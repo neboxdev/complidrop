@@ -36,13 +36,12 @@ const C = {
 /* ── Waitlist Form ────────────────────────────────────────────────── */
 function WaitlistForm({ dark }: { dark?: boolean }) {
   const [email, setEmail] = useState("");
-  const [status, setStatus] = useState<
-    "idle" | "loading" | "success" | "conflict" | "error"
-  >("idle");
+  const [isLoading, setIsLoading] = useState(false);
+  const [result, setResult] = useState<"success" | "error" | null>(null);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    setStatus("loading");
+    setIsLoading(true);
     try {
       const res = await fetch(
         `${process.env.NEXT_PUBLIC_API_URL}/api/waitlist`,
@@ -52,20 +51,16 @@ function WaitlistForm({ dark }: { dark?: boolean }) {
           body: JSON.stringify({ email, source: "landing_page" }),
         }
       );
-      if (res.status === 201) {
-        setStatus("success");
-        setEmail("");
-      } else if (res.status === 409) {
-        setStatus("conflict");
-      } else {
-        setStatus("error");
-      }
+      if (!res.ok) throw new Error();
+      setResult("success");
     } catch {
-      setStatus("error");
+      setResult("error");
+    } finally {
+      setIsLoading(false);
     }
   }
 
-  if (status === "success") {
+  if (result === "success") {
     return (
       <div className="flex items-center gap-2 text-sm font-medium text-emerald-500">
         <CheckCircle2 className="size-5" />
@@ -75,52 +70,43 @@ function WaitlistForm({ dark }: { dark?: boolean }) {
   }
 
   return (
-    <div className="flex w-full max-w-md flex-col gap-3">
-      <form
-        onSubmit={handleSubmit}
-        className="flex w-full flex-col gap-3 sm:flex-row sm:gap-2"
+    <form
+      onSubmit={handleSubmit}
+      className="flex w-full max-w-md flex-col gap-3 sm:flex-row sm:gap-2"
+    >
+      <Input
+        type="email"
+        required
+        placeholder="your.email@yourcompany.com"
+        value={email}
+        onChange={(e) => { setEmail(e.target.value); setResult(null); }}
+        className={cn(
+          "h-12 flex-1 rounded-xl border px-4 text-base transition-colors duration-200",
+          dark
+            ? "border-white/20 bg-white/10 text-white placeholder:text-white/50 focus:border-white/40"
+            : "border-sky-200 bg-white text-slate-900 placeholder:text-slate-400 focus:border-sky-400"
+        )}
+      />
+      <Button
+        type="submit"
+        disabled={isLoading}
+        className="h-12 cursor-pointer rounded-xl px-6 text-base font-semibold shadow-lg transition-all duration-200 hover:shadow-xl"
+        style={{ backgroundColor: C.cta, color: C.white }}
+        onMouseEnter={(e) =>
+          (e.currentTarget.style.backgroundColor = C.ctaHover)
+        }
+        onMouseLeave={(e) =>
+          (e.currentTarget.style.backgroundColor = C.cta)
+        }
       >
-        <Input
-          type="email"
-          required
-          placeholder="your.email@yourcompany.com"
-          value={email}
-          onChange={(e) => {
-            setEmail(e.target.value);
-            if (status === "error" || status === "conflict") setStatus("idle");
-          }}
-          onClick={() => {
-            if (status === "error" || status === "conflict") setStatus("idle");
-          }}
-          className={cn(
-            "h-12 flex-1 rounded-xl border px-4 text-base transition-colors duration-200",
-            dark
-              ? "border-white/20 bg-white/10 text-white placeholder:text-white/50 focus:border-white/40"
-              : "border-sky-200 bg-white text-slate-900 placeholder:text-slate-400 focus:border-sky-400"
-          )}
-        />
-        <Button
-          type="submit"
-          disabled={status === "loading"}
-          className="h-12 cursor-pointer rounded-xl px-6 text-base font-semibold shadow-lg transition-all duration-200 hover:shadow-xl"
-          style={{ backgroundColor: C.cta, color: C.white }}
-          onMouseEnter={(e) =>
-            (e.currentTarget.style.backgroundColor = C.ctaHover)
-          }
-          onMouseLeave={(e) =>
-            (e.currentTarget.style.backgroundColor = C.cta)
-          }
-        >
-          {status === "loading" ? "Joining..." : "Join the Waitlist →"}
-        </Button>
-      </form>
-      {status === "conflict" && (
-        <p className="text-sm text-amber-500">You&rsquo;re already on the list!</p>
+        {isLoading ? "Joining..." : "Join the Waitlist →"}
+      </Button>
+      {result === "error" && (
+        <p className="text-sm text-red-500 sm:absolute sm:-bottom-6">
+          Something went wrong. Please try again.
+        </p>
       )}
-      {status === "error" && (
-        <p className="text-sm text-red-500">Something went wrong. Please try again.</p>
-      )}
-    </div>
+    </form>
   );
 }
 

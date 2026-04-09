@@ -1,4 +1,3 @@
-using System.Net.Mail;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.DTOs.Waitlist;
 using CompliDrop.Api.Entities;
@@ -14,20 +13,20 @@ public static class WaitlistEndpoints
         {
             var email = request.Email?.Trim().ToLowerInvariant() ?? string.Empty;
 
-            if (!MailAddress.TryCreate(email, out _))
+            if (string.IsNullOrWhiteSpace(email))
             {
                 return Results.BadRequest(new
                 {
-                    error = new { message = "Valid email is required.", code = "invalid_email" }
+                    error = new { message = "Email is required.", code = "invalid_email" }
                 });
             }
 
             var exists = await db.WaitlistEntries.AnyAsync(e => e.Email == email);
             if (exists)
             {
-                return Results.Conflict(new
+                return Results.Ok(new
                 {
-                    error = new { message = "Email already registered.", code = "duplicate_email" }
+                    data = new { message = "You're on the list!" }
                 });
             }
 
@@ -44,9 +43,9 @@ public static class WaitlistEndpoints
             db.WaitlistEntries.Add(entry);
             await db.SaveChangesAsync();
 
-            return Results.Created($"/api/waitlist/{entry.Id}", new
+            return Results.Ok(new
             {
-                data = new { id = entry.Id, email = entry.Email }
+                data = new { message = "You're on the list!" }
             });
         });
     }
