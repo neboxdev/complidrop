@@ -196,8 +196,7 @@ export default function Home() {
             >
               CompliDrop reads your COIs, licenses, and permits in
               seconds&nbsp;&mdash; pulls the dates, checks the coverage, and
-              tells you before anything expires. No spreadsheets. No&nbsp;$10K
-              contracts. Just compliance that works.
+              alerts you before anything expires. $49/month. No contracts.
             </p>
 
             <div className="mt-10 flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
@@ -522,96 +521,65 @@ export default function Home() {
           </div>
         </section>
 
-        {/* ── Social Proof ──────────────────────────────────────── */}
-        <section className="py-24 sm:py-32" style={{ backgroundColor: C.bg }}>
+        {/* ── Who It's For ──────────────────────────────────────── */}
+        <section className="py-24 sm:py-32" style={{ backgroundColor: C.dark }}>
           <div className="mx-auto max-w-6xl px-4 sm:px-6">
-            <SectionLabel>Social Proof</SectionLabel>
+            <SectionLabel>Who It&rsquo;s For</SectionLabel>
             <h2
-              className="mt-3 text-center text-3xl font-bold tracking-tight sm:text-4xl"
-              style={{ color: C.text }}
+              className="mt-3 text-center text-3xl font-bold tracking-tight text-white sm:text-4xl"
             >
-              Built for the people who actually do the&nbsp;work.
+              If you&rsquo;ve ever lost sleep over an expired certificate,
+              this is for you.
             </h2>
 
-            <div className="mt-16 grid gap-6 md:grid-cols-3">
+            <div className="mt-16 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
               {(
                 [
                   {
-                    quote:
-                      "[Quote from a GC office manager about time saved]",
-                    name: "Name, Title, Company",
-                    location: "City, State",
+                    title: "Construction & General Contractors",
+                    body: "You're juggling COIs for 40 subs and one expired policy means a crew sitting in the parking lot instead of on the job site. CompliDrop tracks every sub so Monday morning isn't a fire drill.",
                   },
                   {
-                    quote:
-                      "[Quote from a property manager about no more spreadsheets]",
-                    name: "Name, Title, Company",
-                    location: "City, State",
+                    title: "Property Management",
+                    body: "Vendor insurance, tenant certs, lease expirations — one coverage gap on a property and you're holding the liability. Stop cross-referencing three spreadsheets to figure out who's current.",
                   },
                   {
-                    quote:
-                      "[Quote from a healthcare admin about catching a lapsed license]",
-                    name: "Name, Title, Company",
-                    location: "City, State",
+                    title: "Healthcare Practices",
+                    body: "DEA renewals, state licenses, hospital privileges, malpractice certs — all expiring on different dates across every provider. One lapse and a clinician can't see patients until it's fixed.",
+                  },
+                  {
+                    title: "Transportation & Trucking",
+                    body: "DOT medical cards, CDLs, vehicle inspections, cargo insurance — every driver is a stack of documents with a deadline. Miss one and that truck doesn't move.",
+                  },
+                  {
+                    title: "Professional Services",
+                    body: "Liability insurance, professional certifications, contractor agreements — your clients expect proof on demand. \"Let me dig through my files\" isn't the answer they're looking for.",
                   },
                 ] as const
-              ).map((t, i) => (
+              ).map((card) => (
                 <Card
-                  key={i}
-                  className="border-0 bg-white shadow-sm transition-all duration-300 hover:-translate-y-1 hover:shadow-lg"
+                  key={card.title}
+                  className="group border-0 shadow-sm transition-all duration-300 hover:-translate-y-1 hover:shadow-lg"
+                  style={{ backgroundColor: "rgba(255,255,255,0.06)" }}
                 >
                   <CardContent className="p-7">
-                    <div className="mb-3 flex gap-1" style={{ color: C.cta }}>
-                      {Array.from({ length: 5 }).map((_, j) => (
-                        <Star key={j} className="size-4 fill-current" />
-                      ))}
-                    </div>
-                    <p
-                      className="text-base italic leading-relaxed"
-                      style={{ color: C.text }}
+                    <div
+                      className="mb-1 h-1 w-10 rounded-full"
+                      style={{ backgroundColor: C.sky }}
+                    />
+                    <h3
+                      className="mt-4 text-lg font-semibold text-white"
                     >
-                      &ldquo;{t.quote}&rdquo;
+                      {card.title}
+                    </h3>
+                    <p
+                      className="mt-3 text-sm leading-relaxed"
+                      style={{ color: "rgba(186,230,253,0.75)" }}
+                    >
+                      {card.body}
                     </p>
-                    <div className="mt-5 flex items-center gap-3">
-                      <div
-                        className="flex h-10 w-10 items-center justify-center rounded-full text-sm font-bold text-white"
-                        style={{ backgroundColor: C.sky }}
-                      >
-                        {t.name[0]}
-                      </div>
-                      <div>
-                        <p
-                          className="text-sm font-semibold"
-                          style={{ color: C.text }}
-                        >
-                          {t.name}
-                        </p>
-                        <p className="text-xs" style={{ color: C.muted }}>
-                          {t.location}
-                        </p>
-                      </div>
-                    </div>
                   </CardContent>
                 </Card>
-              ))}
-            </div>
-
-            <p
-              className="mt-12 text-center text-sm font-medium"
-              style={{ color: C.muted }}
-            >
-              Trusted by contractors, property managers, and healthcare offices
-              across the U.S.
-            </p>
-            {/* Logo bar placeholder */}
-            <div className="mx-auto mt-6 flex max-w-xl items-center justify-center gap-8 opacity-40">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <div
-                  key={i}
-                  className="h-8 w-20 rounded-lg"
-                  style={{ backgroundColor: C.sky }}
-                  aria-label="Partner logo placeholder"
-                />
               ))}
             </div>
           </div>
