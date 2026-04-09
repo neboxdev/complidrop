@@ -522,15 +522,14 @@ export default function Home() {
         </section>
 
         {/* ── Who It's For ──────────────────────────────────────── */}
-        <section className="py-24 sm:py-32" style={{ backgroundColor: C.bg }}>
+        <section className="py-24 sm:py-32" style={{ backgroundColor: C.dark }}>
           <div className="mx-auto max-w-6xl px-4 sm:px-6">
             <SectionLabel>Who It&rsquo;s For</SectionLabel>
             <h2
-              className="mt-3 text-center text-3xl font-bold tracking-tight sm:text-4xl"
-              style={{ color: C.text }}
+              className="mt-3 text-center text-3xl font-bold tracking-tight text-white sm:text-4xl"
             >
-              If you&rsquo;ve ever lost sleep over an expired certificate, this
-              is for you.
+              If you&rsquo;ve ever lost sleep over an expired certificate,
+              this is for you.
             </h2>
 
             <div className="mt-16 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
@@ -560,24 +559,22 @@ export default function Home() {
               ).map((card) => (
                 <Card
                   key={card.title}
-                  className="group cursor-pointer border-0 bg-white shadow-sm transition-all duration-300 hover:-translate-y-1 hover:shadow-lg"
+                  className="group border-0 shadow-sm transition-all duration-300 hover:-translate-y-1 hover:shadow-lg"
+                  style={{ backgroundColor: "rgba(255,255,255,0.06)" }}
                 >
                   <CardContent className="p-7">
                     <div
-                      className="mb-4 flex h-11 w-11 items-center justify-center rounded-xl transition-colors duration-200"
-                      style={{ backgroundColor: `${C.sky}15`, color: C.sky }}
-                    >
-                      <CheckCircle2 className="size-5" />
-                    </div>
+                      className="mb-1 h-1 w-10 rounded-full"
+                      style={{ backgroundColor: C.sky }}
+                    />
                     <h3
-                      className="text-lg font-semibold"
-                      style={{ color: C.text }}
+                      className="mt-4 text-lg font-semibold text-white"
                     >
                       {card.title}
                     </h3>
                     <p
                       className="mt-3 text-sm leading-relaxed"
-                      style={{ color: C.muted }}
+                      style={{ color: "rgba(186,230,253,0.75)" }}
                     >
                       {card.body}
                     </p>
