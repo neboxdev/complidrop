@@ -15,3 +15,6 @@ frontend/.env.local
 .vscode/
 .idea/
 *.swp
+
+# Docs (architecture reference — do not push)
+complidrop-technical-architecture.md
