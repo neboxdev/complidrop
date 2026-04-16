@@ -80,6 +80,7 @@ builder.Services.AddHttpClient("resend", c => c.Timeout = TimeSpan.FromSeconds(3
 
 builder.Services.AddSingleton<IEmailService, ResendEmailService>();
 builder.Services.AddScoped<IStripeService, StripeService>();
+builder.Services.AddScoped<IExportService, ExportService>();
 
 builder.Services.AddSingleton<IGoogleAuthTokenProvider, GoogleAuthTokenProvider>();
 builder.Services.AddSingleton<IOcrService, DocumentAiOcrService>();
@@ -235,6 +236,7 @@ app.MapVendorEndpoints();
 app.MapVendorPortalEndpoints();
 app.MapReminderEndpoints();
 app.MapBillingEndpoints();
+app.MapExportEndpoints();
 
 // ============================================================
 // Startup: seed system templates
