@@ -1,0 +1,41 @@
+name: api-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "api/**"
+      - ".github/workflows/api-ci.yml"
+  pull_request:
+    paths:
+      - "api/**"
+      - ".github/workflows/api-ci.yml"
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore CompliDrop.slnx
+
+      - name: Build
+        run: dotnet build CompliDrop.slnx --configuration Release --no-restore
+
+      - name: Test
+        if: ${{ secrets.TEST_DATABASE_CONNECTION != '' }}
+        env:
+          ConnectionStrings__Database: ${{ secrets.TEST_DATABASE_CONNECTION }}
+        run: dotnet test CompliDrop.Api.Tests/CompliDrop.Api.Tests.csproj --configuration Release --no-build --logger "console;verbosity=minimal"
+
+      - name: Skip tests (no DB secret)
+        if: ${{ secrets.TEST_DATABASE_CONNECTION == '' }}
+        run: echo "::warning::Tests skipped — set TEST_DATABASE_CONNECTION secret to enable MultiTenancyTests."
