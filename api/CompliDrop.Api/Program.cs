@@ -63,7 +63,12 @@ if (!string.IsNullOrWhiteSpace(sentryDsn))
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ICurrentUser, CurrentUserService>();
 builder.Services.AddSingleton<IPasswordHasher, BCryptPasswordHasher>();
+builder.Services.AddSingleton<ITokenService, TokenService>();
+builder.Services.AddSingleton<IBlobStorageService, BlobStorageService>();
+builder.Services.AddSingleton<IFileValidationService, FileValidationService>();
+builder.Services.AddScoped<IIdempotencyService, IdempotencyService>();
 builder.Services.AddScoped<IAuditLogger, AuditLogger>();
+builder.Services.AddCookieJwtAuth();
 
 builder.Services.AddDbContext<AppDbContext>((sp, options) =>
 {
@@ -173,7 +178,8 @@ app.UseSerilogRequestLogging();
 app.UseRouting();
 app.UseCors();
 app.UseRateLimiter();
-// UseAuthentication/UseAuthorization wired in Phase 2 when cookie auth lands.
+app.UseAuthentication();
+app.UseAuthorization();
 
 // ============================================================
 // Health endpoints
@@ -199,6 +205,8 @@ app.MapGet("/health/ready", async (SystemDbContext db, CancellationToken ct) =>
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
 
 app.MapWaitlistEndpoints();
+app.MapAuthEndpoints();
+app.MapDocumentEndpoints();
 
 // ============================================================
 // Startup: seed system templates

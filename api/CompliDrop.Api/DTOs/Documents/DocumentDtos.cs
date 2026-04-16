@@ -1,0 +1,52 @@
+namespace CompliDrop.Api.DTOs.Documents;
+
+public record DocumentListItem(
+    Guid Id,
+    string OriginalFileName,
+    string DocumentType,
+    string? VendorName,
+    Guid? VendorId,
+    string ExtractionStatus,
+    double? ExtractionConfidence,
+    string ComplianceStatus,
+    DateTime? EffectiveDate,
+    DateTime? ExpirationDate,
+    int? DaysUntilExpiry,
+    DateTime CreatedAt);
+
+public record DocumentDetail(
+    Guid Id,
+    string OriginalFileName,
+    string DocumentType,
+    string? DocumentSubType,
+    string? VendorName,
+    Guid? VendorId,
+    string ExtractionStatus,
+    double? ExtractionConfidence,
+    string ComplianceStatus,
+    DateTime? EffectiveDate,
+    DateTime? ExpirationDate,
+    int? DaysUntilExpiry,
+    bool IsManuallyVerified,
+    string? UploadedBy,
+    string? BlobStorageUrl,
+    decimal? GeneralLiabilityLimit,
+    DocumentFieldDto[] Fields,
+    object? ExtractionFields,
+    string? ExtractionPromptVersion,
+    string? ProcessingError,
+    DateTime CreatedAt,
+    DateTime UpdatedAt);
+
+public record DocumentFieldDto(
+    Guid Id,
+    string FieldName,
+    string? FieldValue,
+    string? FieldType,
+    double Confidence,
+    bool IsManuallyEdited,
+    string? OriginalValue);
+
+public record FieldUpdateRequest(string FieldName, string? FieldValue);
+
+public record FieldsUpdateRequest(FieldUpdateRequest[] Fields);

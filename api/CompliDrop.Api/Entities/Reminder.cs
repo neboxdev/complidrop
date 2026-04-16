@@ -33,7 +33,7 @@ public class Subscription
 {
     public Guid Id { get; set; }
     public Guid OrganizationId { get; set; }
-    public string StripeCustomerId { get; set; } = string.Empty;
+    public string? StripeCustomerId { get; set; }
     public string? StripeSubscriptionId { get; set; }
     public string Plan { get; set; } = "free";
     public string Status { get; set; } = "active";

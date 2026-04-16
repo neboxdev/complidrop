@@ -143,7 +143,9 @@ internal static class ModelConfiguration
             e.Property(s => s.Plan).HasMaxLength(50).HasDefaultValue("free");
             e.Property(s => s.Status).HasMaxLength(50).HasDefaultValue("active");
             e.Property(s => s.ExtractionSpendThisMonthUsd).HasColumnType("numeric(12,4)").HasDefaultValue(0m);
-            e.HasIndex(s => s.StripeCustomerId).IsUnique();
+            e.HasIndex(s => s.StripeCustomerId)
+                .IsUnique()
+                .HasFilter("\"StripeCustomerId\" IS NOT NULL");
             e.HasIndex(s => s.OrganizationId).IsUnique();
             e.HasOne(s => s.Organization).WithOne(o => o.Subscription)
                 .HasForeignKey<Subscription>(s => s.OrganizationId).OnDelete(DeleteBehavior.Cascade);

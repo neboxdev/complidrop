@@ -1,0 +1,357 @@
+using System.Security.Claims;
+using CompliDrop.Api.Auth;
+using CompliDrop.Api.Data;
+using CompliDrop.Api.DTOs.Documents;
+using CompliDrop.Api.Entities;
+using CompliDrop.Api.Services;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+
+namespace CompliDrop.Api.Endpoints;
+
+public static class DocumentEndpoints
+{
+    public static void MapDocumentEndpoints(this WebApplication app)
+    {
+        var group = app.MapGroup("/api/documents").RequireAuthorization();
+
+        group.MapGet("/", ListDocuments);
+        group.MapGet("/{id:guid}", GetDocument);
+        group.MapPost("/upload", UploadDocument)
+            .DisableAntiforgery()
+            .WithMetadata(new RequestSizeLimitAttribute(10 * 1024 * 1024));
+        group.MapPut("/{id:guid}/fields", UpdateFields);
+        group.MapPut("/{id:guid}/verify", MarkVerified);
+        group.MapPost("/{id:guid}/reextract", Reextract);
+        group.MapDelete("/{id:guid}", DeleteDocument);
+    }
+
+    private static async Task<IResult> ListDocuments(
+        AppDbContext db,
+        ICurrentUser currentUser,
+        CancellationToken ct,
+        [FromQuery] string? status = null,
+        [FromQuery] string? type = null,
+        [FromQuery] Guid? vendorId = null,
+        [FromQuery] int? expiresWithin = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 25,
+        [FromQuery] string? sortBy = "createdAt",
+        [FromQuery] string? sortDir = "desc")
+    {
+        if (currentUser.OrganizationId is null) return Unauthorized();
+
+        var query = db.Documents.AsQueryable();
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            if (Enum.TryParse<ComplianceStatus>(status, ignoreCase: true, out var cs))
+                query = query.Where(d => d.ComplianceStatus == cs);
+        }
+        if (!string.IsNullOrWhiteSpace(type))
+            query = query.Where(d => d.DocumentType == type);
+        if (vendorId is not null)
+            query = query.Where(d => d.VendorId == vendorId);
+        if (expiresWithin is int days && days > 0)
+        {
+            var cutoff = DateTime.UtcNow.Date.AddDays(days);
+            query = query.Where(d => d.ExpirationDate != null && d.ExpirationDate <= cutoff);
+        }
+
+        query = (sortBy?.ToLowerInvariant(), sortDir?.ToLowerInvariant()) switch
+        {
+            ("expirationdate", "asc") => query.OrderBy(d => d.ExpirationDate),
+            ("expirationdate", _) => query.OrderByDescending(d => d.ExpirationDate),
+            ("filename", "asc") => query.OrderBy(d => d.OriginalFileName),
+            ("filename", _) => query.OrderByDescending(d => d.OriginalFileName),
+            (_, "asc") => query.OrderBy(d => d.CreatedAt),
+            _ => query.OrderByDescending(d => d.CreatedAt)
+        };
+
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
+        var total = await query.CountAsync(ct);
+        var items = await query
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(d => new DocumentListItem(
+                d.Id,
+                d.OriginalFileName,
+                d.DocumentType,
+                d.Vendor != null ? d.Vendor.Name : null,
+                d.VendorId,
+                d.ExtractionStatus.ToString(),
+                d.ExtractionConfidence,
+                d.ComplianceStatus.ToString(),
+                d.EffectiveDate,
+                d.ExpirationDate,
+                d.ExpirationDate != null
+                    ? (int?)(d.ExpirationDate.Value.Date - DateTime.UtcNow.Date).TotalDays
+                    : null,
+                d.CreatedAt))
+            .ToListAsync(ct);
+
+        return Results.Ok(new
+        {
+            data = new { items, total, page, pageSize },
+            error = (object?)null
+        });
+    }
+
+    private static async Task<IResult> GetDocument(
+        Guid id,
+        AppDbContext db,
+        CancellationToken ct)
+    {
+        var doc = await db.Documents
+            .Include(d => d.Vendor)
+            .Include(d => d.Fields)
+            .FirstOrDefaultAsync(d => d.Id == id, ct);
+        if (doc is null) return NotFound();
+
+        object? extractionFields = null;
+        if (doc.ExtractionFields is not null)
+            extractionFields = System.Text.Json.JsonSerializer.Deserialize<object>(doc.ExtractionFields.RootElement.GetRawText());
+
+        var detail = new DocumentDetail(
+            doc.Id,
+            doc.OriginalFileName,
+            doc.DocumentType,
+            doc.DocumentSubType,
+            doc.Vendor?.Name,
+            doc.VendorId,
+            doc.ExtractionStatus.ToString(),
+            doc.ExtractionConfidence,
+            doc.ComplianceStatus.ToString(),
+            doc.EffectiveDate,
+            doc.ExpirationDate,
+            doc.ExpirationDate != null
+                ? (int?)(doc.ExpirationDate.Value.Date - DateTime.UtcNow.Date).TotalDays
+                : null,
+            doc.IsManuallyVerified,
+            doc.UploadedBy,
+            doc.BlobStorageUrl,
+            doc.GeneralLiabilityLimit,
+            doc.Fields.Select(f => new DocumentFieldDto(
+                f.Id, f.FieldName, f.FieldValue, f.FieldType, f.Confidence, f.IsManuallyEdited, f.OriginalValue)).ToArray(),
+            extractionFields,
+            doc.ExtractionPromptVersion,
+            doc.ProcessingError,
+            doc.CreatedAt,
+            doc.UpdatedAt);
+
+        return Results.Ok(new { data = detail, error = (object?)null });
+    }
+
+    private static async Task<IResult> UploadDocument(
+        HttpContext http,
+        AppDbContext db,
+        SystemDbContext sysDb,
+        IBlobStorageService blobs,
+        IFileValidationService validator,
+        IIdempotencyService idem,
+        ICurrentUser currentUser,
+        IAuditLogger audit,
+        CancellationToken ct)
+    {
+        if (currentUser.OrganizationId is null) return Unauthorized();
+        var orgId = currentUser.OrganizationId.Value;
+
+        var idempotencyKey = http.Request.Headers["Idempotency-Key"].FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
+            if (hit is not null)
+            {
+                return Results.Json(
+                    hit.ResponseJson is null ? null : System.Text.Json.JsonSerializer.Deserialize<object>(hit.ResponseJson),
+                    statusCode: hit.StatusCode);
+            }
+        }
+
+        var sub = await sysDb.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == orgId, ct);
+        if (sub is { DocumentLimit: { } limit })
+        {
+            var activeCount = await sysDb.Documents
+                .CountAsync(d => d.OrganizationId == orgId && d.DeletedAt == null, ct);
+            if (activeCount >= limit)
+                return Error(403, "plan.limit_reached", $"Document limit of {limit} reached. Upgrade to add more.");
+        }
+
+        if (!http.Request.HasFormContentType)
+            return Error(400, "validation.form", "Multipart form expected.");
+        var form = await http.Request.ReadFormAsync(ct);
+        var file = form.Files.GetFile("file");
+        if (file is null || file.Length == 0)
+            return Error(400, "validation.file", "Upload a PDF, JPEG, or PNG file.");
+
+        Guid? vendorId = null;
+        if (Guid.TryParse(form["vendorId"].ToString(), out var parsedVendorId))
+            vendorId = parsedVendorId;
+        var declaredType = form["documentType"].ToString();
+        if (string.IsNullOrWhiteSpace(declaredType)) declaredType = "other";
+
+        await using var buffer = new MemoryStream();
+        await file.CopyToAsync(buffer, ct);
+        buffer.Position = 0;
+
+        var validation = validator.Validate(buffer, file.ContentType, file.FileName);
+        if (!validation.IsValid)
+            return Error(400, validation.ErrorCode ?? "document.unsupported_format", validation.ErrorMessage ?? "Invalid file.");
+
+        buffer.Position = 0;
+        var blobName = $"{orgId}/{DateTime.UtcNow:yyyy-MM}/{Guid.NewGuid()}-{SanitizeFileName(file.FileName)}";
+        var upload = await blobs.UploadAsync(blobName, buffer, validation.DetectedContentType!, ct);
+
+        var doc = new Document
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            VendorId = vendorId,
+            OriginalFileName = file.FileName,
+            BlobStorageUrl = upload.Url,
+            BlobStoragePath = blobName,
+            FileSizeBytes = file.Length,
+            ContentType = validation.DetectedContentType!,
+            DocumentType = declaredType,
+            ExtractionStatus = ExtractionStatus.Pending,
+            ComplianceStatus = ComplianceStatus.Pending,
+            UploadedBy = "user",
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        db.Documents.Add(doc);
+        await db.SaveChangesAsync(ct);
+
+        var response = new
+        {
+            data = new
+            {
+                id = doc.Id,
+                originalFileName = doc.OriginalFileName,
+                extractionStatus = doc.ExtractionStatus.ToString(),
+                createdAt = doc.CreatedAt
+            },
+            error = (object?)null
+        };
+
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+            await idem.StoreAsync(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status201Created, response, ct);
+
+        await audit.LogAsync("document.uploaded", nameof(Document), doc.Id, after: new { doc.Id, doc.OriginalFileName, doc.UploadedBy });
+
+        return Results.Json(response, statusCode: StatusCodes.Status201Created);
+    }
+
+    private static async Task<IResult> UpdateFields(
+        Guid id,
+        FieldsUpdateRequest req,
+        AppDbContext db,
+        IAuditLogger audit,
+        CancellationToken ct)
+    {
+        var doc = await db.Documents
+            .Include(d => d.Fields)
+            .FirstOrDefaultAsync(d => d.Id == id, ct);
+        if (doc is null) return NotFound();
+
+        var before = doc.Fields.Select(f => new { f.FieldName, f.FieldValue }).ToList();
+        foreach (var update in req.Fields)
+        {
+            var field = doc.Fields.FirstOrDefault(f => f.FieldName == update.FieldName);
+            if (field is null)
+            {
+                doc.Fields.Add(new DocumentField
+                {
+                    Id = Guid.NewGuid(),
+                    DocumentId = doc.Id,
+                    FieldName = update.FieldName,
+                    FieldValue = update.FieldValue,
+                    FieldType = "text",
+                    Confidence = 1.0,
+                    IsManuallyEdited = true,
+                    OriginalValue = null
+                });
+            }
+            else
+            {
+                if (field.OriginalValue is null) field.OriginalValue = field.FieldValue;
+                field.FieldValue = update.FieldValue;
+                field.IsManuallyEdited = true;
+                field.Confidence = 1.0;
+            }
+        }
+        doc.IsManuallyVerified = true;
+        doc.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        await audit.LogAsync("document.fields_edited", nameof(Document), doc.Id,
+            before: before,
+            after: doc.Fields.Select(f => new { f.FieldName, f.FieldValue }));
+
+        return Results.Ok(new { data = new { message = "Fields updated." }, error = (object?)null });
+    }
+
+    private static async Task<IResult> MarkVerified(
+        Guid id,
+        AppDbContext db,
+        IAuditLogger audit,
+        CancellationToken ct)
+    {
+        var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
+        if (doc is null) return NotFound();
+        doc.IsManuallyVerified = true;
+        doc.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        await audit.LogAsync("document.verified", nameof(Document), doc.Id);
+        return Results.Ok(new { data = new { message = "Document marked verified." }, error = (object?)null });
+    }
+
+    private static async Task<IResult> Reextract(
+        Guid id,
+        AppDbContext db,
+        IAuditLogger audit,
+        CancellationToken ct)
+    {
+        var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
+        if (doc is null) return NotFound();
+        doc.ExtractionStatus = ExtractionStatus.Pending;
+        doc.ProcessingStartedAt = null;
+        doc.ProcessingError = null;
+        doc.ProcessingAttempts = 0;
+        doc.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        await audit.LogAsync("document.reextract_queued", nameof(Document), doc.Id);
+        return Results.Ok(new { data = new { message = "Re-extraction queued." }, error = (object?)null });
+    }
+
+    private static async Task<IResult> DeleteDocument(
+        Guid id,
+        AppDbContext db,
+        IAuditLogger audit,
+        CancellationToken ct)
+    {
+        var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
+        if (doc is null) return NotFound();
+        db.Documents.Remove(doc); // interceptor translates to soft delete
+        await db.SaveChangesAsync(ct);
+        return Results.Ok(new { data = new { message = "Document removed." }, error = (object?)null });
+    }
+
+    private static string SanitizeFileName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return "file";
+        var cleaned = new string(name.Select(c => char.IsLetterOrDigit(c) || c is '.' or '-' or '_' ? c : '-').ToArray());
+        return cleaned.Length > 120 ? cleaned[..120] : cleaned;
+    }
+
+    private static IResult Unauthorized() =>
+        Results.Json(new { data = (object?)null, error = new { code = "auth.unauthorized", message = "Not authenticated." } }, statusCode: 401);
+
+    private static IResult NotFound() =>
+        Results.Json(new { data = (object?)null, error = new { code = "document.not_found", message = "Document not found." } }, statusCode: 404);
+
+    private static IResult Error(int status, string code, string message) =>
+        Results.Json(new { data = (object?)null, error = new { code, message } }, statusCode: status);
+}

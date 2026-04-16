@@ -1,0 +1,219 @@
+"use client";
+
+import Link from "next/link";
+import { useParams, useRouter } from "next/navigation";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { ArrowLeft, RefreshCw, ShieldCheck } from "lucide-react";
+import { api } from "@/lib/api";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
+import { useState } from "react";
+
+type DocField = {
+  id: string;
+  fieldName: string;
+  fieldValue: string | null;
+  fieldType: string | null;
+  confidence: number;
+  isManuallyEdited: boolean;
+  originalValue: string | null;
+};
+
+type DocDetail = {
+  id: string;
+  originalFileName: string;
+  documentType: string;
+  documentSubType: string | null;
+  vendorName: string | null;
+  extractionStatus: string;
+  extractionConfidence: number | null;
+  complianceStatus: string;
+  effectiveDate: string | null;
+  expirationDate: string | null;
+  daysUntilExpiry: number | null;
+  isManuallyVerified: boolean;
+  uploadedBy: string | null;
+  blobStorageUrl: string | null;
+  generalLiabilityLimit: number | null;
+  fields: DocField[];
+  extractionFields: unknown;
+  extractionPromptVersion: string | null;
+  processingError: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function confidenceHue(c: number) {
+  if (c >= 0.9) return "text-emerald-700 bg-emerald-50";
+  if (c >= 0.7) return "text-amber-700 bg-amber-50";
+  return "text-rose-700 bg-rose-50";
+}
+
+export default function DocumentDetailPage() {
+  const params = useParams<{ id: string }>();
+  const router = useRouter();
+  const qc = useQueryClient();
+  const [edits, setEdits] = useState<Record<string, string>>({});
+
+  const detail = useQuery<DocDetail>({
+    queryKey: ["documents", params.id],
+    queryFn: () => api.get<DocDetail>(`/api/documents/${params.id}`),
+    refetchInterval: (q) => {
+      const s = q.state.data?.extractionStatus;
+      return s === "Pending" || s === "Processing" ? 3000 : false;
+    },
+  });
+
+  const reextract = useMutation({
+    mutationFn: () => api.post<void>(`/api/documents/${params.id}/reextract`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["documents", params.id] });
+      toast.success("Re-extraction queued");
+    },
+  });
+
+  const saveFields = useMutation({
+    mutationFn: (fields: { fieldName: string; fieldValue: string }[]) =>
+      api.put<void>(`/api/documents/${params.id}/fields`, { fields }),
+    onSuccess: () => {
+      setEdits({});
+      qc.invalidateQueries({ queryKey: ["documents", params.id] });
+      toast.success("Fields updated");
+    },
+  });
+
+  if (detail.isLoading) {
+    return <div className="p-8 text-sm text-slate-400">Loading document…</div>;
+  }
+  if (!detail.data) {
+    return (
+      <div className="p-8 text-sm text-slate-500">
+        Document not found. <Link href="/documents" className="text-sky-700">Back to documents</Link>
+      </div>
+    );
+  }
+
+  const doc = detail.data;
+  const hasEdits = Object.keys(edits).length > 0;
+
+  return (
+    <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
+      <Link href="/documents" className="inline-flex items-center gap-1 text-sm text-sky-700 hover:text-sky-800">
+        <ArrowLeft className="w-4 h-4" /> All documents
+      </Link>
+
+      <header className="flex items-start justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-sky-900">{doc.originalFileName}</h1>
+          <p className="text-sm text-slate-500 uppercase tracking-wide">{doc.documentType}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => reextract.mutate()} disabled={reextract.isPending}>
+            <RefreshCw className={cn("w-4 h-4 mr-1", reextract.isPending && "animate-spin")} /> Re-extract
+          </Button>
+          {doc.blobStorageUrl && (
+            <a
+              href={doc.blobStorageUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="text-sm text-sky-700 hover:underline"
+            >
+              View file
+            </a>
+          )}
+        </div>
+      </header>
+
+      <section className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+        <SummaryCell label="Extraction" value={
+          <Badge className={cn("border-transparent",
+            doc.extractionStatus === "Completed" ? "bg-emerald-100 text-emerald-700"
+              : doc.extractionStatus === "Failed" ? "bg-rose-100 text-rose-700"
+              : "bg-sky-100 text-sky-700")}>
+            {doc.extractionStatus}
+          </Badge>
+        } />
+        <SummaryCell label="Compliance" value={
+          <Badge className={cn("border-transparent",
+            doc.complianceStatus === "Compliant" ? "bg-emerald-100 text-emerald-700"
+              : doc.complianceStatus === "NonCompliant" ? "bg-rose-100 text-rose-700"
+              : "bg-slate-100 text-slate-700")}>
+            {doc.complianceStatus}
+          </Badge>
+        } />
+        <SummaryCell label="Expires" value={doc.expirationDate ? new Date(doc.expirationDate).toLocaleDateString() : "—"} />
+        <SummaryCell label="Verified" value={doc.isManuallyVerified ? <span className="inline-flex items-center gap-1 text-emerald-700"><ShieldCheck className="w-3.5 h-3.5" /> Yes</span> : "—"} />
+      </section>
+
+      {doc.processingError && (
+        <Card className="border-rose-200">
+          <CardContent className="p-4 text-sm text-rose-700">
+            <p className="font-medium">Extraction error</p>
+            <p>{doc.processingError}</p>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardContent className="p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold text-slate-800">Extracted fields</h2>
+            <Button
+              size="sm"
+              disabled={!hasEdits || saveFields.isPending}
+              onClick={() => {
+                const fields = Object.entries(edits).map(([fieldName, fieldValue]) => ({ fieldName, fieldValue }));
+                saveFields.mutate(fields);
+              }}
+            >
+              Save changes
+            </Button>
+          </div>
+          {doc.fields.length === 0 ? (
+            <p className="text-sm text-slate-500">
+              {doc.extractionStatus === "Pending" || doc.extractionStatus === "Processing"
+                ? "Extraction in progress…"
+                : "No fields extracted yet."}
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {doc.fields.map((f) => (
+                <div key={f.id} className="space-y-1">
+                  <label className="text-xs uppercase tracking-wide text-slate-500">{f.fieldName}</label>
+                  <Input
+                    defaultValue={f.fieldValue ?? ""}
+                    onChange={(e) => setEdits((prev) => ({ ...prev, [f.fieldName]: e.target.value }))}
+                  />
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className={cn("px-2 py-0.5 rounded font-medium", confidenceHue(f.confidence))}>
+                      {Math.round(f.confidence * 100)}% confident
+                    </span>
+                    {f.isManuallyEdited && <span className="text-sky-700">✎ Manually edited</span>}
+                    {f.originalValue && f.originalValue !== f.fieldValue && (
+                      <span className="text-slate-400">was: {f.originalValue}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function SummaryCell({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <Card>
+      <CardContent className="p-4 space-y-1">
+        <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
+        <div className="text-sm font-medium text-slate-900">{value}</div>
+      </CardContent>
+    </Card>
+  );
+}
