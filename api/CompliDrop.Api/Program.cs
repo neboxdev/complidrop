@@ -79,6 +79,7 @@ builder.Services.AddHttpClient("anthropic", c => c.Timeout = TimeSpan.FromMinute
 builder.Services.AddHttpClient("resend", c => c.Timeout = TimeSpan.FromSeconds(30));
 
 builder.Services.AddSingleton<IEmailService, ResendEmailService>();
+builder.Services.AddScoped<IStripeService, StripeService>();
 
 builder.Services.AddSingleton<IGoogleAuthTokenProvider, GoogleAuthTokenProvider>();
 builder.Services.AddSingleton<IOcrService, DocumentAiOcrService>();
@@ -233,6 +234,7 @@ app.MapDashboardEndpoints();
 app.MapVendorEndpoints();
 app.MapVendorPortalEndpoints();
 app.MapReminderEndpoints();
+app.MapBillingEndpoints();
 
 // ============================================================
 // Startup: seed system templates
