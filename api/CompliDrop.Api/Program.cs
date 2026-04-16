@@ -76,6 +76,9 @@ builder.Services.AddScoped<IComplianceCheckService, ComplianceCheckService>();
 
 builder.Services.AddHttpClient("google", c => c.Timeout = TimeSpan.FromMinutes(2));
 builder.Services.AddHttpClient("anthropic", c => c.Timeout = TimeSpan.FromMinutes(2));
+builder.Services.AddHttpClient("resend", c => c.Timeout = TimeSpan.FromSeconds(30));
+
+builder.Services.AddSingleton<IEmailService, ResendEmailService>();
 
 builder.Services.AddSingleton<IGoogleAuthTokenProvider, GoogleAuthTokenProvider>();
 builder.Services.AddSingleton<IOcrService, DocumentAiOcrService>();
@@ -84,6 +87,7 @@ builder.Services.AddSingleton<IExtractionClient, AnthropicExtractionClient>();
 builder.Services.AddSingleton<IExtractionClientFactory, ExtractionClientFactory>();
 
 builder.Services.AddHostedService<ExtractionWorker>();
+builder.Services.AddHostedService<ReminderBackgroundService>();
 
 builder.Services.AddCookieJwtAuth();
 
@@ -226,6 +230,9 @@ app.MapAuthEndpoints();
 app.MapDocumentEndpoints();
 app.MapComplianceEndpoints();
 app.MapDashboardEndpoints();
+app.MapVendorEndpoints();
+app.MapVendorPortalEndpoints();
+app.MapReminderEndpoints();
 
 // ============================================================
 // Startup: seed system templates
