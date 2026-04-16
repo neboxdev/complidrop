@@ -10,6 +10,8 @@ public class GeminiSettings
     public string ApiKey { get; set; } = string.Empty;
     public string Model { get; set; } = "gemini-2.5-flash";
     public int MaxTokens { get; set; } = 2000;
+    public string Location { get; set; } = "us-central1";
+    public string Endpoint { get; set; } = "vertex"; // "vertex" | "aistudio"
 }
 
 public class AnthropicSettings

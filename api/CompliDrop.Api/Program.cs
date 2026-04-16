@@ -1,11 +1,14 @@
 using System.Threading.RateLimiting;
 using CompliDrop.Api.Auth;
+using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Data.Seed;
 using CompliDrop.Api.Endpoints;
 using CompliDrop.Api.Middleware;
 using CompliDrop.Api.Services;
+using CompliDrop.Api.Services.Extraction;
+using CompliDrop.Api.Services.Ocr;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
@@ -68,6 +71,19 @@ builder.Services.AddSingleton<IBlobStorageService, BlobStorageService>();
 builder.Services.AddSingleton<IFileValidationService, FileValidationService>();
 builder.Services.AddScoped<IIdempotencyService, IdempotencyService>();
 builder.Services.AddScoped<IAuditLogger, AuditLogger>();
+builder.Services.AddScoped<ICostTrackingService, CostTrackingService>();
+
+builder.Services.AddHttpClient("google", c => c.Timeout = TimeSpan.FromMinutes(2));
+builder.Services.AddHttpClient("anthropic", c => c.Timeout = TimeSpan.FromMinutes(2));
+
+builder.Services.AddSingleton<IGoogleAuthTokenProvider, GoogleAuthTokenProvider>();
+builder.Services.AddSingleton<IOcrService, DocumentAiOcrService>();
+builder.Services.AddSingleton<IExtractionClient, GeminiExtractionClient>();
+builder.Services.AddSingleton<IExtractionClient, AnthropicExtractionClient>();
+builder.Services.AddSingleton<IExtractionClientFactory, ExtractionClientFactory>();
+
+builder.Services.AddHostedService<ExtractionWorker>();
+
 builder.Services.AddCookieJwtAuth();
 
 builder.Services.AddDbContext<AppDbContext>((sp, options) =>
