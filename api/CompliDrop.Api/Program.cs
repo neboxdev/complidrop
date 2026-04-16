@@ -72,6 +72,7 @@ builder.Services.AddSingleton<IFileValidationService, FileValidationService>();
 builder.Services.AddScoped<IIdempotencyService, IdempotencyService>();
 builder.Services.AddScoped<IAuditLogger, AuditLogger>();
 builder.Services.AddScoped<ICostTrackingService, CostTrackingService>();
+builder.Services.AddScoped<IComplianceCheckService, ComplianceCheckService>();
 
 builder.Services.AddHttpClient("google", c => c.Timeout = TimeSpan.FromMinutes(2));
 builder.Services.AddHttpClient("anthropic", c => c.Timeout = TimeSpan.FromMinutes(2));
@@ -223,6 +224,8 @@ app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = Dat
 app.MapWaitlistEndpoints();
 app.MapAuthEndpoints();
 app.MapDocumentEndpoints();
+app.MapComplianceEndpoints();
+app.MapDashboardEndpoints();
 
 // ============================================================
 // Startup: seed system templates

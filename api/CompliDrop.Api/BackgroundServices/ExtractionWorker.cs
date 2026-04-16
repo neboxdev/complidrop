@@ -148,6 +148,16 @@ public class ExtractionWorker(
             var totalCost = ocr.EstimatedCostUsd + (extraction.Usage?.EstimatedCostUsd ?? 0m);
             if (totalCost > 0) await costTracker.RecordSpendAsync(doc.OrganizationId, totalCost, ct);
 
+            try
+            {
+                var compliance = scope.ServiceProvider.GetRequiredService<IComplianceCheckService>();
+                await compliance.EvaluateForSystemAsync(doc.Id, ct);
+            }
+            catch (Exception compEx)
+            {
+                logger.LogError(compEx, "Compliance evaluation failed for {DocumentId}", doc.Id);
+            }
+
             logger.LogInformation("Extraction complete for {DocumentId} — {FieldCount} fields, avg conf {Conf:0.00}",
                 doc.Id, extraction.Fields.Count, doc.ExtractionConfidence);
         }
