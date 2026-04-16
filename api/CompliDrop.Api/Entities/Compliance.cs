@@ -8,8 +8,8 @@ public class ComplianceTemplate
     public string? Description { get; set; }
     public bool IsSystemTemplate { get; set; } = false;
     public DateTime CreatedAt { get; set; }
+    public DateTime? DeletedAt { get; set; }
 
-    // Navigation
     public Organization Organization { get; set; } = null!;
     public ICollection<ComplianceRule> Rules { get; set; } = [];
     public ICollection<Vendor> Vendors { get; set; } = [];
@@ -26,7 +26,6 @@ public class ComplianceRule
     public string? ErrorMessage { get; set; }
     public int SortOrder { get; set; }
 
-    // Navigation
     public ComplianceTemplate ComplianceTemplate { get; set; } = null!;
 }
 
@@ -40,7 +39,6 @@ public class ComplianceCheck
     public string? Notes { get; set; }
     public DateTime CheckedAt { get; set; }
 
-    // Navigation
     public Document Document { get; set; } = null!;
     public ComplianceRule ComplianceRule { get; set; } = null!;
 }

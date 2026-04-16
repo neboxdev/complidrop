@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="CompliDrop.Api.Tests/CompliDrop.Api.Tests.csproj" />
+  <Project Path="CompliDrop.Api/CompliDrop.Api.csproj" />
+</Solution>

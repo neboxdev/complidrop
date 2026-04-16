@@ -11,7 +11,6 @@ public class Reminder
     public string? EmailBodyTemplate { get; set; }
     public bool IsActive { get; set; } = true;
 
-    // Navigation
     public Organization Organization { get; set; } = null!;
     public ICollection<ReminderLog> Logs { get; set; } = [];
 }
@@ -23,10 +22,10 @@ public class ReminderLog
     public Guid DocumentId { get; set; }
     public string RecipientEmail { get; set; } = string.Empty;
     public DateTime SentAt { get; set; }
+    public DateOnly SendDate { get; set; }
     public string? ResendMessageId { get; set; }
     public string Status { get; set; } = "sent";
 
-    // Navigation
     public Reminder Reminder { get; set; } = null!;
 }
 
@@ -38,13 +37,13 @@ public class Subscription
     public string? StripeSubscriptionId { get; set; }
     public string Plan { get; set; } = "free";
     public string Status { get; set; } = "active";
-    public int DocumentLimit { get; set; } = 5;
+    public int? DocumentLimit { get; set; } = 5;
     public bool HasVendorPortal { get; set; } = false;
+    public decimal ExtractionSpendThisMonthUsd { get; set; } = 0m;
     public DateTime? CurrentPeriodEnd { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 
-    // Navigation
     public Organization Organization { get; set; } = null!;
 }
 

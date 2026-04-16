@@ -1,0 +1,21 @@
+documentType: permit
+documentSubType: construction
+fields:
+  permit_number:
+    expected: "BP-2025-00471"
+    tolerance: exact
+  permit_type:
+    expected: "Commercial Alteration"
+    tolerance: fuzzy
+  issuing_authority:
+    expected: "City of Austin Development Services"
+    tolerance: fuzzy
+  issue_date:
+    expected: "2025-08-01"
+    tolerance: exact
+  expiration_date:
+    expected: "2026-08-01"
+    tolerance: exact
+  property_address:
+    expected: "1200 Congress Ave, Austin, TX 78701"
+    tolerance: fuzzy

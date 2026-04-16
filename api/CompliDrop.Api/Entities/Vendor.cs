@@ -11,8 +11,8 @@ public class Vendor
     public Guid? ComplianceTemplateId { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+    public DateTime? DeletedAt { get; set; }
 
-    // Navigation
     public Organization Organization { get; set; } = null!;
     public ComplianceTemplate? ComplianceTemplate { get; set; }
     public ICollection<Document> Documents { get; set; } = [];
@@ -28,7 +28,7 @@ public class VendorPortalLink
     public DateTime? ExpiresAt { get; set; }
     public DateTime CreatedAt { get; set; }
     public int UploadCount { get; set; } = 0;
+    public int MaxUploads { get; set; } = 20;
 
-    // Navigation
     public Vendor Vendor { get; set; } = null!;
 }

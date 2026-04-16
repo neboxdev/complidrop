@@ -1,0 +1,21 @@
+documentType: coi
+documentSubType: workers_comp
+fields:
+  policyholder_name:
+    expected: "Bay Area Plumbing Inc"
+    tolerance: fuzzy
+  insurer_name:
+    expected: "State Fund"
+    tolerance: fuzzy
+  policy_number:
+    expected: "WC-9876543"
+    tolerance: exact
+  effective_date:
+    expected: "2025-06-15"
+    tolerance: exact
+  expiration_date:
+    expected: "2026-06-15"
+    tolerance: exact
+  workers_comp_limit:
+    expected: 1000000
+    tolerance: exact

@@ -1,0 +1,21 @@
+documentType: certification
+documentSubType: osha_30
+fields:
+  holder_name:
+    expected: "Sarah Chen"
+    tolerance: fuzzy
+  certification_name:
+    expected: "OSHA 30-Hour Construction Safety"
+    tolerance: fuzzy
+  certifying_body:
+    expected: "OSHA Outreach Training Program"
+    tolerance: fuzzy
+  certification_number:
+    expected: "OSHA-30-88224"
+    tolerance: exact
+  issue_date:
+    expected: "2025-04-20"
+    tolerance: exact
+  expiration_date:
+    expected: "2030-04-20"
+    tolerance: exact

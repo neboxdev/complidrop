@@ -1,0 +1,24 @@
+documentType: coi
+documentSubType: general_liability
+fields:
+  policyholder_name:
+    expected: "Acme Construction LLC"
+    tolerance: fuzzy
+  insurer_name:
+    expected: "Travelers"
+    tolerance: fuzzy
+  policy_number:
+    expected: "GL-1234567"
+    tolerance: exact
+  effective_date:
+    expected: "2026-01-01"
+    tolerance: exact
+  expiration_date:
+    expected: "2027-01-01"
+    tolerance: exact
+  general_liability_limit:
+    expected: 1000000
+    tolerance: exact
+  certificate_holder:
+    expected: "Example Property Mgmt"
+    tolerance: fuzzy

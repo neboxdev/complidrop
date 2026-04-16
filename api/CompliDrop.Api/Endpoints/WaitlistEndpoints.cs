@@ -1,6 +1,7 @@
 using CompliDrop.Api.Data;
 using CompliDrop.Api.DTOs.Waitlist;
 using CompliDrop.Api.Entities;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace CompliDrop.Api.Endpoints;
@@ -9,15 +10,16 @@ public static class WaitlistEndpoints
 {
     public static void MapWaitlistEndpoints(this WebApplication app)
     {
-        app.MapPost("/api/waitlist", async (WaitlistRequest request, AppDbContext db) =>
+        app.MapPost("/api/waitlist", async (WaitlistRequest request, SystemDbContext db) =>
         {
             var email = request.Email?.Trim().ToLowerInvariant() ?? string.Empty;
 
-            if (string.IsNullOrWhiteSpace(email))
+            if (string.IsNullOrWhiteSpace(email) || !email.Contains('@'))
             {
                 return Results.BadRequest(new
                 {
-                    error = new { message = "Email is required.", code = "invalid_email" }
+                    data = (object?)null,
+                    error = new { code = "validation.email", message = "A valid email is required." }
                 });
             }
 
@@ -26,11 +28,12 @@ public static class WaitlistEndpoints
             {
                 return Results.Ok(new
                 {
-                    data = new { message = "You're on the list!" }
+                    data = new { message = "You're on the list!" },
+                    error = (object?)null
                 });
             }
 
-            var entry = new WaitlistEntry
+            db.WaitlistEntries.Add(new WaitlistEntry
             {
                 Id = Guid.NewGuid(),
                 Email = email,
@@ -38,15 +41,15 @@ public static class WaitlistEndpoints
                 Industry = request.Industry,
                 Source = request.Source,
                 CreatedAt = DateTime.UtcNow
-            };
-
-            db.WaitlistEntries.Add(entry);
+            });
             await db.SaveChangesAsync();
 
             return Results.Ok(new
             {
-                data = new { message = "You're on the list!" }
+                data = new { message = "You're on the list!" },
+                error = (object?)null
             });
-        });
+        })
+        .RequireRateLimiting("waitlist");
     }
 }

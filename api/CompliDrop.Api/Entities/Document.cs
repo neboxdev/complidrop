@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace CompliDrop.Api.Entities;
 
 public enum ExtractionStatus
@@ -29,36 +31,38 @@ public class Document
     public long FileSizeBytes { get; set; }
     public string ContentType { get; set; } = string.Empty;
 
-    // Document classification
     public string DocumentType { get; set; } = "other";
     public string? DocumentSubType { get; set; }
 
-    // Extraction results
     public ExtractionStatus ExtractionStatus { get; set; } = ExtractionStatus.Pending;
     public double? ExtractionConfidence { get; set; }
     public string? ExtractionRawJson { get; set; }
+    public JsonDocument? ExtractionFields { get; set; }
+    public string? ExtractionPromptVersion { get; set; }
     public DateTime? ExtractionCompletedAt { get; set; }
 
-    // Key extracted dates
+    public DateTime? ProcessingStartedAt { get; set; }
+    public int ProcessingAttempts { get; set; } = 0;
+    public string? ProcessingError { get; set; }
+
     public DateTime? EffectiveDate { get; set; }
     public DateTime? ExpirationDate { get; set; }
 
-    // Compliance status
+    public decimal? GeneralLiabilityLimit { get; set; }
+
     public ComplianceStatus ComplianceStatus { get; set; } = ComplianceStatus.Pending;
 
-    // Computed (not persisted)
     public bool IsExpired => ExpirationDate.HasValue && ExpirationDate.Value.Date < DateTime.UtcNow.Date;
     public int? DaysUntilExpiry => ExpirationDate.HasValue
         ? (int)(ExpirationDate.Value.Date - DateTime.UtcNow.Date).TotalDays
         : null;
 
-    // Metadata
     public string? UploadedBy { get; set; }
     public bool IsManuallyVerified { get; set; } = false;
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+    public DateTime? DeletedAt { get; set; }
 
-    // Navigation
     public Organization Organization { get; set; } = null!;
     public Vendor? Vendor { get; set; }
     public ICollection<DocumentField> Fields { get; set; } = [];
@@ -76,6 +80,5 @@ public class DocumentField
     public bool IsManuallyEdited { get; set; } = false;
     public string? OriginalValue { get; set; }
 
-    // Navigation
     public Document Document { get; set; } = null!;
 }

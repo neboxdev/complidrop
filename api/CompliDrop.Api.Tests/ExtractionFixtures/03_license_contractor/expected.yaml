@@ -1,0 +1,24 @@
+documentType: license
+documentSubType: contractor
+fields:
+  holder_name:
+    expected: "Juan Martinez"
+    tolerance: fuzzy
+  license_number:
+    expected: "CSLB-842193"
+    tolerance: exact
+  license_type:
+    expected: "C-10 Electrical"
+    tolerance: fuzzy
+  issuing_authority:
+    expected: "California Contractors State License Board"
+    tolerance: fuzzy
+  issue_date:
+    expected: "2024-03-12"
+    tolerance: exact
+  expiration_date:
+    expected: "2028-03-12"
+    tolerance: exact
+  state:
+    expected: "CA"
+    tolerance: exact
