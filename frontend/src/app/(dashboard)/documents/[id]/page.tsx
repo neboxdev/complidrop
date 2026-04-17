@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ArrowLeft, RefreshCw, ShieldCheck } from "lucide-react";
@@ -55,7 +55,6 @@ function confidenceHue(c: number) {
 
 export default function DocumentDetailPage() {
   const params = useParams<{ id: string }>();
-  const router = useRouter();
   const qc = useQueryClient();
   const [edits, setEdits] = useState<Record<string, string>>({});
 

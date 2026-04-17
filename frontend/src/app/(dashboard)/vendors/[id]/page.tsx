@@ -13,19 +13,31 @@ import {
   useGeneratePortalLink,
   useRevokePortalLink,
   useUpdateVendor,
+  type VendorDetail,
 } from "@/hooks/useVendors";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
 type TemplateSummary = { id: string; name: string; isSystemTemplate: boolean };
 
 export default function VendorDetailPage() {
   const params = useParams<{ id: string }>();
   const vendor = useVendor(params.id);
-  const update = useUpdateVendor(params.id);
-  const generate = useGeneratePortalLink(params.id);
-  const revoke = useRevokePortalLink(params.id);
+
+  if (vendor.isLoading || !vendor.data) {
+    return <div className="p-8 text-sm text-slate-400">Loading vendor…</div>;
+  }
+
+  // Re-keying on id resets child useState when navigating between vendors, so
+  // we can initialise form state from props directly — no useEffect+setState.
+  return <VendorDetailContent key={vendor.data.id} vendor={vendor.data} vendorId={params.id} />;
+}
+
+function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendorId: string }) {
+  const update = useUpdateVendor(vendorId);
+  const generate = useGeneratePortalLink(vendorId);
+  const revoke = useRevokePortalLink(vendorId);
 
   const templates = useQuery<TemplateSummary[]>({
     queryKey: ["templates"],
@@ -33,28 +45,12 @@ export default function VendorDetailPage() {
   });
 
   const [form, setForm] = useState({
-    name: "",
-    contactEmail: "",
-    contactPhone: "",
-    category: "",
-    complianceTemplateId: "",
+    name: vendor.name,
+    contactEmail: vendor.contactEmail ?? "",
+    contactPhone: vendor.contactPhone ?? "",
+    category: vendor.category ?? "",
+    complianceTemplateId: vendor.complianceTemplateId ?? "",
   });
-
-  useEffect(() => {
-    if (vendor.data) {
-      setForm({
-        name: vendor.data.name,
-        contactEmail: vendor.data.contactEmail ?? "",
-        contactPhone: vendor.data.contactPhone ?? "",
-        category: vendor.data.category ?? "",
-        complianceTemplateId: vendor.data.complianceTemplateId ?? "",
-      });
-    }
-  }, [vendor.data]);
-
-  if (vendor.isLoading || !vendor.data) {
-    return <div className="p-8 text-sm text-slate-400">Loading vendor…</div>;
-  }
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
@@ -64,7 +60,7 @@ export default function VendorDetailPage() {
 
       <Card>
         <CardContent className="p-6 space-y-4">
-          <h1 className="text-xl font-semibold text-sky-900">{vendor.data.name}</h1>
+          <h1 className="text-xl font-semibold text-sky-900">{vendor.name}</h1>
           <div className="grid grid-cols-2 gap-4 text-sm">
             <LabeledInput label="Name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
             <LabeledInput label="Contact email" value={form.contactEmail} onChange={(v) => setForm({ ...form, contactEmail: v })} />
@@ -113,7 +109,7 @@ export default function VendorDetailPage() {
           <div className="flex items-center justify-between">
             <div>
               <h2 className="font-semibold text-slate-800">Portal upload links</h2>
-              <p className="text-xs text-slate-500">Share a link with {vendor.data.name} — they upload with no login.</p>
+              <p className="text-xs text-slate-500">Share a link with {vendor.name} — they upload with no login.</p>
             </div>
             <Button
               onClick={async () => {
@@ -131,11 +127,11 @@ export default function VendorDetailPage() {
             </Button>
           </div>
 
-          {vendor.data.portalLinks.length === 0 ? (
+          {vendor.portalLinks.length === 0 ? (
             <p className="text-sm text-slate-500">No links yet — generate one above.</p>
           ) : (
             <ul className="space-y-2">
-              {vendor.data.portalLinks.map((l) => (
+              {vendor.portalLinks.map((l) => (
                 <li key={l.id} className="flex items-center gap-3 px-3 py-2 rounded-md border border-slate-100 bg-slate-50/50">
                   <Input value={l.fullUrl} readOnly className="flex-1 h-8 font-mono text-xs" />
                   <Button
