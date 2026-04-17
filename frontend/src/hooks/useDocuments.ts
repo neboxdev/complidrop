@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { track } from "@/lib/analytics";
 
 export type DocumentListItem = {
   id: string;
@@ -52,7 +53,8 @@ export function useUploadDocument() {
         { idempotencyKey },
       );
     },
-    onSuccess: () => {
+    onSuccess: (res) => {
+      track("document.uploaded", { documentId: res.id, extractionStatus: res.extractionStatus });
       qc.invalidateQueries({ queryKey: ["documents"] });
     },
   });

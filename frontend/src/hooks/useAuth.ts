@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api";
+import { identify, resetIdentity, track } from "@/lib/analytics";
 
 export type Me = {
   userId: string;
@@ -45,7 +46,11 @@ export function useRegister() {
   const qc = useQueryClient();
   return useMutation<Me, ApiError, RegisterPayload>({
     mutationFn: (payload) => api.post<Me>("/api/auth/register", payload),
-    onSuccess: (me) => qc.setQueryData(["auth", "me"], me),
+    onSuccess: (me) => {
+      qc.setQueryData(["auth", "me"], me);
+      identify(me.userId, { email: me.email, organizationId: me.organizationId, plan: me.plan });
+      track("user.registered");
+    },
   });
 }
 
@@ -53,7 +58,11 @@ export function useLogin() {
   const qc = useQueryClient();
   return useMutation<Me, ApiError, { email: string; password: string }>({
     mutationFn: (payload) => api.post<Me>("/api/auth/login", payload),
-    onSuccess: (me) => qc.setQueryData(["auth", "me"], me),
+    onSuccess: (me) => {
+      qc.setQueryData(["auth", "me"], me);
+      identify(me.userId, { email: me.email, organizationId: me.organizationId, plan: me.plan });
+      track("user.logged_in");
+    },
   });
 }
 
@@ -63,6 +72,7 @@ export function useLogout() {
     mutationFn: () => api.post<void>("/api/auth/logout"),
     onSuccess: () => {
       qc.setQueryData(["auth", "me"], null);
+      resetIdentity();
       qc.clear();
     },
   });
