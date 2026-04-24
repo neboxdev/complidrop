@@ -51,3 +51,36 @@ cd api/CompliDrop.Api && dotnet ef database update --context AppDbContext
 - Vendor portal endpoints (`/api/portal/*`) are PUBLIC — treat inputs as untrusted.
 - File validation must use magic bytes, not `Content-Type`.
 - Webhook handlers must verify signatures and dedupe event ids.
+
+## Workflow & record-keeping
+
+Substantive changes flow through four record layers:
+
+1. **Tickets** — GitHub Issues (or `docs/tickets/` when `gh` is unavailable). Every non-trivial change starts with a ticket. Typos and trivial fixes excepted.
+2. **Conventional Commits** — durable shipped record. Always reference the issue: `feat(extraction): retry on Gemini 5xx (#42)`.
+3. **ADRs** (`docs/adr/`) — architectural decisions worth preserving. Append-only; supersede via new ADR.
+4. **CHANGELOG.md** — auto-generated from commits via `git-cliff`.
+
+Features begin with `/plan`, run through PM review (6 reviewers including a CompliDrop-specific legal-compliance reviewer), then `/breakdown` into tickets. No jumping straight from idea to code.
+
+Tests are mandatory after implementation — unit tests for pure logic (xUnit), integration tests using `WebApplicationFactory` for boundaries (Postgres, Azure Blob, Document AI, Gemini, Stripe webhook, Resend). Frontend tests use Jest/Vitest.
+
+Multi-agent code review runs on every ticket before PR (`/start <n>` Phase 4). **Every bug the reviewers find gets fixed regardless of severity.** Suggestions (style preferences, "nicer" rewrites) are listed in the PR body but not auto-fixed.
+
+Never silently diverge from a ticket's acceptance criteria — update the ticket first.
+
+## Slash commands
+
+| Command | Purpose |
+|---|---|
+| `/plan <feature>` | Interview → spec → 6-reviewer PM review → approval |
+| `/pm-review` | Re-run PM reviewers on an existing spec |
+| `/breakdown` | Approved spec → epic + 5–12 ordered child tickets |
+| `/start <n>` | Pick up ticket → implement → tests → 5-agent review → fix bugs → PR |
+| `/review` | Diagnostic 5-agent review on the current branch (no auto-fix) |
+| `/epic-review <n>` | Consolidated review across an epic after merge |
+| `/ticket <description>` | Single ticket creator outside `/breakdown` |
+| `/tickets` | List/triage open work |
+| `/adr <title>` | Scaffold a new ADR |
+| `/changelog` | Regenerate `CHANGELOG.md` via git-cliff |
+| `/worklog` | Free-form narrative entry |

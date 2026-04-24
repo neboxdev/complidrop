@@ -1,0 +1,56 @@
+name: Task
+description: Implementation task with clear acceptance criteria
+title: "[task] "
+labels: ["task"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: One sentence describing the end state.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: Motivation — what outcome does this unlock?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context a fresh session needs
+      description: |
+        - Exact file paths
+        - Existing patterns to follow (with file paths)
+        - Related ADRs in `docs/adr/`
+        - External API references with URLs
+        - Dependencies on other tickets (e.g., depends on #51)
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Testable outcomes.
+      value: |
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size
+      options:
+        - "S (< 1h)"
+        - "M (1-3h)"
+        - "L (1 session)"
+        - "XL (needs splitting)"
+    validations:
+      required: true

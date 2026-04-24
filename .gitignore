@@ -18,3 +18,7 @@ frontend/.env.local
 
 # Docs (architecture reference — do not push)
 complidrop-technical-architecture.md
+
+# Claude Code workflow artifacts
+.claude/logs/
+.claude/reviews/

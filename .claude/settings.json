@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "node .claude/hooks/session-start.mjs", "timeout": 10 }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Write|Edit|Bash",
+        "hooks": [{ "type": "command", "command": "node .claude/hooks/activity-log.mjs", "timeout": 5, "async": true }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "node .claude/hooks/session-end.mjs", "timeout": 15 }] }
+    ]
+  }
+}
