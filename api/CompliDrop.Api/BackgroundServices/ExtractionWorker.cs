@@ -21,28 +21,44 @@ public class ExtractionWorker(
         logger.LogInformation("ExtractionWorker starting.");
         while (!stoppingToken.IsCancellationRequested)
         {
+            Guid? claimedId = null;
             try
             {
-                var processed = await TryProcessNextAsync(stoppingToken);
-                if (!processed) await Task.Delay(PollInterval, stoppingToken);
+                claimedId = await ClaimNextAsync(stoppingToken);
+                if (claimedId is null)
+                {
+                    await Task.Delay(PollInterval, stoppingToken);
+                    continue;
+                }
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                logger.LogError(ex, "ExtractionWorker poll failed.");
+                logger.LogError(ex, "ExtractionWorker claim failed.");
                 await Task.Delay(PollInterval, stoppingToken);
+                continue;
+            }
+
+            // Claim's scope is fully disposed before this point. Process in a fresh scope.
+            try
+            {
+                logger.LogInformation("Claimed document {DocumentId}, beginning processing.", claimedId.Value);
+                await ProcessDocumentAsync(claimedId.Value, stoppingToken);
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "ExtractionWorker process failed for {DocumentId}.", claimedId.Value);
             }
         }
         logger.LogInformation("ExtractionWorker stopping.");
     }
 
-    private async Task<bool> TryProcessNextAsync(CancellationToken ct)
+    private async Task<Guid?> ClaimNextAsync(CancellationToken ct)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<SystemDbContext>();
 
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
-        Guid? claimedId = null;
         var claimSql = """
             UPDATE "Documents"
             SET "ExtractionStatus" = 'Processing',
@@ -64,29 +80,23 @@ public class ExtractionWorker(
             RETURNING "Id";
             """;
 
+        // Run the claim as raw SQL on the EF connection — single statement, atomic in
+        // Postgres without an explicit transaction. Avoids holding a tx scope open.
         var conn = db.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open) await conn.OpenAsync(ct);
-        await using (var cmd = conn.CreateCommand())
+        try
         {
+            await using var cmd = conn.CreateCommand();
             cmd.CommandText = claimSql;
-            cmd.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
             await using var reader = await cmd.ExecuteReaderAsync(ct);
-            if (await reader.ReadAsync(ct))
-            {
-                claimedId = reader.GetGuid(0);
-            }
+            if (await reader.ReadAsync(ct)) return reader.GetGuid(0);
+            return null;
         }
-
-        if (claimedId is null)
+        finally
         {
-            await tx.CommitAsync(ct);
-            return false;
+            // Ensure connection returns to the pool before the scope unwinds further.
+            if (conn.State == System.Data.ConnectionState.Open) await conn.CloseAsync();
         }
-
-        await tx.CommitAsync(ct);
-
-        await ProcessDocumentAsync(claimedId.Value, ct);
-        return true;
     }
 
     private async Task ProcessDocumentAsync(Guid documentId, CancellationToken ct)
@@ -100,6 +110,16 @@ public class ExtractionWorker(
 
         var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == documentId, ct);
         if (doc is null) return;
+
+        // Defense-in-depth: if the doc has been claimed too many times (e.g. process
+        // crashed mid-extraction in earlier attempts and the catch block never ran),
+        // mark Failed up-front so we don't keep paying OCR/LLM costs in a zombie loop.
+        if (doc.ProcessingAttempts > MaxAttempts)
+        {
+            await MarkFailed(db, doc, "extraction.too_many_attempts",
+                $"Exceeded {MaxAttempts} attempts ({doc.ProcessingAttempts} so far).", ct);
+            return;
+        }
 
         try
         {

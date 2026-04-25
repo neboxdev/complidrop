@@ -22,3 +22,5 @@ complidrop-technical-architecture.md
 # Claude Code workflow artifacts
 .claude/logs/
 .claude/reviews/
+# Local dev scripts — may contain secret values
+api/CompliDrop.Api/dev-run.ps1
