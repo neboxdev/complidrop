@@ -80,23 +80,18 @@ public class ExtractionWorker(
             RETURNING "Id";
             """;
 
-        // Run the claim as raw SQL on the EF connection — single statement, atomic in
-        // Postgres without an explicit transaction. Avoids holding a tx scope open.
+        // Run the claim as raw SQL — single UPDATE...RETURNING statement, atomic in
+        // Postgres without an explicit transaction. The scope's `await using` disposes
+        // the DbContext (and returns the connection to the pool) when this method
+        // exits — don't close the connection manually, that would leave the
+        // DbContext in a broken state.
         var conn = db.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open) await conn.OpenAsync(ct);
-        try
-        {
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = claimSql;
-            await using var reader = await cmd.ExecuteReaderAsync(ct);
-            if (await reader.ReadAsync(ct)) return reader.GetGuid(0);
-            return null;
-        }
-        finally
-        {
-            // Ensure connection returns to the pool before the scope unwinds further.
-            if (conn.State == System.Data.ConnectionState.Open) await conn.CloseAsync();
-        }
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = claimSql;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct)) return reader.GetGuid(0);
+        return null;
     }
 
     private async Task ProcessDocumentAsync(Guid documentId, CancellationToken ct)
