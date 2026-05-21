@@ -22,6 +22,7 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
 
     private Respawner _respawner = null!;
     private NpgsqlConnection _respawnConnection = null!;
+    private string? _priorDbConnEnv;
 
     public CustomWebApplicationFactory Factory { get; private set; } = null!;
 
@@ -32,7 +33,10 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
         await _container.StartAsync();
 
         // DbContextFactory (used by MultiTenancyTests) reads this env var first; the API host
-        // gets the same value via CustomWebApplicationFactory's in-memory config.
+        // gets the same value via CustomWebApplicationFactory's in-memory config. Capture any
+        // prior value so DisposeAsync can restore it — leaving a dead-container connection string
+        // (or clobbering a real one) in process-global state would be a footgun for later code.
+        _priorDbConnEnv = Environment.GetEnvironmentVariable("ConnectionStrings__Database");
         Environment.SetEnvironmentVariable("ConnectionStrings__Database", ConnectionString);
 
         // Migrations belong to AppDbContext — apply them to the fresh container DB.
@@ -75,5 +79,8 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
         if (Factory is not null)
             await Factory.DisposeAsync();
         await _container.DisposeAsync();
+
+        // Restore the process-global env var we mutated in InitializeAsync.
+        Environment.SetEnvironmentVariable("ConnectionStrings__Database", _priorDbConnEnv);
     }
 }

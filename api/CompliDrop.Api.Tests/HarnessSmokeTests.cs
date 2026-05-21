@@ -9,7 +9,8 @@ namespace CompliDrop.Api.Tests;
 
 /// <summary>
 /// Proves the integration-test harness itself works: the host boots against the container,
-/// migrations are applied, auth flows end-to-end with cookies, and Respawn resets state.
+/// migrations are applied, auth flows end-to-end with cookies, and Respawn resets state
+/// (including automatic reset between tests).
 /// </summary>
 public sealed class HarnessSmokeTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
@@ -57,5 +58,27 @@ public sealed class HarnessSmokeTests(IntegrationTestFixture fixture) : Integrat
             (await db.Users.CountAsync()).Should().Be(0);
             (await db.ComplianceTemplates.CountAsync(t => t.IsSystemTemplate)).Should().BeGreaterThan(0);
         }
+    }
+
+    // The two tests below share a fixed email and each assert a clean database at the START of
+    // the test. They both pass only if IntegrationTestBase.InitializeAsync resets between tests —
+    // i.e. they make the per-test auto-reset (the harness's core promise that every downstream
+    // ticket depends on) load-bearing, and would fail if it regressed. Without the auto-reset,
+    // whichever runs second would see the first test's user (count != 0, and a duplicate-email 409).
+    [Fact]
+    public async Task Auto_reset_gives_each_test_a_clean_database_1() => await AssertCleanStartThenRegister();
+
+    [Fact]
+    public async Task Auto_reset_gives_each_test_a_clean_database_2() => await AssertCleanStartThenRegister();
+
+    private async Task AssertCleanStartThenRegister()
+    {
+        await using (var db = CreateSystemDb())
+        {
+            (await db.Users.CountAsync())
+                .Should().Be(0, "the per-test reset must wipe data created by other tests in the collection");
+        }
+
+        await RegisterAndLoginAsync(email: "iso@example.com");
     }
 }
