@@ -200,7 +200,12 @@ else
 app.UseSerilogRequestLogging();
 app.UseRouting();
 app.UseCors();
-app.UseRateLimiter();
+// Gate behind config so integration tests (which have no client IP to partition on) can
+// disable it via RateLimiting:Enabled=false. Defaults to on for dev/prod.
+if (app.Configuration.GetValue("RateLimiting:Enabled", true))
+{
+    app.UseRateLimiter();
+}
 app.UseAuthentication();
 app.UseAuthorization();
 
