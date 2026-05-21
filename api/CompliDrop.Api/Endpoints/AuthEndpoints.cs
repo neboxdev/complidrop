@@ -200,7 +200,9 @@ public static class AuthEndpoints
         var principal = tokens.ValidateToken(refreshToken, isRefresh: true);
         if (principal is null) return Error(401, "auth.token_expired", "Session expired. Please log in again.");
 
-        var userIdStr = principal.FindFirstValue(JwtClaims.Sub);
+        // JwtSecurityTokenHandler maps "sub" to ClaimTypes.NameIdentifier on validation, so the
+        // user id must be read from there — the raw "sub" claim no longer exists post-validation.
+        var userIdStr = principal.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!Guid.TryParse(userIdStr, out var userId))
             return Error(401, "auth.token_expired", "Session expired.");
 
@@ -274,9 +276,4 @@ public static class AuthEndpoints
 
     private static IResult Error(int status, string code, string message) =>
         Results.Json(new { data = (object?)null, error = new { code, message } }, statusCode: status);
-}
-
-internal static class JwtClaims
-{
-    public const string Sub = "sub";
 }
