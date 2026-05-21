@@ -140,11 +140,8 @@ public static class AuthEndpoints
         if (!hasher.Verify(req.Password ?? string.Empty, user.PasswordHash))
         {
             user.FailedLoginAttempts += 1;
-            if (user.FailedLoginAttempts >= 10)
-            {
-                var multiplier = Math.Min(user.FailedLoginAttempts - 9, 12);
-                user.LockedUntil = DateTime.UtcNow.AddMinutes(15 * multiplier);
-            }
+            if (AuthLockout.ComputeLockoutDuration(user.FailedLoginAttempts) is { } lockFor)
+                user.LockedUntil = DateTime.UtcNow.Add(lockFor);
             await db.SaveChangesAsync();
             await audit.LogAsync(
                 "user.login_failed",
