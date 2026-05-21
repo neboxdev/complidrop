@@ -14,19 +14,25 @@ public interface IComplianceCheckService
 
 public class ComplianceCheckService(
     AppDbContext db,
-    SystemDbContext sysDb) : IComplianceCheckService
+    SystemDbContext sysDb,
+    TimeProvider timeProvider) : IComplianceCheckService
 {
     public Task<ComplianceStatus> EvaluateAsync(Guid documentId, CancellationToken ct) =>
-        EvaluateInternalAsync(db, documentId, ct);
+        EvaluateInternalAsync(db, documentId, timeProvider.GetUtcNow().UtcDateTime, ct);
 
     public Task<ComplianceStatus> EvaluateForSystemAsync(Guid documentId, CancellationToken ct) =>
-        EvaluateInternalAsync(sysDb, documentId, ct);
+        EvaluateInternalAsync(sysDb, documentId, timeProvider.GetUtcNow().UtcDateTime, ct);
 
+    // nowUtc is injected (via TimeProvider) instead of read from DateTime.UtcNow so the
+    // expiration / expiring-soon date boundaries are deterministically testable.
     private static async Task<ComplianceStatus> EvaluateInternalAsync(
         DbContext context,
         Guid documentId,
+        DateTime nowUtc,
         CancellationToken ct)
     {
+        var today = nowUtc.Date;
+
         var doc = await context.Set<Document>()
             .Include(d => d.Vendor)
                 .ThenInclude(v => v!.ComplianceTemplate)
@@ -35,16 +41,16 @@ public class ComplianceCheckService(
 
         if (doc is null) return ComplianceStatus.Pending;
 
-        if (doc.ExpirationDate is DateTime exp && exp.Date < DateTime.UtcNow.Date)
+        if (doc.ExpirationDate is DateTime exp && exp.Date < today)
         {
             doc.ComplianceStatus = ComplianceStatus.Expired;
-            doc.UpdatedAt = DateTime.UtcNow;
+            doc.UpdatedAt = nowUtc;
             await context.SaveChangesAsync(ct);
             return doc.ComplianceStatus;
         }
 
         if (doc.ExpirationDate is DateTime exp2
-            && exp2.Date <= DateTime.UtcNow.Date.AddDays(30))
+            && exp2.Date <= today.AddDays(30))
         {
             doc.ComplianceStatus = ComplianceStatus.ExpiringSoon;
         }
@@ -54,7 +60,7 @@ public class ComplianceCheckService(
         {
             if (doc.ComplianceStatus != ComplianceStatus.ExpiringSoon)
                 doc.ComplianceStatus = ComplianceStatus.Pending;
-            doc.UpdatedAt = DateTime.UtcNow;
+            doc.UpdatedAt = nowUtc;
             await context.SaveChangesAsync(ct);
             return doc.ComplianceStatus;
         }
@@ -78,7 +84,7 @@ public class ComplianceCheckService(
                 IsPassed = passed,
                 ActualValue = actualValue,
                 Notes = note,
-                CheckedAt = DateTime.UtcNow
+                CheckedAt = nowUtc
             });
             if (!passed) allPassed = false;
         }
@@ -88,7 +94,7 @@ public class ComplianceCheckService(
                 ? ComplianceStatus.ExpiringSoon
                 : ComplianceStatus.Compliant)
             : ComplianceStatus.NonCompliant;
-        doc.UpdatedAt = DateTime.UtcNow;
+        doc.UpdatedAt = nowUtc;
         await context.SaveChangesAsync(ct);
         return doc.ComplianceStatus;
     }
