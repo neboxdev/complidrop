@@ -93,7 +93,9 @@ public class ComplianceCheckService(
         return doc.ComplianceStatus;
     }
 
-    private static (bool passed, string? actualValue, string? note) EvaluateRule(Document doc, ComplianceRule rule)
+    // internal (not private) so the pure rule-evaluation logic can be unit-tested directly
+    // without a database — see InternalsVisibleTo in CompliDrop.Api.csproj.
+    internal static (bool passed, string? actualValue, string? note) EvaluateRule(Document doc, ComplianceRule rule)
     {
         string? actual = LookupValue(doc, rule.FieldName);
         var op = rule.Operator?.ToLowerInvariant() ?? "required";
@@ -124,7 +126,7 @@ public class ComplianceCheckService(
         }
     }
 
-    private static string? LookupValue(Document doc, string? fieldName)
+    internal static string? LookupValue(Document doc, string? fieldName)
     {
         if (string.IsNullOrWhiteSpace(fieldName)) return null;
         if (string.Equals(fieldName, "expiration_date", StringComparison.OrdinalIgnoreCase) && doc.ExpirationDate is { } ed)
