@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace CompliDrop.Api.Tests;
 
+[Collection("integration")]
 public class MultiTenancyTests : IAsyncLifetime
 {
     private Guid _orgA;
