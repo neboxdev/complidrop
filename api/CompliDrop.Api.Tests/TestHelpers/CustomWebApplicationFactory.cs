@@ -1,8 +1,11 @@
 using CompliDrop.Api.BackgroundServices;
+using CompliDrop.Api.Services;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 
 namespace CompliDrop.Api.Tests.TestHelpers;
@@ -50,6 +53,11 @@ public sealed class CustomWebApplicationFactory(string connectionString) : WebAp
                 .ToList();
             foreach (var descriptor in workers)
                 services.Remove(descriptor);
+
+            // Replace Azure Blob storage with an in-memory fake — the real BlobStorageService
+            // connects to Azure in its constructor, which has no credentials in the test host.
+            services.RemoveAll<IBlobStorageService>();
+            services.AddSingleton<IBlobStorageService, FakeBlobStorageService>();
         });
     }
 }
