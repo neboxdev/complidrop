@@ -40,6 +40,12 @@ public sealed class CustomWebApplicationFactory(string connectionString) : WebAp
                 ["Cookies:Secure"] = "false",
                 ["Cookies:SameSite"] = "Lax",
                 ["RateLimiting:Enabled"] = "false",
+                // Stripe webhook signature verification + plan resolution (SecretKey left unset,
+                // so checkout/portal stay disabled — only the webhook path is exercised).
+                ["Stripe:WebhookSecret"] = "whsec_test_secret_for_integration_tests",
+                ["Stripe:MonthlyPriceId"] = "price_monthly_test",
+                ["Stripe:AnnualPriceId"] = "price_annual_test",
+                ["Stripe:FoundingPriceId"] = "price_founding_test",
             });
         });
 
