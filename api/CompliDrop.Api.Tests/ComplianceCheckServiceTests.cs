@@ -16,7 +16,11 @@ namespace CompliDrop.Api.Tests;
 public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
     private static readonly DateTimeOffset FixedNow = new(2026, 6, 1, 12, 0, 0, TimeSpan.Zero);
-    private static DateTime Today => FixedNow.UtcDateTime.Date; // 2026-06-01 (UTC)
+
+    // Seed expirations relative to the fixed instant (noon UTC), NOT midnight, so the date the
+    // service compares (exp.Date) cannot be shifted across a day boundary by any timezone skew in
+    // the Postgres timestamptz round-trip. The service's "today" derives from the same FixedNow.
+    private static DateTime Anchor => FixedNow.UtcDateTime; // 2026-06-01T12:00:00Z
 
     private readonly Guid _orgId = Guid.NewGuid();
 
@@ -92,7 +96,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     [Fact]
     public async Task Expired_document_is_marked_Expired()
     {
-        var id = await SeedAsync(expiration: Today.AddDays(-1));
+        var id = await SeedAsync(expiration: Anchor.AddDays(-1));
 
         (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.Expired);
     }
@@ -101,7 +105,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     public async Task Document_expiring_exactly_today_is_ExpiringSoon_not_Expired()
     {
         // The service uses a strict `<` for Expired, so a doc expiring TODAY is not yet expired.
-        var id = await SeedAsync(expiration: Today);
+        var id = await SeedAsync(expiration: Anchor);
 
         (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.ExpiringSoon);
     }
@@ -109,7 +113,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     [Fact]
     public async Task Document_expiring_within_30_days_is_ExpiringSoon()
     {
-        var id = await SeedAsync(expiration: Today.AddDays(10));
+        var id = await SeedAsync(expiration: Anchor.AddDays(10));
 
         (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.ExpiringSoon);
     }
@@ -117,7 +121,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     [Fact]
     public async Task Document_expiring_in_exactly_30_days_is_ExpiringSoon()
     {
-        var id = await SeedAsync(expiration: Today.AddDays(30));
+        var id = await SeedAsync(expiration: Anchor.AddDays(30));
 
         (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.ExpiringSoon);
     }
@@ -125,7 +129,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     [Fact]
     public async Task Document_expiring_in_31_days_is_not_ExpiringSoon()
     {
-        var id = await SeedAsync(expiration: Today.AddDays(31));
+        var id = await SeedAsync(expiration: Anchor.AddDays(31));
 
         (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.Pending);
     }
@@ -133,7 +137,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     [Fact]
     public async Task Document_with_no_template_is_Pending()
     {
-        var id = await SeedAsync(expiration: Today.AddDays(365));
+        var id = await SeedAsync(expiration: Anchor.AddDays(365));
 
         (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.Pending);
     }
@@ -144,7 +148,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     public async Task All_rules_passing_yields_Compliant_and_persists_a_check()
     {
         var id = await SeedAsync(
-            expiration: Today.AddDays(365),
+            expiration: Anchor.AddDays(365),
             docType: "coi", glLimit: 2000000m,
             rules: ("coi", "general_liability_limit", "min_value", "1000000"));
 
@@ -159,7 +163,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     public async Task A_failing_rule_yields_NonCompliant()
     {
         var id = await SeedAsync(
-            expiration: Today.AddDays(365),
+            expiration: Anchor.AddDays(365),
             docType: "coi", glLimit: 500000m,
             rules: ("coi", "general_liability_limit", "min_value", "1000000"));
 
@@ -171,7 +175,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     {
         // Document is a 'license'; the only rule targets 'coi' → no applicable rules → vacuously Compliant.
         var id = await SeedAsync(
-            expiration: Today.AddDays(365),
+            expiration: Anchor.AddDays(365),
             docType: "license",
             rules: ("coi", "general_liability_limit", "min_value", "1000000"));
 
@@ -185,7 +189,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     public async Task Expiring_soon_with_passing_rules_stays_ExpiringSoon()
     {
         var id = await SeedAsync(
-            expiration: Today.AddDays(10),
+            expiration: Anchor.AddDays(10),
             docType: "coi", glLimit: 2000000m,
             rules: ("coi", "general_liability_limit", "min_value", "1000000"));
 
@@ -196,7 +200,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     public async Task Expiring_soon_with_a_failing_rule_is_NonCompliant()
     {
         var id = await SeedAsync(
-            expiration: Today.AddDays(10),
+            expiration: Anchor.AddDays(10),
             docType: "coi", glLimit: 500000m,
             rules: ("coi", "general_liability_limit", "min_value", "1000000"));
 
@@ -207,7 +211,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     public async Task Re_evaluation_replaces_previous_checks()
     {
         var id = await SeedAsync(
-            expiration: Today.AddDays(365),
+            expiration: Anchor.AddDays(365),
             docType: "coi", glLimit: 2000000m,
             rules: ("coi", "general_liability_limit", "min_value", "1000000"));
 
@@ -221,7 +225,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     [Fact]
     public async Task EvaluateAsync_is_tenant_scoped()
     {
-        var id = await SeedAsync(expiration: Today.AddDays(365));
+        var id = await SeedAsync(expiration: Anchor.AddDays(365));
 
         // A different org's tenant context cannot see the document → not found → Pending.
         var otherOrgUser = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = Guid.NewGuid() };
