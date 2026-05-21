@@ -14,7 +14,7 @@ namespace CompliDrop.Api.Tests;
 /// <summary>
 /// Integration tests for the Stripe webhook: signature verification, event dedupe, and the
 /// subscription lifecycle transitions that apply without an external Stripe API call
-/// (customer.subscription.updated / .deleted). Runs on the Testcontainers harness.
+/// (customer.subscription.created / .updated / .deleted). Runs on the Testcontainers harness.
 /// </summary>
 public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
@@ -62,8 +62,8 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         Envelope(eventId, "customer.subscription.deleted",
             new { id = subId, @object = "subscription", status = "canceled" }));
 
-    private static string UpdatedEvent(string eventId, string subId, string status, string priceId) => JsonSerializer.Serialize(
-        Envelope(eventId, "customer.subscription.updated",
+    private static string SubscriptionStateEvent(string eventId, string type, string subId, string status, string priceId) => JsonSerializer.Serialize(
+        Envelope(eventId, type,
         new
         {
             id = subId,
@@ -116,18 +116,36 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         sub.DocumentLimit.Should().Be(5);
     }
 
-    [Fact]
-    public async Task Valid_signed_subscription_updated_applies_status_and_plan()
+    [Theory]
+    [InlineData("customer.subscription.updated")]
+    [InlineData("customer.subscription.created")]
+    public async Task Valid_signed_subscription_state_event_applies_status_and_plan(string eventType)
     {
-        var subId = await SeedSubscriptionAsync(plan: "monthly", status: "active");
-        var payload = UpdatedEvent($"evt_{Guid.NewGuid():N}", subId, "past_due", "price_monthly_test");
+        // Seed "free" and send the ANNUAL price (which maps to "annual", NOT the "monthly" fallback)
+        // so the assertion genuinely proves price->plan re-derivation, not the seeded value or fallback.
+        var subId = await SeedSubscriptionAsync(plan: "free", status: "active");
+        var payload = SubscriptionStateEvent($"evt_{Guid.NewGuid():N}", eventType, subId, "past_due", "price_annual_test");
 
         var resp = await PostWebhook(payload, SignatureFor(payload));
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var sub = await ReloadAsync(subId);
         sub.Status.Should().Be("past_due");
-        sub.Plan.Should().Be("monthly");
+        sub.Plan.Should().Be("annual");
+    }
+
+    [Fact]
+    public async Task Unknown_event_type_is_accepted_as_a_noop()
+    {
+        var subId = await SeedSubscriptionAsync(plan: "monthly", status: "active");
+        var payload = JsonSerializer.Serialize(Envelope(
+            $"evt_{Guid.NewGuid():N}", "customer.subscription.trial_will_end",
+            new { id = subId, @object = "subscription", status = "trialing" }));
+
+        var resp = await PostWebhook(payload, SignatureFor(payload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);          // accepted + recorded
+        (await ReloadAsync(subId)).Status.Should().Be("active"); // but no handler ran
     }
 
     [Fact]
@@ -148,7 +166,12 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         var subId = await SeedSubscriptionAsync(status: "active");
         var payload = DeletedEvent($"evt_{Guid.NewGuid():N}", subId);
 
-        var resp = await PostWebhook(payload, "t=1700000000,v1=deadbeefdeadbeef");
+        // A current-timestamp signature with a corrupted hash — isolates hash-mismatch rejection
+        // from the timestamp-tolerance window.
+        var valid = SignatureFor(payload);
+        var corrupted = valid[..^1] + (valid[^1] == '0' ? '1' : '0');
+
+        var resp = await PostWebhook(payload, corrupted);
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         (await ReloadAsync(subId)).Status.Should().Be("active");
@@ -159,7 +182,7 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
     {
         var subId = await SeedSubscriptionAsync(plan: "monthly", status: "active");
         var eventId = $"evt_{Guid.NewGuid():N}";
-        var payload = UpdatedEvent(eventId, subId, "past_due", "price_monthly_test");
+        var payload = SubscriptionStateEvent(eventId, "customer.subscription.updated", subId, "past_due", "price_monthly_test");
 
         (await PostWebhook(payload, SignatureFor(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
 
