@@ -14,19 +14,25 @@ public interface IComplianceCheckService
 
 public class ComplianceCheckService(
     AppDbContext db,
-    SystemDbContext sysDb) : IComplianceCheckService
+    SystemDbContext sysDb,
+    TimeProvider timeProvider) : IComplianceCheckService
 {
     public Task<ComplianceStatus> EvaluateAsync(Guid documentId, CancellationToken ct) =>
-        EvaluateInternalAsync(db, documentId, ct);
+        EvaluateInternalAsync(db, documentId, timeProvider.GetUtcNow().UtcDateTime, ct);
 
     public Task<ComplianceStatus> EvaluateForSystemAsync(Guid documentId, CancellationToken ct) =>
-        EvaluateInternalAsync(sysDb, documentId, ct);
+        EvaluateInternalAsync(sysDb, documentId, timeProvider.GetUtcNow().UtcDateTime, ct);
 
+    // nowUtc is injected (via TimeProvider) instead of read from DateTime.UtcNow so the
+    // expiration / expiring-soon date boundaries are deterministically testable.
     private static async Task<ComplianceStatus> EvaluateInternalAsync(
         DbContext context,
         Guid documentId,
+        DateTime nowUtc,
         CancellationToken ct)
     {
+        var today = nowUtc.Date;
+
         var doc = await context.Set<Document>()
             .Include(d => d.Vendor)
                 .ThenInclude(v => v!.ComplianceTemplate)
@@ -35,16 +41,16 @@ public class ComplianceCheckService(
 
         if (doc is null) return ComplianceStatus.Pending;
 
-        if (doc.ExpirationDate is DateTime exp && exp.Date < DateTime.UtcNow.Date)
+        if (doc.ExpirationDate is DateTime exp && exp.Date < today)
         {
             doc.ComplianceStatus = ComplianceStatus.Expired;
-            doc.UpdatedAt = DateTime.UtcNow;
+            doc.UpdatedAt = nowUtc;
             await context.SaveChangesAsync(ct);
             return doc.ComplianceStatus;
         }
 
         if (doc.ExpirationDate is DateTime exp2
-            && exp2.Date <= DateTime.UtcNow.Date.AddDays(30))
+            && exp2.Date <= today.AddDays(30))
         {
             doc.ComplianceStatus = ComplianceStatus.ExpiringSoon;
         }
@@ -54,7 +60,7 @@ public class ComplianceCheckService(
         {
             if (doc.ComplianceStatus != ComplianceStatus.ExpiringSoon)
                 doc.ComplianceStatus = ComplianceStatus.Pending;
-            doc.UpdatedAt = DateTime.UtcNow;
+            doc.UpdatedAt = nowUtc;
             await context.SaveChangesAsync(ct);
             return doc.ComplianceStatus;
         }
@@ -78,7 +84,7 @@ public class ComplianceCheckService(
                 IsPassed = passed,
                 ActualValue = actualValue,
                 Notes = note,
-                CheckedAt = DateTime.UtcNow
+                CheckedAt = nowUtc
             });
             if (!passed) allPassed = false;
         }
@@ -88,12 +94,14 @@ public class ComplianceCheckService(
                 ? ComplianceStatus.ExpiringSoon
                 : ComplianceStatus.Compliant)
             : ComplianceStatus.NonCompliant;
-        doc.UpdatedAt = DateTime.UtcNow;
+        doc.UpdatedAt = nowUtc;
         await context.SaveChangesAsync(ct);
         return doc.ComplianceStatus;
     }
 
-    private static (bool passed, string? actualValue, string? note) EvaluateRule(Document doc, ComplianceRule rule)
+    // internal (not private) so the pure rule-evaluation logic can be unit-tested directly
+    // without a database — see InternalsVisibleTo in CompliDrop.Api.csproj.
+    internal static (bool passed, string? actualValue, string? note) EvaluateRule(Document doc, ComplianceRule rule)
     {
         string? actual = LookupValue(doc, rule.FieldName);
         var op = rule.Operator?.ToLowerInvariant() ?? "required";
@@ -124,7 +132,7 @@ public class ComplianceCheckService(
         }
     }
 
-    private static string? LookupValue(Document doc, string? fieldName)
+    internal static string? LookupValue(Document doc, string? fieldName)
     {
         if (string.IsNullOrWhiteSpace(fieldName)) return null;
         if (string.Equals(fieldName, "expiration_date", StringComparison.OrdinalIgnoreCase) && doc.ExpirationDate is { } ed)

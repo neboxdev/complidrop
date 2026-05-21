@@ -64,6 +64,7 @@ if (!string.IsNullOrWhiteSpace(sentryDsn))
 // Core services
 // ============================================================
 builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ICurrentUser, CurrentUserService>();
 builder.Services.AddSingleton<IPasswordHasher, BCryptPasswordHasher>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
