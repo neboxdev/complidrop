@@ -14,13 +14,15 @@ public class AuthLockoutTests
         AuthLockout.ComputeLockoutDuration(attempts).Should().BeNull();
 
     [Theory]
-    [InlineData(10, 15)]   // first lock (1× step)
-    [InlineData(11, 30)]   // grows per attempt
-    [InlineData(12, 45)]
-    [InlineData(20, 165)]  // 11× step
-    [InlineData(21, 180)]  // cap reached (12× step)
-    [InlineData(22, 180)]  // capped — does not keep growing
-    [InlineData(100, 180)] // still capped
-    public void Locks_with_capped_backoff(int attempts, int expectedMinutes) =>
+    [InlineData(10, 15)]     // first lock: 15 min
+    [InlineData(11, 30)]     // doubles each subsequent attempt
+    [InlineData(12, 60)]
+    [InlineData(13, 120)]
+    [InlineData(14, 240)]
+    [InlineData(16, 960)]
+    [InlineData(17, 1440)]   // cap reached (24h)
+    [InlineData(18, 1440)]   // capped — does not keep doubling
+    [InlineData(100, 1440)]  // still capped, overflow-safe
+    public void Locks_with_exponential_backoff_capped_at_24h(int attempts, int expectedMinutes) =>
         AuthLockout.ComputeLockoutDuration(attempts).Should().Be(TimeSpan.FromMinutes(expectedMinutes));
 }
