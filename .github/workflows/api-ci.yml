@@ -17,8 +17,6 @@ jobs:
     defaults:
       run:
         working-directory: api
-    env:
-      ConnectionStrings__Database: ${{ secrets.TEST_DATABASE_CONNECTION }}
     steps:
       - uses: actions/checkout@v4
 
@@ -32,11 +30,9 @@ jobs:
       - name: Build
         run: dotnet build CompliDrop.slnx --configuration Release --no-restore
 
+      # DB strategy: integration tests provision a throwaway postgres:17-alpine database via
+      # Testcontainers (see api/CompliDrop.Api.Tests/TestHelpers/IntegrationTestFixture.cs).
+      # Docker is preinstalled on GitHub-hosted ubuntu runners, so no external test database
+      # (and no TEST_DATABASE_CONNECTION secret) is required — the suite always runs.
       - name: Test
-        run: |
-          if [ -z "$ConnectionStrings__Database" ]; then
-            echo "::warning::Tests skipped — set TEST_DATABASE_CONNECTION secret to enable MultiTenancyTests."
-          else
-            dotnet test CompliDrop.Api.Tests/CompliDrop.Api.Tests.csproj \
-              --configuration Release --no-build --logger "console;verbosity=minimal"
-          fi
+        run: dotnet test CompliDrop.Api.Tests/CompliDrop.Api.Tests.csproj --configuration Release --no-build --logger "console;verbosity=minimal"
