@@ -78,6 +78,11 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
         // residue from earlier tests in the same fixture.
         if (Factory.Services.GetService<IEmailService>() is FakeEmailService email)
             email.Reset();
+
+        // Same for the extraction/OCR fakes: clear call counts and restore default behavior so a
+        // test that flips ThrowOnExtract or IsEnabled doesn't leak that into the next one.
+        Factory.Services.GetService<FakeExtractionClient>()?.Reset();
+        Factory.Services.GetService<FakeOcrService>()?.Reset();
     }
 
     public async Task DisposeAsync()
