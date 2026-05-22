@@ -1,5 +1,7 @@
 using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Services;
+using CompliDrop.Api.Services.Extraction;
+using CompliDrop.Api.Services.Ocr;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -81,6 +83,23 @@ public sealed class CustomWebApplicationFactory(
             // and captures every send so tests can assert recipients, subjects, and bodies.
             services.RemoveAll<IEmailService>();
             services.AddSingleton<IEmailService, FakeEmailService>();
+
+            // Replace the OCR + LLM extraction boundary with controllable in-memory fakes. The real
+            // DocumentAiOcrService / Gemini / Anthropic clients make outbound HTTP calls, so the
+            // ExtractionWorker tests swap these in to make extraction deterministically succeed or
+            // throw. Registered both as the concrete type (for tests to grab a handle and toggle
+            // knobs) and as the interface (so the worker resolves the same singleton). The real
+            // ExtractionClientFactory is left in place — with a single registered client it returns
+            // the fake.
+            services.RemoveAll<IOcrService>();
+            var fakeOcr = new FakeOcrService();
+            services.AddSingleton(fakeOcr);
+            services.AddSingleton<IOcrService>(fakeOcr);
+
+            services.RemoveAll<IExtractionClient>();
+            var fakeExtraction = new FakeExtractionClient();
+            services.AddSingleton(fakeExtraction);
+            services.AddSingleton<IExtractionClient>(fakeExtraction);
         });
     }
 }
