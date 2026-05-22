@@ -35,6 +35,9 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      - name: Test
+        run: npm test
+
       - name: Build
         env:
           NEXT_PUBLIC_API_URL: https://api.complidrop.com
