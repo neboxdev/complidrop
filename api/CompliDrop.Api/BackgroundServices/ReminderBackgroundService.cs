@@ -7,6 +7,7 @@ namespace CompliDrop.Api.BackgroundServices;
 
 public class ReminderBackgroundService(
     IServiceScopeFactory scopeFactory,
+    TimeProvider timeProvider,
     ILogger<ReminderBackgroundService> logger) : BackgroundService
 {
     private const int TargetLocalHour = 8;
@@ -20,7 +21,7 @@ public class ReminderBackgroundService(
             catch (OperationCanceledException) { break; }
             catch (Exception ex) { logger.LogError(ex, "Reminder tick failed."); }
 
-            var now = DateTime.UtcNow;
+            var now = timeProvider.GetUtcNow().UtcDateTime;
             var nextTopOfHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Utc).AddHours(1);
             var delay = nextTopOfHour - now;
             if (delay < TimeSpan.FromMinutes(1)) delay = TimeSpan.FromMinutes(1);
@@ -41,7 +42,7 @@ public class ReminderBackgroundService(
             return;
         }
 
-        var nowUtc = DateTime.UtcNow;
+        var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
 
         var orgs = await db.Organizations
             .Where(o => o.DeletedAt == null)
@@ -111,7 +112,7 @@ public class ReminderBackgroundService(
                                 ReminderId = reminder.Id,
                                 DocumentId = doc.Id,
                                 RecipientEmail = recipient,
-                                SentAt = DateTime.UtcNow,
+                                SentAt = timeProvider.GetUtcNow().UtcDateTime,
                                 SendDate = sendDate,
                                 ResendMessageId = messageId,
                                 Status = messageId is null ? "failed" : "sent"
