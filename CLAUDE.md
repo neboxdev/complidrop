@@ -65,7 +65,13 @@ Features begin with `/plan`, run through PM review (6 reviewers including a Comp
 
 Tests are mandatory after implementation — unit tests for pure logic (xUnit), integration tests using `WebApplicationFactory` for boundaries (Postgres, Azure Blob, Document AI, Gemini, Stripe webhook, Resend). Frontend tests use Jest/Vitest.
 
-Multi-agent code review runs on every ticket before PR (`/start <n>` Phase 4). **Every bug the reviewers find gets fixed regardless of severity.** Suggestions (style preferences, "nicer" rewrites) are listed in the PR body but not auto-fixed.
+Multi-agent code review runs on every ticket before PR (`/start <n>` Phase 4). **Every bug the reviewers find gets fixed regardless of severity.** Reviewer **suggestions** are triaged three ways before the PR opens:
+
+1. **Implement in the same PR** — the default. Polish, missing test edges, small refactors, ADRs.
+2. **Defer to a follow-up ticket** — only when the suggestion expands scope, changes data semantics, or contradicts the reviewer's own caveat. The new ticket gets the reviewer's reasoning copied in. The PR body lists the spawned ticket ids.
+3. **Discard** — only when the suggestion contradicts a project rule (this file, an existing ADR, the ticket's Non-goals). The PR body lists discards with the rule cited.
+
+"Listed in the PR body but not auto-fixed" is no longer a valid outcome.
 
 Never silently diverge from a ticket's acceptance criteria — update the ticket first.
 
