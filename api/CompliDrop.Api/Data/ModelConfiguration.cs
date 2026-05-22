@@ -132,6 +132,8 @@ internal static class ModelConfiguration
             e.Property(l => l.ResendMessageId).HasMaxLength(200);
             e.Property(l => l.Status).HasMaxLength(50).HasDefaultValue("sent");
             e.HasIndex(l => new { l.ReminderId, l.DocumentId, l.SendDate }).IsUnique();
+            // Inbound Resend (Svix) webhook looks up the log by its Resend message id.
+            e.HasIndex(l => l.ResendMessageId);
             e.HasOne(l => l.Reminder).WithMany(r => r.Logs)
                 .HasForeignKey(l => l.ReminderId).OnDelete(DeleteBehavior.Cascade);
         });
