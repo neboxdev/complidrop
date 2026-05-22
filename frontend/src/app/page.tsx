@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
-import { Button, buttonVariants } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import Link from "next/link";
+import { buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { useMe } from "@/hooks/useAuth";
 import {
   Upload,
   ShieldCheck,
@@ -14,8 +14,6 @@ import {
   DollarSign,
   ScanSearch,
   ArrowRight,
-  CheckCircle2,
-  Star,
 } from "lucide-react";
 
 /* ── Colors (from design system) ──────────────────────────────────── */
@@ -33,83 +31,6 @@ const C = {
   white: "#ffffff",
 } as const;
 
-/* ── Waitlist Form ────────────────────────────────────────────────── */
-function WaitlistForm({ dark }: { dark?: boolean }) {
-  const [email, setEmail] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [result, setResult] = useState<"success" | "error" | null>(null);
-
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    setIsLoading(true);
-    try {
-      const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/api/waitlist`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, source: "landing_page" }),
-        }
-      );
-      if (!res.ok) throw new Error();
-      setResult("success");
-    } catch {
-      setResult("error");
-    } finally {
-      setIsLoading(false);
-    }
-  }
-
-  if (result === "success") {
-    return (
-      <div className="flex items-center gap-2 text-sm font-medium text-emerald-500">
-        <CheckCircle2 className="size-5" />
-        You&rsquo;re on the list! We&rsquo;ll email you when it&rsquo;s your turn.
-      </div>
-    );
-  }
-
-  return (
-    <form
-      onSubmit={handleSubmit}
-      className="flex w-full max-w-md flex-col gap-3 sm:flex-row sm:gap-2"
-    >
-      <Input
-        type="email"
-        required
-        placeholder="your.email@yourcompany.com"
-        value={email}
-        onChange={(e) => { setEmail(e.target.value); setResult(null); }}
-        className={cn(
-          "h-12 flex-1 rounded-xl border px-4 text-base transition-colors duration-200",
-          dark
-            ? "border-white/20 bg-white/10 text-white placeholder:text-white/50 focus:border-white/40"
-            : "border-sky-200 bg-white text-slate-900 placeholder:text-slate-400 focus:border-sky-400"
-        )}
-      />
-      <Button
-        type="submit"
-        disabled={isLoading}
-        className="h-12 cursor-pointer rounded-xl px-6 text-base font-semibold shadow-lg transition-all duration-200 hover:shadow-xl"
-        style={{ backgroundColor: C.cta, color: C.white }}
-        onMouseEnter={(e) =>
-          (e.currentTarget.style.backgroundColor = C.ctaHover)
-        }
-        onMouseLeave={(e) =>
-          (e.currentTarget.style.backgroundColor = C.cta)
-        }
-      >
-        {isLoading ? "Joining..." : "Join the Waitlist →"}
-      </Button>
-      {result === "error" && (
-        <p className="text-sm text-red-500 sm:absolute sm:-bottom-6">
-          Something went wrong. Please try again.
-        </p>
-      )}
-    </form>
-  );
-}
-
 /* ── Section Label ────────────────────────────────────────────────── */
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -124,31 +45,56 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 
 /* ── Page ─────────────────────────────────────────────────────────── */
 export default function Home() {
+  const { data: me } = useMe();
+  const authed = !!me;
+
   return (
     <>
       {/* ── Sticky Nav ──────────────────────────────────────────── */}
       <header className="sticky top-0 z-50 border-b bg-white/80 backdrop-blur-lg transition-all duration-300" style={{ borderColor: C.border }}>
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
-          <a href="#" className="flex items-center gap-2 text-xl font-bold tracking-tight" style={{ color: C.text }}>
+          <Link href="/" className="flex items-center gap-2 text-xl font-bold tracking-tight" style={{ color: C.text }}>
             <ShieldCheck className="size-6" style={{ color: C.sky }} />
             CompliDrop
-          </a>
-          <a
-            href="#waitlist"
-            className={cn(
-              buttonVariants(),
-              "h-9 cursor-pointer rounded-lg px-5 text-sm font-semibold shadow-md transition-all duration-200 hover:shadow-lg"
+          </Link>
+          <nav className="flex items-center gap-1 sm:gap-3">
+            {authed ? (
+              <Link
+                href="/dashboard"
+                className={cn(
+                  buttonVariants(),
+                  "h-9 cursor-pointer rounded-lg px-5 text-sm font-semibold shadow-md transition-all duration-200 hover:shadow-lg"
+                )}
+                style={{ backgroundColor: C.cta, color: C.white }}
+                onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = C.ctaHover)}
+                onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = C.cta)}
+              >
+                Go to dashboard
+              </Link>
+            ) : (
+              <>
+                <Link
+                  href="/login"
+                  className="rounded-lg px-3 py-2 text-sm font-semibold transition-opacity duration-200 hover:opacity-70"
+                  style={{ color: C.text }}
+                >
+                  Log in
+                </Link>
+                <Link
+                  href="/register"
+                  className={cn(
+                    buttonVariants(),
+                    "h-9 cursor-pointer rounded-lg px-5 text-sm font-semibold shadow-md transition-all duration-200 hover:shadow-lg"
+                  )}
+                  style={{ backgroundColor: C.cta, color: C.white }}
+                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = C.ctaHover)}
+                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = C.cta)}
+                >
+                  Get started
+                </Link>
+              </>
             )}
-            style={{ backgroundColor: C.cta, color: C.white }}
-            onMouseEnter={(e) =>
-              (e.currentTarget.style.backgroundColor = C.ctaHover)
-            }
-            onMouseLeave={(e) =>
-              (e.currentTarget.style.backgroundColor = C.cta)
-            }
-          >
-            Join the Waitlist
-          </a>
+          </nav>
         </div>
       </header>
 
@@ -171,19 +117,6 @@ export default function Home() {
           />
 
           <div className="relative mx-auto max-w-4xl px-4 py-24 text-center sm:px-6 sm:py-36">
-            <Badge
-              variant="secondary"
-              className="mb-8 inline-flex items-center gap-1.5 rounded-full border px-4 py-1.5 text-sm font-medium transition-colors duration-200"
-              style={{
-                borderColor: C.border,
-                backgroundColor: C.white,
-                color: C.sky,
-              }}
-            >
-              <Star className="size-3.5 fill-current" />
-              Now accepting early access signups
-            </Badge>
-
             <h1
               className="text-4xl font-extrabold leading-[1.1] tracking-tight sm:text-5xl lg:text-6xl"
               style={{ color: C.text }}
@@ -203,8 +136,8 @@ export default function Home() {
             </p>
 
             <div className="mt-10 flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
-              <a
-                href="#waitlist"
+              <Link
+                href="/register"
                 className={cn(
                   buttonVariants({ size: "lg" }),
                   "h-13 cursor-pointer rounded-xl px-8 text-base font-semibold shadow-lg transition-all duration-200 hover:shadow-xl"
@@ -217,9 +150,9 @@ export default function Home() {
                   (e.currentTarget.style.backgroundColor = C.cta)
                 }
               >
-                Join the Waitlist&nbsp;&mdash; It&rsquo;s Free
+                Get started free
                 <ArrowRight className="ml-2 size-4" />
-              </a>
+              </Link>
               <a
                 href="#how-it-works"
                 className={cn(
@@ -412,8 +345,8 @@ export default function Home() {
                     reminders. Perfect for testing it with your most annoying
                     vendor first.
                   </p>
-                  <a
-                    href="#waitlist"
+                  <Link
+                    href="/register?plan=free"
                     className={cn(
                       buttonVariants({ variant: "outline" }),
                       "mt-6 w-full cursor-pointer rounded-xl py-5 font-semibold transition-all duration-200"
@@ -421,7 +354,7 @@ export default function Home() {
                     style={{ borderColor: C.sky, color: C.sky }}
                   >
                     Start Free&nbsp;→
-                  </a>
+                  </Link>
                 </CardContent>
               </Card>
 
@@ -460,8 +393,8 @@ export default function Home() {
                     reminders. Compliance rules engine. Audit-ready exports.
                     Everything you need, nothing you don&rsquo;t.
                   </p>
-                  <a
-                    href="#waitlist"
+                  <Link
+                    href="/register?plan=pro"
                     className={cn(
                       buttonVariants(),
                       "mt-6 w-full cursor-pointer rounded-xl py-5 text-base font-semibold shadow-md transition-all duration-200 hover:shadow-lg"
@@ -474,8 +407,8 @@ export default function Home() {
                       (e.currentTarget.style.backgroundColor = C.cta)
                     }
                   >
-                    Join the Waitlist&nbsp;→
-                  </a>
+                    Get started&nbsp;→
+                  </Link>
                 </CardContent>
               </Card>
 
@@ -508,16 +441,16 @@ export default function Home() {
                     months&rsquo; worth in your pocket. That&rsquo;s less than
                     one hour of your office manager&rsquo;s time per month.
                   </p>
-                  <a
-                    href="#waitlist"
+                  <Link
+                    href="/register?plan=annual"
                     className={cn(
                       buttonVariants({ variant: "outline" }),
                       "mt-6 w-full cursor-pointer rounded-xl py-5 font-semibold transition-all duration-200"
                     )}
                     style={{ borderColor: C.sky, color: C.sky }}
                   >
-                    Join the Waitlist&nbsp;→
-                  </a>
+                    Get started&nbsp;→
+                  </Link>
                 </CardContent>
               </Card>
             </div>
@@ -588,9 +521,8 @@ export default function Home() {
           </div>
         </section>
 
-        {/* ── CTA / Waitlist ────────────────────────────────────── */}
+        {/* ── Final CTA ─────────────────────────────────────────── */}
         <section
-          id="waitlist"
           className="relative overflow-hidden py-24 sm:py-32"
           style={{ backgroundColor: C.dark }}
         >
@@ -601,23 +533,61 @@ export default function Home() {
           />
 
           <div className="relative mx-auto max-w-2xl px-4 text-center sm:px-6">
-            <SectionLabel>Get Early Access</SectionLabel>
+            <SectionLabel>Get Started</SectionLabel>
             <h2 className="mt-3 text-3xl font-bold tracking-tight text-white sm:text-4xl">
-              Be the first to drop.
+              Drop your first doc in under a minute.
             </h2>
             <p className="mt-4 text-lg text-sky-200/80">
-              We&rsquo;re onboarding a small group of businesses this summer.
-              Join the waitlist and we&rsquo;ll save you a
-              spot&nbsp;&mdash;&nbsp;plus 30&nbsp;days of Pro free when we
-              launch.
+              Free for your first 5 documents&nbsp;&mdash; full AI extraction and
+              reminders, no credit card. Upgrade to Pro when you&rsquo;re ready.
             </p>
 
-            <div className="mt-10 flex justify-center">
-              <WaitlistForm dark />
+            <div className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
+              {authed ? (
+                <Link
+                  href="/dashboard"
+                  className={cn(
+                    buttonVariants({ size: "lg" }),
+                    "h-13 cursor-pointer rounded-xl px-8 text-base font-semibold shadow-lg transition-all duration-200 hover:shadow-xl"
+                  )}
+                  style={{ backgroundColor: C.cta, color: C.white }}
+                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = C.ctaHover)}
+                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = C.cta)}
+                >
+                  Go to dashboard
+                  <ArrowRight className="ml-2 size-4" />
+                </Link>
+              ) : (
+                <>
+                  <Link
+                    href="/register"
+                    className={cn(
+                      buttonVariants({ size: "lg" }),
+                      "h-13 cursor-pointer rounded-xl px-8 text-base font-semibold shadow-lg transition-all duration-200 hover:shadow-xl"
+                    )}
+                    style={{ backgroundColor: C.cta, color: C.white }}
+                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = C.ctaHover)}
+                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = C.cta)}
+                  >
+                    Get started free
+                    <ArrowRight className="ml-2 size-4" />
+                  </Link>
+                  <Link
+                    href="/login"
+                    className={cn(
+                      buttonVariants({ variant: "outline", size: "lg" }),
+                      "h-13 cursor-pointer rounded-xl border-2 px-8 text-base font-semibold transition-all duration-200 hover:opacity-90"
+                    )}
+                    style={{ borderColor: "rgba(255,255,255,0.25)", color: C.white, backgroundColor: "transparent" }}
+                  >
+                    Log in
+                  </Link>
+                </>
+              )}
             </div>
 
             <p className="mt-5 text-sm text-sky-300/60">
-              No credit card. No spam. Just an email when it&rsquo;s your turn.
+              No credit card. Cancel anytime.
             </p>
           </div>
         </section>
