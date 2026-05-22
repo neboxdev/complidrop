@@ -183,6 +183,32 @@ public sealed class AnthropicExtractionClientTests
         result.Fields.Single(f => f.Name == "note").Type.Should().Be("text"); // defaulted
     }
 
+    [Fact]
+    public async Task Blank_field_names_are_dropped_and_flags_parsed()
+    {
+        // Mirrors the Gemini test: MapResult is duplicated across the two clients, so the
+        // needsReprocessing=true / documentSubType / blank-name-drop arms are pinned for both.
+        var payload = new JsonObject
+        {
+            ["documentType"] = "permit",
+            ["documentSubType"] = "commercial",
+            ["needsReprocessing"] = true,
+            ["fields"] = new JsonArray
+            {
+                new JsonObject { ["name"] = "", ["value"] = "ignored", ["type"] = "text", ["confidence"] = 0.9 },
+                new JsonObject { ["name"] = "permit_number", ["value"] = "BP-1", ["type"] = "text", ["confidence"] = 0.9 },
+            },
+        };
+        var handler = new StubHttpMessageHandler(HttpStatusCode.OK, Json(ExtractionFixtureHarness.AnthropicResponseFromPayload(payload)));
+
+        var result = await ExtractionClientBuilder.Anthropic(handler).ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
+
+        result.DocumentType.Should().Be("permit");
+        result.DocumentSubType.Should().Be("commercial");
+        result.NeedsReprocessing.Should().BeTrue();
+        result.Fields.Should().ContainSingle().Which.Name.Should().Be("permit_number");
+    }
+
     // ---- Acceptance #4: malformed / empty handling ----
 
     [Fact]
