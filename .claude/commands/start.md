@@ -104,7 +104,11 @@ Severity orders the fixing (blockers first), but does NOT decide whether to fix.
 3. **Fix every `kind: bug` finding**, regardless of severity. Blockers first, then majors, then minors.
 4. Re-run tests after fixes. They must still pass.
 5. After all bugs fixed, re-run the affected reviewers once more to verify nothing new surfaced from the fixes.
-6. **Suggestions are NOT auto-fixed.** They go in the PR description under "Suggestions noted". Do not burn time on them unless the user explicitly asks.
+6. **Triage every `kind: suggestion` finding three ways** — "listed in the PR body but not fixed" is NOT a valid outcome:
+   - **Implement in this PR** (default). Polish, missing test edges, small refactors, ADRs. Commit them as a `fix(scope): address review findings (#N)` commit alongside the bug fixes.
+   - **Defer to a follow-up ticket** — only when the suggestion expands scope, changes data semantics, or contradicts the reviewer's own caveat (e.g. "MVP no-op", "don't introduce prophylactically"). Use `mcp__ccd_session__spawn_task` (or `gh issue create`) with the reviewer's reasoning copied verbatim. List the new ticket id(s) in the PR body.
+   - **Discard** — only when the suggestion contradicts a project rule (CLAUDE.md, an existing ADR, the ticket's Non-goals). List discards in the PR body with the rule cited.
+   When unsure between implement and defer, default to implement if the change is <30 lines.
 7. If any bug fix requires a design change contradicting the ticket, stop and ask the user — do not silently diverge.
 
 ## Phase 6: PR
@@ -137,8 +141,16 @@ Closes #$ARGUMENTS
 - [correctness] <file:line> — <what>, fix: <what was done>
 - ...
 
-### Suggestions noted (not fixed)
-- [architecture] <file:line> — <what>, reviewer's suggestion: <what>
+### Suggestions implemented (N total)
+- [architecture] <file:line> — <what>, applied: <what was done>
+- ...
+
+### Suggestions deferred to follow-up tickets (N total)
+- [correctness] <what>, ticket #N — reason: <expands scope / changes data semantics / reviewer's own caveat>
+- ...
+
+### Suggestions discarded (N total)
+- [architecture] <what>, reason: <which project rule it contradicts>
 - ...
 
 ### Reviewer summary

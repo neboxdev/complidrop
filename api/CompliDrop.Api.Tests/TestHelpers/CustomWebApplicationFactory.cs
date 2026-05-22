@@ -74,6 +74,13 @@ public sealed class CustomWebApplicationFactory(
             // connects to Azure in its constructor, which has no credentials in the test host.
             services.RemoveAll<IBlobStorageService>();
             services.AddSingleton<IBlobStorageService, FakeBlobStorageService>();
+
+            // Replace the Resend-backed email service with an in-memory fake. The real service
+            // self-disables when ApiKey/FromEmail are unset (which is the test default), so the
+            // reminder worker would short-circuit before sending. The fake reports IsEnabled=true
+            // and captures every send so tests can assert recipients, subjects, and bodies.
+            services.RemoveAll<IEmailService>();
+            services.AddSingleton<IEmailService, FakeEmailService>();
         });
     }
 }

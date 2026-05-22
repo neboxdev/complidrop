@@ -9,3 +9,4 @@ Use `/adr <title>` to scaffold a new one.
 ## Index
 
 - [0001](0001-record-architecture-decisions.md) — Record architecture decisions
+- [0002](0002-reminder-dedupe-is-per-recipient.md) — Reminder dedupe is per-recipient, not per-(reminder, doc, day)

@@ -1,6 +1,8 @@
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Data.Seed;
+using CompliDrop.Api.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using Respawn;
 using Respawn.Graph;
@@ -62,7 +64,7 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
         });
     }
 
-    /// <summary>Wipes all data and re-seeds the system compliance templates.</summary>
+    /// <summary>Wipes all data, re-seeds system compliance templates, and clears any in-memory test doubles.</summary>
     public async Task ResetAsync()
     {
         await _respawner.ResetAsync(_respawnConnection);
@@ -70,6 +72,12 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
         await using var sys = new SystemDbContext(
             new DbContextOptionsBuilder<SystemDbContext>().UseNpgsql(ConnectionString).Options);
         await ComplianceTemplateSeed.EnsureAsync(sys);
+
+        // The FakeEmailService is a host singleton, so its captured sends persist across tests
+        // unless we explicitly reset it. Tests that assert on Sends.Count would otherwise see
+        // residue from earlier tests in the same fixture.
+        if (Factory.Services.GetService<IEmailService>() is FakeEmailService email)
+            email.Reset();
     }
 
     public async Task DisposeAsync()
