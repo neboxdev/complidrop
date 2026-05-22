@@ -25,6 +25,10 @@ public sealed class GeminiExtractionClientTests
     [MemberData(nameof(ExtractionFixtureHarness.AllFixtures), MemberType = typeof(ExtractionFixtureHarness))]
     public async Task Maps_canned_response_to_each_fixtures_expected_fields(string fixtureName)
     {
+        // The canned response is synthesized from expected.yaml's values (HTTP is mocked; model accuracy
+        // is a non-goal), so this proves request-shaping + response-parsing round-trip the fields. The
+        // 'fuzzy' tolerance is therefore trivially satisfied here — genuine fuzzy discrimination is pinned
+        // by ExtractionFixtureHarnessTests and belongs to the future live-OCR suite (input.pdf).
         var expected = ExtractionFixtureHarness.Load(fixtureName);
         var handler = new StubHttpMessageHandler(HttpStatusCode.OK, Json(ExtractionFixtureHarness.GeminiResponse(expected)));
         var client = ExtractionClientBuilder.Gemini(handler);
@@ -159,7 +163,8 @@ public sealed class GeminiExtractionClientTests
         await ExtractionClientBuilder.Gemini(handler).ExtractAsync(ExtractionClientBuilder.Ocr(huge), null, "application/pdf", null, default);
 
         var userText = JsonNode.Parse(handler.LastRequestBody)!["contents"]![0]!["parts"]![0]!["text"]!.GetValue<string>();
-        userText.Should().Contain(new string('A', 1000)).And.NotContain("OVERFLOW_SENTINEL");
+        // Pins the exact 20000-char cut: all 20000 A's survive, the sentinel just past the boundary does not.
+        userText.Should().Contain(new string('A', 20000)).And.NotContain("OVERFLOW_SENTINEL");
     }
 
     // ---- Acceptance #5: usage + cost ----
@@ -168,15 +173,16 @@ public sealed class GeminiExtractionClientTests
     public async Task Token_usage_and_cost_are_computed_from_usage_metadata()
     {
         var handler = new StubHttpMessageHandler(HttpStatusCode.OK,
-            Json(ExtractionFixtureHarness.GeminiResponse(ExtractionFixtureHarness.Minimal(), promptTokens: 1_000_000, candidatesTokens: 1_000_000)));
+            Json(ExtractionFixtureHarness.GeminiResponse(ExtractionFixtureHarness.Minimal(), promptTokens: 2_000_000, candidatesTokens: 1_000_000)));
 
         var result = await ExtractionClientBuilder.Gemini(handler).ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
 
         result.Usage.Should().NotBeNull();
-        result.Usage!.InputTokens.Should().Be(1_000_000);
+        result.Usage!.InputTokens.Should().Be(2_000_000);
         result.Usage.OutputTokens.Should().Be(1_000_000);
-        // $0.075/1M input + $0.30/1M output.
-        result.Usage.EstimatedCostUsd.Should().Be(0.375m);
+        // Distinct token counts so a transposed input/output rate would change the total:
+        // $0.075/1M input * 2M + $0.30/1M output * 1M = 0.15 + 0.30.
+        result.Usage.EstimatedCostUsd.Should().Be(0.45m);
     }
 
     [Fact]
@@ -240,6 +246,29 @@ public sealed class GeminiExtractionClientTests
         result.Fields.Should().ContainSingle().Which.Name.Should().Be("permit_number");
     }
 
+    [Fact]
+    public async Task Field_type_is_parsed_and_defaults_to_text()
+    {
+        var payload = new JsonObject
+        {
+            ["documentType"] = "license",
+            ["needsReprocessing"] = false,
+            ["fields"] = new JsonArray
+            {
+                new JsonObject { ["name"] = "issue_date", ["value"] = "2025-01-01", ["type"] = "date", ["confidence"] = 0.9 },
+                new JsonObject { ["name"] = "limit", ["value"] = "1000000", ["type"] = "currency", ["confidence"] = 0.9 },
+                new JsonObject { ["name"] = "note", ["value"] = "x", ["confidence"] = 0.9 }, // type omitted
+            },
+        };
+        var handler = new StubHttpMessageHandler(HttpStatusCode.OK, Json(ExtractionFixtureHarness.GeminiResponseFromPayload(payload)));
+
+        var result = await ExtractionClientBuilder.Gemini(handler).ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
+
+        result.Fields.Single(f => f.Name == "issue_date").Type.Should().Be("date");
+        result.Fields.Single(f => f.Name == "limit").Type.Should().Be("currency");
+        result.Fields.Single(f => f.Name == "note").Type.Should().Be("text"); // defaulted
+    }
+
     // ---- Acceptance #4: malformed / empty handling ----
 
     [Fact]
@@ -294,6 +323,7 @@ public sealed class GeminiExtractionClientTests
         var result = await ExtractionClientBuilder.Gemini(handler).ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
 
         result.DocumentType.Should().Be("other");
+        result.DocumentSubType.Should().BeNull();
         result.Fields.Should().BeEmpty();
         result.NeedsReprocessing.Should().BeFalse();
     }

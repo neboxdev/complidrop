@@ -1,11 +1,10 @@
 using System.Net;
 using System.Text.Json.Nodes;
 using CompliDrop.Api.Services.Extraction;
-using CompliDrop.Api.Tests.ExtractionFixtures;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 
-namespace CompliDrop.Api.Tests;
+namespace CompliDrop.Api.Tests.ExtractionFixtures;
 
 /// <summary>
 /// Self-tests for the fixture harness and the one invariant that spans both providers. The comparator
@@ -46,6 +45,18 @@ public sealed class ExtractionFixtureHarnessTests
         var field = new ExpectedField { Expected = "Travelers", Tolerance = "fuzzy" };
         ExtractionFixtureHarness.FieldValueMatches(field, "Travelers Indemnity Company").Should().BeTrue();
         ExtractionFixtureHarness.FieldValueMatches(field, "State Farm").Should().BeFalse();
+    }
+
+    [Fact]
+    public void Fuzzy_tolerance_does_not_vacuously_match_empty_values()
+    {
+        // Guards the comparator against the "every string contains the empty string" trap.
+        ExtractionFixtureHarness.FieldValueMatches(new ExpectedField { Expected = "", Tolerance = "fuzzy" }, "anything")
+            .Should().BeFalse();
+        ExtractionFixtureHarness.FieldValueMatches(new ExpectedField { Expected = "Travelers", Tolerance = "fuzzy" }, "")
+            .Should().BeFalse();
+        ExtractionFixtureHarness.FieldValueMatches(new ExpectedField { Expected = "", Tolerance = "fuzzy" }, "")
+            .Should().BeTrue();
     }
 
     [Fact]

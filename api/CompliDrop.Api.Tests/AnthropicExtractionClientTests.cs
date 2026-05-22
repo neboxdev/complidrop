@@ -25,6 +25,7 @@ public sealed class AnthropicExtractionClientTests
     [MemberData(nameof(ExtractionFixtureHarness.AllFixtures), MemberType = typeof(ExtractionFixtureHarness))]
     public async Task Maps_canned_tool_use_response_to_each_fixtures_expected_fields(string fixtureName)
     {
+        // Round-trip from expected.yaml — see the Gemini equivalent for why fuzzy tolerance is trivial here.
         var expected = ExtractionFixtureHarness.Load(fixtureName);
         var handler = new StubHttpMessageHandler(HttpStatusCode.OK, Json(ExtractionFixtureHarness.AnthropicResponse(expected)));
         var client = ExtractionClientBuilder.Anthropic(handler);
@@ -106,15 +107,16 @@ public sealed class AnthropicExtractionClientTests
     public async Task Token_usage_and_cost_are_computed_from_usage()
     {
         var handler = new StubHttpMessageHandler(HttpStatusCode.OK,
-            Json(ExtractionFixtureHarness.AnthropicResponse(ExtractionFixtureHarness.Minimal(), inputTokens: 1_000_000, outputTokens: 1_000_000)));
+            Json(ExtractionFixtureHarness.AnthropicResponse(ExtractionFixtureHarness.Minimal(), inputTokens: 2_000_000, outputTokens: 1_000_000)));
 
         var result = await ExtractionClientBuilder.Anthropic(handler).ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
 
         result.Usage.Should().NotBeNull();
-        result.Usage!.InputTokens.Should().Be(1_000_000);
+        result.Usage!.InputTokens.Should().Be(2_000_000);
         result.Usage.OutputTokens.Should().Be(1_000_000);
-        // $1/1M input + $5/1M output.
-        result.Usage.EstimatedCostUsd.Should().Be(6m);
+        // Distinct token counts so a transposed input/output rate would change the total:
+        // $1/1M input * 2M + $5/1M output * 1M = 2 + 5.
+        result.Usage.EstimatedCostUsd.Should().Be(7m);
     }
 
     [Fact]
@@ -156,6 +158,29 @@ public sealed class AnthropicExtractionClientTests
         result.Fields.Single(f => f.Name == "over").Confidence.Should().Be(1.0);
         result.Fields.Single(f => f.Name == "under").Confidence.Should().Be(0.0);
         result.Fields.Single(f => f.Name == "missing").Confidence.Should().Be(0.5);
+    }
+
+    [Fact]
+    public async Task Field_type_is_parsed_and_defaults_to_text()
+    {
+        var payload = new JsonObject
+        {
+            ["documentType"] = "license",
+            ["needsReprocessing"] = false,
+            ["fields"] = new JsonArray
+            {
+                new JsonObject { ["name"] = "issue_date", ["value"] = "2025-01-01", ["type"] = "date", ["confidence"] = 0.9 },
+                new JsonObject { ["name"] = "limit", ["value"] = "1000000", ["type"] = "currency", ["confidence"] = 0.9 },
+                new JsonObject { ["name"] = "note", ["value"] = "x", ["confidence"] = 0.9 }, // type omitted
+            },
+        };
+        var handler = new StubHttpMessageHandler(HttpStatusCode.OK, Json(ExtractionFixtureHarness.AnthropicResponseFromPayload(payload)));
+
+        var result = await ExtractionClientBuilder.Anthropic(handler).ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
+
+        result.Fields.Single(f => f.Name == "issue_date").Type.Should().Be("date");
+        result.Fields.Single(f => f.Name == "limit").Type.Should().Be("currency");
+        result.Fields.Single(f => f.Name == "note").Type.Should().Be("text"); // defaulted
     }
 
     // ---- Acceptance #4: malformed / empty handling ----
@@ -203,6 +228,7 @@ public sealed class AnthropicExtractionClientTests
         var result = await ExtractionClientBuilder.Anthropic(handler).ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
 
         result.DocumentType.Should().Be("other");
+        result.DocumentSubType.Should().BeNull();
         result.Fields.Should().BeEmpty();
         result.NeedsReprocessing.Should().BeFalse();
     }

@@ -16,8 +16,18 @@ namespace CompliDrop.Api.Tests.ExtractionFixtures;
 /// </summary>
 public static class ExtractionFixtureHarness
 {
-    public static readonly string FixtureRoot = Path.GetFullPath(
-        Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "ExtractionFixtures"));
+    public static readonly string FixtureRoot = ResolveFixtureRoot();
+
+    // Prefer the copy emitted next to the test assembly (the test csproj copies expected.yaml with
+    // CopyToOutputDirectory), so fixture discovery is robust to however the test host is launched. Fall
+    // back to the source tree (FixtureGenerator's convention) if the copy step is ever removed.
+    private static string ResolveFixtureRoot()
+    {
+        var output = Path.Combine(AppContext.BaseDirectory, "ExtractionFixtures");
+        return Directory.Exists(output)
+            ? output
+            : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "ExtractionFixtures"));
+    }
 
     /// <summary>Fixture directory names discovered on disk (each holds an <c>expected.yaml</c>).</summary>
     public static IReadOnlyList<string> FixtureNames() =>
@@ -160,9 +170,15 @@ public static class ExtractionFixtureHarness
     {
         var e = (expected.Expected ?? string.Empty).Trim();
         var a = (actual ?? string.Empty).Trim();
-        return string.Equals(expected.Tolerance, "fuzzy", StringComparison.OrdinalIgnoreCase)
-            ? a.Contains(e, StringComparison.OrdinalIgnoreCase) || e.Contains(a, StringComparison.OrdinalIgnoreCase)
-            : string.Equals(e, a, StringComparison.Ordinal);
+        if (!string.Equals(expected.Tolerance, "fuzzy", StringComparison.OrdinalIgnoreCase))
+            return string.Equals(e, a, StringComparison.Ordinal);
+
+        // Empty on either side must never fuzzy-match a non-empty value: every string ".Contains("")",
+        // so a blank expectation (or a blank extraction) would otherwise pass vacuously — defeating the
+        // comparator's whole purpose (guaranteeing the round-trip can't pass without real data).
+        if (e.Length == 0 || a.Length == 0)
+            return string.Equals(e, a, StringComparison.Ordinal);
+        return a.Contains(e, StringComparison.OrdinalIgnoreCase) || e.Contains(a, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string InferType(string name, string value) =>

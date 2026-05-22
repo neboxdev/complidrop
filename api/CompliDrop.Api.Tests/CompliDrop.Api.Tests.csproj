@@ -29,6 +29,12 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <!-- Copy fixture expectations next to the test assembly so ExtractionFixtureHarness discovery is
+       robust to the test-host launch layout (not just the default bin/<cfg>/<tfw> nesting). -->
+  <ItemGroup>
+    <None Update="ExtractionFixtures\**\expected.yaml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\CompliDrop.Api\CompliDrop.Api.csproj" />
   </ItemGroup>
