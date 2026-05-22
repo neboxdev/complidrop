@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// SessionEnd hook: append session-end marker + activity count + changed files to WORKLOG.md.
-// Fails silently.
+// SessionEnd hook: append session-end marker + activity count + changed files to
+// .claude/session-log.md (gitignored), keeping the tracked WORKLOG.md clean so it never
+// dirties the working tree. Fails silently.
 
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -42,7 +43,7 @@ const safeRun = (cmd) => {
 
     const entry = `\n---\n\n### Session ended ${ts}\n\n- Branch: \`${branch}\`\n- Reason: ${reason}\n- Tool calls (this session): ${activityCount}\n- Changed files:\n\`\`\`\n${changed || "(none)"}\n\`\`\`\n`;
 
-    await appendFile("WORKLOG.md", entry);
+    await appendFile(".claude/session-log.md", entry);
   } catch {
     // fail silently
   }

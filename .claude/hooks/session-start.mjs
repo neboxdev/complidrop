@@ -81,13 +81,23 @@ if (ghAvailable) {
   }
 }
 
-// --- WORKLOG.md tail ---------------------------------------------------
+// --- WORKLOG.md tail (committed human narrative via /worklog) ----------
 if (existsSync("WORKLOG.md")) {
   try {
     const content = readFileSync("WORKLOG.md", "utf8");
     const lines = content.trim().split("\n");
     const tail = lines.slice(-30).join("\n").trim();
     if (tail) sections.push(`## WORKLOG.md (tail)\n\n\`\`\`\n${tail}\n\`\`\``);
+  } catch {}
+}
+
+// --- Recent session markers (local, gitignored) -----------------------
+if (existsSync(".claude/session-log.md")) {
+  try {
+    const content = readFileSync(".claude/session-log.md", "utf8");
+    const lines = content.trim().split("\n");
+    const tail = lines.slice(-24).join("\n").trim();
+    if (tail) sections.push(`## Recent sessions (local)\n\n\`\`\`\n${tail}\n\`\`\``);
   } catch {}
 }
 
