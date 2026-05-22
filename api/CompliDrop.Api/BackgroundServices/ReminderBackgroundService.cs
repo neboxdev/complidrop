@@ -91,14 +91,22 @@ public class ReminderBackgroundService(
                     if (recipients.Count == 0) continue;
 
                     var sendDate = DateOnly.FromDateTime(nowUtc);
-                    var alreadySent = await db.ReminderLogs.AnyAsync(l =>
-                        l.ReminderId == reminder.Id
-                        && l.DocumentId == doc.Id
-                        && l.SendDate == sendDate, ct);
-                    if (alreadySent) continue;
+
+                    // Pull the set of recipients we've already logged for this (reminder, doc,
+                    // day) so multi-recipient reminders dedupe per recipient instead of skipping
+                    // the doc once any recipient has been sent.
+                    var alreadySent = (await db.ReminderLogs
+                        .Where(l => l.ReminderId == reminder.Id
+                                    && l.DocumentId == doc.Id
+                                    && l.SendDate == sendDate)
+                        .Select(l => l.RecipientEmail)
+                        .ToListAsync(ct))
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
                     foreach (var recipient in recipients)
                     {
+                        if (alreadySent.Contains(recipient)) continue;
+
                         try
                         {
                             var subject = reminder.EmailSubjectTemplate

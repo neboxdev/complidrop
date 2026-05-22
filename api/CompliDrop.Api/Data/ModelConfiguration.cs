@@ -131,7 +131,11 @@ internal static class ModelConfiguration
             e.Property(l => l.RecipientEmail).HasMaxLength(256);
             e.Property(l => l.ResendMessageId).HasMaxLength(200);
             e.Property(l => l.Status).HasMaxLength(50).HasDefaultValue("sent");
-            e.HasIndex(l => new { l.ReminderId, l.DocumentId, l.SendDate }).IsUnique();
+            // Dedupe is per-recipient: a multi-recipient reminder (internal + vendor) needs one
+            // row per recipient on the same day. Narrowing the key to (Reminder, Doc, Date) only
+            // would block the second insert and roll back the whole batch, dropping all rows and
+            // re-sending on the next tick.
+            e.HasIndex(l => new { l.ReminderId, l.DocumentId, l.SendDate, l.RecipientEmail }).IsUnique();
             // Inbound Resend (Svix) webhook looks up the log by its Resend message id.
             e.HasIndex(l => l.ResendMessageId);
             e.HasOne(l => l.Reminder).WithMany(r => r.Logs)
