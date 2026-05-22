@@ -22,6 +22,8 @@ public sealed class FakeExtractionClient : IExtractionClient
         NeedsReprocessing: false,
         Usage: new ExtractionUsage(InputTokens: 1200, OutputTokens: 300, EstimatedCostUsd: 0.02m));
 
+    // Gemini is the factory's default provider, so ExtractionClientFactory.Get() selects this fake
+    // by preferred-match (not merely the clients.First() fallback) when it's the only registered client.
     public ExtractionProvider Provider => ExtractionProvider.Gemini;
 
     /// <summary>Number of times <see cref="ExtractAsync"/> was called since the last reset.</summary>

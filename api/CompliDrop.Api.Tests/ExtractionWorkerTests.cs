@@ -1,5 +1,6 @@
 using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -107,15 +108,27 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     private async Task<(NpgsqlConnection Conn, NpgsqlTransaction Tx)> LockRowAsync(Guid docId)
     {
         var conn = new NpgsqlConnection(Fixture.ConnectionString);
-        await conn.OpenAsync();
-        var tx = await conn.BeginTransactionAsync();
-        await using var cmd = conn.CreateCommand();
-        cmd.Transaction = tx;
-        cmd.CommandText = """SELECT "Id" FROM "Documents" WHERE "Id" = @id FOR UPDATE""";
-        cmd.Parameters.AddWithValue("id", docId);
-        var locked = await cmd.ExecuteScalarAsync();
-        locked.Should().NotBeNull("the row to be locked must exist");
-        return (conn, tx);
+        NpgsqlTransaction? tx = null;
+        try
+        {
+            await conn.OpenAsync();
+            tx = await conn.BeginTransactionAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = """SELECT "Id" FROM "Documents" WHERE "Id" = @id FOR UPDATE""";
+            cmd.Parameters.AddWithValue("id", docId);
+            var locked = await cmd.ExecuteScalarAsync();
+            locked.Should().NotBeNull("the row to be locked must exist");
+            return (conn, tx);
+        }
+        catch
+        {
+            // Don't leak the open connection + held lock if the setup assertion (or open/begin)
+            // throws before the caller receives the handles it would otherwise dispose.
+            if (tx is not null) await tx.DisposeAsync();
+            await conn.DisposeAsync();
+            throw;
+        }
     }
 
     // ----- AC1: bounded retry then Failed (no infinite loop) ---------------------------------
@@ -201,13 +214,15 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         Extraction.ExtractCallCount.Should().Be(1);
 
         // Token usage/cost recorded against the org subscription. OCR is disabled, so the recorded
-        // spend is exactly the fake LLM usage cost.
+        // spend is exactly the fake's LLM usage cost — asserted against the fake's own result so the
+        // fake stays the single source of truth (no duplicated magic literal).
         var sub = await GetSubscriptionAsync(orgId);
-        sub.ExtractionSpendThisMonthUsd.Should().Be(0.02m);
+        sub.ExtractionSpendThisMonthUsd.Should().Be(Extraction.Result.Usage!.EstimatedCostUsd);
 
-        // Extracted fields persisted.
+        // Every extracted field persisted.
         await using var db = CreateSystemDb();
-        (await db.DocumentFields.CountAsync(f => f.DocumentId == docId)).Should().Be(2);
+        (await db.DocumentFields.CountAsync(f => f.DocumentId == docId))
+            .Should().Be(Extraction.Result.Fields.Count);
     }
 
     // ----- AC4: FOR UPDATE SKIP LOCKED --------------------------------------------------------
@@ -320,5 +335,90 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
 
         claimed.Should().BeNull("a freshly-claimed doc must not be stolen before the zombie timeout");
         (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(1, "the doc is untouched");
+    }
+
+    // ----- Boundary + branch coverage (from review) ------------------------------------------
+
+    [Fact]
+    public async Task Document_at_exactly_the_attempt_cap_is_still_processed_not_guarded_up_front()
+    {
+        // The up-front zombie guard is `> MaxAttempts` (strict), while the failure path is
+        // `>= MaxAttempts`. A doc sitting at exactly MaxAttempts must still get its final attempt — it
+        // must NOT be failed up-front. Pins the boundary against a `>`->`>=` regression that would
+        // silently drop the legitimate last attempt. (AC2 covers the over-cap side at MaxAttempts+1.)
+        var (_, docId) = await SeedDocAsync(
+            status: ExtractionStatus.Processing,
+            attempts: ExtractionWorker.MaxAttempts,
+            processingStartedAt: DateTime.UtcNow,
+            subscriptionSpendUsd: 0m);
+        var worker = BuildWorker();
+
+        // Call process directly so attempts stays at exactly MaxAttempts (a claim would increment it).
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        Extraction.ExtractCallCount.Should().Be(1, "a doc at exactly the cap still gets its final attempt");
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        // The success path clears ProcessingError; had the up-front guard fired instead it would read
+        // "extraction.too_many_attempts: ...". Null therefore proves the guard did NOT trip at the cap.
+        doc.ProcessingError.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Cost_exactly_at_the_ceiling_is_allowed_to_proceed()
+    {
+        // Free-tier ceiling is $5 and the worker plans $0.01 per doc. Seeding spend at $4.99 lands the
+        // planned amount at exactly $5.00 — CanSpendAsync uses `<=`, so it must be ALLOWED. Pins the
+        // boundary against a `<=`->`<` regression that would wrongly block a doc sitting at the ceiling.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 4.99m, plan: "free");
+        var worker = BuildWorker();
+
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        Extraction.ExtractCallCount.Should().Be(1, "spend exactly at the ceiling is allowed");
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+    }
+
+    [Fact]
+    public async Task Document_with_no_blob_path_is_failed_safely_without_extracting()
+    {
+        // A doc with no blob path can't be downloaded; the worker throws before the cost check and
+        // routes through the normal failure handling rather than NRE-ing or hanging. Below the cap it
+        // returns to Pending for retry, and extraction/OCR are never reached.
+        var (_, docId) = await SeedDocAsync(blobPath: null);
+        var worker = BuildWorker();
+
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "a first failure below the cap is retried");
+        doc.ProcessingError.Should().Contain("blob path");
+        Extraction.ExtractCallCount.Should().Be(0, "extraction must never run without a document to read");
+        Ocr.OcrCallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Low_confidence_extraction_completes_as_manual_required_and_still_records_cost()
+    {
+        // PersistSuccess routes to ManualRequired when avg field confidence < 0.7 (or NeedsReprocessing) —
+        // the other terminal-success outcome alongside Completed. Cost is still recorded either way.
+        var (orgId, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = Extraction.Result with
+        {
+            Fields = [new ExtractedField("policy_number", "POL-1", "string", 0.40)],
+        };
+        var worker = BuildWorker();
+
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired);
+        doc.ExtractionCompletedAt.Should().NotBeNull();
+
+        var sub = await GetSubscriptionAsync(orgId);
+        sub.ExtractionSpendThisMonthUsd.Should().Be(Extraction.Result.Usage!.EstimatedCostUsd);
     }
 }
