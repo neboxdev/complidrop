@@ -19,6 +19,11 @@ public static class SvixWebhookVerifier
     /// <summary>Svix's recommended replay-protection window (the timestamp must be within ± this of now).</summary>
     public static readonly TimeSpan DefaultTolerance = TimeSpan.FromMinutes(5);
 
+    // DateTimeOffset.FromUnixTimeSeconds throws outside this range (years 0001..9999); a parseable
+    // but absurd timestamp must be rejected, not allowed to throw.
+    private static readonly long MinUnixSeconds = DateTimeOffset.MinValue.ToUnixTimeSeconds();
+    private static readonly long MaxUnixSeconds = DateTimeOffset.MaxValue.ToUnixTimeSeconds();
+
     public enum Result
     {
         Valid,
@@ -45,8 +50,10 @@ public static class SvixWebhookVerifier
             string.IsNullOrEmpty(svixSignature))
             return Result.MissingHeaders;
 
-        // Replay protection: the timestamp must parse and fall within ± the tolerance window.
+        // Replay protection: the timestamp must parse, be representable, and fall within ± the window.
         if (!long.TryParse(svixTimestamp, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unixSeconds))
+            return Result.TimestampOutOfTolerance;
+        if (unixSeconds < MinUnixSeconds || unixSeconds > MaxUnixSeconds)
             return Result.TimestampOutOfTolerance;
 
         var window = tolerance ?? DefaultTolerance;

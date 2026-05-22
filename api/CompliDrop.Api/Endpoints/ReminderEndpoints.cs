@@ -92,32 +92,30 @@ public static class ReminderEndpoints
 
         // Webhook signature verification (Svix scheme — Resend signs via Svix). Must run on the raw
         // body BEFORE parsing or mutating any state. See CLAUDE.md "Resend:WebhookSecret".
-        if (string.IsNullOrWhiteSpace(secret))
+        switch (ResolveSecretPolicy(secret, env.IsDevelopment()))
         {
-            // No signing secret configured: reject in production; allow (with a warning) only in
-            // Development so local end-to-end testing isn't blocked.
-            if (!env.IsDevelopment())
-            {
+            case SecretPolicy.RejectUnconfigured:
                 logger.LogWarning("Resend webhook rejected: Resend:WebhookSecret is not configured.");
                 return Results.Unauthorized();
-            }
-            logger.LogWarning("Resend webhook signature check SKIPPED — Resend:WebhookSecret not configured (Development only).");
-        }
-        else
-        {
-            var verification = SvixWebhookVerifier.Verify(
-                raw,
-                http.Request.Headers["svix-id"].FirstOrDefault(),
-                http.Request.Headers["svix-timestamp"].FirstOrDefault(),
-                http.Request.Headers["svix-signature"].FirstOrDefault(),
-                secret,
-                timeProvider.GetUtcNow());
 
-            if (verification != SvixWebhookVerifier.Result.Valid)
-            {
-                logger.LogWarning("Resend webhook rejected: signature verification failed ({Result}).", verification);
-                return Results.Unauthorized();
-            }
+            case SecretPolicy.SkipInDevelopment:
+                logger.LogWarning("Resend webhook signature check SKIPPED — Resend:WebhookSecret not configured (Development only).");
+                break;
+
+            case SecretPolicy.Verify:
+                var verification = SvixWebhookVerifier.Verify(
+                    raw,
+                    http.Request.Headers["svix-id"].FirstOrDefault(),
+                    http.Request.Headers["svix-timestamp"].FirstOrDefault(),
+                    http.Request.Headers["svix-signature"].FirstOrDefault(),
+                    secret!,
+                    timeProvider.GetUtcNow());
+                if (verification != SvixWebhookVerifier.Result.Valid)
+                {
+                    logger.LogWarning("Resend webhook rejected: signature verification failed ({Result}).", verification);
+                    return Results.Unauthorized();
+                }
+                break;
         }
 
         System.Text.Json.JsonDocument doc;
@@ -153,6 +151,9 @@ public static class ReminderEndpoints
         };
         if (status is null) return Results.Ok(new { data = (object?)null, error = (object?)null });
 
+        // No explicit event-id dedupe (unlike the Stripe webhook's ProcessedStripeEvent): this
+        // handler only assigns log.Status = status, which is idempotent under redelivery, so a
+        // duplicate Svix delivery within the timestamp window produces the same end state.
         var log = await db.ReminderLogs.FirstOrDefaultAsync(l => l.ResendMessageId == messageId, ct);
         if (log is not null)
         {
@@ -161,6 +162,20 @@ public static class ReminderEndpoints
         }
         return Results.Ok(new { data = (object?)null, error = (object?)null });
     }
+
+    /// <summary>
+    /// Policy for the inbound webhook when no signing secret is configured. Unlike the Stripe
+    /// webhook (which rejects an unset secret unconditionally in every environment), the Resend
+    /// webhook deliberately allows unsigned requests in Development only — so local end-to-end
+    /// testing isn't blocked — while still failing closed (rejecting) everywhere else. This
+    /// divergence is documented in CLAUDE.md.
+    /// </summary>
+    internal enum SecretPolicy { Verify, SkipInDevelopment, RejectUnconfigured }
+
+    internal static SecretPolicy ResolveSecretPolicy(string? secret, bool isDevelopment) =>
+        !string.IsNullOrWhiteSpace(secret) ? SecretPolicy.Verify
+        : isDevelopment ? SecretPolicy.SkipInDevelopment
+        : SecretPolicy.RejectUnconfigured;
 }
 
 public record ReminderUpdateRequest(
