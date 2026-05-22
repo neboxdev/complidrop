@@ -126,6 +126,17 @@ public sealed class SvixWebhookVerifierTests
             .Should().Be(SvixWebhookVerifier.Result.TimestampOutOfTolerance);
     }
 
+    [Theory]
+    [InlineData("99999999999999999")]  // parses as a long, but overflows DateTimeOffset.FromUnixTimeSeconds
+    [InlineData("-99999999999999999")]
+    public void Numeric_but_out_of_range_timestamp_is_rejected_not_thrown(string timestamp)
+    {
+        // Regression guard: an absurd-but-parseable timestamp must return a rejection, never throw
+        // (an uncaught throw would surface as HTTP 500 on attacker-controlled input).
+        SvixWebhookVerifier.Verify(Payload, Id, timestamp, Sign(Id, timestamp, Payload), Secret, Now)
+            .Should().Be(SvixWebhookVerifier.Result.TimestampOutOfTolerance);
+    }
+
     [Fact]
     public void Custom_tolerance_is_honored()
     {
@@ -159,6 +170,18 @@ public sealed class SvixWebhookVerifierTests
     }
 
     [Fact]
+    public void A_non_v1_entry_before_a_valid_v1_entry_is_skipped_not_fatal()
+    {
+        // Realistic rotation/format scenario: an unsupported scheme entry precedes the valid v1
+        // entry. The unsupported entry must be skipped (continue), not abort the scan.
+        var ts = Ts(Now);
+        var v2 = $"v2,{Convert.ToBase64String(new byte[32])}";
+        var valid = Sign(Id, ts, Payload);
+        SvixWebhookVerifier.Verify(Payload, Id, ts, $"{v2} {valid}", Secret, Now)
+            .Should().Be(SvixWebhookVerifier.Result.Valid);
+    }
+
+    [Fact]
     public void Malformed_base64_signature_entry_is_skipped()
     {
         var ts = Ts(Now);
@@ -171,6 +194,16 @@ public sealed class SvixWebhookVerifierTests
     {
         var ts = Ts(Now);
         SvixWebhookVerifier.Verify(Payload, Id, ts, "v1,whatever", "whsec_!!!not-base64!!!", Now)
+            .Should().Be(SvixWebhookVerifier.Result.InvalidSecret);
+    }
+
+    [Fact]
+    public void Empty_secret_returns_InvalidSecret()
+    {
+        // Pins the verifier's own contract (the endpoint guards empty-secret upstream, but the
+        // verifier is public and must fail closed if ever called with an empty secret).
+        var ts = Ts(Now);
+        SvixWebhookVerifier.Verify(Payload, Id, ts, "v1,whatever", "", Now)
             .Should().Be(SvixWebhookVerifier.Result.InvalidSecret);
     }
 }

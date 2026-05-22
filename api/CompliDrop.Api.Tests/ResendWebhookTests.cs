@@ -48,11 +48,13 @@ public sealed class ResendWebhookTests(IntegrationTestFixture fixture) : Integra
         return messageId;
     }
 
-    private static string DeliveredPayload(string messageId) => JsonSerializer.Serialize(new
+    private static string EventPayload(string type, string emailId) => JsonSerializer.Serialize(new
     {
-        type = "email.delivered",
-        data = new { email_id = messageId }
+        type,
+        data = new { email_id = emailId }
     });
+
+    private static string DeliveredPayload(string messageId) => EventPayload("email.delivered", messageId);
 
     /// <summary>Builds the three Svix headers for a payload, signed with the harness secret.</summary>
     private static (string id, string timestamp, string signature) Sign(string payload, DateTimeOffset? when = null)
@@ -142,6 +144,60 @@ public sealed class ResendWebhookTests(IntegrationTestFixture fixture) : Integra
 
         resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
         (await StatusOf(messageId)).Should().Be("sent");
+    }
+
+    [Theory]
+    [InlineData("email.bounced", "bounced")]
+    [InlineData("email.complained", "complained")]
+    [InlineData("email.opened", "opened")]
+    [InlineData("email.clicked", "clicked")]
+    public async Task Valid_signature_maps_each_event_type_to_its_status(string eventType, string expectedStatus)
+    {
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var payload = EventPayload(eventType, messageId);
+
+        var resp = await PostWebhook(payload, Sign(payload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await StatusOf(messageId)).Should().Be(expectedStatus);
+    }
+
+    [Fact]
+    public async Task Duplicate_valid_delivery_is_idempotent()
+    {
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var payload = DeliveredPayload(messageId);
+        var svix = Sign(payload); // same id/timestamp/signature reused on both deliveries
+
+        (await PostWebhook(payload, svix)).StatusCode.Should().Be(HttpStatusCode.OK);
+        (await PostWebhook(payload, svix)).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        (await StatusOf(messageId)).Should().Be("delivered");
+    }
+
+    [Fact]
+    public async Task Signed_but_unparseable_body_returns_400()
+    {
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        const string body = "this is not json"; // signed verbatim so verification passes
+
+        var resp = await PostWebhook(body, Sign(body));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await StatusOf(messageId)).Should().Be("sent");
+    }
+
+    [Fact]
+    public async Task Valid_signature_for_unknown_message_id_is_a_noop()
+    {
+        var seededId = await SeedReminderLogAsync(status: "sent");
+        // A correctly-signed event for an email_id that matches no ReminderLog.
+        var payload = DeliveredPayload($"resend_{Guid.NewGuid():N}");
+
+        var resp = await PostWebhook(payload, Sign(payload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);          // accepted (signature valid)
+        (await StatusOf(seededId)).Should().Be("sent");          // but nothing was mutated
     }
 
     [Fact]
