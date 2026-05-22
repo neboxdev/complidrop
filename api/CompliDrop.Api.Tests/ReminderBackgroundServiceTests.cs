@@ -41,17 +41,19 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             NullLogger<ReminderBackgroundService>.Instance);
 
     /// <summary>
-    /// Mirrors the prod-code calculation of the document expiration window so seed values land
-    /// inside it regardless of the test host's local timezone. The worker treats the org's local
-    /// date + DaysBefore as a UTC-rendered window via <c>DateOnly.ToDateTime(...).ToUniversalTime()</c>,
-    /// which interprets <c>Unspecified</c> kinds as server-local; we reproduce that here.
+    /// Returns the UTC instant at the *start* of the org-local target day so the worker's
+    /// expiration window query matches. Mirrors the prod-code calculation (which uses
+    /// <c>TimeZoneInfo.ConvertTimeToUtc</c> against the org's zone), so seeded docs land inside
+    /// the window on any host's local timezone.
     /// </summary>
     private static DateTime ExpirationForOrgWindow(string tz, DateTimeOffset nowUtc, int daysBefore)
     {
-        var local = TimeZoneInfo.ConvertTimeFromUtc(
-            nowUtc.UtcDateTime, TimeZoneInfo.FindSystemTimeZoneById(tz));
+        var info = TimeZoneInfo.FindSystemTimeZoneById(tz);
+        var local = TimeZoneInfo.ConvertTimeFromUtc(nowUtc.UtcDateTime, info);
         var targetDate = DateOnly.FromDateTime(local).AddDays(daysBefore);
-        return targetDate.ToDateTime(TimeOnly.MinValue).ToUniversalTime();
+        return TimeZoneInfo.ConvertTimeToUtc(
+            DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified),
+            info);
     }
 
     private sealed record SeedResult(Guid OrgId, Guid ReminderId, Guid DocumentId, Guid? VendorId, Guid? UserId);
@@ -358,17 +360,13 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
     {
         var seed = await SeedReminderAsync(NyEightAm);
         Email.IsEnabled = false;
-        try
-        {
-            await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+        // No finally restore — FakeEmailService.Reset() (run between tests by
+        // IntegrationTestFixture.ResetAsync) puts IsEnabled back to true automatically.
 
-            Email.Sends.Should().BeEmpty();
-            (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(0);
-        }
-        finally
-        {
-            Email.IsEnabled = true; // restore for any subsequent test in the same fixture
-        }
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().BeEmpty();
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(0);
     }
 
     [Fact]
@@ -378,8 +376,77 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
 
         await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
 
-        var send = Email.Sends.Should().HaveCount(2).And.Subject.First();
-        send.Subject.Should().Contain("policy.pdf").And.Contain("30 days");
-        send.HtmlBody.Should().Contain("policy.pdf").And.Contain("30 days from today");
+        // Assert across every send rather than picking Sends[0], so the test doesn't silently
+        // re-target itself if the worker's recipient loop order ever changes.
+        Email.Sends.Should().HaveCount(2);
+        foreach (var send in Email.Sends)
+        {
+            send.Subject.Should().Contain("policy.pdf").And.Contain("30 days");
+            send.HtmlBody.Should().Contain("policy.pdf").And.Contain("30 days from today");
+        }
+    }
+
+    // ----- Regression tests from review --------------------------------------------------------
+
+    [Fact]
+    public async Task Multi_recipient_send_does_not_re_send_on_second_tick_in_same_day()
+    {
+        // The marquee invariant this ticket's schema widening enables: both recipients are
+        // notified on tick 1, both rows persist, and tick 2 finds both in the dedupe set.
+        var seed = await SeedReminderAsync(NyEightAm, notifyInternal: true, notifyVendor: true);
+        var worker = BuildWorker(NyEightAm);
+
+        await worker.ProcessHourlyTickAsync(CancellationToken.None);
+        await worker.ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().HaveCount(2);
+        Email.Sends.Select(s => s.ToEmail).Should().BeEquivalentTo(["owner@example.com", "vendor@example.com"]);
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Pre_existing_log_for_one_recipient_does_not_block_the_other()
+    {
+        // Per-recipient dedupe: a prior log for the internal user must not suppress the vendor.
+        var seed = await SeedReminderAsync(NyEightAm, notifyInternal: true, notifyVendor: true);
+
+        await using (var db = CreateSystemDb())
+        {
+            db.ReminderLogs.Add(new ReminderLog
+            {
+                Id = Guid.NewGuid(),
+                ReminderId = seed.ReminderId,
+                DocumentId = seed.DocumentId,
+                RecipientEmail = "owner@example.com",
+                SentAt = NyEightAm.UtcDateTime,
+                SendDate = DateOnly.FromDateTime(NyEightAm.UtcDateTime),
+                ResendMessageId = "resend_pre_owner",
+                Status = "sent",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Select(s => s.ToEmail).Should().Equal(["vendor@example.com"]);
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Case_variant_duplicate_recipients_collapse_to_a_single_send()
+    {
+        // Internal user emails are stored lowercased; vendor ContactEmail is stored as-typed.
+        // A vendor "Owner@example.com" must not produce a second mail to the same human.
+        var seed = await SeedReminderAsync(
+            NyEightAm,
+            notifyInternal: true,
+            notifyVendor: true,
+            internalEmail: "owner@example.com",
+            vendorEmail: "OWNER@example.com");
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle();
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
     }
 }

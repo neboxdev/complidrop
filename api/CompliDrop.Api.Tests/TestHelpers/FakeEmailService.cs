@@ -18,10 +18,14 @@ public sealed class FakeEmailService : IEmailService
 
     public IReadOnlyList<Sent> Sends => _sends.ToArray();
 
+    /// <summary>Clears captured sends and restores <see cref="IsEnabled"/> to its default true.
+    /// Callers should not have to remember a finally — any test that mutates IsEnabled is freshly
+    /// reset before the next test runs.</summary>
     public void Reset()
     {
         _sends.Clear();
         Interlocked.Exchange(ref _counter, 0);
+        IsEnabled = true;
     }
 
     public Task<string?> SendAsync(string toEmail, string subject, string htmlBody, CancellationToken ct)

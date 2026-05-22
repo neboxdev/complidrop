@@ -60,11 +60,28 @@ public class ReminderBackgroundService(
 
             var localDate = DateOnly.FromDateTime(ToLocal(org.TimeZone, nowUtc));
 
+            // Resolved once per org so the worker doesn't re-throw on TZ lookup inside the
+            // reminder loop; ToLocal already proved the id resolves.
+            var orgTzInfo = TryFindTimeZone(org.TimeZone);
+
             foreach (var reminder in reminders)
             {
                 var targetDate = localDate.AddDays(reminder.DaysBefore);
-                var targetStart = targetDate.ToDateTime(TimeOnly.MinValue).ToUniversalTime();
-                var targetEnd = targetDate.ToDateTime(TimeOnly.MaxValue).ToUniversalTime();
+                // Bracket the org's local target day, converted to UTC via the org's own TZ.
+                // The previous .ToUniversalTime() on an Unspecified-kind value silently used the
+                // SERVER's local zone, so the window matched a different UTC range depending on
+                // where the worker ran. Going through TimeZoneInfo.ConvertTimeToUtc makes the
+                // window host-independent and aligned with the org's wall clock.
+                var targetStart = orgTzInfo is null
+                    ? DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MinValue), DateTimeKind.Utc)
+                    : TimeZoneInfo.ConvertTimeToUtc(
+                        DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified),
+                        orgTzInfo);
+                var targetEnd = orgTzInfo is null
+                    ? DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MaxValue), DateTimeKind.Utc)
+                    : TimeZoneInfo.ConvertTimeToUtc(
+                        DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MaxValue), DateTimeKind.Unspecified),
+                        orgTzInfo);
 
                 var docs = await db.Documents
                     .Where(d => d.OrganizationId == org.Id
@@ -87,7 +104,14 @@ public class ReminderBackgroundService(
                     var recipients = new List<string>(internalUsers);
                     if (reminder.NotifyVendor && !string.IsNullOrWhiteSpace(doc.Vendor?.ContactEmail))
                         recipients.Add(doc.Vendor.ContactEmail);
-                    recipients = recipients.Where(r => !string.IsNullOrWhiteSpace(r)).Distinct().ToList();
+                    // Distinct uses OrdinalIgnoreCase to match the dedupe HashSet below and the
+                    // intent of "one mail per real recipient": a user email stored lowercased
+                    // ("owner@x.com") and a vendor ContactEmail stored as-typed ("Owner@x.com")
+                    // would otherwise be sent to twice within the same tick.
+                    recipients = recipients
+                        .Where(r => !string.IsNullOrWhiteSpace(r))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
                     if (recipients.Count == 0) continue;
 
                     var sendDate = DateOnly.FromDateTime(nowUtc);
@@ -136,6 +160,17 @@ public class ReminderBackgroundService(
                     catch (DbUpdateException ex)
                     {
                         logger.LogWarning(ex, "Reminder log upsert conflict (likely concurrent tick) for doc {DocumentId}", doc.Id);
+
+                        // After a failed SaveChanges the pending Added ReminderLog entries stay
+                        // in the change tracker. The next doc iteration's SaveChangesAsync would
+                        // re-attempt them and throw again — cascading the failure to every doc
+                        // remaining in this tick. Detach them so each doc gets a clean slate.
+                        foreach (var entry in db.ChangeTracker.Entries<ReminderLog>()
+                                     .Where(e => e.State == EntityState.Added)
+                                     .ToList())
+                        {
+                            entry.State = EntityState.Detached;
+                        }
                     }
                 }
             }
@@ -144,30 +179,23 @@ public class ReminderBackgroundService(
 
     private static bool IsLocalSendWindow(string tz, DateTime nowUtc)
     {
-        try
-        {
-            var info = TimeZoneInfo.FindSystemTimeZoneById(tz);
-            var local = TimeZoneInfo.ConvertTimeFromUtc(nowUtc, info);
-            return local.Hour == TargetLocalHour;
-        }
-        catch
-        {
-            // Unknown tz falls back to UTC 08:00.
-            return nowUtc.Hour == TargetLocalHour;
-        }
+        var info = TryFindTimeZone(tz);
+        if (info is null) return nowUtc.Hour == TargetLocalHour;
+        var local = TimeZoneInfo.ConvertTimeFromUtc(nowUtc, info);
+        return local.Hour == TargetLocalHour;
     }
 
     private static DateTime ToLocal(string tz, DateTime utc)
     {
-        try
-        {
-            var info = TimeZoneInfo.FindSystemTimeZoneById(tz);
-            return TimeZoneInfo.ConvertTimeFromUtc(utc, info);
-        }
-        catch
-        {
-            return utc;
-        }
+        var info = TryFindTimeZone(tz);
+        return info is null ? utc : TimeZoneInfo.ConvertTimeFromUtc(utc, info);
+    }
+
+    /// <summary>Returns the named IANA / Windows zone, or null for an unknown id.</summary>
+    private static TimeZoneInfo? TryFindTimeZone(string tz)
+    {
+        try { return TimeZoneInfo.FindSystemTimeZoneById(tz); }
+        catch { return null; }
     }
 
     private static string BuildBody(string orgName, Document doc, int daysBefore)
