@@ -370,19 +370,21 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
     }
 
     [Fact]
-    public async Task Email_body_includes_document_org_and_days_before()
+    public async Task Email_subject_and_body_include_filename_org_name_and_days_before()
     {
-        await SeedReminderAsync(NyEightAm, daysBefore: 30, notifyVendor: true, vendorEmail: "vendor@example.com");
+        var seed = await SeedReminderAsync(NyEightAm, daysBefore: 30, notifyVendor: true, vendorEmail: "vendor@example.com");
+        var orgName = $"Org-{seed.OrgId:N}";
 
         await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
 
         // Assert across every send rather than picking Sends[0], so the test doesn't silently
-        // re-target itself if the worker's recipient loop order ever changes.
+        // re-target itself if the worker's recipient loop order ever changes. The org name
+        // assertion ties the body to the specific org the reminder fired for.
         Email.Sends.Should().HaveCount(2);
         foreach (var send in Email.Sends)
         {
             send.Subject.Should().Contain("policy.pdf").And.Contain("30 days");
-            send.HtmlBody.Should().Contain("policy.pdf").And.Contain("30 days from today");
+            send.HtmlBody.Should().Contain("policy.pdf").And.Contain("30 days from today").And.Contain(orgName);
         }
     }
 
@@ -409,6 +411,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
     {
         // Per-recipient dedupe: a prior log for the internal user must not suppress the vendor.
         var seed = await SeedReminderAsync(NyEightAm, notifyInternal: true, notifyVendor: true);
+        const string preExistingId = "resend_pre_owner";
 
         await using (var db = CreateSystemDb())
         {
@@ -420,7 +423,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
                 RecipientEmail = "owner@example.com",
                 SentAt = NyEightAm.UtcDateTime,
                 SendDate = DateOnly.FromDateTime(NyEightAm.UtcDateTime),
-                ResendMessageId = "resend_pre_owner",
+                ResendMessageId = preExistingId,
                 Status = "sent",
             });
             await db.SaveChangesAsync();
@@ -429,14 +432,26 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
 
         Email.Sends.Select(s => s.ToEmail).Should().Equal(["vendor@example.com"]);
-        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(2);
+
+        // Verify the newly-written row directly rather than just the count, so a refactor that
+        // (say) overwrote the pre-existing row instead of inserting a new one would fail loudly.
+        await using var db2 = CreateSystemDb();
+        var newLog = await db2.ReminderLogs
+            .Where(l => l.ReminderId == seed.ReminderId
+                        && l.DocumentId == seed.DocumentId
+                        && l.ResendMessageId != preExistingId)
+            .SingleAsync();
+        newLog.RecipientEmail.Should().Be("vendor@example.com");
+        newLog.Status.Should().Be("sent");
+        newLog.ResendMessageId.Should().NotBeNullOrEmpty();
     }
 
     [Fact]
-    public async Task Case_variant_duplicate_recipients_collapse_to_a_single_send()
+    public async Task Case_variant_duplicate_recipients_collapse_to_a_single_send_keeping_internal()
     {
         // Internal user emails are stored lowercased; vendor ContactEmail is stored as-typed.
-        // A vendor "Owner@example.com" must not produce a second mail to the same human.
+        // A vendor "Owner@example.com" must not produce a second mail to the same human, and
+        // the kept variant is the internal one (added to the recipient list first).
         var seed = await SeedReminderAsync(
             NyEightAm,
             notifyInternal: true,
@@ -446,7 +461,137 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
 
         await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
 
-        Email.Sends.Should().ContainSingle();
+        Email.Sends.Should().ContainSingle().Which.ToEmail.Should().Be("owner@example.com");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+    }
+
+    // ----- Additional coverage from review (DST, multi-reminder, retry, subject template) ------
+
+    [Fact]
+    public async Task DST_spring_forward_day_still_fires_at_local_08()
+    {
+        // March 8, 2026 is the US DST spring-forward: at 02:00 EST clocks jump to 03:00 EDT.
+        // 08:00 New_York that morning = 12:00 UTC (NY is UTC-4 EDT after the jump).
+        var when = new DateTimeOffset(2026, 3, 8, 12, 0, 0, TimeSpan.Zero);
+        var seed = await SeedReminderAsync(when);
+
+        await BuildWorker(when).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle().Which.ToEmail.Should().Be("owner@example.com");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task DST_fall_back_day_still_fires_at_local_08()
+    {
+        // November 1, 2026: at 02:00 EDT clocks fall back to 01:00 EST. The 01:00–02:00 wall hour
+        // happens twice (ambiguous), but 08:00 happens exactly once at 13:00 UTC (NY now UTC-5).
+        var when = new DateTimeOffset(2026, 11, 1, 13, 0, 0, TimeSpan.Zero);
+        var seed = await SeedReminderAsync(when);
+
+        await BuildWorker(when).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle().Which.ToEmail.Should().Be("owner@example.com");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Two_reminders_with_different_days_before_each_fire_for_their_own_doc()
+    {
+        // Org has two reminders: 30-day and 7-day. Two docs, one expiring in 30 NY-local days,
+        // the other in 7. Both reminders must fire in the same tick, each matching its own doc.
+        var orgId = Guid.NewGuid();
+        var reminder30Id = Guid.NewGuid();
+        var reminder7Id = Guid.NewGuid();
+        var doc30Id = Guid.NewGuid();
+        var doc7Id = Guid.NewGuid();
+        var vendorId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var now = NyEightAm.UtcDateTime;
+
+        await using (var db = CreateSystemDb())
+        {
+            db.Organizations.Add(new Organization { Id = orgId, Name = $"Org-{orgId:N}", TimeZone = NyTz, CreatedAt = now, UpdatedAt = now });
+            db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = orgId, Name = "V", CreatedAt = now, UpdatedAt = now });
+            db.Users.Add(new User { Id = userId, OrganizationId = orgId, Email = "owner@example.com", PasswordHash = "x", FullName = "Owner", Role = "admin", CreatedAt = now });
+            db.Documents.AddRange(
+                new Document { Id = doc30Id, OrganizationId = orgId, VendorId = vendorId, OriginalFileName = "30day.pdf", BlobStorageUrl = "b", FileSizeBytes = 1, ContentType = "application/pdf", ExpirationDate = ExpirationForOrgWindow(NyTz, NyEightAm, 30), CreatedAt = now, UpdatedAt = now },
+                new Document { Id = doc7Id, OrganizationId = orgId, VendorId = vendorId, OriginalFileName = "7day.pdf", BlobStorageUrl = "b", FileSizeBytes = 1, ContentType = "application/pdf", ExpirationDate = ExpirationForOrgWindow(NyTz, NyEightAm, 7), CreatedAt = now, UpdatedAt = now });
+            db.Reminders.AddRange(
+                new Reminder { Id = reminder30Id, OrganizationId = orgId, DaysBefore = 30, NotifyInternalUser = true, IsActive = true },
+                new Reminder { Id = reminder7Id, OrganizationId = orgId, DaysBefore = 7, NotifyInternalUser = true, IsActive = true });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().HaveCount(2);
+        (await LogCountAsync(reminder30Id, doc30Id)).Should().Be(1);
+        (await LogCountAsync(reminder7Id, doc7Id)).Should().Be(1);
+        // No cross-match: reminder30 should not have fired against doc7 (or vice versa).
+        (await LogCountAsync(reminder30Id, doc7Id)).Should().Be(0);
+        (await LogCountAsync(reminder7Id, doc30Id)).Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Notify_vendor_with_whitespace_only_email_falls_through_to_internal(string vendorEmail)
+    {
+        // Pairs with Notify_vendor_but_vendor_has_no_contact_email... (covers null) to exercise
+        // every branch of string.IsNullOrWhiteSpace.
+        var seed = await SeedReminderAsync(
+            NyEightAm, notifyInternal: true, notifyVendor: true, vendorEmail: vendorEmail);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Select(s => s.ToEmail).Should().Equal(["owner@example.com"]);
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task EmailSubjectTemplate_overrides_the_default_subject_line()
+    {
+        const string customSubject = "Please renew your policy ASAP";
+        var seed = await SeedReminderAsync(NyEightAm);
+
+        await using (var db = CreateSystemDb())
+        {
+            var reminder = await db.Reminders.SingleAsync(r => r.Id == seed.ReminderId);
+            reminder.EmailSubjectTemplate = customSubject;
+            await db.SaveChangesAsync();
+        }
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle().Which.Subject.Should().Be(customSubject);
+    }
+
+    [Fact]
+    public async Task Failed_send_writes_a_failed_log_row_and_blocks_intraday_retry()
+    {
+        // Codifies the current behavior: a Resend non-2xx (messageId == null) persists a log row
+        // with Status='failed' that subsequent ticks the same day treat as already-sent. Intraday
+        // retry is intentionally NOT attempted today; if/when we add retries, this test will need
+        // to flip its assertions and is the canonical place to do so.
+        var seed = await SeedReminderAsync(NyEightAm);
+        Email.NextSendReturnsNull = true;
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        // First tick: send was attempted (queue has the entry with null id) and a failed row exists.
+        Email.Sends.Should().ContainSingle().Which.MessageId.Should().BeNull();
+        await using (var db = CreateSystemDb())
+        {
+            var log = await db.ReminderLogs.SingleAsync(l =>
+                l.ReminderId == seed.ReminderId && l.DocumentId == seed.DocumentId);
+            log.Status.Should().Be("failed");
+            log.ResendMessageId.Should().BeNull();
+        }
+
+        // Second tick same day: dedupe set contains the failed row → no retry.
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+        Email.Sends.Should().ContainSingle(); // unchanged
         (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
     }
 }

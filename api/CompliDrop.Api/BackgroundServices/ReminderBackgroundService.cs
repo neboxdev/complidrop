@@ -44,7 +44,11 @@ public class ReminderBackgroundService(
 
         var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
 
+        // AsNoTracking on read-only queries: this worker only writes ReminderLog inserts (which
+        // are tracked explicitly via db.ReminderLogs.Add). Tracking orgs / reminders / docs /
+        // users buys us nothing and inflates the change tracker.
         var orgs = await db.Organizations
+            .AsNoTracking()
             .Where(o => o.DeletedAt == null)
             .Select(o => new { o.Id, o.Name, o.TimeZone })
             .ToListAsync(ct);
@@ -54,6 +58,7 @@ public class ReminderBackgroundService(
             if (!IsLocalSendWindow(org.TimeZone, nowUtc)) continue;
 
             var reminders = await db.Reminders
+                .AsNoTracking()
                 .Where(r => r.OrganizationId == org.Id && r.IsActive)
                 .ToListAsync(ct);
             if (reminders.Count == 0) continue;
@@ -63,6 +68,19 @@ public class ReminderBackgroundService(
             // Resolved once per org so the worker doesn't re-throw on TZ lookup inside the
             // reminder loop; ToLocal already proved the id resolves.
             var orgTzInfo = TryFindTimeZone(org.TimeZone);
+
+            // Hoisted out of the reminder loop: the internal-user list is identical for every
+            // reminder under the same org, so we resolve it once and reuse. OrderBy keeps the
+            // recipient order stable across runs (Postgres returns rows in physical order
+            // otherwise), which keeps multi-user assertions in tests deterministic.
+            var internalUsers = reminders.Any(r => r.NotifyInternalUser)
+                ? await db.Users
+                    .AsNoTracking()
+                    .Where(u => u.OrganizationId == org.Id && u.DeletedAt == null)
+                    .OrderBy(u => u.Email)
+                    .Select(u => u.Email)
+                    .ToListAsync(ct)
+                : new List<string>();
 
             foreach (var reminder in reminders)
             {
@@ -84,6 +102,7 @@ public class ReminderBackgroundService(
                         orgTzInfo);
 
                 var docs = await db.Documents
+                    .AsNoTracking()
                     .Where(d => d.OrganizationId == org.Id
                                 && d.DeletedAt == null
                                 && d.ExpirationDate >= targetStart
@@ -92,16 +111,13 @@ public class ReminderBackgroundService(
                     .ToListAsync(ct);
                 if (docs.Count == 0) continue;
 
-                var internalUsers = reminder.NotifyInternalUser
-                    ? await db.Users
-                        .Where(u => u.OrganizationId == org.Id && u.DeletedAt == null)
-                        .Select(u => u.Email)
-                        .ToListAsync(ct)
-                    : new List<string>();
+                // reminders.NotifyInternalUser gates whether THIS reminder includes the cached
+                // list; the cache itself is built once per org above.
+                var reminderInternalUsers = reminder.NotifyInternalUser ? internalUsers : new List<string>();
 
                 foreach (var doc in docs)
                 {
-                    var recipients = new List<string>(internalUsers);
+                    var recipients = new List<string>(reminderInternalUsers);
                     if (reminder.NotifyVendor && !string.IsNullOrWhiteSpace(doc.Vendor?.ContactEmail))
                         recipients.Add(doc.Vendor.ContactEmail);
                     // Distinct uses OrdinalIgnoreCase to match the dedupe HashSet below and the
@@ -195,7 +211,8 @@ public class ReminderBackgroundService(
     private static TimeZoneInfo? TryFindTimeZone(string tz)
     {
         try { return TimeZoneInfo.FindSystemTimeZoneById(tz); }
-        catch { return null; }
+        catch (TimeZoneNotFoundException) { return null; }
+        catch (InvalidTimeZoneException) { return null; }
     }
 
     private static string BuildBody(string orgName, Document doc, int daysBefore)
