@@ -1,4 +1,5 @@
 using CompliDrop.Api.BackgroundServices;
+using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Tests.TestHelpers;
@@ -6,6 +7,7 @@ using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Npgsql;
 
 namespace CompliDrop.Api.Tests;
@@ -26,6 +28,13 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
 
     private FakeOcrService Ocr =>
         Fixture.Factory.Services.GetRequiredService<FakeOcrService>();
+
+    /// <summary>The configured free-tier monthly cost ceiling — read from config, not hard-coded.</summary>
+    private decimal FreeTierCeilingUsd =>
+        Fixture.Factory.Services.GetRequiredService<IOptions<CostCeilings>>().Value.FreeTierMonthlyUsd;
+
+    /// <summary>Mirrors the per-document amount ExtractionWorker passes to CanSpendAsync.</summary>
+    private const decimal PlannedPerDocUsd = 0.01m;
 
     /// <summary>Builds a worker bound to the host's DI (so it resolves the test DB + fakes).</summary>
     private ExtractionWorker BuildWorker() =>
@@ -288,9 +297,10 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     [Fact]
     public async Task Cost_ceiling_exceeded_short_circuits_to_failed_without_extracting()
     {
-        // Free-tier monthly ceiling is $5. Seeding spend at the ceiling makes the planned +$0.01 tip
-        // it over, so CanSpendAsync returns false and the worker fails the doc before extracting.
-        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 5m, plan: "free");
+        // Seeding spend at the ceiling makes the worker's planned per-doc amount tip it over, so
+        // CanSpendAsync returns false and the worker fails the doc before extracting. Spend and
+        // ceiling are derived from config so the boundary tracks the source of truth, not a literal.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: FreeTierCeilingUsd, plan: "free");
         var worker = BuildWorker();
 
         (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
@@ -367,10 +377,11 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     [Fact]
     public async Task Cost_exactly_at_the_ceiling_is_allowed_to_proceed()
     {
-        // Free-tier ceiling is $5 and the worker plans $0.01 per doc. Seeding spend at $4.99 lands the
-        // planned amount at exactly $5.00 — CanSpendAsync uses `<=`, so it must be ALLOWED. Pins the
-        // boundary against a `<=`->`<` regression that would wrongly block a doc sitting at the ceiling.
-        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 4.99m, plan: "free");
+        // Seeding spend at (ceiling - plannedPerDoc) lands the planned amount at exactly the ceiling —
+        // CanSpendAsync uses `<=`, so it must be ALLOWED. Pins the boundary against a `<=`->`<`
+        // regression that would wrongly block a doc at the ceiling. Both values are derived from
+        // config/source, so the test can't silently stop landing on the boundary if the ceiling moves.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: FreeTierCeilingUsd - PlannedPerDocUsd, plan: "free");
         var worker = BuildWorker();
 
         (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
@@ -399,15 +410,19 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         Ocr.OcrCallCount.Should().Be(0);
     }
 
-    [Fact]
-    public async Task Low_confidence_extraction_completes_as_manual_required_and_still_records_cost()
+    [Theory]
+    [InlineData(0.40, false)] // low average confidence
+    [InlineData(0.95, true)]  // high confidence, but the extractor flagged it for reprocessing
+    public async Task Manual_required_extraction_completes_and_still_records_cost(double confidence, bool needsReprocessing)
     {
-        // PersistSuccess routes to ManualRequired when avg field confidence < 0.7 (or NeedsReprocessing) —
-        // the other terminal-success outcome alongside Completed. Cost is still recorded either way.
+        // PersistSuccess routes to ManualRequired on EITHER avg field confidence < 0.7 OR
+        // NeedsReprocessing — the other terminal-success outcome alongside Completed. Both independent
+        // triggers are pinned here, and cost is recorded on this path either way.
         var (orgId, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
         Extraction.Result = Extraction.Result with
         {
-            Fields = [new ExtractedField("policy_number", "POL-1", "string", 0.40)],
+            Fields = [new ExtractedField("policy_number", "POL-1", "string", confidence)],
+            NeedsReprocessing = needsReprocessing,
         };
         var worker = BuildWorker();
 
