@@ -14,7 +14,13 @@ public class ExtractionWorker(
     ILogger<ExtractionWorker> logger) : BackgroundService
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(5);
-    private const int MaxAttempts = 5;
+
+    /// <summary>
+    /// Hard cap on extraction attempts per document. Enforced both up-front (zombie guard) and in
+    /// the failure path. Public so the regression suite asserts the retry budget against the source
+    /// of truth rather than a hard-coded literal.
+    /// </summary>
+    public const int MaxAttempts = 5;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -54,7 +60,13 @@ public class ExtractionWorker(
         logger.LogInformation("ExtractionWorker stopping.");
     }
 
-    private async Task<Guid?> ClaimNextAsync(CancellationToken ct)
+    /// <summary>
+    /// Atomically claims the next processable document via <c>UPDATE … FOR UPDATE SKIP LOCKED</c>
+    /// (a Pending doc, or a Processing doc whose claim went stale past the zombie timeout), flips it
+    /// to Processing, and increments its attempt counter. Returns the claimed id, or null when
+    /// nothing is available. Public so the regression suite can drive the claim path in isolation.
+    /// </summary>
+    public async Task<Guid?> ClaimNextAsync(CancellationToken ct)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<SystemDbContext>();
@@ -94,7 +106,12 @@ public class ExtractionWorker(
         return null;
     }
 
-    private async Task ProcessDocumentAsync(Guid documentId, CancellationToken ct)
+    /// <summary>
+    /// Runs extraction for a previously-claimed document in a fresh DI scope: enforces the attempt
+    /// cap and the org cost ceiling, runs OCR + LLM extraction, and persists success or failure.
+    /// Public so the regression suite can drive the process path in isolation.
+    /// </summary>
+    public async Task ProcessDocumentAsync(Guid documentId, CancellationToken ct)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<SystemDbContext>();
