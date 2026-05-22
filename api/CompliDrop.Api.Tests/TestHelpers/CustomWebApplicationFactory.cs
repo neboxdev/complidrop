@@ -20,7 +20,9 @@ namespace CompliDrop.Api.Tests.TestHelpers;
 /// External integrations (Stripe, Resend, Blob, Document AI, Gemini, Anthropic, Sentry)
 /// are left unconfigured — they self-disable via their IsEnabled/IsConfigured gates.
 /// </summary>
-public sealed class CustomWebApplicationFactory(string connectionString) : WebApplicationFactory<Program>
+public sealed class CustomWebApplicationFactory(
+    string connectionString,
+    IReadOnlyDictionary<string, string?>? configOverrides = null) : WebApplicationFactory<Program>
 {
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -46,7 +48,15 @@ public sealed class CustomWebApplicationFactory(string connectionString) : WebAp
                 ["Stripe:MonthlyPriceId"] = "price_monthly_test",
                 ["Stripe:AnnualPriceId"] = "price_annual_test",
                 ["Stripe:FoundingPriceId"] = "price_founding_test",
+                // Resend inbound-webhook (Svix) signature verification. The secret after the
+                // "whsec_" prefix must be valid base64 — ResendWebhookTests signs with the same value.
+                ["Resend:WebhookSecret"] = "whsec_Y29tcGxpZHJvcC1yZXNlbmQtd2ViaG9vay10ZXN0LXNlY3JldC0wMTIzNDU2Nzg5",
             });
+
+            // Per-test overrides (added last → win). Lets a test unset a key, e.g. to exercise the
+            // "no Resend:WebhookSecret configured" branch.
+            if (configOverrides is not null)
+                config.AddInMemoryCollection(configOverrides);
         });
 
         builder.ConfigureTestServices(services =>
