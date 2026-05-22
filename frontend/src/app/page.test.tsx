@@ -29,16 +29,27 @@ describe("Landing page CTAs", () => {
 
     const hrefs = linkHrefs();
     expect(hrefs).toContain("/login");
-    expect(hrefs.some((h) => h?.startsWith("/register"))).toBe(true);
-    // pricing CTAs carry the selected plan
-    expect(hrefs).toContain("/register?plan=annual");
+    expect(hrefs).toContain("/register");
+    // every pricing CTA carries its plan
+    expect(hrefs).toContain("/register?plan=free");
     expect(hrefs).toContain("/register?plan=pro");
+    expect(hrefs).toContain("/register?plan=annual");
     // the waitlist gate is gone, in links and in copy
     expect(hrefs).not.toContain("#waitlist");
     expect(screen.queryByText(/waitlist/i)).toBeNull();
   });
 
-  it("offers an authenticated visitor a path to the dashboard", () => {
+  it("defaults to the logged-out CTAs while the session is still loading", () => {
+    // useMe() is undefined during SSR / first paint; the public nav must not block on it.
+    mockUseMe.mockReturnValue({ data: undefined });
+    render(<Home />);
+
+    const hrefs = linkHrefs();
+    expect(hrefs).toContain("/login");
+    expect(hrefs).not.toContain("/dashboard");
+  });
+
+  it("swaps the auth-aware CTAs to a dashboard path when authenticated", () => {
     mockUseMe.mockReturnValue({
       data: {
         userId: "u1",
@@ -53,6 +64,11 @@ describe("Landing page CTAs", () => {
     });
     render(<Home />);
 
-    expect(linkHrefs()).toContain("/dashboard");
+    const hrefs = linkHrefs();
+    expect(hrefs).toContain("/dashboard");
+    // "Log in" lives only in the nav + final-CTA logged-out branches, so its absence proves both
+    // swapped. (The hero/pricing "Get started" CTAs are intentionally not auth-gated, so a bare
+    // /register still appears — asserting its absence here would be wrong.)
+    expect(hrefs).not.toContain("/login");
   });
 });
