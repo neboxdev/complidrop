@@ -1,7 +1,6 @@
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace CompliDrop.Api.Endpoints;
@@ -13,10 +12,11 @@ public static class VendorPortalEndpoints
         var group = app.MapGroup("/api/portal");
 
         group.MapGet("/{token}", PortalInfo);
+        // Rate limits (10/hr per token + 30/hr per ip) are applied by the GLOBAL chained limiter
+        // in Program.cs — not via .RequireRateLimiting(...) here, because chaining two named
+        // policies on one endpoint silently drops the first (see ADR 0004).
         group.MapPost("/{token}/upload", UploadViaPortal)
-            .DisableAntiforgery()
-            .RequireRateLimiting("portal-token")
-            .RequireRateLimiting("portal-ip");
+            .DisableAntiforgery();
         group.MapGet("/{token}/status/{uploadId:guid}", GetStatus);
     }
 

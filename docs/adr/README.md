@@ -10,3 +10,5 @@ Use `/adr <title>` to scaffold a new one.
 
 - [0001](0001-record-architecture-decisions.md) — Record architecture decisions
 - [0002](0002-reminder-dedupe-is-per-recipient.md) — Reminder dedupe is per-recipient, not per-(reminder, doc, day)
+- [0003](0003-frontend-testing-with-vitest.md) — Frontend testing with Vitest + React Testing Library
+- [0004](0004-portal-rate-limits-via-chained-global-limiter.md) — Portal upload rate limits via a chained global limiter
