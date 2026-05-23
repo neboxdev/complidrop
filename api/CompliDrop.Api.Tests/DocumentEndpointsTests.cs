@@ -1,34 +1,17 @@
 using System.Net;
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using static CompliDrop.Api.Tests.TestHelpers.UploadFixtures;
 
 namespace CompliDrop.Api.Tests;
 
 /// <summary>Integration tests for the document upload pipeline (magic bytes, plan limit, idempotency, soft delete, tenant scoping).</summary>
 public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
-    private static readonly byte[] PdfBytes = FileWith(0x25, 0x50, 0x44, 0x46); // %PDF
-
-    private static byte[] FileWith(params byte[] header)
-    {
-        var buf = new byte[64];
-        Array.Copy(header, buf, header.Length);
-        return buf;
-    }
-
-    private static MultipartFormDataContent UploadForm(byte[] bytes, string fileName, string contentType)
-    {
-        var form = new MultipartFormDataContent();
-        var file = new ByteArrayContent(bytes);
-        file.Headers.ContentType = new MediaTypeHeaderValue(contentType);
-        form.Add(file, "file", fileName);
-        return form;
-    }
 
     private static async Task<Guid> UploadedId(HttpResponseMessage resp) =>
         (await resp.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("data").GetProperty("id").GetGuid();

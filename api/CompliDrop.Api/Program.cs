@@ -173,7 +173,10 @@ builder.Services.AddRateLimiter(opts =>
         HttpMethods.IsPost(ctx.Request.Method)
             && ctx.Request.Path.StartsWithSegments("/api/portal")
             && ctx.Request.Path.Value is { } p
-            && p.EndsWith("/upload", StringComparison.Ordinal);
+            // ASP.NET routing matches MapPost("/{token}/upload") case-insensitively, so the gate
+            // must too. An ordinal compare would let `POST /api/portal/{token}/Upload` skip BOTH
+            // limits while still reaching the handler.
+            && p.EndsWith("/upload", StringComparison.OrdinalIgnoreCase);
 });
 
 // ============================================================

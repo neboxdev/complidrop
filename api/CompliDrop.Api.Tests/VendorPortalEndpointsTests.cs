@@ -1,11 +1,12 @@
 using System.Net;
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using static CompliDrop.Api.Tests.TestHelpers.UploadFixtures;
 
 namespace CompliDrop.Api.Tests;
 
@@ -16,33 +17,12 @@ namespace CompliDrop.Api.Tests;
 /// tests assert token validation + tenant-leak avoidance, rate limits (token 10/hr, ip 30/hr),
 /// the <c>MaxUploads</c> quota with auto-deactivation, magic-byte file validation, and org scoping.
 ///
-/// The shared fixture boots the host with <c>RateLimiting:Enabled=false</c>, so the two rate-limit
-/// tests spin up a one-off host with the limiter enabled (same pattern as ResendWebhookTests). Each
-/// gets a fresh host → fresh partition state, so limiter counters never leak across tests.
+/// The shared fixture boots the host with <c>RateLimiting:Enabled=false</c>, so the rate-limit
+/// tests spin up a one-off host with the limiter enabled (same pattern as ResendWebhookTests).
+/// Each gets a fresh host → fresh partition state, so limiter counters never leak across tests.
 /// </summary>
 public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
-    // A real %PDF magic-byte header, padded past the validator's 8-byte minimum.
-    private static readonly byte[] PdfBytes = FileWith(0x25, 0x50, 0x44, 0x46);
-    // Plain text ("hello wd") — matches no supported type, used to test the spoofed-Content-Type path.
-    private static readonly byte[] TextBytes = FileWith(0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x77, 0x64);
-
-    private static byte[] FileWith(params byte[] header)
-    {
-        var buf = new byte[64];
-        Array.Copy(header, buf, header.Length);
-        return buf;
-    }
-
-    private static MultipartFormDataContent UploadForm(byte[] bytes, string fileName, string contentType)
-    {
-        var form = new MultipartFormDataContent();
-        var file = new ByteArrayContent(bytes);
-        file.Headers.ContentType = new MediaTypeHeaderValue(contentType);
-        form.Add(file, "file", fileName);
-        return form;
-    }
-
     private static Task<HttpResponseMessage> UploadAsync(
         HttpClient client, string token, byte[] bytes, string fileName, string contentType) =>
         client.PostAsync($"/api/portal/{token}/upload", UploadForm(bytes, fileName, contentType));
@@ -94,7 +74,9 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     private CustomWebApplicationFactory RateLimitedFactory() =>
         new(Fixture.ConnectionString, new Dictionary<string, string?> { ["RateLimiting:Enabled"] = "true" });
 
-    // ---- AC1: token validation + no tenant-data leak --------------------------------------------
+    // ============================================================================================
+    // AC1 — token validation + no tenant-data leak
+    // ============================================================================================
 
     [Fact]
     public async Task Valid_token_returns_portal_info()
@@ -111,6 +93,19 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         data.GetProperty("isActive").GetBoolean().Should().BeTrue();
         data.GetProperty("maxUploads").GetInt32().Should().Be(20);
         data.GetProperty("uploadCount").GetInt32().Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Valid_token_with_future_expiry_returns_portal_info()
+    {
+        // Pins the third arm of `link.ExpiresAt is DateTime exp && exp < UtcNow` — flipping the
+        // comparison to `>` would 410 a valid future-dated link.
+        var seeded = await SeedLinkAsync(expiresAt: DateTime.UtcNow.AddDays(7));
+        var client = CreateClient();
+
+        var resp = await client.GetAsync($"/api/portal/{seeded.Token}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
     }
 
     [Fact]
@@ -156,7 +151,9 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         raw.Should().NotContain(seeded.OrgName).And.NotContain(seeded.VendorName);
     }
 
-    // ---- AC4: magic-byte validation ------------------------------------------------------------
+    // ============================================================================================
+    // AC4 — magic-byte validation + multipart-form handling
+    // ============================================================================================
 
     [Fact]
     public async Task Upload_with_spoofed_content_type_is_rejected_on_bytes()
@@ -175,7 +172,66 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
             .Should().Be(0); // nothing persisted for a rejected file
     }
 
-    // ---- AC4 + AC5: valid upload is scoped to the link's org -----------------------------------
+    [Fact]
+    public async Task Upload_with_unsupported_magic_bytes_is_rejected()
+    {
+        // GIF magic bytes carried under a .jpg name + image/jpeg — not in the supported set
+        // (PDF / JPEG / PNG). Validator should reject on bytes, not on filename or Content-Type.
+        var seeded = await SeedLinkAsync();
+        var client = CreateClient();
+
+        var resp = await UploadAsync(client, seeded.Token, FileWith(0x47, 0x49, 0x46, 0x38, 0x39, 0x61), "x.jpg", "image/jpeg");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(resp)).Should().Be("document.unsupported_format");
+    }
+
+    [Fact]
+    public async Task Upload_with_no_file_field_returns_400()
+    {
+        var seeded = await SeedLinkAsync();
+        var client = CreateClient();
+
+        // A valid multipart body that carries other fields but omits the "file" field — mirrors a
+        // real client that filled in metadata and forgot to attach the document. (An entirely
+        // empty MultipartFormDataContent would emit just a closing boundary, which the form parser
+        // treats as malformed and 500s — not the contract we want to assert here.)
+        var form = new MultipartFormDataContent { { new StringContent("other"), "documentType" } };
+        var resp = await client.PostAsync($"/api/portal/{seeded.Token}/upload", form);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(resp)).Should().Be("validation.file");
+    }
+
+    [Fact]
+    public async Task Upload_with_zero_byte_file_returns_400()
+    {
+        var seeded = await SeedLinkAsync();
+        var client = CreateClient();
+
+        var resp = await UploadAsync(client, seeded.Token, [], "empty.pdf", "application/pdf");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(resp)).Should().Be("validation.file");
+    }
+
+    [Fact]
+    public async Task Upload_with_non_multipart_body_returns_400()
+    {
+        var seeded = await SeedLinkAsync();
+        var client = CreateClient();
+
+        var resp = await client.PostAsync(
+            $"/api/portal/{seeded.Token}/upload",
+            new StringContent("not a form", Encoding.UTF8, "text/plain"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(resp)).Should().Be("validation.form");
+    }
+
+    // ============================================================================================
+    // AC5 — valid upload is scoped to the link's org; status is link-scoped
+    // ============================================================================================
 
     [Fact]
     public async Task Valid_upload_succeeds_and_is_scoped_to_the_links_org()
@@ -198,6 +254,13 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         // The other org/vendor must not have received the document.
         doc.OrganizationId.Should().NotBe(b.OrgId);
         (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == b.VendorId)).Should().Be(0);
+
+        // Quota counter advanced (independent of the AC3 deactivation tests, which only assert
+        // the boundary). A regression that forgot `link.UploadCount += 1;` would slip past the
+        // doc assertions above but fail here.
+        var link = await db.VendorPortalLinks.SingleAsync(l => l.Id == a.LinkId);
+        link.UploadCount.Should().Be(1);
+        link.IsActive.Should().BeTrue();
     }
 
     [Fact]
@@ -221,7 +284,56 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         (await ErrorCode(crossResp)).Should().Be("document.not_found");
     }
 
-    // ---- AC3: MaxUploads quota + auto-deactivation ---------------------------------------------
+    [Fact]
+    public async Task Status_with_unknown_token_returns_404()
+    {
+        var client = CreateClient();
+
+        var resp = await client.GetAsync($"/api/portal/does-not-exist-{Guid.NewGuid():N}/status/{Guid.NewGuid()}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(resp)).Should().Be("vendor.portal_token_invalid");
+    }
+
+    [Fact]
+    public async Task Status_with_known_token_but_unknown_uploadId_returns_404()
+    {
+        var seeded = await SeedLinkAsync();
+        var client = CreateClient();
+
+        var resp = await client.GetAsync($"/api/portal/{seeded.Token}/status/{Guid.NewGuid()}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(resp)).Should().Be("document.not_found");
+    }
+
+    [Fact]
+    public async Task Status_remains_queryable_after_the_link_is_deactivated()
+    {
+        // The status endpoint intentionally does NOT short-circuit on `IsActive`/`ExpiresAt` —
+        // vendors can poll their past uploads even after the link is revoked or hits its quota.
+        // This test pins that asymmetry against info/upload (which both check the link state)
+        // so a future "tighten the status check" change has to think about it explicitly.
+        var seeded = await SeedLinkAsync(maxUploads: 1);
+        var client = CreateClient();
+
+        var uploadId = (await Data(await UploadAsync(client, seeded.Token, PdfBytes, "1.pdf", "application/pdf")))
+            .GetProperty("uploadId").GetGuid();
+
+        await using (var db = CreateSystemDb())
+        {
+            // The upload reached the cap → link auto-deactivated.
+            (await db.VendorPortalLinks.SingleAsync(l => l.Id == seeded.LinkId)).IsActive.Should().BeFalse();
+        }
+
+        var resp = await client.GetAsync($"/api/portal/{seeded.Token}/status/{uploadId}");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await Data(resp)).GetProperty("extractionStatus").GetString().Should().Be("Pending");
+    }
+
+    // ============================================================================================
+    // AC3 — MaxUploads quota + auto-deactivation
+    // ============================================================================================
 
     [Fact]
     public async Task Reaching_MaxUploads_deactivates_link_and_refuses_further_uploads()
@@ -269,7 +381,14 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId)).Should().Be(0);
     }
 
-    // ---- AC2: rate limits (require the limiter, which the shared fixture disables) --------------
+    // ============================================================================================
+    // AC2 — rate limits (require the limiter, which the shared fixture disables)
+    //
+    // Each test below spins up its own RateLimitedFactory so partition counters start fresh and
+    // don't leak across tests. The fixed window is 1 hour — well beyond the loop wall-clock —
+    // so window rollover is not a flake source today. If Window is ever shortened, these tests
+    // must move to a TimeProvider-driven test-clock.
+    // ============================================================================================
 
     [Fact]
     public async Task Exceeding_the_portal_token_rate_limit_returns_429()
@@ -298,10 +417,16 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     [Fact]
     public async Task Exceeding_the_portal_ip_rate_limit_returns_429()
     {
-        // The ip limiter (30/hr) partitions on client IP, which is constant for the test host. We
-        // use 31 DISTINCT tokens so the per-token limiter (10/hr) never trips — the only thing that
-        // can throttle the 31st request is the shared ip partition. Invalid tokens 404 at the
-        // handler but still consume an ip permit (the limiter runs before the handler).
+        // The ip limiter (30/hr) partitions on `Connection.RemoteIpAddress`, falling back to the
+        // literal string "unknown" when null — which it is under TestServer. All 31 requests
+        // therefore share one ip partition. We use 31 DISTINCT tokens so the per-token limiter
+        // (10/hr) never trips — the only thing that can throttle the 31st request is the shared
+        // ip partition. Invalid tokens 404 at the handler but still consume an ip permit (the
+        // limiter runs before the handler).
+        //
+        // If a future host change populates Connection.RemoteIpAddress in tests (e.g. wiring
+        // UseForwardedHeaders against a test header), this test must be updated to pin the
+        // partition key explicitly rather than relying on the null fallback.
         await using var factory = RateLimitedFactory();
         var client = factory.CreateClient();
 
@@ -313,5 +438,47 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
 
         var throttled = await client.PostAsync($"/api/portal/ip-31-{Guid.NewGuid():N}/upload", null);
         throttled.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+    }
+
+    [Fact]
+    public async Task Portal_upload_with_mixed_case_path_is_still_rate_limited()
+    {
+        // ASP.NET routing matches MapPost("/{token}/upload") case-insensitively, so the upload
+        // handler is reachable via /Upload, /UPLOAD, etc. The IsPortalUpload gate in Program.cs
+        // therefore must also be case-insensitive — an ordinal compare on "/upload" would let an
+        // attacker bypass BOTH portal rate limits by varying the path case while still hitting
+        // the upload code path. This test pins the gate's case-insensitivity against regression.
+        var seeded = await SeedLinkAsync(maxUploads: 100);
+        await using var factory = RateLimitedFactory();
+        var client = factory.CreateClient();
+        var url = $"/api/portal/{seeded.Token}/Upload"; // capital U
+
+        for (var i = 0; i < 10; i++)
+        {
+            var ok = await client.PostAsync(url, UploadForm(PdfBytes, $"{i}.pdf", "application/pdf"));
+            ok.StatusCode.Should().Be(HttpStatusCode.OK);
+        }
+
+        var throttled = await client.PostAsync(url, UploadForm(PdfBytes, "11.pdf", "application/pdf"));
+        throttled.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+    }
+
+    [Fact]
+    public async Task Portal_GET_endpoints_are_not_rate_limited()
+    {
+        // The IsPortalUpload gate intentionally excludes GETs (info + status). If a regression
+        // broadened the gate, a vendor refreshing the page would burn the 10/hr token budget on
+        // page loads. We issue 35 GETs — past BOTH portal limits (10/hr token, 30/hr ip) — and
+        // assert none are throttled.
+        var seeded = await SeedLinkAsync(maxUploads: 50);
+        await using var factory = RateLimitedFactory();
+        var client = factory.CreateClient();
+
+        for (var i = 0; i < 35; i++)
+        {
+            var resp = await client.GetAsync($"/api/portal/{seeded.Token}");
+            resp.StatusCode.Should().Be(HttpStatusCode.OK,
+                $"GET /api/portal/{{token}} iteration {i + 1}/35 should not be rate-limited");
+        }
     }
 }
