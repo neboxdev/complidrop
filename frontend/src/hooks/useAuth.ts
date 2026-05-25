@@ -20,7 +20,12 @@ export function useMe() {
     queryKey: ["auth", "me"],
     queryFn: async () => {
       try {
-        return await api.get<Me>("/api/auth/me");
+        // skipRefresh: anonymous landing-page visitors have no cd_refresh cookie,
+        // so the automatic POST /api/auth/refresh on 401 is a guaranteed wasted
+        // round-trip on the highest-traffic public page. Authenticated users
+        // with a valid cd_session still get 200 here; refresh-on-expiry still
+        // works on every other authenticated call site (#30, follow-up from #22).
+        return await api.get<Me>("/api/auth/me", { skipRefresh: true });
       } catch (err) {
         if (err instanceof ApiError && (err.status === 401 || err.code === "auth.unauthorized")) {
           return null;
