@@ -13,9 +13,9 @@ namespace CompliDrop.Api.Tests.TestHelpers;
 /// <summary>
 /// Shared per-collection fixture. Starts a throwaway Postgres container, applies EF
 /// migrations, boots the API host once, and provides a Respawn-based reset between tests.
-/// The container connection string is also published to the <c>ConnectionStrings__Database</c>
-/// environment variable so the existing <see cref="DbContextFactory"/>-based tests transparently
-/// run against the same container.
+/// The API host receives the container's connection string via
+/// <see cref="CustomWebApplicationFactory"/>'s in-memory configuration override; the harness
+/// itself never mutates process-global state.
 /// </summary>
 public sealed class IntegrationTestFixture : IAsyncLifetime
 {
@@ -24,7 +24,6 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
 
     private Respawner _respawner = null!;
     private NpgsqlConnection _respawnConnection = null!;
-    private string? _priorDbConnEnv;
 
     public CustomWebApplicationFactory Factory { get; private set; } = null!;
 
@@ -33,13 +32,6 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await _container.StartAsync();
-
-        // DbContextFactory (used by MultiTenancyTests) reads this env var first; the API host
-        // gets the same value via CustomWebApplicationFactory's in-memory config. Capture any
-        // prior value so DisposeAsync can restore it — leaving a dead-container connection string
-        // (or clobbering a real one) in process-global state would be a footgun for later code.
-        _priorDbConnEnv = Environment.GetEnvironmentVariable("ConnectionStrings__Database");
-        Environment.SetEnvironmentVariable("ConnectionStrings__Database", ConnectionString);
 
         // Migrations belong to AppDbContext — apply them to the fresh container DB.
         await using (var migrate = new AppDbContext(
@@ -87,13 +79,26 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        if (_respawnConnection is not null)
-            await _respawnConnection.DisposeAsync();
-        if (Factory is not null)
-            await Factory.DisposeAsync();
-        await _container.DisposeAsync();
-
-        // Restore the process-global env var we mutated in InitializeAsync.
-        Environment.SetEnvironmentVariable("ConnectionStrings__Database", _priorDbConnEnv);
+        // Chain the three disposals so a throw in one still runs the others. C# 'finally' will
+        // replace an earlier exception with a later one if both throw — acceptable here because
+        // all three are idempotent best-effort cleanups; the test runner only needs to know
+        // something went wrong on shutdown, not the precise ordering.
+        try
+        {
+            if (_respawnConnection is not null)
+                await _respawnConnection.DisposeAsync();
+        }
+        finally
+        {
+            try
+            {
+                if (Factory is not null)
+                    await Factory.DisposeAsync();
+            }
+            finally
+            {
+                await _container.DisposeAsync();
+            }
+        }
     }
 }

@@ -7,6 +7,14 @@ public static class ComplianceTemplateSeed
 {
     private static readonly Guid SystemOrgId = Guid.Parse("00000000-0000-0000-0000-000000000001");
 
+    /// <summary>
+    /// Number of system templates this seed installs. Exposed to the test project
+    /// (<see cref="InternalsVisibleToAttribute"/>) so harness assertions can pin the exact count
+    /// without re-declaring a brittle hand-mirror constant — adding a template here forces the
+    /// test to be updated (or, if the count is read indirectly, doesn't break it at all).
+    /// </summary>
+    internal static int TemplateCount => Templates.Length;
+
     public static async Task EnsureAsync(SystemDbContext db, CancellationToken ct = default)
     {
         var org = await db.Organizations.IgnoreQueryFilters()
