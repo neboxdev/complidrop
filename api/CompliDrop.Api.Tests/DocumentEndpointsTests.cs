@@ -1,34 +1,17 @@
 using System.Net;
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using static CompliDrop.Api.Tests.TestHelpers.UploadFixtures;
 
 namespace CompliDrop.Api.Tests;
 
 /// <summary>Integration tests for the document upload pipeline (magic bytes, plan limit, idempotency, soft delete, tenant scoping).</summary>
 public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
-    private static readonly byte[] PdfBytes = FileWith(0x25, 0x50, 0x44, 0x46); // %PDF
-
-    private static byte[] FileWith(params byte[] header)
-    {
-        var buf = new byte[64];
-        Array.Copy(header, buf, header.Length);
-        return buf;
-    }
-
-    private static MultipartFormDataContent UploadForm(byte[] bytes, string fileName, string contentType)
-    {
-        var form = new MultipartFormDataContent();
-        var file = new ByteArrayContent(bytes);
-        file.Headers.ContentType = new MediaTypeHeaderValue(contentType);
-        form.Add(file, "file", fileName);
-        return form;
-    }
 
     private static async Task<Guid> UploadedId(HttpResponseMessage resp) =>
         (await resp.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("data").GetProperty("id").GetGuid();
@@ -38,7 +21,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     {
         var auth = await RegisterAndLoginAsync();
 
-        var resp = await auth.Client.PostAsync("/api/documents/upload", UploadForm(PdfBytes, "coi.pdf", "application/pdf"));
+        var resp = await auth.Client.PostAsync("/api/documents/upload", UploadForm(PdfBytes(), "coi.pdf", "application/pdf"));
 
         resp.StatusCode.Should().Be(HttpStatusCode.Created);
         var list = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/");
@@ -49,9 +32,8 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     public async Task Upload_with_bytes_not_matching_a_supported_type_is_rejected()
     {
         var auth = await RegisterAndLoginAsync();
-        var textBytes = FileWith(0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x77, 0x64); // not PDF/JPEG/PNG
 
-        var resp = await auth.Client.PostAsync("/api/documents/upload", UploadForm(textBytes, "evil.pdf", "application/pdf"));
+        var resp = await auth.Client.PostAsync("/api/documents/upload", UploadForm(TextBytes(), "evil.pdf", "application/pdf"));
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
@@ -80,7 +62,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             await db.SaveChangesAsync();
         }
 
-        var resp = await auth.Client.PostAsync("/api/documents/upload", UploadForm(PdfBytes, "sixth.pdf", "application/pdf"));
+        var resp = await auth.Client.PostAsync("/api/documents/upload", UploadForm(PdfBytes(), "sixth.pdf", "application/pdf"));
 
         resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
     }
@@ -102,7 +84,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     {
         var req = new HttpRequestMessage(HttpMethod.Post, "/api/documents/upload")
         {
-            Content = UploadForm(PdfBytes, "c.pdf", "application/pdf")
+            Content = UploadForm(PdfBytes(), "c.pdf", "application/pdf")
         };
         req.Headers.Add("Idempotency-Key", key);
         return await client.SendAsync(req);
@@ -112,7 +94,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     public async Task Soft_deleted_document_is_404_and_absent_from_the_list()
     {
         var auth = await RegisterAndLoginAsync();
-        var id = await UploadedId(await auth.Client.PostAsync("/api/documents/upload", UploadForm(PdfBytes, "c.pdf", "application/pdf")));
+        var id = await UploadedId(await auth.Client.PostAsync("/api/documents/upload", UploadForm(PdfBytes(), "c.pdf", "application/pdf")));
 
         (await auth.Client.DeleteAsync($"/api/documents/{id}")).StatusCode.Should().Be(HttpStatusCode.OK);
 
@@ -125,7 +107,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     public async Task A_document_is_not_visible_to_another_org()
     {
         var owner = await RegisterAndLoginAsync();
-        var id = await UploadedId(await owner.Client.PostAsync("/api/documents/upload", UploadForm(PdfBytes, "c.pdf", "application/pdf")));
+        var id = await UploadedId(await owner.Client.PostAsync("/api/documents/upload", UploadForm(PdfBytes(), "c.pdf", "application/pdf")));
 
         var other = await RegisterAndLoginAsync(); // a different organization
 

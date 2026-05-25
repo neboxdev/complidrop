@@ -1,8 +1,8 @@
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CompliDrop.Api.Endpoints;
 
@@ -13,10 +13,11 @@ public static class VendorPortalEndpoints
         var group = app.MapGroup("/api/portal");
 
         group.MapGet("/{token}", PortalInfo);
+        // Rate limits (10/hr per token + 30/hr per ip) are applied by the GLOBAL chained limiter
+        // in Program.cs — not via .RequireRateLimiting(...) here, because chaining two named
+        // policies on one endpoint silently drops the first (see ADR 0004).
         group.MapPost("/{token}/upload", UploadViaPortal)
-            .DisableAntiforgery()
-            .RequireRateLimiting("portal-token")
-            .RequireRateLimiting("portal-ip");
+            .DisableAntiforgery();
         group.MapGet("/{token}/status/{uploadId:guid}", GetStatus);
     }
 
@@ -54,6 +55,8 @@ public static class VendorPortalEndpoints
         SystemDbContext db,
         IBlobStorageService blobs,
         IFileValidationService validator,
+        IAuditLogger audit,
+        ILogger<VendorPortalLink> logger,
         CancellationToken ct)
     {
         var link = await db.VendorPortalLinks
@@ -65,8 +68,9 @@ public static class VendorPortalEndpoints
             return Error(410, "vendor.portal_token_expired", "This upload link has expired.");
         if (link.UploadCount >= link.MaxUploads)
         {
-            link.IsActive = false;
-            await db.SaveChangesAsync(ct);
+            // Already-at-cap: deactivate idempotently via atomic UPDATE so two concurrent at-cap
+            // requests don't fight over tracked-entity state.
+            await DeactivateAsync(db, link.Id, ct);
             return Error(429, "vendor.portal_quota_exceeded", "Upload quota reached for this link.");
         }
 
@@ -107,10 +111,72 @@ public static class VendorPortalEndpoints
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };
-        db.Documents.Add(doc);
-        link.UploadCount += 1;
-        if (link.UploadCount >= link.MaxUploads) link.IsActive = false;
-        await db.SaveChangesAsync(ct);
+
+        // Atomic reservation + Document insert + audit row, all in one explicit transaction. The
+        // cheap `UploadCount >= MaxUploads` check above is racy: two concurrent requests can both
+        // see count=N-1 with cap=N and both pass. The atomic UPDATE-WHERE clause is re-evaluated
+        // against the row's current state under Postgres's row-level UPDATE lock, so only one of
+        // the racing requests increments past the cap. SetProperty(IsActive, count+1 < max) flips
+        // the link inactive when this request takes the last permit. rows-affected == 0 means we
+        // lost the race (or the link was revoked between the initial read and now).
+        //
+        // The transaction means: if the Document insert OR the audit-log SaveChanges fail after
+        // the reservation, the permit increment rolls back (so the customer doesn't lose paid
+        // quota for an upload that didn't persist). The blob is still uploaded by that point —
+        // the `finally` best-effort deletes it so storage doesn't leak. If the blob delete itself
+        // fails, we log loud so an operator notices the orphan rather than failing silent.
+        var documentPersisted = false;
+        try
+        {
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+            var reserved = await db.VendorPortalLinks
+                .Where(l => l.Id == link.Id && l.IsActive && l.UploadCount < l.MaxUploads)
+                .ExecuteUpdateAsync(set => set
+                    .SetProperty(l => l.UploadCount, l => l.UploadCount + 1)
+                    .SetProperty(l => l.IsActive, l => l.UploadCount + 1 < l.MaxUploads),
+                    ct);
+
+            if (reserved == 0)
+            {
+                // Lost the race or link revoked. The `finally` will best-effort delete the blob.
+                // Deactivate idempotently outside this (rolled-back) tx.
+                await tx.RollbackAsync(ct);
+                await DeactivateAsync(db, link.Id, ct);
+                return Error(429, "vendor.portal_quota_exceeded", "Upload quota reached for this link.");
+            }
+
+            db.Documents.Add(doc);
+            await db.SaveChangesAsync(ct);
+
+            // Explicit audit row for the link mutation — ExecuteUpdateAsync bypasses the
+            // AuditSaveChangesInterceptor, so without this call the link-mutation audit trail
+            // would be lost. organizationIdOverride is needed because the portal upload is
+            // unauthenticated (ICurrentUser has no OrgId). Same tx → commits atomically with
+            // the Document insert and the counter increment.
+            await audit.LogAsync(
+                "vendorPortalLink.upload_processed",
+                nameof(VendorPortalLink),
+                link.Id,
+                organizationIdOverride: orgId,
+                ct: ct);
+
+            await tx.CommitAsync(ct);
+            documentPersisted = true;
+        }
+        finally
+        {
+            if (!documentPersisted)
+            {
+                try { await blobs.DeleteAsync(blobName, ct); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex,
+                        "Portal upload: best-effort blob cleanup failed for {BlobName} on link {LinkId}",
+                        blobName, link.Id);
+                }
+            }
+        }
 
         return Results.Ok(new
         {
@@ -123,6 +189,11 @@ public static class VendorPortalEndpoints
             error = (object?)null
         });
     }
+
+    private static Task<int> DeactivateAsync(SystemDbContext db, Guid linkId, CancellationToken ct) =>
+        db.VendorPortalLinks
+            .Where(l => l.Id == linkId)
+            .ExecuteUpdateAsync(set => set.SetProperty(l => l.IsActive, false), ct);
 
     private static async Task<IResult> GetStatus(
         string token,
