@@ -465,6 +465,142 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
     }
 
+    // ----- SendDate = org-local calendar day (#24) -------------------------------------------
+    // ReminderLog.SendDate stores the org's local calendar day, not the UTC date at send time.
+    // The regression is real only for orgs whose 08:00-local crosses a UTC midnight (Tokyo: 23:00
+    // UTC the prior day); NY is included for symmetry so a future "let's just use nowUtc" refactor
+    // breaks both tests at once instead of looking like a Tokyo-only quirk. ADR 0002 documents the
+    // decision; SentAt (the timestamptz instant) is unchanged.
+
+    [Fact]
+    public async Task Tokyo_org_records_send_date_as_local_calendar_day_not_utc()
+    {
+        // 08:00 Tokyo Jan 15 = 23:00 UTC Jan 14. The old behavior stored Jan 14 (UTC date at the
+        // moment of send); the new behavior stores Jan 15 (the org's local calendar day, which is
+        // what every "reminders sent on Jan 15" query naturally means for a Tokyo org).
+        var seed = await SeedReminderAsync(TokyoEightAm, timeZone: TokyoTz, internalEmail: "tokyo@example.com");
+
+        await BuildWorker(TokyoEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        await using var db = CreateSystemDb();
+        var log = await db.ReminderLogs.SingleAsync(l =>
+            l.ReminderId == seed.ReminderId && l.DocumentId == seed.DocumentId);
+        log.SendDate.Should().Be(new DateOnly(2026, 1, 15));
+        // SentAt remains the precise UTC instant — DateOnly column flipping doesn't change this.
+        log.SentAt.Should().Be(TokyoEightAm.UtcDateTime);
+    }
+
+    [Fact]
+    public async Task NewYork_org_records_send_date_as_local_calendar_day()
+    {
+        // 08:00 NY Jan 15 = 13:00 UTC Jan 15 — same calendar day in both zones, so the value is
+        // identical before and after #24. The test exists so the Tokyo assertion above doesn't
+        // stand alone: a regression that reverted both write sites to nowUtc would silently pass
+        // for NY but fail for Tokyo, and we want the failure to read as "SendDate semantic", not
+        // "Tokyo-specific bug".
+        var seed = await SeedReminderAsync(NyEightAm, timeZone: NyTz, internalEmail: "ny@example.com");
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        await using var db = CreateSystemDb();
+        var log = await db.ReminderLogs.SingleAsync(l =>
+            l.ReminderId == seed.ReminderId && l.DocumentId == seed.DocumentId);
+        log.SendDate.Should().Be(new DateOnly(2026, 1, 15));
+        log.SentAt.Should().Be(NyEightAm.UtcDateTime);
+    }
+
+    [Fact]
+    public async Task Backfill_sql_rewrites_legacy_utc_send_date_to_org_local_for_tokyo_row()
+    {
+        // The runtime tests cover the new write path. This test covers the one-shot backfill SQL
+        // shipped in migration `BackfillReminderLogSendDateToOrgLocal` — seed a row in the
+        // pre-#24 shape (SendDate = UTC date), execute the same SQL the migration runs, and
+        // assert the row was shifted to the org-local day. WHERE guard means it's idempotent;
+        // running it a second time is a no-op.
+        var seed = await SeedReminderAsync(TokyoEightAm, timeZone: TokyoTz, internalEmail: "tokyo@example.com");
+        var nyOnSameTokyoDay = await SeedReminderAsync(NyEightAm, timeZone: NyTz, internalEmail: "ny@example.com");
+
+        await using (var db = CreateSystemDb())
+        {
+            db.ReminderLogs.Add(new ReminderLog
+            {
+                Id = Guid.NewGuid(),
+                ReminderId = seed.ReminderId,
+                DocumentId = seed.DocumentId,
+                RecipientEmail = "tokyo@example.com",
+                SentAt = TokyoEightAm.UtcDateTime,        // 23:00 UTC Jan 14
+                SendDate = new DateOnly(2026, 1, 14),     // legacy: UTC date
+                ResendMessageId = "resend_legacy_tokyo",
+                Status = "sent",
+            });
+            db.ReminderLogs.Add(new ReminderLog
+            {
+                Id = Guid.NewGuid(),
+                ReminderId = nyOnSameTokyoDay.ReminderId,
+                DocumentId = nyOnSameTokyoDay.DocumentId,
+                RecipientEmail = "ny@example.com",
+                SentAt = NyEightAm.UtcDateTime,           // 13:00 UTC Jan 15
+                SendDate = new DateOnly(2026, 1, 15),     // already matches local — backfill must skip
+                ResendMessageId = "resend_legacy_ny",
+                Status = "sent",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await using (var db = CreateSystemDb())
+        {
+            // Identical SQL to the migration. Kept in sync by code review — diverging here means
+            // the migration ships untested SQL, which the bug-fix epic exists to prevent.
+            await db.Database.ExecuteSqlRawAsync("""
+                UPDATE "ReminderLogs" AS l
+                SET "SendDate" = ((l."SentAt" AT TIME ZONE o."TimeZone"))::date
+                FROM "Reminders" AS r
+                INNER JOIN "Organizations" AS o ON o."Id" = r."OrganizationId"
+                WHERE r."Id" = l."ReminderId"
+                  AND ((l."SentAt" AT TIME ZONE o."TimeZone"))::date <> l."SendDate";
+                """);
+        }
+
+        await using (var db = CreateSystemDb())
+        {
+            var tokyoLog = await db.ReminderLogs.SingleAsync(l => l.ReminderId == seed.ReminderId);
+            tokyoLog.SendDate.Should().Be(new DateOnly(2026, 1, 15)); // shifted from Jan 14 → Jan 15
+            var nyLog = await db.ReminderLogs.SingleAsync(l => l.ReminderId == nyOnSameTokyoDay.ReminderId);
+            nyLog.SendDate.Should().Be(new DateOnly(2026, 1, 15));   // unchanged (already matched)
+        }
+    }
+
+    [Fact]
+    public async Task Tokyo_pre_existing_log_with_local_send_date_blocks_resend()
+    {
+        // Dedupe check uses the new local-day SendDate on both sides (write and lookup). A
+        // pre-existing row written with the new semantic (SendDate = Jan 15 Tokyo-local) must
+        // block today's tick at 23:00 UTC Jan 14. This is the dedupe invariant for non-US zones
+        // after the value change.
+        var seed = await SeedReminderAsync(TokyoEightAm, timeZone: TokyoTz, internalEmail: "tokyo@example.com");
+
+        await using (var db = CreateSystemDb())
+        {
+            db.ReminderLogs.Add(new ReminderLog
+            {
+                Id = Guid.NewGuid(),
+                ReminderId = seed.ReminderId,
+                DocumentId = seed.DocumentId,
+                RecipientEmail = "tokyo@example.com",
+                SentAt = TokyoEightAm.UtcDateTime,
+                SendDate = new DateOnly(2026, 1, 15), // Tokyo-local day, not UTC (Jan 14).
+                ResendMessageId = "resend_pre_existing_tokyo",
+                Status = "sent",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildWorker(TokyoEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().BeEmpty();
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1); // unchanged
+    }
+
     // ----- Additional coverage from review (DST, multi-reminder, retry, subject template) ------
 
     [Fact]
