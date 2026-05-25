@@ -25,7 +25,8 @@ export interface LogoProps {
   variant?: LogoVariant;
   /**
    * Lockup height in px. For `mark` this is the icon size. For lockup variants
-   * the icon size equals `height` and the wordmark scales to `1.3 × height`.
+   * the icon size equals `height` and the wordmark scales to `~0.81 × height`
+   * (matching the 52 / 64 ratio in the canonical SVG exports — icon-dominant).
    * Defaults to `36`. Non-positive or non-finite values fall back to the default.
    */
   height?: number;
