@@ -218,4 +218,120 @@ public sealed class ResendWebhookTests(IntegrationTestFixture fixture) : Integra
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         (await StatusOf(messageId)).Should().Be("delivered");
     }
+
+    // -- Ordering-aware status updates (ticket #21). ----------------------------------------
+    // Resend delivers via Svix, which does NOT guarantee event ordering and may redeliver older
+    // events. These tests assert the lifecycle precedence rule end-to-end through the HTTP
+    // handler; the pure precedence function itself is exhaustively unit-tested in
+    // ReminderStatusPrecedenceTests.
+
+    [Theory]
+    [InlineData("bounced", "email.delivered", "bounced")]
+    [InlineData("bounced", "email.opened", "bounced")]
+    [InlineData("bounced", "email.clicked", "bounced")]
+    [InlineData("complained", "email.delivered", "complained")]
+    [InlineData("complained", "email.clicked", "complained")]
+    public async Task Positive_event_after_negative_does_not_regress_status(
+        string seeded, string positiveEventType, string expectedFinal)
+    {
+        var messageId = await SeedReminderLogAsync(status: seeded);
+        var payload = EventPayload(positiveEventType, messageId);
+
+        var resp = await PostWebhook(payload, Sign(payload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await StatusOf(messageId)).Should().Be(expectedFinal);
+    }
+
+    [Theory]
+    [InlineData("delivered", "email.bounced", "bounced")]
+    [InlineData("opened", "email.bounced", "bounced")]
+    [InlineData("clicked", "email.bounced", "bounced")]
+    [InlineData("delivered", "email.complained", "complained")]
+    [InlineData("clicked", "email.complained", "complained")]
+    public async Task Negative_event_after_positive_overrides_to_negative(
+        string seeded, string negativeEventType, string expectedFinal)
+    {
+        var messageId = await SeedReminderLogAsync(status: seeded);
+        var payload = EventPayload(negativeEventType, messageId);
+
+        var resp = await PostWebhook(payload, Sign(payload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await StatusOf(messageId)).Should().Be(expectedFinal);
+    }
+
+    [Fact]
+    public async Task Late_lower_rank_positive_does_not_regress_a_higher_rank_positive()
+    {
+        // Seed at clicked; a late email.delivered redelivery must NOT roll back to delivered.
+        var messageId = await SeedReminderLogAsync(status: "clicked");
+        var payload = DeliveredPayload(messageId);
+
+        var resp = await PostWebhook(payload, Sign(payload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await StatusOf(messageId)).Should().Be("clicked");
+    }
+
+    [Fact]
+    public async Task Sequential_positives_settle_on_highest_rank_reached()
+    {
+        // Send delivered → opened → clicked → late delivered → late opened. End state: clicked.
+        var messageId = await SeedReminderLogAsync(status: "sent");
+
+        foreach (var type in new[] { "email.delivered", "email.opened", "email.clicked", "email.delivered", "email.opened" })
+        {
+            var payload = EventPayload(type, messageId);
+            (await PostWebhook(payload, Sign(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+        }
+
+        (await StatusOf(messageId)).Should().Be("clicked");
+    }
+
+    [Fact]
+    public async Task Failed_current_status_can_be_advanced_by_a_real_positive_event()
+    {
+        // "failed" logs carry no ResendMessageId in production (set by ReminderBackgroundService
+        // only when Resend returns no id), but the precedence rule must still be defined for an
+        // unknown current status. We seed a log with status="failed" AND a synthetic message id
+        // to exercise the path where it matches.
+        var messageId = await SeedReminderLogAsync(status: "failed");
+        var payload = DeliveredPayload(messageId);
+
+        var resp = await PostWebhook(payload, Sign(payload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await StatusOf(messageId)).Should().Be("delivered");
+    }
+
+    [Fact]
+    public async Task Duplicate_negative_redelivery_is_idempotent()
+    {
+        // The existing Duplicate_valid_delivery_is_idempotent test covers positive-duplicate;
+        // assert the same for a negative, which under the precedence rule is also a no-op write
+        // when current == incoming.
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var payload = EventPayload("email.bounced", messageId);
+        var svix = Sign(payload);
+
+        (await PostWebhook(payload, svix)).StatusCode.Should().Be(HttpStatusCode.OK);
+        (await PostWebhook(payload, svix)).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        (await StatusOf(messageId)).Should().Be("bounced");
+    }
+
+    [Fact]
+    public async Task Negative_after_different_negative_applies_per_rule()
+    {
+        // Per the ticket: "negative/terminal events always apply, regardless of current status".
+        // This is the corner case (a bounced log getting a later complained event, or vice
+        // versa) — pinned to document the chosen interpretation.
+        var messageId = await SeedReminderLogAsync(status: "bounced");
+        var payload = EventPayload("email.complained", messageId);
+
+        (await PostWebhook(payload, Sign(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        (await StatusOf(messageId)).Should().Be("complained");
+    }
 }
