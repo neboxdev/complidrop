@@ -25,7 +25,8 @@ export interface LogoProps {
   variant?: LogoVariant;
   /**
    * Lockup height in px. For `mark` this is the icon size. For lockup variants
-   * the icon size equals `height` and the wordmark scales to `1.3 × height`.
+   * the icon size equals `height` and the wordmark scales to `~0.81 × height`
+   * (matching the 52 / 64 ratio in the canonical SVG exports — icon-dominant).
    * Defaults to `36`. Non-positive or non-finite values fall back to the default.
    */
   height?: number;
@@ -116,8 +117,14 @@ export function Logo({
     );
   }
 
-  const fontSize = Math.round(safeHeight * 1.3);
-  const gap = Math.round(safeHeight * 0.35);
+  // Proportions derived from the canonical export at
+  // `docs/brand/logo-refresh-2026/svg/complidrop-logo-horizontal.svg`:
+  // viewBox 0 0 380 80, icon scaled to 64 px tall, wordmark font-size 52,
+  // gap-between 16. Yields fontSize ≈ 0.81 × icon and gap ≈ 0.22 × icon. The
+  // reference `Logo.jsx` in the handoff used a `1.3 × icon` fontSize comment
+  // that was inconsistent with the actual SVG exports — we match the SVGs.
+  const fontSize = Math.round(safeHeight * 0.81);
+  const gap = Math.round(safeHeight * 0.22);
 
   const wordmarkStyle: CSSProperties = {
     ...WORDMARK_FONT_STYLE,
