@@ -48,11 +48,11 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
         // Respawn: wipe tenant data between tests, but keep schema + migration history + the
         // system seed. Organizations + ComplianceTemplates + ComplianceRules are pulled out of
         // Respawn's wipe set because they hold the seeded system rows (one Organization row at
-        // SystemOrgId, five IsSystemTemplate templates with their rules). Respawn cannot
-        // row-level ignore, so we keep the whole table and run custom DELETE SQL after the
-        // Respawn pass to wipe only the tenant rows — see ResetAsync. Net effect: skip
-        // ComplianceTemplateSeed.EnsureAsync's ~50ms-per-test reseed cost while keeping the
-        // same final state.
+        // SystemOrgId plus the ComplianceTemplateSeed-installed templates and their rules).
+        // Respawn cannot row-level ignore, so we keep the whole table and run custom DELETE SQL
+        // after the Respawn pass to wipe only the tenant rows — see ResetAsync. Net effect:
+        // skip ComplianceTemplateSeed.EnsureAsync's ~50ms-per-test reseed cost while keeping
+        // the same final state.
         _respawnConnection = new NpgsqlConnection(ConnectionString);
         await _respawnConnection.OpenAsync();
         _respawner = await Respawner.CreateAsync(_respawnConnection, new RespawnerOptions

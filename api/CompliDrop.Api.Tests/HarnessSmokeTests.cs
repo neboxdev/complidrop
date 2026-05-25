@@ -115,6 +115,12 @@ public sealed class HarnessSmokeTests(IntegrationTestFixture fixture) : Integrat
         body.GetProperty("data").GetProperty("userId").GetGuid().Should().Be(registered.UserId);
     }
 
+    /// <summary>
+    /// Sister of <see cref="Reset_cascade_wipes_tenant_templates_while_system_seed_persists"/>.
+    /// This one pins the User cleanup angle specifically; the cascade test below covers the
+    /// FK-cascade tables (Organizations/ComplianceTemplates/ComplianceRules) that the optimised
+    /// reset strategy treats specially. Kept separate because they assert different invariants.
+    /// </summary>
     [Fact]
     public async Task Reset_clears_tenant_data_but_keeps_system_templates()
     {
@@ -138,41 +144,61 @@ public sealed class HarnessSmokeTests(IntegrationTestFixture fixture) : Integrat
     /// Pins the cascade-based wipe strategy used by <c>ResetAsync</c>. Because
     /// <c>Organizations</c>, <c>ComplianceTemplates</c>, and <c>ComplianceRules</c> are in
     /// Respawn's <c>TablesToIgnore</c>, the only thing wiping tenant rows in those tables is the
-    /// targeted <c>DELETE FROM "Organizations" WHERE "Id" &lt;&gt; sysOrgId</c> + FK cascade. If
-    /// the cascade ever stopped working (FK changed to <c>SetNull</c>, table added that ignores
-    /// the cascade, etc.) tenant rows would leak across tests and this assertion would catch it.
-    /// Stable system-template IDs across resets confirm the seed isn't being re-run.
+    /// targeted <c>DELETE FROM "Organizations" WHERE "Id" &lt;&gt; sysOrgId</c> + FK cascade. We
+    /// seed every cascade arm the optimization implicitly depends on:
+    /// <list type="bullet">
+    /// <item><c>tenant Org → tenant ComplianceTemplate → tenant ComplianceRule</c> (CASCADE x2)</item>
+    /// <item><c>tenant Vendor → system ComplianceTemplate</c> (Vendor's FK to template is
+    /// SetNull, so it's safe across the cascade as long as the Vendor itself is wiped by Respawn
+    /// first — pins the ordering invariant).</item>
+    /// <item><c>tenant Document → tenant ComplianceCheck → tenant ComplianceRule</c>
+    /// (ComplianceCheck → ComplianceRule is RESTRICT; the cascade only stays safe because the
+    /// ComplianceChecks are wiped by Respawn before the Org-DELETE fires).</item>
+    /// </list>
+    /// Stable system-template rows across resets (Id + Name + CreatedAt) confirm rows weren't
+    /// re-inserted by a hypothetical re-run of the seed. Looping the reset three times catches
+    /// a regression that only kicks in on later resets (e.g. lazy-init cache invalidation).
     /// </summary>
     [Fact]
-    public async Task Reset_cascade_wipes_tenant_templates_while_system_seed_persists_with_stable_ids()
+    public async Task Reset_cascade_wipes_tenant_templates_while_system_seed_persists()
     {
-        // Capture system-template IDs before any tenant data lands.
-        Guid[] systemIdsBefore;
+        // Snapshot the system rows before any tenant data lands. Use a projection rich enough
+        // that a hypothetical "rows updated rather than re-inserted" regression also fails.
+        // OrderBy(Id) — Name has no unique index, so name-ordering could theoretically be
+        // ambiguous if a future seed duplicated a name.
+        SystemTemplateSnapshot[] systemBefore = await SnapshotSystemTemplatesAsync();
+        systemBefore.Should().HaveCount(ExpectedSystemTemplateCount);
+
+        // Pick the first system template's Id — the Vendor row below will reference it via
+        // Vendor.ComplianceTemplateId (FK = SetNull) — and a system rule Id for the
+        // RESTRICT-FK ComplianceCheck arm.
+        var systemTemplateId = systemBefore[0].Id;
+        Guid systemRuleId;
         await using (var db = CreateSystemDb())
         {
-            systemIdsBefore = await db.ComplianceTemplates
-                .Where(t => t.IsSystemTemplate)
-                .OrderBy(t => t.Name)
-                .Select(t => t.Id)
-                .ToArrayAsync();
+            systemRuleId = await db.ComplianceRules
+                .Where(r => r.ComplianceTemplate.IsSystemTemplate)
+                .Select(r => r.Id)
+                .FirstAsync();
         }
-        systemIdsBefore.Should().HaveCount(ExpectedSystemTemplateCount);
-
-        // Seed a tenant Org with a tenant ComplianceTemplate + ComplianceRule. The template is
-        // in TablesToIgnore — so the only way for it to disappear is the cascade from deleting
-        // its parent Organization.
+        var seedSuffix = Guid.NewGuid().ToString("N")[..8];
         var tenantOrgId = Guid.NewGuid();
         var tenantTemplateId = Guid.NewGuid();
         var tenantRuleId = Guid.NewGuid();
+        var tenantVendorId = Guid.NewGuid();
+        var tenantDocId = Guid.NewGuid();
+        var tenantCheckOnTenantRuleId = Guid.NewGuid();
+        var tenantCheckOnSystemRuleId = Guid.NewGuid();
+
         await using (var db = CreateSystemDb())
         {
             var now = DateTime.UtcNow;
-            db.Organizations.Add(new() { Id = tenantOrgId, Name = "tenant-org", CreatedAt = now, UpdatedAt = now });
+            db.Organizations.Add(new() { Id = tenantOrgId, Name = $"tenant-org-{seedSuffix}", CreatedAt = now, UpdatedAt = now });
             db.ComplianceTemplates.Add(new()
             {
                 Id = tenantTemplateId,
                 OrganizationId = tenantOrgId,
-                Name = "tenant-only-template",
+                Name = $"tenant-template-{seedSuffix}",
                 IsSystemTemplate = false,
                 CreatedAt = now
             });
@@ -185,39 +211,122 @@ public sealed class HarnessSmokeTests(IntegrationTestFixture fixture) : Integrat
                 ErrorMessage = "x",
                 SortOrder = 1
             });
+            // Vendor points at a SYSTEM template via SetNull FK — exercises the order-dependent
+            // safety (Vendor must be wiped by Respawn before the system template would matter).
+            db.Vendors.Add(new()
+            {
+                Id = tenantVendorId,
+                OrganizationId = tenantOrgId,
+                Name = $"tenant-vendor-{seedSuffix}",
+                ComplianceTemplateId = systemTemplateId,
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+            // Document + two ComplianceChecks — one referencing the tenant rule, one referencing
+            // a SYSTEM rule. ComplianceCheck → ComplianceRule is RESTRICT, so the cascade only
+            // stays safe because Respawn wipes the checks before the Org-DELETE fires.
+            db.Documents.Add(new()
+            {
+                Id = tenantDocId,
+                OrganizationId = tenantOrgId,
+                VendorId = tenantVendorId,
+                OriginalFileName = "x.pdf",
+                BlobStorageUrl = "blob://x",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+            db.ComplianceChecks.Add(new()
+            {
+                Id = tenantCheckOnTenantRuleId,
+                DocumentId = tenantDocId,
+                ComplianceRuleId = tenantRuleId,
+                IsPassed = true,
+                CheckedAt = now
+            });
+            db.ComplianceChecks.Add(new()
+            {
+                Id = tenantCheckOnSystemRuleId,
+                DocumentId = tenantDocId,
+                ComplianceRuleId = systemRuleId,
+                IsPassed = true,
+                CheckedAt = now
+            });
             await db.SaveChangesAsync();
         }
+
         // Pre-reset sanity: tenant rows exist alongside the system rows.
         await using (var db = CreateSystemDb())
         {
             (await db.Organizations.CountAsync()).Should().Be(2, "system org + tenant org");
             (await db.ComplianceTemplates.CountAsync(t => !t.IsSystemTemplate)).Should().Be(1);
             (await db.ComplianceRules.CountAsync(r => r.Id == tenantRuleId)).Should().Be(1);
+            (await db.Vendors.CountAsync(v => v.Id == tenantVendorId)).Should().Be(1);
+            (await db.Documents.CountAsync(d => d.Id == tenantDocId)).Should().Be(1);
+            (await db.ComplianceChecks.CountAsync(c => c.DocumentId == tenantDocId)).Should().Be(2);
         }
 
-        await Fixture.ResetAsync();
-
-        await using (var db = CreateSystemDb())
+        // Loop the reset to catch hypothetical regressions that only kick in on later resets
+        // (lazy-init invalidation, cached state in Respawn, etc.). The reset must not throw —
+        // including the RESTRICT-FK case (ComplianceCheck → system ComplianceRule). The system
+        // snapshot must remain byte-identical to the initial capture every iteration.
+        for (var i = 1; i <= 3; i++)
         {
-            // Only the system org survives.
-            (await db.Organizations.CountAsync()).Should().Be(1);
+            await Fixture.ResetAsync();
+
+            await using var db = CreateSystemDb();
+
+            // Only the system org survives the targeted DELETE.
+            (await db.Organizations.CountAsync()).Should().Be(1, $"iteration {i}");
+
             // Cascade-delete wiped the tenant template (parent org gone) — even though Respawn
             // ignored the ComplianceTemplates table.
-            (await db.ComplianceTemplates.CountAsync(t => !t.IsSystemTemplate)).Should().Be(0);
+            (await db.ComplianceTemplates.CountAsync(t => !t.IsSystemTemplate)).Should().Be(0, $"iteration {i}");
             // Cascade through ComplianceTemplate → ComplianceRule too.
-            (await db.ComplianceRules.CountAsync(r => r.Id == tenantRuleId)).Should().Be(0);
+            (await db.ComplianceRules.CountAsync(r => r.Id == tenantRuleId)).Should().Be(0, $"iteration {i}");
+            // Respawn wiped the tenant Vendor + Document + ComplianceChecks.
+            (await db.Vendors.CountAsync(v => v.Id == tenantVendorId)).Should().Be(0, $"iteration {i}");
+            (await db.Documents.CountAsync(d => d.Id == tenantDocId)).Should().Be(0, $"iteration {i}");
+            (await db.ComplianceChecks.CountAsync()).Should().Be(0, $"iteration {i}");
 
-            // System-template IDs are byte-identical to the pre-test snapshot — proves the seed
-            // is NOT being re-run on reset (re-running would generate new GUIDs).
-            var systemIdsAfter = await db.ComplianceTemplates
-                .Where(t => t.IsSystemTemplate)
-                .OrderBy(t => t.Name)
-                .Select(t => t.Id)
-                .ToArrayAsync();
-            systemIdsAfter.Should().BeEquivalentTo(systemIdsBefore,
-                "the optimization skips the seed reseed; system template GUIDs must be stable across resets");
+            // The SYSTEM template referenced by the tenant Vendor (SetNull) survives.
+            (await db.ComplianceTemplates.CountAsync(t => t.Id == systemTemplateId)).Should().Be(1, $"iteration {i}");
+            // The SYSTEM rule referenced by a tenant check (RESTRICT) survives.
+            (await db.ComplianceRules.CountAsync(r => r.Id == systemRuleId)).Should().Be(1, $"iteration {i}");
+
+            // Rows weren't re-inserted: Id + Name + CreatedAt are byte-identical to the pre-test
+            // snapshot. A hypothetical reseed-as-update regression would shift CreatedAt; the
+            // pre-optimization reseed-after-wipe would have shifted Id.
+            var systemAfter = await SnapshotSystemTemplatesAsync(db);
+            systemAfter.Should().BeEquivalentTo(systemBefore,
+                $"system template rows must not be re-inserted across resets (iteration {i})");
+
+            // The system rules count also stays at the seeded value — locks in the cascade isn't
+            // accidentally widened to system rows.
+            (await db.ComplianceRules.CountAsync(r => r.ComplianceTemplate.IsSystemTemplate))
+                .Should().BeGreaterThan(0, $"iteration {i}");
         }
     }
+
+    /// <summary>Snapshot the system template rows in a stable order, projecting fields that
+    /// would differ if a reseed (insert-or-update) were silently running on reset.</summary>
+    private async Task<SystemTemplateSnapshot[]> SnapshotSystemTemplatesAsync(
+        Data.SystemDbContext? db = null)
+    {
+        if (db is not null) return await Query(db);
+        await using var owned = CreateSystemDb();
+        return await Query(owned);
+
+        static async Task<SystemTemplateSnapshot[]> Query(Data.SystemDbContext db) =>
+            await db.ComplianceTemplates
+                .Where(t => t.IsSystemTemplate)
+                .OrderBy(t => t.Id) // Id is the canonical stable key — Name has no unique index.
+                .Select(t => new SystemTemplateSnapshot(t.Id, t.Name, t.CreatedAt))
+                .ToArrayAsync();
+    }
+
+    private sealed record SystemTemplateSnapshot(Guid Id, string Name, DateTime CreatedAt);
 
     /// <summary>
     /// Inspects the response's <c>Set-Cookie</c> headers (independent of the cookie container)
