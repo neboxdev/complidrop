@@ -98,6 +98,6 @@ Rejected because:
 
 ## References
 
-- Tickets: [#26](https://github.com/neboxdev/complidrop/issues/26) (the fix that prompted this ADR)
+- Tickets: [#26](https://github.com/neboxdev/complidrop/issues/26) (the fix that prompted this ADR), [#60](https://github.com/neboxdev/complidrop/issues/60) (initial project-wide audit confirming every other raw-SQL path is clean or clause-3 legitimate; codifies the rule in `CLAUDE.md` Rules of engagement)
 - ADRs: [0007](0007-reminder-log-send-date-is-org-local.md) (sibling — calendar-day extraction via `AT TIME ZONE org."TimeZone"`, the legitimate use covered by clause 3), [0008](0008-reminder-multi-instance-coordination-via-advisory-lock.md) (other raw-SQL path, no timestamp surface, audited clean)
 - External: [Postgres docs — Date/Time Types §8.5.1.3](https://www.postgresql.org/docs/current/datatype-datetime.html#DATATYPE-TIMEZONES) on session TimeZone semantics

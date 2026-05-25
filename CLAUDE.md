@@ -48,6 +48,7 @@ cd api/CompliDrop.Api && dotnet ef database update --context AppDbContext
 - Never expose API keys in code — always config + user-secrets.
 - Never commit the contents of `connection string.txt`.
 - Never create migrations without reading spec §3 first.
+- Raw SQL touching a `timestamptz` column uses bare `now()` / `DateTime.UtcNow`, never `AT TIME ZONE` — see [ADR 0009](docs/adr/0009-no-at-time-zone-on-timestamptz-in-raw-sql.md). When reviewing a diff that adds `ExecuteSqlRaw` / `ExecuteSqlInterpolated` / `migrationBuilder.Sql` / `cmd.CommandText`, check: any `AT TIME ZONE` on a timestamptz expression whose result feeds back into a timestamptz comparison or assignment is a bug. (Output-only conversion to `date` / wall-clock display — clause 3 — stays legitimate.)
 - Vendor portal endpoints (`/api/portal/*`) are PUBLIC — treat inputs as untrusted.
 - File validation must use magic bytes, not `Content-Type`.
 - Webhook handlers must verify signatures and dedupe event ids.
