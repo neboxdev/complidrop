@@ -347,6 +347,131 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(1, "the doc is untouched");
     }
 
+    // ----- Session-TZ independence (the #26 fix) ----------------------------------------------
+
+    /// <summary>
+    /// Both directions of the bug surface. The pre-fix SQL mixed timestamptz with `now() at time
+    /// zone 'utc'` (a `timestamp without time zone`), which Postgres bridged via the SESSION TZ —
+    /// so the threshold and the writes drifted by the session offset. The drift sign depends on
+    /// the offset direction:
+    /// <list type="bullet">
+    /// <item><c>America/New_York</c> (UTC-4/-5): RHS shifts hours into the FUTURE → fresh docs are wrongly reclaimed.</item>
+    /// <item><c>Asia/Tokyo</c> (UTC+9): RHS shifts hours into the PAST → stale docs are wrongly NOT reclaimed.</item>
+    /// </list>
+    /// Driving each test under both zones means every test discriminates the bug from the fix
+    /// under at least one zone (e.g. the stale-reclaim test passes under both old and new SQL when
+    /// run under NY, but only the new SQL passes it under Tokyo — see comments on each fact).
+    /// </summary>
+    public static TheoryData<string> NonUtcSessionZones() => new()
+    {
+        "America/New_York",
+        "Asia/Tokyo",
+    };
+
+    /// <summary>
+    /// Runs <see cref="ExtractionWorker.ClaimSql"/> on a fresh connection whose session TimeZone
+    /// is pinned to the given IANA zone. Proves the worker's SQL is correct regardless of session
+    /// TZ. The trailing `RESET TIMEZONE` is belt-and-suspenders: Npgsql's pool-return runs
+    /// `DISCARD ALL` by default which would clear the session TZ anyway, but a future change to
+    /// `Pooling`/`No Reset On Close` settings could disable that reset and silently leak a non-UTC
+    /// TZ into the next test's pooled connection. Resetting explicitly removes the dependency.
+    /// </summary>
+    private async Task<Guid?> RunClaimUnderSessionTimeZoneAsync(string ianaZone)
+    {
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+
+        await using (var setTz = conn.CreateCommand())
+        {
+            // Inline literal is safe — IANA zone names are caller-controlled test inputs, not user
+            // input, and `SET TIME ZONE` does not accept parameters in Postgres.
+            setTz.CommandText = $"SET TIME ZONE '{ianaZone}'";
+            await setTz.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            await using var claim = conn.CreateCommand();
+            claim.CommandText = ExtractionWorker.ClaimSql;
+            await using var reader = await claim.ExecuteReaderAsync();
+            return await reader.ReadAsync() ? reader.GetGuid(0) : (Guid?)null;
+        }
+        finally
+        {
+            // Explicit cleanup — see helper docstring.
+            await using var reset = conn.CreateCommand();
+            reset.CommandText = "RESET TIMEZONE";
+            await reset.ExecuteNonQueryAsync();
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(NonUtcSessionZones))]
+    public async Task Claim_under_non_UTC_session_reclaims_a_stale_processing_doc(string ianaZone)
+    {
+        // ProcessingStartedAt 10 min ago, well past the 5-min zombie threshold. Under the pre-fix
+        // SQL with Asia/Tokyo (UTC+9), `now() at time zone 'utc'` produces a naive value that
+        // Postgres re-casts to timestamptz using session TZ — pushing the comparison's RHS ~9h
+        // into the PAST, so a 10-min-old doc fails `< (real_now - 9h5m)` and is NEVER reclaimed
+        // (zombies stuck forever). Under New_York the RHS drifts into the future and this test
+        // still passes under the broken SQL; the Tokyo branch is what catches that side of the bug.
+        var (_, docId) = await SeedDocAsync(
+            status: ExtractionStatus.Processing,
+            attempts: 1,
+            processingStartedAt: DateTime.UtcNow.AddMinutes(-10));
+
+        var claimed = await RunClaimUnderSessionTimeZoneAsync(ianaZone);
+
+        claimed.Should().Be(docId, "stale doc must still be reclaimed under a non-UTC session TZ");
+        (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(2);
+    }
+
+    [Theory]
+    [MemberData(nameof(NonUtcSessionZones))]
+    public async Task Claim_under_non_UTC_session_does_not_reclaim_a_fresh_processing_doc(string ianaZone)
+    {
+        // ProcessingStartedAt 1 min ago, well inside the 5-min window. Under the pre-fix SQL with
+        // America/New_York (UTC-4/-5), the RHS drifts ~4-5h into the future, so a 1-min-old doc
+        // satisfies `< (real_now + 4h55m)` and is wrongly reclaimed (data corruption: another
+        // worker steals it mid-extraction). Under Tokyo the broken SQL also holds the doc (RHS
+        // drifts into the past), so this assertion is satisfied under both old and new SQL there;
+        // the New_York branch is what catches this side of the bug.
+        var (_, docId) = await SeedDocAsync(
+            status: ExtractionStatus.Processing,
+            attempts: 1,
+            processingStartedAt: DateTime.UtcNow.AddMinutes(-1));
+
+        var claimed = await RunClaimUnderSessionTimeZoneAsync(ianaZone);
+
+        claimed.Should().BeNull("a fresh doc must not be reclaimed under a non-UTC session TZ");
+        (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(1, "fresh doc is untouched");
+    }
+
+    [Theory]
+    [MemberData(nameof(NonUtcSessionZones))]
+    public async Task Claim_under_non_UTC_session_writes_ProcessingStartedAt_at_real_now_not_offset(string ianaZone)
+    {
+        // The symmetric write-side bug: under the pre-fix SQL, assigning `now() at time zone 'utc'`
+        // (a naive timestamp) into the timestamptz `ProcessingStartedAt` column forced Postgres to
+        // interpret the naive value in the session TZ. Under New_York the stored value drifted
+        // ~4-5h into the future; under Tokyo ~9h into the past. Either way far outside the 30s
+        // envelope. With timestamptz-to-timestamptz writes, the stored value equals real-now
+        // regardless of session TZ — caught here under both zones.
+        var (_, docId) = await SeedDocAsync(status: ExtractionStatus.Pending);
+        var before = DateTime.UtcNow;
+
+        var claimed = await RunClaimUnderSessionTimeZoneAsync(ianaZone);
+
+        var after = DateTime.UtcNow;
+        claimed.Should().Be(docId);
+        var doc = await GetDocAsync(docId);
+        doc.ProcessingStartedAt.Should().NotBeNull();
+        // Generous skew window — the failure mode is hours, not seconds; a 30s envelope catches
+        // the bug while staying robust against test-host timing jitter.
+        doc.ProcessingStartedAt!.Value.Should().BeOnOrAfter(before.AddSeconds(-30));
+        doc.ProcessingStartedAt!.Value.Should().BeOnOrBefore(after.AddSeconds(30));
+    }
+
     // ----- Boundary + branch coverage (from review) ------------------------------------------
 
     [Fact]
