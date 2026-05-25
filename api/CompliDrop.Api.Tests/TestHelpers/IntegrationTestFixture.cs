@@ -45,25 +45,50 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
         Factory = new CustomWebApplicationFactory(ConnectionString);
         _ = Factory.CreateClient();
 
-        // Respawn: wipe all data between tests, but keep the schema and migration history.
+        // Respawn: wipe tenant data between tests, but keep schema + migration history + the
+        // system seed. Organizations + ComplianceTemplates + ComplianceRules are pulled out of
+        // Respawn's wipe set because they hold the seeded system rows (one Organization row at
+        // SystemOrgId plus the ComplianceTemplateSeed-installed templates and their rules).
+        // Respawn cannot row-level ignore, so we keep the whole table and run custom DELETE SQL
+        // after the Respawn pass to wipe only the tenant rows — see ResetAsync. Net effect:
+        // skip ComplianceTemplateSeed.EnsureAsync's ~50ms-per-test reseed cost while keeping
+        // the same final state.
         _respawnConnection = new NpgsqlConnection(ConnectionString);
         await _respawnConnection.OpenAsync();
         _respawner = await Respawner.CreateAsync(_respawnConnection, new RespawnerOptions
         {
             DbAdapter = DbAdapter.Postgres,
             SchemasToInclude = ["public"],
-            TablesToIgnore = [new Table("__EFMigrationsHistory")],
+            TablesToIgnore =
+            [
+                new Table("__EFMigrationsHistory"),
+                new Table("Organizations"),
+                new Table("ComplianceTemplates"),
+                new Table("ComplianceRules"),
+            ],
         });
     }
 
-    /// <summary>Wipes all data, re-seeds system compliance templates, and clears any in-memory test doubles.</summary>
+    /// <summary>Wipes tenant data and clears any in-memory test doubles. System seed survives.</summary>
     public async Task ResetAsync()
     {
         await _respawner.ResetAsync(_respawnConnection);
 
-        await using var sys = new SystemDbContext(
-            new DbContextOptionsBuilder<SystemDbContext>().UseNpgsql(ConnectionString).Options);
-        await ComplianceTemplateSeed.EnsureAsync(sys);
+        // Single targeted DELETE — the system org row stays, every tenant org row goes. The
+        // ON DELETE CASCADE FK from ComplianceTemplate → Organization (and ComplianceRule →
+        // ComplianceTemplate) cascades through, wiping tenant templates + their rules in one
+        // round trip without us having to enumerate the dependent tables.
+        await using (var wipe = _respawnConnection.CreateCommand())
+        {
+            wipe.CommandText = """
+                DELETE FROM "Organizations" WHERE "Id" <> @sysOrgId;
+                """;
+            var param = wipe.CreateParameter();
+            param.ParameterName = "@sysOrgId";
+            param.Value = ComplianceTemplateSeed.SystemOrgId;
+            wipe.Parameters.Add(param);
+            await wipe.ExecuteNonQueryAsync();
+        }
 
         // The FakeEmailService is a host singleton, so its captured sends persist across tests
         // unless we explicitly reset it. Tests that assert on Sends.Count would otherwise see

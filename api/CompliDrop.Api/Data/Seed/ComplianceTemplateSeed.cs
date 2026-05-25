@@ -5,7 +5,13 @@ namespace CompliDrop.Api.Data.Seed;
 
 public static class ComplianceTemplateSeed
 {
-    private static readonly Guid SystemOrgId = Guid.Parse("00000000-0000-0000-0000-000000000001");
+    /// <summary>
+    /// Identity of the synthetic organization that owns all <c>IsSystemTemplate=true</c>
+    /// templates. Exposed to the test project (<see cref="InternalsVisibleToAttribute"/>) so the
+    /// integration-test harness can target it directly in custom wipe SQL — keeps the magic
+    /// constant in one place.
+    /// </summary>
+    internal static readonly Guid SystemOrgId = Guid.Parse("00000000-0000-0000-0000-000000000001");
 
     /// <summary>
     /// Number of system templates this seed installs. Exposed to the test project
