@@ -9,7 +9,14 @@ const plusJakartaSans = Plus_Jakarta_Sans({
   display: "swap",
 });
 
+// `metadataBase` makes social-card image URLs absolute. Defaults to the
+// public production origin; override per-env via NEXT_PUBLIC_SITE_URL if needed
+// (preview deploys, staging, etc.).
+const SITE_URL =
+  process.env.NEXT_PUBLIC_SITE_URL ?? "https://www.complidrop.com";
+
 export const metadata: Metadata = {
+  metadataBase: new URL(SITE_URL),
   title: "CompliDrop — Stop Chasing Paper. Start Dropping Docs.",
   description:
     "CompliDrop reads your COIs, licenses, and permits in seconds — pulls the dates, checks the coverage, and tells you before anything expires.",
