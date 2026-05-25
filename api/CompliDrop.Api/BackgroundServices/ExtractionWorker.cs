@@ -66,8 +66,9 @@ public class ExtractionWorker(
     /// written as timestamptz — no `at time zone 'utc'` conversion. Mixing in a naive
     /// `timestamp without time zone` would force Postgres to bridge it via the SESSION TimeZone,
     /// which is UTC on Neon/postgres:17-alpine today but is latent on any connection that ever
-    /// runs with a non-UTC session TZ. Exposed as `internal` so the regression suite can drive
-    /// the exact same string through a connection with a non-UTC session and prove the SQL is
+    /// runs with a non-UTC session TZ. See [ADR 0009](../../../docs/adr/0009-no-at-time-zone-on-timestamptz-in-raw-sql.md)
+    /// for the project-wide rule. Exposed as `internal` so the regression suite can drive the
+    /// exact same string through a connection with a non-UTC session and prove the SQL is
     /// TZ-independent end-to-end.
     /// </summary>
     internal const string ClaimSql = """
