@@ -4,6 +4,7 @@ import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { Logo } from "@/components/Logo";
 import { cn } from "@/lib/utils";
 import { useMe } from "@/hooks/useAuth";
 import {
@@ -53,9 +54,8 @@ export default function Home() {
       {/* ── Sticky Nav ──────────────────────────────────────────── */}
       <header className="sticky top-0 z-50 border-b bg-white/80 backdrop-blur-lg transition-all duration-300" style={{ borderColor: C.border }}>
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
-          <Link href="/" className="flex items-center gap-2 text-xl font-bold tracking-tight" style={{ color: C.text }}>
-            <ShieldCheck className="size-6" style={{ color: C.sky }} />
-            CompliDrop
+          <Link href="/" className="flex items-center" aria-label="CompliDrop — home">
+            <Logo variant="primary" height={36} decorative />
           </Link>
           <nav className="flex items-center gap-1 sm:gap-3">
             {authed ? (
@@ -117,6 +117,9 @@ export default function Home() {
           />
 
           <div className="relative mx-auto max-w-4xl px-4 py-24 text-center sm:px-6 sm:py-36">
+            <div className="mb-8 flex justify-center sm:mb-10">
+              <Logo variant="twotone" height={48} />
+            </div>
             <h1
               className="text-4xl font-extrabold leading-[1.1] tracking-tight sm:text-5xl lg:text-6xl"
               style={{ color: C.text }}
@@ -599,10 +602,8 @@ export default function Home() {
         style={{ borderColor: C.border, backgroundColor: C.white }}
       >
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 sm:px-6">
-          <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: C.text }}>
-            <ShieldCheck className="size-4" style={{ color: C.sky }} />
-            CompliDrop
-          </div>
+          <Logo variant="primary" height={32} />
+
           <p className="text-sm" style={{ color: C.muted }}>
             Drop your docs. Stay compliant. &copy; 2026 CompliDrop
           </p>

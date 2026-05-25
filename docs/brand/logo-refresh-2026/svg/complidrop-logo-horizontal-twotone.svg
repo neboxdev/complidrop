@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 380 80" width="380" height="80" role="img" aria-label="CompliDrop">
+  <title>CompliDrop — marketing two-tone lockup</title>
+  <g transform="translate(0 8) scale(0.64)">
+    <path d="M50 4 C 50 4, 14 38, 14 62 C 14 82, 30 96, 50 96 C 70 96, 86 82, 86 62 C 86 38, 50 4, 50 4 Z" fill="#0EA5E9"></path>
+    <path d="M30 60 L 46 74 L 72 44" fill="none" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></path>
+  </g>
+  <text x="80" y="40" font-family="&#39;Plus Jakarta Sans&#39;, system-ui, sans-serif" font-weight="700" font-size="52" dominant-baseline="middle" style="letter-spacing: -0.02em;">
+    <tspan fill="#0C4A6E">Compli</tspan><tspan fill="#0EA5E9">Drop</tspan>
+  </text>
+</svg>

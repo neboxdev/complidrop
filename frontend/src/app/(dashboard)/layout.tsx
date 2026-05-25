@@ -3,10 +3,11 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect } from "react";
-import { LayoutDashboard, FileText, Users, Settings, LogOut, ShieldCheck, Bell, ClipboardList, Download } from "lucide-react";
+import { LayoutDashboard, FileText, Users, Settings, LogOut, Bell, ClipboardList, Download } from "lucide-react";
 import { useLogout, useMe } from "@/hooks/useAuth";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
+import { Logo } from "@/components/Logo";
 
 const NAV = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -40,9 +41,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   return (
     <div className="min-h-screen grid" style={{ gridTemplateColumns: "240px 1fr" }}>
       <aside className="bg-sky-950 text-sky-50 flex flex-col">
-        <div className="px-6 py-5 flex items-center gap-2 border-b border-sky-900">
-          <ShieldCheck className="w-5 h-5 text-sky-300" />
-          <span className="font-semibold">CompliDrop</span>
+        <div className="px-6 py-5 flex items-center border-b border-sky-900">
+          <Logo variant="reverse" height={32} />
         </div>
         <nav className="flex-1 py-4 px-2 space-y-1">
           {NAV.map(({ href, label, icon: Icon }) => {

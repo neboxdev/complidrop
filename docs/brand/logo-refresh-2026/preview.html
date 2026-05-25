@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>CompliDrop Logo — Preview</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --sky: #0EA5E9;
+    --navy: #0C4A6E;
+    --orange: #F97316;
+    --tint: #F0F9FF;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; background: #f8fafc; color: var(--navy); }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 56px 32px 96px; }
+  h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 8px; }
+  .sub { color: #64748b; margin: 0 0 40px; font-size: 14px; }
+  h2 { font-size: 13px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; margin: 32px 0 12px; }
+  .card { border: 1px solid #e2e8f0; border-radius: 14px; overflow: hidden; background: white; margin-bottom: 16px; }
+  .card .label { padding: 12px 18px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; font-size: 12px; color: #64748b; font-family: ui-monospace, monospace; display: flex; justify-content: space-between; align-items: center; }
+  .card .label code { background: #eef2f7; padding: 2px 8px; border-radius: 4px; font-size: 11px; color: var(--navy); }
+  .card .stage { display: flex; align-items: center; justify-content: center; padding: 56px 32px; min-height: 160px; }
+  .stage.tint  { background: var(--tint); }
+  .stage.navy  { background: var(--navy); }
+  .stage.white { background: white; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .grid .card .stage { padding: 28px; min-height: 130px; }
+  .swatches { display: flex; gap: 12px; margin-top: 8px; }
+  .sw { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #64748b; font-family: ui-monospace, monospace; }
+  .sw span { display: inline-block; width: 22px; height: 22px; border-radius: 6px; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>CompliDrop — Logo Preview</h1>
+  <p class="sub">Plus Jakarta Sans · #0EA5E9 sky · #0C4A6E navy</p>
+
+  <div class="swatches">
+    <div class="sw"><span style="background:#0EA5E9"></span>#0EA5E9 sky</div>
+    <div class="sw"><span style="background:#0C4A6E"></span>#0C4A6E navy</div>
+    <div class="sw"><span style="background:#F97316"></span>#F97316 orange (UI only)</div>
+    <div class="sw"><span style="background:#F0F9FF;box-shadow:inset 0 0 0 1px #e2e8f0"></span>#F0F9FF tint</div>
+  </div>
+
+  <h2>1 · Primary (site header, default)</h2>
+  <div class="card">
+    <div class="label"><span>complidrop-logo-horizontal.svg · on white</span><code>variant="primary"</code></div>
+    <div class="stage white"><img src="svg/complidrop-logo-horizontal.svg" alt="CompliDrop" height="56" /></div>
+  </div>
+
+  <h2>2 · Two-tone (marketing hero)</h2>
+  <div class="card">
+    <div class="label"><span>complidrop-logo-horizontal-twotone.svg · on tint</span><code>variant="twotone"</code></div>
+    <div class="stage tint"><img src="svg/complidrop-logo-horizontal-twotone.svg" alt="CompliDrop" height="64" /></div>
+  </div>
+
+  <h2>3 · Reverse (footer / dark backgrounds)</h2>
+  <div class="card">
+    <div class="label"><span>complidrop-logo-horizontal-reverse.svg · on navy</span><code>variant="reverse"</code></div>
+    <div class="stage navy"><img src="svg/complidrop-logo-horizontal-reverse.svg" alt="CompliDrop" height="56" /></div>
+  </div>
+
+  <h2>4 · Icon only & favicon</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="label"><span>mark</span><code>96px</code></div>
+      <div class="stage white"><img src="svg/complidrop-mark.svg" alt="" width="96" height="96" /></div>
+    </div>
+    <div class="card">
+      <div class="label"><span>mark</span><code>48px</code></div>
+      <div class="stage white"><img src="svg/complidrop-mark.svg" alt="" width="48" height="48" /></div>
+    </div>
+    <div class="card">
+      <div class="label"><span>mark on navy</span><code>48px</code></div>
+      <div class="stage navy"><img src="svg/complidrop-mark.svg" alt="" width="48" height="48" /></div>
+    </div>
+    <div class="card">
+      <div class="label"><span>favicon tile</span><code>64px</code></div>
+      <div class="stage tint"><img src="svg/complidrop-favicon.svg" alt="" width="64" height="64" /></div>
+    </div>
+  </div>
+
+  <h2>5 · Size ladder (mark)</h2>
+  <div class="card">
+    <div class="stage white" style="gap: 32px;">
+      <img src="svg/complidrop-mark.svg" alt="" height="96" />
+      <img src="svg/complidrop-mark.svg" alt="" height="64" />
+      <img src="svg/complidrop-mark.svg" alt="" height="40" />
+      <img src="svg/complidrop-mark.svg" alt="" height="24" />
+      <img src="svg/complidrop-mark.svg" alt="" height="16" />
+    </div>
+  </div>
+</div>
+</body>
+</html>
