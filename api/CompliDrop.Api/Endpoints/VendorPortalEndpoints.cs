@@ -65,8 +65,9 @@ public static class VendorPortalEndpoints
             return Error(410, "vendor.portal_token_expired", "This upload link has expired.");
         if (link.UploadCount >= link.MaxUploads)
         {
-            link.IsActive = false;
-            await db.SaveChangesAsync(ct);
+            // Already-at-cap: deactivate idempotently via atomic UPDATE so two concurrent at-cap
+            // requests don't fight over tracked-entity state.
+            await DeactivateAsync(db, link.Id, ct);
             return Error(429, "vendor.portal_quota_exceeded", "Upload quota reached for this link.");
         }
 
@@ -90,6 +91,35 @@ public static class VendorPortalEndpoints
         var blobName = $"{orgId}/{DateTime.UtcNow:yyyy-MM}/portal-{Guid.NewGuid()}-{SanitizeFileName(file.FileName)}";
         var upload = await blobs.UploadAsync(blobName, buffer, validation.DetectedContentType!, ct);
 
+        // Atomic reservation. The cheap `UploadCount >= MaxUploads` check above is racy: two
+        // concurrent requests can both see count=N-1 with cap=N and both pass. This UPDATE closes
+        // the window — its WHERE clause is re-evaluated against the row's current state under
+        // Postgres's row-level UPDATE lock, so only one of the racing requests increments past the
+        // cap. SetProperty(IsActive, count+1 < max) flips the link inactive when this request
+        // takes the last permit. rows-affected == 0 means we lost the race (or the link was
+        // revoked between the initial read and now).
+        var reserved = await db.VendorPortalLinks
+            .Where(l => l.Id == link.Id && l.IsActive && l.UploadCount < l.MaxUploads)
+            .ExecuteUpdateAsync(set => set
+                .SetProperty(l => l.UploadCount, l => l.UploadCount + 1)
+                .SetProperty(l => l.IsActive, l => l.UploadCount + 1 < l.MaxUploads),
+                ct);
+
+        if (reserved == 0)
+        {
+            // Lost the race. Best-effort blob cleanup so a heavy concurrent load doesn't leak
+            // storage objects, then refuse with the same envelope as the already-at-cap path.
+            try { await blobs.DeleteAsync(blobName, ct); } catch { /* best-effort */ }
+            await DeactivateAsync(db, link.Id, ct);
+            return Error(429, "vendor.portal_quota_exceeded", "Upload quota reached for this link.");
+        }
+
+        // Permit reserved. Insert the Document referencing the uploaded blob. The tracked `link`
+        // entity is now stale (we updated the DB row via ExecuteUpdate which bypasses change
+        // tracking) — we intentionally don't mutate it further, so SaveChanges only emits the
+        // Document insert. Audit log for the link mutation is consequently lost in this path; the
+        // Document insert is audited separately, which is the more interesting trail. If link-
+        // mutation audit becomes important, add an explicit IAuditLogger.LogAsync here.
         var doc = new Document
         {
             Id = Guid.NewGuid(),
@@ -108,8 +138,6 @@ public static class VendorPortalEndpoints
             UpdatedAt = DateTime.UtcNow
         };
         db.Documents.Add(doc);
-        link.UploadCount += 1;
-        if (link.UploadCount >= link.MaxUploads) link.IsActive = false;
         await db.SaveChangesAsync(ct);
 
         return Results.Ok(new
@@ -123,6 +151,11 @@ public static class VendorPortalEndpoints
             error = (object?)null
         });
     }
+
+    private static Task<int> DeactivateAsync(SystemDbContext db, Guid linkId, CancellationToken ct) =>
+        db.VendorPortalLinks
+            .Where(l => l.Id == linkId)
+            .ExecuteUpdateAsync(set => set.SetProperty(l => l.IsActive, false), ct);
 
     private static async Task<IResult> GetStatus(
         string token,

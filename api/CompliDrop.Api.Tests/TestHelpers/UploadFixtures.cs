@@ -10,11 +10,15 @@ namespace CompliDrop.Api.Tests.TestHelpers;
 /// </summary>
 public static class UploadFixtures
 {
-    /// <summary>%PDF header padded to 64 bytes — passes the validator's 8-byte minimum.</summary>
-    public static readonly byte[] PdfBytes = FileWith(0x25, 0x50, 0x44, 0x46);
+    /// <summary>
+    /// %PDF header padded to 64 bytes — passes the validator's 8-byte minimum. Returns a fresh
+    /// buffer per call so a test that mutates its bytes (e.g. corrupts a header to construct a
+    /// bad fixture) can't poison subsequent tests that share the same magic-byte template.
+    /// </summary>
+    public static byte[] PdfBytes() => FileWith(0x25, 0x50, 0x44, 0x46);
 
-    /// <summary>Plain text bytes ("hello wd") — matches no supported magic-byte signature.</summary>
-    public static readonly byte[] TextBytes = FileWith(0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x77, 0x64);
+    /// <summary>Plain text bytes ("hello wd") — matches no supported magic-byte signature. Fresh buffer per call (see <see cref="PdfBytes"/>).</summary>
+    public static byte[] TextBytes() => FileWith(0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x77, 0x64);
 
     /// <summary>Builds a 64-byte buffer prefixed with the given magic-byte header.</summary>
     public static byte[] FileWith(params byte[] header)

@@ -162,7 +162,7 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         var client = CreateClient();
 
         // Plain-text bytes, a .pdf name, and an application/pdf Content-Type — the lie doesn't help.
-        var resp = await UploadAsync(client, seeded.Token, TextBytes, "evil.pdf", "application/pdf");
+        var resp = await UploadAsync(client, seeded.Token, TextBytes(), "evil.pdf", "application/pdf");
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         (await ErrorCode(resp)).Should().Be("document.unsupported_format");
@@ -240,7 +240,7 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         var b = await SeedLinkAsync(); // a different org/vendor
         var client = CreateClient();
 
-        var resp = await UploadAsync(client, a.Token, PdfBytes, "coi.pdf", "application/pdf");
+        var resp = await UploadAsync(client, a.Token, PdfBytes(), "coi.pdf", "application/pdf");
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var uploadId = (await Data(resp)).GetProperty("uploadId").GetGuid();
@@ -270,7 +270,7 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         var b = await SeedLinkAsync(); // a different org/vendor
         var client = CreateClient();
 
-        var uploadId = (await Data(await UploadAsync(client, a.Token, PdfBytes, "coi.pdf", "application/pdf")))
+        var uploadId = (await Data(await UploadAsync(client, a.Token, PdfBytes(), "coi.pdf", "application/pdf")))
             .GetProperty("uploadId").GetGuid();
 
         // The owning link sees its own upload...
@@ -307,25 +307,39 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         (await ErrorCode(resp)).Should().Be("document.not_found");
     }
 
-    [Fact]
-    public async Task Status_remains_queryable_after_the_link_is_deactivated()
+    [Theory]
+    [InlineData("deactivated")]
+    [InlineData("expired")]
+    public async Task Status_remains_queryable_after_the_link_is_no_longer_usable(string scenario)
     {
         // The status endpoint intentionally does NOT short-circuit on `IsActive`/`ExpiresAt` —
-        // vendors can poll their past uploads even after the link is revoked or hits its quota.
-        // This test pins that asymmetry against info/upload (which both check the link state)
-        // so a future "tighten the status check" change has to think about it explicitly.
-        var seeded = await SeedLinkAsync(maxUploads: 1);
+        // vendors can poll their past uploads even after the link is revoked or has expired.
+        // This test pins BOTH arms of that asymmetry against info/upload (which check the link
+        // state) so a future "tighten the status check" change has to think about it explicitly.
+        var seeded = await SeedLinkAsync();
         var client = CreateClient();
 
-        var uploadId = (await Data(await UploadAsync(client, seeded.Token, PdfBytes, "1.pdf", "application/pdf")))
+        var uploadId = (await Data(await UploadAsync(client, seeded.Token, PdfBytes(), "1.pdf", "application/pdf")))
             .GetProperty("uploadId").GetGuid();
 
+        // After the upload, make the link unusable in the scenario's way.
         await using (var db = CreateSystemDb())
         {
-            // The upload reached the cap → link auto-deactivated.
-            (await db.VendorPortalLinks.SingleAsync(l => l.Id == seeded.LinkId)).IsActive.Should().BeFalse();
+            var link = await db.VendorPortalLinks.SingleAsync(l => l.Id == seeded.LinkId);
+            switch (scenario)
+            {
+                case "deactivated": link.IsActive = false; break;
+                case "expired": link.ExpiresAt = DateTime.UtcNow.AddDays(-1); break;
+                default: throw new InvalidOperationException($"unknown scenario '{scenario}'");
+            }
+            await db.SaveChangesAsync();
         }
 
+        // Sanity: info/upload now refuse the link, proving the scenario was applied.
+        (await client.GetAsync($"/api/portal/{seeded.Token}")).StatusCode
+            .Should().BeOneOf(HttpStatusCode.NotFound, HttpStatusCode.Gone);
+
+        // Status STILL returns the upload (the intentional asymmetry under test).
         var resp = await client.GetAsync($"/api/portal/{seeded.Token}/status/{uploadId}");
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         (await Data(resp)).GetProperty("extractionStatus").GetString().Should().Be("Pending");
@@ -341,9 +355,9 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         var seeded = await SeedLinkAsync(maxUploads: 2);
         var client = CreateClient();
 
-        (await UploadAsync(client, seeded.Token, PdfBytes, "1.pdf", "application/pdf"))
+        (await UploadAsync(client, seeded.Token, PdfBytes(), "1.pdf", "application/pdf"))
             .StatusCode.Should().Be(HttpStatusCode.OK);
-        (await UploadAsync(client, seeded.Token, PdfBytes, "2.pdf", "application/pdf"))
+        (await UploadAsync(client, seeded.Token, PdfBytes(), "2.pdf", "application/pdf"))
             .StatusCode.Should().Be(HttpStatusCode.OK);
 
         // The second upload reached the cap → the link auto-deactivates.
@@ -355,12 +369,45 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         }
 
         // A third upload is refused because the link is now inactive.
-        var third = await UploadAsync(client, seeded.Token, PdfBytes, "3.pdf", "application/pdf");
+        var third = await UploadAsync(client, seeded.Token, PdfBytes(), "3.pdf", "application/pdf");
         third.StatusCode.Should().Be(HttpStatusCode.NotFound);
         (await ErrorCode(third)).Should().Be("vendor.portal_token_invalid");
 
         await using var db2 = CreateSystemDb();
         (await db2.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId)).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Concurrent_uploads_at_the_cap_boundary_only_let_one_succeed()
+    {
+        // Pre-fix: two requests both read UploadCount=0 with cap=1, both pass the check-then-act
+        // quota check, both upload to blob, both insert a Document — the cap was exceeded by 1.
+        // Post-fix: the atomic UPDATE-with-WHERE reservation in UploadViaPortal serializes the
+        // two requests at the row-level lock and only one increments past the boundary.
+        var seeded = await SeedLinkAsync(maxUploads: 1, uploadCount: 0);
+        var client = CreateClient();
+
+        var t1 = UploadAsync(client, seeded.Token, PdfBytes(), "a.pdf", "application/pdf");
+        var t2 = UploadAsync(client, seeded.Token, PdfBytes(), "b.pdf", "application/pdf");
+        var responses = await Task.WhenAll(t1, t2);
+
+        // Exactly one wins. The loser is refused — the *which* refusal depends on timing:
+        //   - 429 vendor.portal_quota_exceeded if the loser passed the initial-read check (link
+        //     still active) and only lost the atomic UPDATE-WHERE reservation.
+        //   - 404 vendor.portal_token_invalid if the loser read *after* the winner committed,
+        //     saw IsActive=false from the deactivation, and short-circuited at the initial check.
+        // Either is a correct refusal; the safety invariant is that the cap is not exceeded.
+        responses.Count(r => r.StatusCode == HttpStatusCode.OK).Should().Be(1);
+        var refused = responses.Single(r => r.StatusCode != HttpStatusCode.OK);
+        refused.StatusCode.Should().BeOneOf(HttpStatusCode.TooManyRequests, HttpStatusCode.NotFound);
+        (await ErrorCode(refused)).Should().BeOneOf("vendor.portal_quota_exceeded", "vendor.portal_token_invalid");
+
+        await using var db = CreateSystemDb();
+        var link = await db.VendorPortalLinks.SingleAsync(l => l.Id == seeded.LinkId);
+        link.UploadCount.Should().Be(1, "the cap of 1 must never be exceeded, even under concurrency");
+        link.IsActive.Should().BeFalse();
+        (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId))
+            .Should().Be(1, "the losing request must not persist a Document");
     }
 
     [Fact]
@@ -370,7 +417,7 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         var seeded = await SeedLinkAsync(maxUploads: 2, uploadCount: 2);
         var client = CreateClient();
 
-        var resp = await UploadAsync(client, seeded.Token, PdfBytes, "x.pdf", "application/pdf");
+        var resp = await UploadAsync(client, seeded.Token, PdfBytes(), "x.pdf", "application/pdf");
 
         resp.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
         (await ErrorCode(resp)).Should().Be("vendor.portal_quota_exceeded");
@@ -401,11 +448,11 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
 
         for (var i = 0; i < 10; i++)
         {
-            var ok = await UploadAsync(client, seeded.Token, PdfBytes, $"{i}.pdf", "application/pdf");
+            var ok = await UploadAsync(client, seeded.Token, PdfBytes(), $"{i}.pdf", "application/pdf");
             ok.StatusCode.Should().Be(HttpStatusCode.OK, "the first 10 uploads are within the 10/hr token limit");
         }
 
-        var throttled = await UploadAsync(client, seeded.Token, PdfBytes, "11.pdf", "application/pdf");
+        var throttled = await UploadAsync(client, seeded.Token, PdfBytes(), "11.pdf", "application/pdf");
         throttled.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
 
         // The 11th request was rejected by the limiter middleware *before* the handler ran, so the
@@ -455,11 +502,11 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
 
         for (var i = 0; i < 10; i++)
         {
-            var ok = await client.PostAsync(url, UploadForm(PdfBytes, $"{i}.pdf", "application/pdf"));
+            var ok = await client.PostAsync(url, UploadForm(PdfBytes(), $"{i}.pdf", "application/pdf"));
             ok.StatusCode.Should().Be(HttpStatusCode.OK);
         }
 
-        var throttled = await client.PostAsync(url, UploadForm(PdfBytes, "11.pdf", "application/pdf"));
+        var throttled = await client.PostAsync(url, UploadForm(PdfBytes(), "11.pdf", "application/pdf"));
         throttled.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
     }
 
@@ -467,18 +514,24 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     public async Task Portal_GET_endpoints_are_not_rate_limited()
     {
         // The IsPortalUpload gate intentionally excludes GETs (info + status). If a regression
-        // broadened the gate, a vendor refreshing the page would burn the 10/hr token budget on
-        // page loads. We issue 35 GETs — past BOTH portal limits (10/hr token, 30/hr ip) — and
-        // assert none are throttled.
+        // broadened the gate (e.g. "lock everything down on the portal" rewriting it to match any
+        // verb on the prefix), a vendor refreshing the page or polling status would burn the
+        // 10/hr token budget. We interleave info + status GETs at 35 iterations each (70 total) —
+        // past BOTH portal limits (10/hr token, 30/hr ip) — and assert none get a 429.
         var seeded = await SeedLinkAsync(maxUploads: 50);
         await using var factory = RateLimitedFactory();
         var client = factory.CreateClient();
 
         for (var i = 0; i < 35; i++)
         {
-            var resp = await client.GetAsync($"/api/portal/{seeded.Token}");
-            resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            var info = await client.GetAsync($"/api/portal/{seeded.Token}");
+            info.StatusCode.Should().Be(HttpStatusCode.OK,
                 $"GET /api/portal/{{token}} iteration {i + 1}/35 should not be rate-limited");
+
+            // Status against a random uploadId 404s at the handler — we only care it isn't 429.
+            var status = await client.GetAsync($"/api/portal/{seeded.Token}/status/{Guid.NewGuid()}");
+            status.StatusCode.Should().Be(HttpStatusCode.NotFound,
+                $"GET /api/portal/{{token}}/status iteration {i + 1}/35 should not be rate-limited");
         }
     }
 }
