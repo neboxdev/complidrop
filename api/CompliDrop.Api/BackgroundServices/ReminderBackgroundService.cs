@@ -1,3 +1,5 @@
+using System.Data;
+using System.Data.Common;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
@@ -44,159 +46,258 @@ public class ReminderBackgroundService(
 
         var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
 
-        // AsNoTracking on read-only queries: this worker only writes ReminderLog inserts (which
-        // are tracked explicitly via db.ReminderLogs.Add). Tracking orgs / reminders / docs /
-        // users buys us nothing and inflates the change tracker.
-        var orgs = await db.Organizations
-            .AsNoTracking()
-            .Where(o => o.DeletedAt == null)
-            .Select(o => new { o.Id, o.Name, o.TimeZone })
-            .ToListAsync(ct);
-
-        foreach (var org in orgs)
+        // Pin one connection for the whole tick. Session-scoped advisory locks (acquired per
+        // (org, sendDate) below) live on the connection; if EF Core grabbed a fresh connection
+        // per command, the lock would live on a connection returned to the pool and the next
+        // SaveChanges would run unprotected. The outer finally closes the connection — Npgsql's
+        // DISCARD ALL on pool return releases any still-held advisory locks as a safety net
+        // for an exception path that skipped explicit unlock. See ADR 0008.
+        await db.Database.OpenConnectionAsync(ct);
+        try
         {
-            if (!IsLocalSendWindow(org.TimeZone, nowUtc)) continue;
-
-            var reminders = await db.Reminders
+            // AsNoTracking on read-only queries: this worker only writes ReminderLog inserts (which
+            // are tracked explicitly via db.ReminderLogs.Add). Tracking orgs / reminders / docs /
+            // users buys us nothing and inflates the change tracker.
+            var orgs = await db.Organizations
                 .AsNoTracking()
-                .Where(r => r.OrganizationId == org.Id && r.IsActive)
+                .Where(o => o.DeletedAt == null)
+                .Select(o => new { o.Id, o.Name, o.TimeZone })
                 .ToListAsync(ct);
-            if (reminders.Count == 0) continue;
 
-            var localDate = DateOnly.FromDateTime(ToLocal(org.TimeZone, nowUtc));
-
-            // Resolved once per org so the worker doesn't re-throw on TZ lookup inside the
-            // reminder loop; ToLocal already proved the id resolves.
-            var orgTzInfo = TryFindTimeZone(org.TimeZone);
-
-            // Hoisted out of the reminder loop: the internal-user list is identical for every
-            // reminder under the same org, so we resolve it once and reuse. OrderBy keeps the
-            // recipient order stable across runs (Postgres returns rows in physical order
-            // otherwise), which keeps multi-user assertions in tests deterministic.
-            var internalUsers = reminders.Any(r => r.NotifyInternalUser)
-                ? await db.Users
-                    .AsNoTracking()
-                    .Where(u => u.OrganizationId == org.Id && u.DeletedAt == null)
-                    .OrderBy(u => u.Email)
-                    .Select(u => u.Email)
-                    .ToListAsync(ct)
-                : new List<string>();
-
-            foreach (var reminder in reminders)
+            foreach (var org in orgs)
             {
-                var targetDate = localDate.AddDays(reminder.DaysBefore);
-                // Bracket the org's local target day, converted to UTC via the org's own TZ.
-                // The previous .ToUniversalTime() on an Unspecified-kind value silently used the
-                // SERVER's local zone, so the window matched a different UTC range depending on
-                // where the worker ran. Going through TimeZoneInfo.ConvertTimeToUtc makes the
-                // window host-independent and aligned with the org's wall clock.
-                var targetStart = orgTzInfo is null
-                    ? DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MinValue), DateTimeKind.Utc)
-                    : TimeZoneInfo.ConvertTimeToUtc(
-                        DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified),
-                        orgTzInfo);
-                var targetEnd = orgTzInfo is null
-                    ? DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MaxValue), DateTimeKind.Utc)
-                    : TimeZoneInfo.ConvertTimeToUtc(
-                        DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MaxValue), DateTimeKind.Unspecified),
-                        orgTzInfo);
+                if (!IsLocalSendWindow(org.TimeZone, nowUtc)) continue;
 
-                var docs = await db.Documents
+                var reminders = await db.Reminders
                     .AsNoTracking()
-                    .Where(d => d.OrganizationId == org.Id
-                                && d.DeletedAt == null
-                                && d.ExpirationDate >= targetStart
-                                && d.ExpirationDate <= targetEnd)
-                    .Include(d => d.Vendor)
+                    .Where(r => r.OrganizationId == org.Id && r.IsActive)
                     .ToListAsync(ct);
-                if (docs.Count == 0) continue;
+                if (reminders.Count == 0) continue;
 
-                // reminders.NotifyInternalUser gates whether THIS reminder includes the cached
-                // list; the cache itself is built once per org above.
-                var reminderInternalUsers = reminder.NotifyInternalUser ? internalUsers : new List<string>();
+                var localDate = DateOnly.FromDateTime(ToLocal(org.TimeZone, nowUtc));
 
-                foreach (var doc in docs)
+                // Per-(org, sendDate) coordination across replicas. If another instance is currently
+                // processing this same tuple, skip — its work will populate the ReminderLog rows
+                // this instance would otherwise duplicate. The lock is keyed at org+day granularity
+                // so disjoint orgs in the same tick can still run on different replicas in parallel.
+                // See ADR 0008.
+                var lockKey = BuildLockKey(org.Id, localDate);
+                if (!await TryAcquireOrgLockAsync(db, lockKey, ct))
                 {
-                    var recipients = new List<string>(reminderInternalUsers);
-                    if (reminder.NotifyVendor && !string.IsNullOrWhiteSpace(doc.Vendor?.ContactEmail))
-                        recipients.Add(doc.Vendor.ContactEmail);
-                    // Distinct uses OrdinalIgnoreCase to match the dedupe HashSet below and the
-                    // intent of "one mail per real recipient": a user email stored lowercased
-                    // ("owner@x.com") and a vendor ContactEmail stored as-typed ("Owner@x.com")
-                    // would otherwise be sent to twice within the same tick.
-                    recipients = recipients
-                        .Where(r => !string.IsNullOrWhiteSpace(r))
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .ToList();
-                    if (recipients.Count == 0) continue;
+                    logger.LogDebug(
+                        "Reminder tick: skipping org {OrgId} on {LocalDate} — advisory lock held by another instance.",
+                        org.Id, localDate);
+                    continue;
+                }
 
-                    // SendDate records the *org-local* calendar day this batch belongs to, not the
-                    // UTC date at the instant the send happened. For a Tokyo org firing at local
-                    // 08:00 on Jan 15 (23:00 UTC Jan 14) the column reads Jan 15 — matching what
-                    // any analytics query, the Resend dashboard, or the org's audit log expects.
-                    // SentAt (timestamptz) still stores the precise UTC instant.
-                    // See ADR 0007 (revises the SendDate Neutral consequence in ADR 0002).
-                    var sendDate = localDate;
+                try
+                {
+                    // Resolved once per org so the worker doesn't re-throw on TZ lookup inside the
+                    // reminder loop; ToLocal already proved the id resolves.
+                    var orgTzInfo = TryFindTimeZone(org.TimeZone);
 
-                    // Pull the set of recipients we've already logged for this (reminder, doc,
-                    // day) so multi-recipient reminders dedupe per recipient instead of skipping
-                    // the doc once any recipient has been sent.
-                    var alreadySent = (await db.ReminderLogs
-                        .Where(l => l.ReminderId == reminder.Id
-                                    && l.DocumentId == doc.Id
-                                    && l.SendDate == sendDate)
-                        .Select(l => l.RecipientEmail)
-                        .ToListAsync(ct))
-                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    // Hoisted out of the reminder loop: the internal-user list is identical for every
+                    // reminder under the same org, so we resolve it once and reuse. OrderBy keeps the
+                    // recipient order stable across runs (Postgres returns rows in physical order
+                    // otherwise), which keeps multi-user assertions in tests deterministic.
+                    var internalUsers = reminders.Any(r => r.NotifyInternalUser)
+                        ? await db.Users
+                            .AsNoTracking()
+                            .Where(u => u.OrganizationId == org.Id && u.DeletedAt == null)
+                            .OrderBy(u => u.Email)
+                            .Select(u => u.Email)
+                            .ToListAsync(ct)
+                        : new List<string>();
 
-                    foreach (var recipient in recipients)
+                    foreach (var reminder in reminders)
                     {
-                        if (alreadySent.Contains(recipient)) continue;
+                        var targetDate = localDate.AddDays(reminder.DaysBefore);
+                        // Bracket the org's local target day, converted to UTC via the org's own TZ.
+                        // The previous .ToUniversalTime() on an Unspecified-kind value silently used the
+                        // SERVER's local zone, so the window matched a different UTC range depending on
+                        // where the worker ran. Going through TimeZoneInfo.ConvertTimeToUtc makes the
+                        // window host-independent and aligned with the org's wall clock.
+                        var targetStart = orgTzInfo is null
+                            ? DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MinValue), DateTimeKind.Utc)
+                            : TimeZoneInfo.ConvertTimeToUtc(
+                                DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified),
+                                orgTzInfo);
+                        var targetEnd = orgTzInfo is null
+                            ? DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MaxValue), DateTimeKind.Utc)
+                            : TimeZoneInfo.ConvertTimeToUtc(
+                                DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MaxValue), DateTimeKind.Unspecified),
+                                orgTzInfo);
 
-                        try
+                        var docs = await db.Documents
+                            .AsNoTracking()
+                            .Where(d => d.OrganizationId == org.Id
+                                        && d.DeletedAt == null
+                                        && d.ExpirationDate >= targetStart
+                                        && d.ExpirationDate <= targetEnd)
+                            .Include(d => d.Vendor)
+                            .ToListAsync(ct);
+                        if (docs.Count == 0) continue;
+
+                        // reminders.NotifyInternalUser gates whether THIS reminder includes the cached
+                        // list; the cache itself is built once per org above.
+                        var reminderInternalUsers = reminder.NotifyInternalUser ? internalUsers : new List<string>();
+
+                        foreach (var doc in docs)
                         {
-                            var subject = reminder.EmailSubjectTemplate
-                                          ?? $"[{org.Name}] {doc.OriginalFileName} expires in {reminder.DaysBefore} days";
-                            var body = BuildBody(org.Name, doc, reminder.DaysBefore);
-                            var messageId = await email.SendAsync(recipient, subject, body, ct);
+                            var recipients = new List<string>(reminderInternalUsers);
+                            if (reminder.NotifyVendor && !string.IsNullOrWhiteSpace(doc.Vendor?.ContactEmail))
+                                recipients.Add(doc.Vendor.ContactEmail);
+                            // Distinct uses OrdinalIgnoreCase to match the dedupe HashSet below and the
+                            // intent of "one mail per real recipient": a user email stored lowercased
+                            // ("owner@x.com") and a vendor ContactEmail stored as-typed ("Owner@x.com")
+                            // would otherwise be sent to twice within the same tick.
+                            recipients = recipients
+                                .Where(r => !string.IsNullOrWhiteSpace(r))
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList();
+                            if (recipients.Count == 0) continue;
 
-                            db.ReminderLogs.Add(new ReminderLog
+                            // SendDate records the *org-local* calendar day this batch belongs to, not the
+                            // UTC date at the instant the send happened. For a Tokyo org firing at local
+                            // 08:00 on Jan 15 (23:00 UTC Jan 14) the column reads Jan 15 — matching what
+                            // any analytics query, the Resend dashboard, or the org's audit log expects.
+                            // SentAt (timestamptz) still stores the precise UTC instant.
+                            // See ADR 0007 (revises the SendDate Neutral consequence in ADR 0002).
+                            var sendDate = localDate;
+
+                            // Pull the set of recipients we've already logged for this (reminder, doc,
+                            // day) so multi-recipient reminders dedupe per recipient instead of skipping
+                            // the doc once any recipient has been sent.
+                            var alreadySent = (await db.ReminderLogs
+                                .Where(l => l.ReminderId == reminder.Id
+                                            && l.DocumentId == doc.Id
+                                            && l.SendDate == sendDate)
+                                .Select(l => l.RecipientEmail)
+                                .ToListAsync(ct))
+                                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                            foreach (var recipient in recipients)
                             {
-                                Id = Guid.NewGuid(),
-                                ReminderId = reminder.Id,
-                                DocumentId = doc.Id,
-                                RecipientEmail = recipient,
-                                SentAt = timeProvider.GetUtcNow().UtcDateTime,
-                                SendDate = sendDate,
-                                ResendMessageId = messageId,
-                                Status = messageId is null ? "failed" : "sent"
-                            });
-                        }
-                        catch (Exception ex)
-                        {
-                            logger.LogError(ex, "Failed sending reminder for doc {DocumentId}", doc.Id);
-                        }
-                    }
+                                if (alreadySent.Contains(recipient)) continue;
 
-                    try { await db.SaveChangesAsync(ct); }
-                    catch (DbUpdateException ex)
-                    {
-                        logger.LogWarning(ex, "Reminder log upsert conflict (likely concurrent tick) for doc {DocumentId}", doc.Id);
+                                try
+                                {
+                                    var subject = reminder.EmailSubjectTemplate
+                                                  ?? $"[{org.Name}] {doc.OriginalFileName} expires in {reminder.DaysBefore} days";
+                                    var body = BuildBody(org.Name, doc, reminder.DaysBefore);
+                                    var messageId = await email.SendAsync(recipient, subject, body, ct);
 
-                        // After a failed SaveChanges the pending Added ReminderLog entries stay
-                        // in the change tracker. The next doc iteration's SaveChangesAsync would
-                        // re-attempt them and throw again — cascading the failure to every doc
-                        // remaining in this tick. Detach them so each doc gets a clean slate.
-                        foreach (var entry in db.ChangeTracker.Entries<ReminderLog>()
-                                     .Where(e => e.State == EntityState.Added)
-                                     .ToList())
-                        {
-                            entry.State = EntityState.Detached;
+                                    db.ReminderLogs.Add(new ReminderLog
+                                    {
+                                        Id = Guid.NewGuid(),
+                                        ReminderId = reminder.Id,
+                                        DocumentId = doc.Id,
+                                        RecipientEmail = recipient,
+                                        SentAt = timeProvider.GetUtcNow().UtcDateTime,
+                                        SendDate = sendDate,
+                                        ResendMessageId = messageId,
+                                        Status = messageId is null ? "failed" : "sent"
+                                    });
+                                }
+                                catch (Exception ex)
+                                {
+                                    logger.LogError(ex, "Failed sending reminder for doc {DocumentId}", doc.Id);
+                                }
+                            }
+
+                            try { await db.SaveChangesAsync(ct); }
+                            catch (DbUpdateException ex)
+                            {
+                                // Defensive: the per-(org, sendDate) advisory lock above makes this
+                                // path nearly unreachable in multi-instance deploys — the only residual
+                                // trigger is a hashtextextended collision in the lock key space (2^63).
+                                // We keep the catch + detach because the cost is zero and the recovery
+                                // shape is the same one we'd want if a future code path were to bypass
+                                // the lock.
+                                logger.LogWarning(ex, "Reminder log upsert conflict (likely concurrent tick) for doc {DocumentId}", doc.Id);
+
+                                // After a failed SaveChanges the pending Added ReminderLog entries stay
+                                // in the change tracker. The next doc iteration's SaveChangesAsync would
+                                // re-attempt them and throw again — cascading the failure to every doc
+                                // remaining in this tick. Detach them so each doc gets a clean slate.
+                                foreach (var entry in db.ChangeTracker.Entries<ReminderLog>()
+                                             .Where(e => e.State == EntityState.Added)
+                                             .ToList())
+                                {
+                                    entry.State = EntityState.Detached;
+                                }
+                            }
                         }
                     }
                 }
+                finally
+                {
+                    // Release even on cancellation/throw. We deliberately do not pass `ct` to the
+                    // release — a cancelled tick should still hand the lock back to the pool rather
+                    // than rely on DISCARD ALL alone. The pool reset is a safety net, not the
+                    // primary release path.
+                    await ReleaseOrgLockAsync(db, lockKey);
+                }
             }
         }
+        finally
+        {
+            // Returning the connection to the pool triggers Npgsql's DISCARD ALL, which runs
+            // pg_advisory_unlock_all() — a final safety net for any lock we somehow didn't
+            // release above (e.g. unlock-call itself threw).
+            await db.Database.CloseConnectionAsync();
+        }
+    }
+
+    /// <summary>
+    /// Stable text key for the per-(org, sendDate) advisory lock. Hashed server-side via
+    /// <c>hashtextextended(text, 0)</c> so the same key always maps to the same <c>bigint</c>
+    /// across processes — unlike CLR <c>string.GetHashCode</c>, which is randomised per
+    /// process from .NET Core 2.1 onwards.
+    /// </summary>
+    internal static string BuildLockKey(Guid orgId, DateOnly sendDate) =>
+        $"reminder:{orgId:N}:{sendDate:yyyyMMdd}";
+
+    /// <summary>
+    /// Tries to acquire the session-scoped Postgres advisory lock keyed by
+    /// <paramref name="lockKey"/> on the DbContext's currently-open connection. Returns true if
+    /// the lock was acquired, false if another session holds it. Non-blocking
+    /// (<c>pg_try_advisory_lock</c>), so a held lock causes an immediate <c>false</c> rather
+    /// than a wait.
+    /// </summary>
+    private static async Task<bool> TryAcquireOrgLockAsync(SystemDbContext db, string lockKey, CancellationToken ct)
+    {
+        var conn = db.Database.GetDbConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT pg_try_advisory_lock(hashtextextended(@key, 0))";
+        AddTextParam(cmd, "@key", lockKey);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is bool b && b;
+    }
+
+    /// <summary>
+    /// Releases the session-scoped advisory lock keyed by <paramref name="lockKey"/>. Best-effort:
+    /// if the call itself throws (e.g. the connection is already gone), the pool's DISCARD ALL
+    /// will release the lock on connection return, so we log and swallow rather than letting an
+    /// unlock error propagate up the per-org loop and skip subsequent orgs.
+    /// </summary>
+    private static async Task ReleaseOrgLockAsync(SystemDbContext db, string lockKey)
+    {
+        var conn = db.Database.GetDbConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT pg_advisory_unlock(hashtextextended(@key, 0))";
+        AddTextParam(cmd, "@key", lockKey);
+        // ExecuteScalarAsync without a CT — see comment at the call site for why.
+        await cmd.ExecuteScalarAsync();
+    }
+
+    private static void AddTextParam(DbCommand cmd, string name, string value)
+    {
+        var p = cmd.CreateParameter();
+        p.ParameterName = name;
+        p.DbType = DbType.String;
+        p.Value = value;
+        cmd.Parameters.Add(p);
     }
 
     private static bool IsLocalSendWindow(string tz, DateTime nowUtc)
