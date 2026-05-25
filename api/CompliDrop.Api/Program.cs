@@ -221,8 +221,10 @@ app.UseSerilogRequestLogging();
 app.UseRouting();
 app.UseCors();
 // Gate behind config so integration tests (which have no client IP to partition on) can
-// disable it via RateLimiting:Enabled=false. Defaults to on for dev/prod.
-if (app.Configuration.GetValue("RateLimiting:Enabled", true))
+// disable it via RateLimiting:Enabled=false. Defaults to on for dev/prod, and the gate is
+// *force-on* in non-Development so a config slip can never silently drop auth-strict / portal
+// limits in prod. The helper is in a static class to keep it unit-testable.
+if (RateLimitingGate.ShouldEnable(app.Environment, app.Configuration, app.Logger))
 {
     app.UseRateLimiter();
 }
