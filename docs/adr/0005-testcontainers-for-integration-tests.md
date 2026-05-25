@@ -45,7 +45,7 @@ The API host receives the container connection string via `CustomWebApplicationF
 ### Neutral
 
 - **Pure-unit tests stay parallel** — only `[Collection("integration")]` tests serialize. Tests under `CompliDrop.Api.Tests` that don't touch the fixture (e.g. `PasswordHasherTests`, `TokenServiceTests`, `SvixWebhookVerifierTests`) parallelise normally.
-- **System-template reseed runs every reset** — `ResetAsync` wipes everything Respawn knows about, including the system Organization row that templates FK to, so the seed runs again. At MVP scale (5 templates × handful of rules) the cost is ~50ms/test; not yet worth the complexity of teaching Respawn to ignore a specific row. Tracked as a follow-up if test count grows.
+- **System-template seed survives across resets via FK cascade** — `Organizations`, `ComplianceTemplates`, and `ComplianceRules` are in Respawn's `TablesToIgnore`. After Respawn's pass, a single `DELETE FROM "Organizations" WHERE "Id" <> sysOrgId` runs in `ResetAsync`; the `ON DELETE CASCADE` FKs from `ComplianceTemplate → Organization` and `ComplianceRule → ComplianceTemplate` wipe any tenant templates and rules without touching the system rows. The seed only runs once (at host boot in `InitializeAsync`); subsequent resets skip it entirely. Saves ~50ms per integration test (was a documented follow-up; landed in the same PR as the ADR after a second pass on the harness).
 - **`MultiTenancyTests` was originally pre-fixture** and self-managed cleanup against a now-removed `DbContextFactory` helper. Ticket #13 migrated it onto `IntegrationTestBase` so all integration tests share one reset strategy.
 
 ## Alternatives considered
