@@ -130,7 +130,13 @@ public class ReminderBackgroundService(
                         .ToList();
                     if (recipients.Count == 0) continue;
 
-                    var sendDate = DateOnly.FromDateTime(nowUtc);
+                    // SendDate records the *org-local* calendar day this batch belongs to, not the
+                    // UTC date at the instant the send happened. For a Tokyo org firing at local
+                    // 08:00 on Jan 15 (23:00 UTC Jan 14) the column reads Jan 15 — matching what
+                    // any analytics query, the Resend dashboard, or the org's audit log expects.
+                    // SentAt (timestamptz) still stores the precise UTC instant.
+                    // See ADR 0007 (revises the SendDate Neutral consequence in ADR 0002).
+                    var sendDate = localDate;
 
                     // Pull the set of recipients we've already logged for this (reminder, doc,
                     // day) so multi-recipient reminders dedupe per recipient instead of skipping
