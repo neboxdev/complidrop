@@ -63,7 +63,23 @@ gh issue create -t "[task] <title>" -F <tempfile> -l "task" -a @me
 
 Add `careful-review` label if the work touches: auth, payments (Stripe), PII (document storage, audit log, vendor portal), multi-tenant filter, or compliance documents themselves.
 
-For bugs: title prefix `[bug]`, label `bug`.
+#### For bug-fix tickets
+
+Title prefix `[bug]`, label `bug` (in addition to whatever else applies — `careful-review`, `frontend`, etc.). Example:
+
+```bash
+gh issue create -t "[bug] <title>" -F <tempfile> -l "bug,task" -a @me
+```
+
+The `bug` label is the join key for the **rolling bug-fix epic [#48](https://github.com/neboxdev/complidrop/issues/48)** — `.github/workflows/bugfix-epic-sync.yml` auto-appends the ticket to the epic checklist on issue events (and ticks it when the issue closes). Do **not** edit the epic body by hand.
+
+Apply `bug` whenever the ticket is any of:
+- A defect or latent fragility (race, TZ assumption, multi-instance assumption).
+- A correctness/semantic decision needed to fix wrong behavior.
+- A contract ambiguity producing wrong client behavior.
+- A review finding deferred from another PR's triage.
+
+Do NOT apply `bug` to feature work, refactors, test scaffolding, or codebase simplification — those belong to their feature/epic tickets. See [ADR 0006](../../docs/adr/0006-rolling-bug-fix-epic.md) and CLAUDE.md → "Rolling bug-fix epic (#48)" for the full rationale.
 
 ### Local mode
 

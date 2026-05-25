@@ -83,6 +83,8 @@ Detect mode at runtime: if `gh --version` works AND `gh auth status` succeeds, u
    - Audit log (`AuditSaveChangesInterceptor`)
    - PII handling (extraction, exports)
 
+6. **Mark bug-fix tickets** with the `bug` label so they auto-index in the rolling bug-fix epic [#48](https://github.com/neboxdev/complidrop/issues/48) (via `.github/workflows/bugfix-epic-sync.yml`). Inside a feature breakdown, most children are tasks — `bug` is uncommon here and usually only applies if the spec exists to fix a defect. See CLAUDE.md → "Rolling bug-fix epic (#48)" and [ADR 0006](../../docs/adr/0006-rolling-bug-fix-epic.md).
+
 ### Local mode
 
 Create files under `docs/tickets/backlog/` named `YYYY-MM-DD-NNN-kebab-title.md`. Epic file named `YYYY-MM-DD-NNN-epic-<title>.md` listing child ticket paths. Use `docs/tickets/TEMPLATE.md` as a starting point.

@@ -106,7 +106,7 @@ Severity orders the fixing (blockers first), but does NOT decide whether to fix.
 5. After all bugs fixed, re-run the affected reviewers once more to verify nothing new surfaced from the fixes.
 6. **Triage every `kind: suggestion` finding three ways** — "listed in the PR body but not fixed" is NOT a valid outcome:
    - **Implement in this PR** (default). Polish, missing test edges, small refactors, ADRs. Commit them as a `fix(scope): address review findings (#N)` commit alongside the bug fixes.
-   - **Defer to a follow-up ticket** — only when the suggestion expands scope, changes data semantics, or contradicts the reviewer's own caveat (e.g. "MVP no-op", "don't introduce prophylactically"). Use `mcp__ccd_session__spawn_task` (or `gh issue create`) with the reviewer's reasoning copied verbatim. List the new ticket id(s) in the PR body.
+   - **Defer to a follow-up ticket** — only when the suggestion expands scope, changes data semantics, or contradicts the reviewer's own caveat (e.g. "MVP no-op", "don't introduce prophylactically"). Use `mcp__ccd_session__spawn_task` (or `gh issue create`) with the reviewer's reasoning copied verbatim. List the new ticket id(s) in the PR body. **If the deferred finding is a bug or latent issue** (defect, race, TZ/multi-instance assumption, contract ambiguity producing wrong client behavior), apply the `bug` label — the rolling bug-fix epic [#48](https://github.com/neboxdev/complidrop/issues/48) auto-syncs from that label via `.github/workflows/bugfix-epic-sync.yml`.
    - **Discard** — only when the suggestion contradicts a project rule (CLAUDE.md, an existing ADR, the ticket's Non-goals). List discards in the PR body with the rule cited.
    When unsure between implement and defer, default to implement if the change is <30 lines.
 7. If any bug fix requires a design change contradicting the ticket, stop and ask the user — do not silently diverge.
@@ -117,6 +117,8 @@ Severity orders the fixing (blockers first), but does NOT decide whether to fix.
 git push -u origin HEAD
 gh pr create -t "<conventional commit title> (#$ARGUMENTS)" -F <pr-body-tempfile>
 ```
+
+The PR title/body should include `Closes #$ARGUMENTS` so the ticket auto-closes on merge. If the ticket carries the `bug` label, the close event triggers `bugfix-epic-sync.yml` which ticks the box in the rolling bug-fix epic [#48](https://github.com/neboxdev/complidrop/issues/48) — no manual epic edit needed.
 
 PR body structure:
 

@@ -1,0 +1,122 @@
+name: bugfix-epic-sync
+
+# Keeps the rolling "Bug fixes & latent issues" epic body in sync with the set
+# of issues currently carrying the `bug` label.
+#
+# How it works:
+# - Any issue labeled `bug` (open or closed) is rendered into a managed block in
+#   the epic body: `- [ ] #N Title` if open, `- [x] #N Title` if closed.
+# - The managed block is delimited by HTML comments so the rest of the body
+#   (Goal / Scope / How) is preserved.
+# - Triggers on every relevant issue event plus a daily cron as a safety net.
+# - Self-edits to the epic are ignored (we skip when the event issue IS the
+#   epic) to avoid feedback loops.
+#
+# Configuration:
+# - The epic issue number is read from repo variable `BUGFIX_EPIC_NUMBER`.
+#   Set it once with: `gh variable set BUGFIX_EPIC_NUMBER --body "<n>"`.
+
+on:
+  issues:
+    types: [opened, closed, reopened, labeled, unlabeled, edited, deleted, transferred]
+  schedule:
+    # Daily at 06:00 UTC as a safety net in case an event was missed.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # Skip when the edited issue IS the epic itself (prevents self-trigger loops).
+    if: >-
+      github.event_name != 'issues' ||
+      github.event.issue.number != fromJSON(vars.BUGFIX_EPIC_NUMBER || '0')
+    steps:
+      - name: Validate config
+        env:
+          BUGFIX_EPIC_NUMBER: ${{ vars.BUGFIX_EPIC_NUMBER }}
+        run: |
+          if [ -z "$BUGFIX_EPIC_NUMBER" ]; then
+            echo "::error::Repo variable BUGFIX_EPIC_NUMBER is not set."
+            echo "Set it with: gh variable set BUGFIX_EPIC_NUMBER --body \"<epic-issue-number>\""
+            exit 1
+          fi
+
+      - name: Sync epic body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EPIC: ${{ vars.BUGFIX_EPIC_NUMBER }}
+          REPO: ${{ github.repository }}
+          START_MARK: "<!-- bugfix-epic-sync:start -->"
+          END_MARK: "<!-- bugfix-epic-sync:end -->"
+        run: |
+          set -euo pipefail
+
+          # Fetch the current epic body.
+          epic_body=$(gh issue view "$EPIC" --repo "$REPO" --json body --jq '.body')
+
+          if ! printf '%s' "$epic_body" | grep -qF "$START_MARK"; then
+            echo "::error::Epic #$EPIC body has no '$START_MARK' marker. Cannot sync."
+            exit 1
+          fi
+
+          # Fetch all issues with label `bug` (open + closed), sorted ascending by number.
+          # --limit 1000 is well above the realistic ceiling for a rolling epic.
+          mapfile -t lines < <(
+            gh issue list \
+              --repo "$REPO" \
+              --label bug \
+              --state all \
+              --limit 1000 \
+              --json number,title,state \
+              --jq 'sort_by(.number) | .[] | "\(.state)\t\(.number)\t\(.title)"'
+          )
+
+          # Build the managed block. `gh` returns state as OPEN / CLOSED.
+          block_inner=""
+          for line in "${lines[@]:-}"; do
+            [ -z "$line" ] && continue
+            state=$(printf '%s' "$line" | cut -f1)
+            num=$(printf '%s' "$line" | cut -f2)
+            # Skip the epic itself in case it ever carries the `bug` label by accident.
+            if [ "$num" = "$EPIC" ]; then continue; fi
+            title=$(printf '%s' "$line" | cut -f3-)
+            if [ "$state" = "CLOSED" ]; then
+              block_inner+="- [x] #${num} ${title}"$'\n'
+            else
+              block_inner+="- [ ] #${num} ${title}"$'\n'
+            fi
+          done
+
+          if [ -z "$block_inner" ]; then
+            block_inner="_No bug-fix tickets yet._"$'\n'
+          fi
+
+          # Regenerate the managed block in place, preserving the rest of the body.
+          export EPIC_BODY="$epic_body"
+          export BLOCK_INNER="$block_inner"
+          python3 - "$START_MARK" "$END_MARK" > /tmp/new_body.md <<'PY'
+          import os, re, sys
+          start, end = sys.argv[1], sys.argv[2]
+          body = os.environ['EPIC_BODY']
+          block = os.environ['BLOCK_INNER']
+          pattern = re.compile(
+              re.escape(start) + r'.*?' + re.escape(end),
+              flags=re.DOTALL,
+          )
+          replacement = f"{start}\n{block}{end}"
+          new = pattern.sub(replacement, body, count=1)
+          sys.stdout.write(new)
+          PY
+
+          # Only update if the body actually changed (saves an audit-log entry per run).
+          if [ "$(cat /tmp/new_body.md)" = "$epic_body" ]; then
+            echo "No change to epic body — skipping update."
+            exit 0
+          fi
+
+          gh issue edit "$EPIC" --repo "$REPO" --body-file /tmp/new_body.md
+          echo "Updated epic #$EPIC."
