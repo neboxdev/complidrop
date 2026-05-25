@@ -1,4 +1,4 @@
-using CompliDrop.Api.Middleware;
+using CompliDrop.Api;
 using FluentAssertions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -32,6 +32,33 @@ public sealed class RateLimitingGateTests
     }
 
     [Fact]
+    public void Defaults_to_true_when_key_absent_in_staging()
+    {
+        // Closes the matrix — ensures a future refactor that special-cases Production in the
+        // absent-key branch can't silently regress Staging.
+        RateLimitingGate.ShouldEnable(Env("Staging"), Config(), NullLogger.Instance)
+            .Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData("yes")]
+    [InlineData("1")]
+    [InlineData("on")]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("not-a-bool")]
+    public void Unparseable_string_fails_closed_to_enabled(string value)
+    {
+        // Don't crash startup on a typoed bool — treat unparseable as enabled (fail-closed for
+        // a security-shaped gate). Verified with the same value in both Production and
+        // Development to confirm parsing happens before the env-specific branching.
+        RateLimitingGate.ShouldEnable(Env("Production"), Config(("RateLimiting:Enabled", value)), NullLogger.Instance)
+            .Should().BeTrue();
+        RateLimitingGate.ShouldEnable(Env("Development"), Config(("RateLimiting:Enabled", value)), NullLogger.Instance)
+            .Should().BeTrue();
+    }
+
+    [Fact]
     public void Honors_true_in_production()
     {
         RateLimitingGate.ShouldEnable(Env("Production"), Config(("RateLimiting:Enabled", "true")), NullLogger.Instance)
@@ -56,8 +83,11 @@ public sealed class RateLimitingGateTests
             captured);
 
         result.Should().BeTrue("the gate must ignore a disable attempt outside Development");
+        // Assert on contract-shaped fragments (the config key name and the environment name)
+        // rather than internal phrasing — these would be the tokens an operator searching the
+        // logs would use, so they're stable across rewording of the message.
         captured.Warnings.Should().ContainSingle()
-            .Which.Should().Contain("forced ON")
+            .Which.Should().Contain("RateLimiting:Enabled")
             .And.Contain("Production");
     }
 
@@ -73,7 +103,8 @@ public sealed class RateLimitingGateTests
 
         result.Should().BeTrue();
         captured.Warnings.Should().ContainSingle()
-            .Which.Should().Contain("Staging");
+            .Which.Should().Contain("RateLimiting:Enabled")
+            .And.Contain("Staging");
     }
 
     [Fact]
