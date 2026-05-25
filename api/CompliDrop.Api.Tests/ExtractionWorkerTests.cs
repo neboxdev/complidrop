@@ -1,5 +1,6 @@
 using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Configuration;
+using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Tests.TestHelpers;
@@ -470,6 +471,107 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         // the bug while staying robust against test-host timing jitter.
         doc.ProcessingStartedAt!.Value.Should().BeOnOrAfter(before.AddSeconds(-30));
         doc.ProcessingStartedAt!.Value.Should().BeOnOrBefore(after.AddSeconds(30));
+    }
+
+    // ----- Full-path TZ independence via NpgsqlDataSource initializer (the #61 follow-up) -----
+    //
+    // The strongest end-to-end regression for [ADR 0009](../../../docs/adr/0009-no-at-time-zone-on-timestamptz-in-raw-sql.md)
+    // — "raw SQL against timestamptz columns uses bare now() / DateTime.UtcNow, never AT TIME ZONE".
+    // The Claim_under_non_UTC_session_* family above pins the SQL string under a non-UTC session;
+    // this test pins the production claim PATH (SystemDbContext → pooled physical connection →
+    // raw SQL) by routing the worker through an NpgsqlDataSource whose every physical connection
+    // has SET TIME ZONE applied at open.
+
+    [Fact]
+    public async Task Claim_via_full_DataSource_path_with_non_UTC_session_does_not_reclaim_fresh_doc()
+    {
+        // End-to-end variant of Claim_under_non_UTC_session_does_not_reclaim_a_fresh_processing_doc:
+        // instead of pinning the session TZ on a hand-rolled NpgsqlConnection and running the raw
+        // SQL string directly (which proves the SQL is TZ-independent), this test drives the full
+        // production claim path — worker.ClaimNextAsync → scopeFactory.CreateAsyncScope →
+        // SystemDbContext → pooled physical connection → raw SQL — through a connection whose
+        // session TZ has been pinned by an NpgsqlDataSource initializer. Closes the path-coverage
+        // gap the SQL-string-level tests cannot see (#61): if some other piece of the app installs
+        // a connection-opened hook that sets a non-UTC TZ, or a future Npgsql change disables
+        // DISCARD ALL by default, the worker MUST still claim correctly.
+        const string ianaZone = "America/New_York";
+
+        // Build a DataSource that pins SET TIME ZONE on every physical-connection open.
+        // NoResetOnClose=true is strictly load-bearing once the SHOW-timezone probe below runs: the
+        // probe causes a pool-return-and-reborrow cycle, and the connection initializer fires only
+        // on a NEW physical open, not on a reuse. Without this flag the probe's return would
+        // trigger DISCARD ALL, the worker's borrow would reuse the same physical connection at UTC,
+        // and the test would silently pass even under pre-#26 SQL (UTC means no bridging). Keeping
+        // the flag also matches the production scenario the #26 reviewer flagged — a non-UTC TZ
+        // surviving DISCARD ALL because a future Npgsql config change disables the reset.
+        var builder = new NpgsqlDataSourceBuilder(Fixture.ConnectionString);
+        builder.ConnectionStringBuilder.NoResetOnClose = true;
+        builder.UsePhysicalConnectionInitializer(
+            connectionInitializer: conn =>
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"SET TIME ZONE '{ianaZone}'";
+                cmd.ExecuteNonQuery();
+            },
+            connectionInitializerAsync: async conn =>
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"SET TIME ZONE '{ianaZone}'";
+                await cmd.ExecuteNonQueryAsync();
+            });
+        await using var dataSource = builder.Build();
+
+        // Sanity-check that the initializer actually pinned the TZ on a physical connection from
+        // this DataSource before driving the worker. Without this guard, a future Npgsql/EF change
+        // that quietly stops firing UsePhysicalConnectionInitializer on EF-wrapped opens would
+        // silently degrade this test to "the SQL is correct under UTC" — already covered by the
+        // SQL-string-level Theory — and the BeNull() assertion below would still pass.
+        await using (var probe = dataSource.CreateConnection())
+        {
+            await probe.OpenAsync();
+            await using var show = probe.CreateCommand();
+            show.CommandText = "SHOW timezone";
+            var probedTz = (string?)await show.ExecuteScalarAsync();
+            probedTz.Should().Be(ianaZone,
+                "the DataSource's physical-connection initializer must actually set the session TZ; "
+                + "otherwise this test silently degrades into a UTC-only check already covered by "
+                + "the Claim_under_non_UTC_session_* SQL-string-level Theory");
+        }
+
+        // Stand up a throw-away DI container so SystemDbContext resolves the test DataSource. We
+        // deliberately don't override CustomWebApplicationFactory: (a) the worker only needs
+        // SystemDbContext for the claim path — the rest of the host is irrelevant — and (b)
+        // mutating the shared factory's DataSource would leak state into other tests in this
+        // collection. A scoped ServiceProvider disposed at end-of-test cleans up cleanly. No
+        // AuditSaveChangesInterceptor is wired because ClaimNextAsync issues raw SQL — it never
+        // calls SaveChanges, so the interceptor would be unreachable.
+        var services = new ServiceCollection();
+        services.AddDbContext<SystemDbContext>(options => options.UseNpgsql(dataSource));
+        await using var sp = services.BuildServiceProvider();
+        var worker = new ExtractionWorker(
+            sp.GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<ExtractionWorker>.Instance);
+
+        // Same seed shape as the SQL-level fresh-doc test: ProcessingStartedAt 1 min ago, well
+        // inside the 5-min zombie window. Pre-#26 SQL with America/New_York (UTC-4/-5) bridged
+        // the threshold's RHS ~4-5h into the future via the session TZ, so a 1-min-old doc
+        // satisfied `< (real_now + 4h55m)` and was wrongly reclaimed — another worker would have
+        // stolen it mid-extraction. Post-#26 SQL is timestamptz on both sides and the comparison
+        // is offset-independent, so the doc correctly stays unclaimed.
+        var (_, docId) = await SeedDocAsync(
+            status: ExtractionStatus.Processing,
+            attempts: 1,
+            processingStartedAt: DateTime.UtcNow.AddMinutes(-1));
+
+        var claimed = await worker.ClaimNextAsync(CancellationToken.None);
+
+        claimed.Should().BeNull(
+            "the claim path must be TZ-independent end-to-end: a fresh Processing doc must not be "
+            + "reclaimed when the worker is driven through a SystemDbContext whose underlying "
+            + "NpgsqlDataSource pins a non-UTC session TZ on every physical connection (#61)");
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Processing, "the fresh doc's status must be untouched");
+        doc.ProcessingAttempts.Should().Be(1, "the fresh doc's attempt counter must be untouched");
     }
 
     // ----- Boundary + branch coverage (from review) ------------------------------------------
