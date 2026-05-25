@@ -2,6 +2,7 @@ using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CompliDrop.Api.Endpoints;
 
@@ -54,6 +55,8 @@ public static class VendorPortalEndpoints
         SystemDbContext db,
         IBlobStorageService blobs,
         IFileValidationService validator,
+        IAuditLogger audit,
+        ILogger<VendorPortalLink> logger,
         CancellationToken ct)
     {
         var link = await db.VendorPortalLinks
@@ -91,35 +94,6 @@ public static class VendorPortalEndpoints
         var blobName = $"{orgId}/{DateTime.UtcNow:yyyy-MM}/portal-{Guid.NewGuid()}-{SanitizeFileName(file.FileName)}";
         var upload = await blobs.UploadAsync(blobName, buffer, validation.DetectedContentType!, ct);
 
-        // Atomic reservation. The cheap `UploadCount >= MaxUploads` check above is racy: two
-        // concurrent requests can both see count=N-1 with cap=N and both pass. This UPDATE closes
-        // the window — its WHERE clause is re-evaluated against the row's current state under
-        // Postgres's row-level UPDATE lock, so only one of the racing requests increments past the
-        // cap. SetProperty(IsActive, count+1 < max) flips the link inactive when this request
-        // takes the last permit. rows-affected == 0 means we lost the race (or the link was
-        // revoked between the initial read and now).
-        var reserved = await db.VendorPortalLinks
-            .Where(l => l.Id == link.Id && l.IsActive && l.UploadCount < l.MaxUploads)
-            .ExecuteUpdateAsync(set => set
-                .SetProperty(l => l.UploadCount, l => l.UploadCount + 1)
-                .SetProperty(l => l.IsActive, l => l.UploadCount + 1 < l.MaxUploads),
-                ct);
-
-        if (reserved == 0)
-        {
-            // Lost the race. Best-effort blob cleanup so a heavy concurrent load doesn't leak
-            // storage objects, then refuse with the same envelope as the already-at-cap path.
-            try { await blobs.DeleteAsync(blobName, ct); } catch { /* best-effort */ }
-            await DeactivateAsync(db, link.Id, ct);
-            return Error(429, "vendor.portal_quota_exceeded", "Upload quota reached for this link.");
-        }
-
-        // Permit reserved. Insert the Document referencing the uploaded blob. The tracked `link`
-        // entity is now stale (we updated the DB row via ExecuteUpdate which bypasses change
-        // tracking) — we intentionally don't mutate it further, so SaveChanges only emits the
-        // Document insert. Audit log for the link mutation is consequently lost in this path; the
-        // Document insert is audited separately, which is the more interesting trail. If link-
-        // mutation audit becomes important, add an explicit IAuditLogger.LogAsync here.
         var doc = new Document
         {
             Id = Guid.NewGuid(),
@@ -137,8 +111,72 @@ public static class VendorPortalEndpoints
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow
         };
-        db.Documents.Add(doc);
-        await db.SaveChangesAsync(ct);
+
+        // Atomic reservation + Document insert + audit row, all in one explicit transaction. The
+        // cheap `UploadCount >= MaxUploads` check above is racy: two concurrent requests can both
+        // see count=N-1 with cap=N and both pass. The atomic UPDATE-WHERE clause is re-evaluated
+        // against the row's current state under Postgres's row-level UPDATE lock, so only one of
+        // the racing requests increments past the cap. SetProperty(IsActive, count+1 < max) flips
+        // the link inactive when this request takes the last permit. rows-affected == 0 means we
+        // lost the race (or the link was revoked between the initial read and now).
+        //
+        // The transaction means: if the Document insert OR the audit-log SaveChanges fail after
+        // the reservation, the permit increment rolls back (so the customer doesn't lose paid
+        // quota for an upload that didn't persist). The blob is still uploaded by that point —
+        // the `finally` best-effort deletes it so storage doesn't leak. If the blob delete itself
+        // fails, we log loud so an operator notices the orphan rather than failing silent.
+        var documentPersisted = false;
+        try
+        {
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+            var reserved = await db.VendorPortalLinks
+                .Where(l => l.Id == link.Id && l.IsActive && l.UploadCount < l.MaxUploads)
+                .ExecuteUpdateAsync(set => set
+                    .SetProperty(l => l.UploadCount, l => l.UploadCount + 1)
+                    .SetProperty(l => l.IsActive, l => l.UploadCount + 1 < l.MaxUploads),
+                    ct);
+
+            if (reserved == 0)
+            {
+                // Lost the race or link revoked. The `finally` will best-effort delete the blob.
+                // Deactivate idempotently outside this (rolled-back) tx.
+                await tx.RollbackAsync(ct);
+                await DeactivateAsync(db, link.Id, ct);
+                return Error(429, "vendor.portal_quota_exceeded", "Upload quota reached for this link.");
+            }
+
+            db.Documents.Add(doc);
+            await db.SaveChangesAsync(ct);
+
+            // Explicit audit row for the link mutation — ExecuteUpdateAsync bypasses the
+            // AuditSaveChangesInterceptor, so without this call the link-mutation audit trail
+            // would be lost. organizationIdOverride is needed because the portal upload is
+            // unauthenticated (ICurrentUser has no OrgId). Same tx → commits atomically with
+            // the Document insert and the counter increment.
+            await audit.LogAsync(
+                "vendorPortalLink.upload_processed",
+                nameof(VendorPortalLink),
+                link.Id,
+                organizationIdOverride: orgId,
+                ct: ct);
+
+            await tx.CommitAsync(ct);
+            documentPersisted = true;
+        }
+        finally
+        {
+            if (!documentPersisted)
+            {
+                try { await blobs.DeleteAsync(blobName, ct); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex,
+                        "Portal upload: best-effort blob cleanup failed for {BlobName} on link {LinkId}",
+                        blobName, link.Id);
+                }
+            }
+        }
 
         return Results.Ok(new
         {
