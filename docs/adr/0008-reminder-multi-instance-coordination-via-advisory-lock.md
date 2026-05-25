@@ -99,11 +99,16 @@ Hash the lock key in C# and pass the bigint. Rejected:
 
 ## Test coverage
 
-- `Concurrent_ticks_against_the_same_org_send_each_recipient_exactly_one_email` — two `ReminderBackgroundService` instances driven via `Task.WhenAll`, share the same DB and fakes, asserts one email + one log row per recipient. The marquee invariant.
-- `Held_advisory_lock_on_a_side_connection_causes_the_tick_to_skip_the_org` — manually acquires `pg_advisory_lock` for the `(org, sendDate)` key on a separate Npgsql connection, runs one tick, asserts the org was skipped entirely (no email, no log row). Pins the lock-acquisition path explicitly so the concurrent test can't false-positive on dedupe alone.
-- `Releasing_the_advisory_lock_lets_a_subsequent_tick_process_the_org` — manual acquire, release, tick, assert normal processing. Confirms the acquire/release round-trip works.
-- `Different_orgs_can_be_processed_in_the_same_tick_when_one_orgs_lock_is_held_by_another_instance` — two orgs, one's lock held externally; one tick must process the other org and skip the locked one. Pins the granularity (lock is per-org, not global).
-- `Lock_is_released_after_each_org_so_a_second_tick_in_the_same_process_processes_normally` — two sequential ticks at the same instant; first sends, second finds dedupe and sends nothing. Pins that the `finally`-based release works.
+All tests live in `api/CompliDrop.Api.Tests/ReminderBackgroundServiceTests.cs` under the section heading `// ----- AC: Multi-instance coordination via advisory lock (#25 / ADR 0008) -----`.
+
+- `Concurrent_ticks_against_the_same_org_send_each_recipient_exactly_one_email` — two `ReminderBackgroundService` instances driven via `Task.WhenAll`, share the same DB and fakes, asserts two sends total (one per recipient) and two log rows. The marquee externally-observable invariant. By itself this test cannot detect a lock-removal regression under cooperative scheduling (the dedupe HashSet path b. would still hold the assertion); the lock-presence pin lives in the next test.
+- `Held_advisory_lock_on_a_side_connection_causes_the_tick_to_skip_the_org` — manually acquires `pg_try_advisory_lock` for the `(org, sendDate)` key on a separate Npgsql connection, runs one tick, asserts the org was skipped entirely (no email, no log row). The canonical lock-acquisition pin.
+- `Releasing_the_advisory_lock_lets_a_subsequent_tick_process_the_org` — manual acquire, release, tick, assert normal processing. Confirms the acquire/release round-trip works. Uses an explicit `pg_advisory_unlock` on the holder's `DisposeAsync` because Npgsql's `DISCARD ALL`-on-pool-return reset is not synchronously visible to the next pooled command.
+- `Different_orgs_can_be_processed_in_the_same_tick_when_one_orgs_lock_is_held` — two orgs, one's lock held externally; one tick must process the unlocked org and skip the locked one. Pins the granularity (per-(org, day), not global).
+- `Cancellation_during_tick_releases_the_advisory_lock_for_next_tick` — pre-cancels the CT, runs a tick, then runs a fresh tick on a fresh CT and asserts at least one log row was written. Catches a hypothetical regression that wraps the unlock or close-connection in `if (!ct.IsCancellationRequested)` — that would leak the lock for the rest of the local day and the fresh tick would silently skip.
+- `BuildOrgDayLockKey_is_stable_across_calls_and_distinct_across_inputs` — unit-level identity pin so the integration tests' manual lock-key construction cannot drift from the worker's. A refactor that accidentally collapsed granularity (per-org-only, per-day-only, constant) fails here loudly.
+
+The pre-existing `Same_day_re_tick_does_not_send_again` covers the lock-released-after-org-processed invariant by way of the second tick succeeding on dedupe alone.
 
 ## References
 

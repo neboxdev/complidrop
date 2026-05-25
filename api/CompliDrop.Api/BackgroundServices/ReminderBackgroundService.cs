@@ -81,8 +81,31 @@ public class ReminderBackgroundService(
                 // this instance would otherwise duplicate. The lock is keyed at org+day granularity
                 // so disjoint orgs in the same tick can still run on different replicas in parallel.
                 // See ADR 0008.
-                var lockKey = BuildLockKey(org.Id, localDate);
-                if (!await TryAcquireOrgLockAsync(db, lockKey, ct))
+                var lockKey = BuildOrgDayLockKey(org.Id, localDate);
+                bool acquired;
+                try
+                {
+                    acquired = await TryAcquireOrgLockAsync(db, lockKey, ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Shutdown path — propagate so the outer try/finally closes the pinned
+                    // connection and the worker exits cleanly.
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    // A transient acquire failure (network blip, statement timeout, Neon
+                    // disconnect) on one org must not kill the whole tick. Pre-fix, per-org
+                    // failures were already bounded (TryFindTimeZone catches TZ errors,
+                    // DbUpdateException is caught at save time). Treat the throw as
+                    // "couldn't acquire, skip" and let the next hourly tick retry.
+                    logger.LogWarning(ex,
+                        "Reminder tick: pg_try_advisory_lock failed for org {OrgId} on {LocalDate}; skipping (next tick retries).",
+                        org.Id, localDate);
+                    continue;
+                }
+                if (!acquired)
                 {
                     logger.LogDebug(
                         "Reminder tick: skipping org {OrgId} on {LocalDate} — advisory lock held by another instance.",
@@ -235,8 +258,20 @@ public class ReminderBackgroundService(
                     // Release even on cancellation/throw. We deliberately do not pass `ct` to the
                     // release — a cancelled tick should still hand the lock back to the pool rather
                     // than rely on DISCARD ALL alone. The pool reset is a safety net, not the
-                    // primary release path.
-                    await ReleaseOrgLockAsync(db, lockKey);
+                    // primary release path. Swallow exceptions from the unlock itself: if the
+                    // connection is broken the lock dies with the session server-side anyway, and
+                    // a throw here would escape the per-org loop and skip every remaining org for
+                    // this tick (the very contract this finally exists to maintain).
+                    try
+                    {
+                        await ReleaseOrgLockAsync(db, lockKey);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex,
+                            "Reminder tick: pg_advisory_unlock failed for org {OrgId} on {LocalDate}; pool DISCARD ALL will release on connection return.",
+                            org.Id, localDate);
+                    }
                 }
             }
         }
@@ -244,18 +279,23 @@ public class ReminderBackgroundService(
         {
             // Returning the connection to the pool triggers Npgsql's DISCARD ALL, which runs
             // pg_advisory_unlock_all() — a final safety net for any lock we somehow didn't
-            // release above (e.g. unlock-call itself threw).
+            // release above (e.g. unlock-call itself threw). We deliberately do NOT pass `ct`
+            // here for the same reason as ReleaseOrgLockAsync's no-CT pattern: cleanup must run
+            // even on shutdown so any leftover advisory lock is freed before the connection
+            // returns to the pool.
             await db.Database.CloseConnectionAsync();
         }
     }
 
     /// <summary>
-    /// Stable text key for the per-(org, sendDate) advisory lock. Hashed server-side via
+    /// Stable text key for the per-(org, sendDate) advisory lock. The name encodes the lock's
+    /// granularity (one lock per org per local-calendar day) so a future caller can tell from
+    /// the call site what bound contention this lock provides. Hashed server-side via
     /// <c>hashtextextended(text, 0)</c> so the same key always maps to the same <c>bigint</c>
     /// across processes — unlike CLR <c>string.GetHashCode</c>, which is randomised per
     /// process from .NET Core 2.1 onwards.
     /// </summary>
-    internal static string BuildLockKey(Guid orgId, DateOnly sendDate) =>
+    internal static string BuildOrgDayLockKey(Guid orgId, DateOnly sendDate) =>
         $"reminder:{orgId:N}:{sendDate:yyyyMMdd}";
 
     /// <summary>

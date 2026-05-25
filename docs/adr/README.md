@@ -15,3 +15,4 @@ Use `/adr <title>` to scaffold a new one.
 - [0005](0005-testcontainers-for-integration-tests.md) — Testcontainers + Respawn + WebApplicationFactory for API integration tests
 - [0006](0006-rolling-bug-fix-epic.md) — Rolling bug-fix epic synced from the `bug` label
 - [0007](0007-reminder-log-send-date-is-org-local.md) — `ReminderLog.SendDate` stores the org-local calendar day (supersedes 0002 Neutral)
+- [0008](0008-reminder-multi-instance-coordination-via-advisory-lock.md) — Reminder worker uses a per-(org, sendDate) Postgres advisory lock to coordinate across replicas (supersedes 0002 Negative)

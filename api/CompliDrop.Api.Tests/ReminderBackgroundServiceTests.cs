@@ -1,3 +1,5 @@
+using System.Data;
+using System.Data.Common;
 using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Migrations;
@@ -15,8 +17,9 @@ namespace CompliDrop.Api.Tests;
 /// Integration tests for <see cref="ReminderBackgroundService"/>: drives
 /// <c>ProcessHourlyTickAsync</c> against the Testcontainers Postgres harness with a
 /// <see cref="FixedTimeProvider"/> and a <see cref="FakeEmailService"/>, so the local-08:00
-/// window, the (ReminderId, DocumentId, SendDate) dedupe key, and recipient selection can be
-/// asserted deterministically.
+/// window, the per-recipient dedupe key (ADR 0002), the org-local <c>SendDate</c> semantic
+/// (ADR 0007), and the per-(orgId, sendDate) advisory lock coordinating multi-instance ticks
+/// (ADR 0008) can be asserted deterministically.
 /// </summary>
 public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
@@ -813,6 +816,12 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
     /// next tick immediately after the handle is disposed would race the lock's actual release.
     /// Uses <c>pg_try_advisory_lock</c> so a stale lock from a prior test fails loudly here
     /// instead of blocking for the connection-timeout window.
+    /// <para/>
+    /// Both the acquire and release commands set <c>DbType.String</c> explicitly to match the
+    /// production parameter shape in <c>ReminderBackgroundService.AddTextParam</c>. The default
+    /// <c>AddWithValue</c> inference is <c>text</c> in Npgsql today and works the same — but
+    /// pinning the type guarantees the hash and the prod hash agree even if a future
+    /// Npgsql/PG version changes inference for CLR <c>string</c>.
     /// </summary>
     private async Task<IAsyncDisposable> HoldAdvisoryLockAsync(string lockKey)
     {
@@ -822,7 +831,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         {
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT pg_try_advisory_lock(hashtextextended(@key, 0))";
-            cmd.Parameters.AddWithValue("@key", lockKey);
+            AddTextParam(cmd, "@key", lockKey);
             var acquired = (bool?)await cmd.ExecuteScalarAsync();
             acquired.Should().BeTrue("no other session should hold the lock at test arrangement time");
             return new AdvisoryLockHandle(conn, lockKey);
@@ -836,6 +845,15 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         }
     }
 
+    private static void AddTextParam(DbCommand cmd, string name, string value)
+    {
+        var p = cmd.CreateParameter();
+        p.ParameterName = name;
+        p.DbType = DbType.String;
+        p.Value = value;
+        cmd.Parameters.Add(p);
+    }
+
     private sealed class AdvisoryLockHandle(NpgsqlConnection conn, string lockKey) : IAsyncDisposable
     {
         public async ValueTask DisposeAsync()
@@ -844,7 +862,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             {
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = "SELECT pg_advisory_unlock(hashtextextended(@key, 0))";
-                cmd.Parameters.AddWithValue("@key", lockKey);
+                AddTextParam(cmd, "@key", lockKey);
                 await cmd.ExecuteScalarAsync();
             }
             finally
@@ -871,7 +889,13 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         // (b) one fully completes before the other reaches the critical section, the second's
         // alreadySent set then contains both recipients and it sends nothing. Either way the
         // total send count is 2, the total log count is 2 — the assertions below pin the floor
-        // and the ceiling. The Held_advisory_lock_* test below pins path (a) specifically.
+        // and the ceiling.
+        //
+        // CAVEAT: this test alone CANNOT detect a regression that silently removes the advisory
+        // lock — under cooperative scheduling path (b) it would pass on the dedupe HashSet
+        // alone. `Held_advisory_lock_on_a_side_connection_causes_the_tick_to_skip_the_org`
+        // below is the canonical lock-presence pin; this test pins the externally observable
+        // invariant (two sends total, two log rows, no matter the interleaving).
         await Task.WhenAll(
             workerA.ProcessHourlyTickAsync(CancellationToken.None),
             workerB.ProcessHourlyTickAsync(CancellationToken.None));
@@ -890,7 +914,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         // serialisation but would fail this one — the worker would enter the critical section,
         // find no log rows, and send.
         var seed = await SeedReminderAsync(NyEightAm);
-        var lockKey = ReminderBackgroundService.BuildLockKey(seed.OrgId, new DateOnly(2026, 1, 15));
+        var lockKey = ReminderBackgroundService.BuildOrgDayLockKey(seed.OrgId, new DateOnly(2026, 1, 15));
 
         await using var holder = await HoldAdvisoryLockAsync(lockKey);
 
@@ -907,7 +931,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         // the next tick, with no residual state blocking the second run. Without this, a one-off
         // race that took the lock would permanently wedge the org for the rest of the local day.
         var seed = await SeedReminderAsync(NyEightAm);
-        var lockKey = ReminderBackgroundService.BuildLockKey(seed.OrgId, new DateOnly(2026, 1, 15));
+        var lockKey = ReminderBackgroundService.BuildOrgDayLockKey(seed.OrgId, new DateOnly(2026, 1, 15));
 
         await using (var holder = await HoldAdvisoryLockAsync(lockKey))
         {
@@ -931,7 +955,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         // out the workers would serialise reminder processing globally and defeat the point.
         var orgA = await SeedReminderAsync(NyEightAm, internalEmail: "a@example.com");
         var orgB = await SeedReminderAsync(NyEightAm, internalEmail: "b@example.com");
-        var lockKeyA = ReminderBackgroundService.BuildLockKey(orgA.OrgId, new DateOnly(2026, 1, 15));
+        var lockKeyA = ReminderBackgroundService.BuildOrgDayLockKey(orgA.OrgId, new DateOnly(2026, 1, 15));
 
         await using var holder = await HoldAdvisoryLockAsync(lockKeyA);
 
@@ -943,10 +967,39 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
     }
 
     [Fact]
-    public void BuildLockKey_is_stable_across_calls_and_distinct_across_inputs()
+    public async Task Cancellation_during_tick_releases_the_advisory_lock_for_next_tick()
+    {
+        // Defensive pin on the lock-release-on-cancellation contract. The per-org `finally`
+        // (release lock) and the outer pinned-connection `finally` (close connection — pool
+        // DISCARD ALL is the ultimate safety net) both run on cancellation, and neither
+        // ReleaseOrgLockAsync nor CloseConnectionAsync take the tick's CT. A regression that
+        // wrapped the unlock in `if (!ct.IsCancellationRequested) ...` would leak the lock
+        // for the rest of the local day; this test catches that by running a fresh tick and
+        // asserting the org was actually processed (a leak would have skipped it).
+        var seed = await SeedReminderAsync(NyEightAm);
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        try
+        {
+            await BuildWorker(NyEightAm).ProcessHourlyTickAsync(cts.Token);
+        }
+        catch (OperationCanceledException) { /* expected — cancellation propagates out */ }
+
+        // If the cancelled tick had leaked the (orgId, sendDate) lock, this tick would skip
+        // the org (logged at debug as "advisory lock held by another instance") and write no
+        // ReminderLog row at all. The assertion below would then fail.
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().BeGreaterOrEqualTo(1,
+            "the fresh tick must have acquired the lock — a leaked lock would have blocked the send");
+    }
+
+    [Fact]
+    public void BuildOrgDayLockKey_is_stable_across_calls_and_distinct_across_inputs()
     {
         // Pins the lock key's identity at the function level so the integration tests above
-        // can rely on ReminderBackgroundService.BuildLockKey returning the same string they
+        // can rely on ReminderBackgroundService.BuildOrgDayLockKey returning the same string they
         // pass to pg_try_advisory_lock manually. A refactor that accidentally collapsed the
         // granularity (per-org only, per-day only, or constant global) would fail here loudly
         // — without this, the failure mode would surface only as "the concurrent test
@@ -954,13 +1007,13 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         var orgId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         var date = new DateOnly(2026, 1, 15);
 
-        ReminderBackgroundService.BuildLockKey(orgId, date)
-            .Should().Be(ReminderBackgroundService.BuildLockKey(orgId, date));
+        ReminderBackgroundService.BuildOrgDayLockKey(orgId, date)
+            .Should().Be(ReminderBackgroundService.BuildOrgDayLockKey(orgId, date));
 
         var otherOrg = Guid.Parse("22222222-2222-2222-2222-222222222222");
-        ReminderBackgroundService.BuildLockKey(otherOrg, date)
-            .Should().NotBe(ReminderBackgroundService.BuildLockKey(orgId, date));
-        ReminderBackgroundService.BuildLockKey(orgId, date.AddDays(1))
-            .Should().NotBe(ReminderBackgroundService.BuildLockKey(orgId, date));
+        ReminderBackgroundService.BuildOrgDayLockKey(otherOrg, date)
+            .Should().NotBe(ReminderBackgroundService.BuildOrgDayLockKey(orgId, date));
+        ReminderBackgroundService.BuildOrgDayLockKey(orgId, date.AddDays(1))
+            .Should().NotBe(ReminderBackgroundService.BuildOrgDayLockKey(orgId, date));
     }
 }
