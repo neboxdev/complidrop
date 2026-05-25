@@ -98,12 +98,16 @@ describe("Logo", () => {
       expect(svg?.getAttribute("width")).toBe("36");
     });
 
-    it("scales the wordmark font-size to 1.3x the height", () => {
+    it("scales the wordmark font-size to ~0.81x the height (icon-dominant lockup)", () => {
+      // Matches the canonical SVG ratio of 52/64 from
+      // `docs/brand/logo-refresh-2026/svg/complidrop-logo-horizontal.svg`.
+      // The icon stays at full `height`; the wordmark cap-height ends up
+      // ~58 % of the icon height, so the icon visually dominates the lockup.
       const { container } = render(<Logo variant="primary" height={40} />);
       const wordmark = Array.from(container.querySelectorAll("span > span")).find(
         (el) => el.textContent === "CompliDrop",
       ) as HTMLElement | undefined;
-      expect(wordmark?.style.fontSize).toBe("52px"); // 40 * 1.3
+      expect(wordmark?.style.fontSize).toBe("32px"); // round(40 * 0.81)
     });
 
     it("uses the height as size for the mark variant", () => {

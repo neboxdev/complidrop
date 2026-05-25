@@ -116,8 +116,14 @@ export function Logo({
     );
   }
 
-  const fontSize = Math.round(safeHeight * 1.3);
-  const gap = Math.round(safeHeight * 0.35);
+  // Proportions derived from the canonical export at
+  // `docs/brand/logo-refresh-2026/svg/complidrop-logo-horizontal.svg`:
+  // viewBox 0 0 380 80, icon scaled to 64 px tall, wordmark font-size 52,
+  // gap-between 16. Yields fontSize ≈ 0.81 × icon and gap ≈ 0.22 × icon. The
+  // reference `Logo.jsx` in the handoff used a `1.3 × icon` fontSize comment
+  // that was inconsistent with the actual SVG exports — we match the SVGs.
+  const fontSize = Math.round(safeHeight * 0.81);
+  const gap = Math.round(safeHeight * 0.22);
 
   const wordmarkStyle: CSSProperties = {
     ...WORDMARK_FONT_STYLE,
