@@ -7,8 +7,10 @@
  * this file's `size` + `contentType` exports.
  *
  * Source artwork: `docs/brand/logo-refresh-2026/svg/complidrop-favicon.svg`.
+ * Brand constants come from `@/lib/brand` (single source of truth).
  */
 import { ImageResponse } from "next/og";
+import { BRAND_COLORS, CHECK_PATH, DROPLET_PATH } from "@/lib/brand";
 
 export const size = { width: 180, height: 180 };
 export const contentType = "image/png";
@@ -23,7 +25,7 @@ export default function AppleIcon() {
         style={{
           width: "100%",
           height: "100%",
-          background: "#0EA5E9",
+          background: BRAND_COLORS.sky,
           borderRadius: 40,
           display: "flex",
           alignItems: "center",
@@ -37,14 +39,11 @@ export default function AppleIcon() {
           xmlns="http://www.w3.org/2000/svg"
         >
           <g transform="translate(15 12) scale(0.7)">
+            <path d={DROPLET_PATH} fill={BRAND_COLORS.white} />
             <path
-              d="M50 4 C 50 4, 14 38, 14 62 C 14 82, 30 96, 50 96 C 70 96, 86 82, 86 62 C 86 38, 50 4, 50 4 Z"
-              fill="#FFFFFF"
-            />
-            <path
-              d="M30 60 L 46 74 L 72 44"
+              d={CHECK_PATH}
               fill="none"
-              stroke="#0EA5E9"
+              stroke={BRAND_COLORS.sky}
               strokeWidth={9}
               strokeLinecap="round"
               strokeLinejoin="round"

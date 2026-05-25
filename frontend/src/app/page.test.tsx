@@ -71,4 +71,21 @@ describe("Landing page CTAs", () => {
     // /register still appears — asserting its absence here would be wrong.)
     expect(hrefs).not.toContain("/login");
   });
+
+  it("renders the brand Logo in the hero and footer (header is decorative under the home Link)", () => {
+    // The header Logo is decorative (its accessible name comes from the wrapping
+    // `<Link aria-label="CompliDrop — home">`). The hero (twotone) and footer
+    // (primary) Logos both expose `role="img"` with the CompliDrop label. A
+    // regression that removed all three placements would no longer be caught
+    // by the link-only assertions above; this test pins that the brand mark
+    // is actually rendered in the most visible spots on the marketing site.
+    mockUseMe.mockReturnValue({ data: null });
+    render(<Home />);
+
+    const brandImages = screen.getAllByRole("img", { name: /CompliDrop/i });
+    // Hero + footer at minimum. (The header counts a wrapping `<Link>` with
+    // aria-label="CompliDrop — home" as a separate accessible image-or-link
+    // depending on the engine; we assert ≥2 to stay implementation-tolerant.)
+    expect(brandImages.length).toBeGreaterThanOrEqual(2);
+  });
 });

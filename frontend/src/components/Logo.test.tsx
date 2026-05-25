@@ -14,19 +14,32 @@ describe("Logo", () => {
       expect(screen.getByRole("img", { name: "CompliDrop" })).toBeTruthy();
     });
 
-    it("renders decoratively (no role, aria-hidden) when title is empty", () => {
+    it("renders decoratively (no role, aria-hidden) when decorative=true", () => {
       // Used inside a <Link aria-label="..."> so the wordmark isn't double-announced.
-      const { container } = render(<Logo variant="primary" title="" />);
+      const { container } = render(<Logo variant="primary" decorative />);
       expect(screen.queryByRole("img")).toBeNull();
       const wrapper = container.firstElementChild;
       expect(wrapper?.getAttribute("aria-hidden")).toBe("true");
       expect(wrapper?.hasAttribute("aria-label")).toBe(false);
     });
 
-    it("renders the mark variant decoratively when title is empty", () => {
-      const { container } = render(<Logo variant="mark" title="" />);
+    it("renders the mark variant decoratively when decorative=true", () => {
+      const { container } = render(<Logo variant="mark" decorative />);
       expect(screen.queryByRole("img")).toBeNull();
       expect(container.firstElementChild?.getAttribute("aria-hidden")).toBe("true");
+    });
+
+    it("inner droplet SVG is always aria-hidden so the wrapper label isn't double-announced", () => {
+      // The outer span carries role="img" + aria-label="CompliDrop"; the inner
+      // SVG must remain aria-hidden so screen readers treat the lockup as one
+      // labelled image. A regression that drops aria-hidden from <Mark /> would
+      // not be caught by the wrapper-level tests above.
+      for (const variant of ["primary", "twotone", "reverse", "mark"] as const) {
+        const { container, unmount } = render(<Logo variant={variant} />);
+        const svg = container.querySelector("svg");
+        expect(svg?.getAttribute("aria-hidden"), `variant=${variant}`).toBe("true");
+        unmount();
+      }
     });
 
     it("accepts a custom accessible name", () => {
@@ -38,10 +51,7 @@ describe("Logo", () => {
   describe("variants", () => {
     it("primary renders the full CompliDrop wordmark in one span (navy)", () => {
       const { container } = render(<Logo variant="primary" />);
-      const wordmarkSpan = container.querySelectorAll("span > span");
-      // Outermost lockup span → mark <svg> + wordmark <span> → wordmark contains
-      // a single text node "CompliDrop" (not split for primary).
-      const wordmark = Array.from(wordmarkSpan).find(
+      const wordmark = Array.from(container.querySelectorAll("span > span")).find(
         (el) => el.textContent === "CompliDrop",
       );
       expect(wordmark).toBeTruthy();
@@ -50,14 +60,11 @@ describe("Logo", () => {
 
     it("twotone splits the wordmark into Compli (navy) + Drop (sky)", () => {
       const { container } = render(<Logo variant="twotone" />);
-      // The outer wordmark span has navy color and contains an inner span with sky color
-      // wrapping "Drop". The literal "Compli" text sits in the outer span as a sibling.
       const dropSpan = Array.from(container.querySelectorAll("span")).find(
         (el) => el.textContent === "Drop" && el.children.length === 0,
       );
       expect(dropSpan).toBeTruthy();
       expect((dropSpan as HTMLElement).style.color).toBe("rgb(14, 165, 233)"); // sky #0EA5E9
-      // The full wordmark still reads "CompliDrop"
       expect(container.textContent).toContain("CompliDrop");
     });
 
@@ -73,7 +80,6 @@ describe("Logo", () => {
     it("mark renders only the SVG droplet (no wordmark text)", () => {
       const { container } = render(<Logo variant="mark" />);
       expect(container.querySelectorAll("svg").length).toBe(1);
-      // No span containing the wordmark text
       expect(container.textContent).toBe("");
     });
   });
@@ -106,26 +112,56 @@ describe("Logo", () => {
       expect(svg?.getAttribute("width")).toBe("64");
       expect(svg?.getAttribute("height")).toBe("64");
     });
+
+    it("falls back to the default size when height is NaN / 0 / negative", () => {
+      // Invalid heights would otherwise emit `width="NaN"`, `fontSize: "NaNpx"`,
+      // etc. The guard normalises them to the 36-px default.
+      for (const bad of [Number.NaN, 0, -10, Number.POSITIVE_INFINITY]) {
+        const { container, unmount } = render(
+          <Logo variant="primary" height={bad as number} />,
+        );
+        const svg = container.querySelector("svg");
+        expect(svg?.getAttribute("width"), `height=${bad}`).toBe("36");
+        unmount();
+      }
+    });
+  });
+
+  describe("prop forwarding", () => {
+    it("forwards className to the outer wrapper span (lockup variants)", () => {
+      const { container } = render(<Logo variant="primary" className="custom-class" />);
+      expect(container.firstElementChild?.className).toContain("custom-class");
+    });
+
+    it("forwards className to the outer wrapper span (mark variant)", () => {
+      const { container } = render(<Logo variant="mark" className="mark-class" />);
+      expect(container.firstElementChild?.className).toContain("mark-class");
+    });
   });
 
   describe("brand rules", () => {
     it("contains no orange (#F97316) anywhere in the rendered markup", () => {
       // Render every variant and assert the orange UI-accent color never leaks
       // into the logo's inline styles or fills.
-      const variants = ["primary", "twotone", "reverse", "mark"] as const;
-      for (const variant of variants) {
-        const { container } = render(<Logo variant={variant} />);
+      for (const variant of ["primary", "twotone", "reverse", "mark"] as const) {
+        const { container, unmount } = render(<Logo variant={variant} />);
         const html = container.innerHTML.toLowerCase();
-        expect(html).not.toContain("#f97316");
-        expect(html).not.toContain("rgb(249, 115, 22)");
-        container.remove();
+        expect(html, `variant=${variant}`).not.toContain("#f97316");
+        expect(html, `variant=${variant}`).not.toContain("rgb(249, 115, 22)");
+        unmount();
       }
     });
 
-    it("droplet uses sky #0EA5E9", () => {
-      const { container } = render(<Logo variant="primary" />);
-      const droplet = container.querySelector("svg path[fill]");
-      expect(droplet?.getAttribute("fill")).toBe("#0EA5E9");
+    it("droplet always uses sky #0EA5E9 — across every variant", () => {
+      // The droplet color is invariant across all four variants per the
+      // design handoff. A regression that flipped the droplet on `reverse`
+      // (e.g. to navy) would only be caught here.
+      for (const variant of ["primary", "twotone", "reverse", "mark"] as const) {
+        const { container, unmount } = render(<Logo variant={variant} />);
+        const droplet = container.querySelector("svg path[fill]");
+        expect(droplet?.getAttribute("fill"), `variant=${variant}`).toBe("#0EA5E9");
+        unmount();
+      }
     });
   });
 });

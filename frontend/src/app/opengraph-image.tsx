@@ -10,30 +10,31 @@
  * alongside) supplies `og:image:alt`.
  *
  * Source artwork: `docs/brand/logo-refresh-2026/`.
+ * Brand constants come from `@/lib/brand` (single source of truth).
  */
 import { ImageResponse } from "next/og";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { BRAND_COLORS, CHECK_PATH, DROPLET_PATH } from "@/lib/brand";
 
 export const alt = "CompliDrop — Stop Chasing Paper. Start Dropping Docs.";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
-const COLORS = {
-  sky: "#0EA5E9",
-  navy: "#0C4A6E",
-  tint: "#F0F9FF",
-  white: "#FFFFFF",
-  muted: "#64748B",
-};
+const TINT = "#F0F9FF";
+const MUTED = "#64748B";
+
+// Embed Plus Jakarta Sans so the wordmark in the OG render matches the
+// typography used on the live site. The file is OFL-licensed and committed
+// under `app/_assets/` (the `_` prefix opts the folder out of routing).
+// Memoized at module scope so the buffer is read once per process and reused
+// across renders — important if this route ever transitions from the default
+// static optimization to dynamic mode.
+const fontPath = join(process.cwd(), "src/app/_assets/PlusJakartaSans-Bold.ttf");
+const fontPromise = readFile(fontPath);
 
 export default async function OpenGraphImage() {
-  // Embed Plus Jakarta Sans so the wordmark in the OG render matches the
-  // typography used on the live site. The file is OFL-licensed and committed
-  // under `app/_assets/` (the `_` prefix opts the folder out of routing).
-  const fontData = await readFile(
-    join(process.cwd(), "src/app/_assets/PlusJakartaSans-Bold.ttf"),
-  );
+  const fontData = await fontPromise;
 
   return new ImageResponse(
     (
@@ -41,7 +42,7 @@ export default async function OpenGraphImage() {
         style={{
           width: "100%",
           height: "100%",
-          background: `linear-gradient(135deg, ${COLORS.tint} 0%, ${COLORS.white} 50%, ${COLORS.tint} 100%)`,
+          background: `linear-gradient(135deg, ${TINT} 0%, ${BRAND_COLORS.white} 50%, ${TINT} 100%)`,
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
@@ -64,14 +65,11 @@ export default async function OpenGraphImage() {
             viewBox="0 0 100 100"
             xmlns="http://www.w3.org/2000/svg"
           >
+            <path d={DROPLET_PATH} fill={BRAND_COLORS.sky} />
             <path
-              d="M50 4 C 50 4, 14 38, 14 62 C 14 82, 30 96, 50 96 C 70 96, 86 82, 86 62 C 86 38, 50 4, 50 4 Z"
-              fill={COLORS.sky}
-            />
-            <path
-              d="M30 60 L 46 74 L 72 44"
+              d={CHECK_PATH}
               fill="none"
-              stroke={COLORS.white}
+              stroke={BRAND_COLORS.white}
               strokeWidth={9}
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -86,8 +84,8 @@ export default async function OpenGraphImage() {
               display: "flex",
             }}
           >
-            <span style={{ color: COLORS.navy }}>Compli</span>
-            <span style={{ color: COLORS.sky }}>Drop</span>
+            <span style={{ color: BRAND_COLORS.navy }}>Compli</span>
+            <span style={{ color: BRAND_COLORS.sky }}>Drop</span>
           </div>
         </div>
 
@@ -98,7 +96,7 @@ export default async function OpenGraphImage() {
             fontSize: 52,
             fontWeight: 700,
             letterSpacing: "-0.02em",
-            color: COLORS.navy,
+            color: BRAND_COLORS.navy,
             textAlign: "center",
             lineHeight: 1.15,
             display: "flex",
@@ -107,7 +105,7 @@ export default async function OpenGraphImage() {
           }}
         >
           <span>Stop Chasing Paper.</span>
-          <span style={{ color: COLORS.sky }}>Start Dropping Docs.</span>
+          <span style={{ color: BRAND_COLORS.sky }}>Start Dropping Docs.</span>
         </div>
 
         {/* Footer line */}
@@ -115,7 +113,7 @@ export default async function OpenGraphImage() {
           style={{
             marginTop: 48,
             fontSize: 28,
-            color: COLORS.muted,
+            color: MUTED,
             display: "flex",
           }}
         >

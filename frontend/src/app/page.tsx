@@ -55,7 +55,7 @@ export default function Home() {
       <header className="sticky top-0 z-50 border-b bg-white/80 backdrop-blur-lg transition-all duration-300" style={{ borderColor: C.border }}>
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
           <Link href="/" className="flex items-center" aria-label="CompliDrop — home">
-            <Logo variant="primary" height={36} title="" />
+            <Logo variant="primary" height={36} decorative />
           </Link>
           <nav className="flex items-center gap-1 sm:gap-3">
             {authed ? (

@@ -11,9 +11,11 @@ const plusJakartaSans = Plus_Jakarta_Sans({
 
 // `metadataBase` makes social-card image URLs absolute. Defaults to the
 // public production origin; override per-env via NEXT_PUBLIC_SITE_URL if needed
-// (preview deploys, staging, etc.).
+// (preview deploys, staging, etc.). Empty string is treated as unset — CI/
+// preview environments commonly forward env vars without setting a value, and
+// `new URL("")` throws.
 const SITE_URL =
-  process.env.NEXT_PUBLIC_SITE_URL ?? "https://www.complidrop.com";
+  process.env.NEXT_PUBLIC_SITE_URL?.trim() || "https://www.complidrop.com";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),

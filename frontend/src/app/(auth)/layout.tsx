@@ -7,7 +7,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
       <header className="border-b border-sky-100 bg-white">
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
           <Link href="/" className="flex items-center" aria-label="CompliDrop — home">
-            <Logo variant="primary" height={36} title="" />
+            <Logo variant="primary" height={36} decorative />
           </Link>
           <div className="flex items-center gap-4 text-sm text-slate-500">
             <Link href="/login" className="hover:text-sky-700">Log in</Link>
