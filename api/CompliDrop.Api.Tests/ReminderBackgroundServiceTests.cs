@@ -1,3 +1,5 @@
+using System.Data;
+using System.Data.Common;
 using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Migrations;
@@ -7,6 +9,7 @@ using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 
 namespace CompliDrop.Api.Tests;
 
@@ -14,8 +17,9 @@ namespace CompliDrop.Api.Tests;
 /// Integration tests for <see cref="ReminderBackgroundService"/>: drives
 /// <c>ProcessHourlyTickAsync</c> against the Testcontainers Postgres harness with a
 /// <see cref="FixedTimeProvider"/> and a <see cref="FakeEmailService"/>, so the local-08:00
-/// window, the (ReminderId, DocumentId, SendDate) dedupe key, and recipient selection can be
-/// asserted deterministically.
+/// window, the per-recipient dedupe key (ADR 0002), the org-local <c>SendDate</c> semantic
+/// (ADR 0007), and the per-(orgId, sendDate) advisory lock coordinating multi-instance ticks
+/// (ADR 0008) can be asserted deterministically.
 /// </summary>
 public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
@@ -795,5 +799,221 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
         Email.Sends.Should().ContainSingle(); // unchanged
         (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+    }
+
+    // ----- AC: Multi-instance coordination via advisory lock (#25 / ADR 0008) ----------------
+    // Two API replicas firing their hourly tick at the same UTC hour must not both call
+    // email.SendAsync for the same (reminder, doc, recipient). The advisory lock keyed on
+    // (orgId, sendDate) is the primary mechanism; the per-recipient unique index from ADR 0002
+    // is defence-in-depth.
+
+    /// <summary>
+    /// Acquires the session-scoped Postgres advisory lock keyed by <paramref name="lockKey"/> on
+    /// a separate Npgsql connection and returns a handle whose <c>DisposeAsync</c> calls
+    /// <c>pg_advisory_unlock</c> explicitly before disposing the connection. Relying on Npgsql's
+    /// <c>DISCARD ALL</c>-on-pool-return is not enough here: the reset isn't synchronously visible
+    /// to the next command on a different pooled connection, so a Release test that fires the
+    /// next tick immediately after the handle is disposed would race the lock's actual release.
+    /// Uses <c>pg_try_advisory_lock</c> so a stale lock from a prior test fails loudly here
+    /// instead of blocking for the connection-timeout window.
+    /// <para/>
+    /// Both the acquire and release commands set <c>DbType.String</c> explicitly to match the
+    /// production parameter shape in <c>ReminderBackgroundService.AddTextParam</c>. The default
+    /// <c>AddWithValue</c> inference is <c>text</c> in Npgsql today and works the same — but
+    /// pinning the type guarantees the hash and the prod hash agree even if a future
+    /// Npgsql/PG version changes inference for CLR <c>string</c>.
+    /// </summary>
+    private async Task<IAsyncDisposable> HoldAdvisoryLockAsync(string lockKey)
+    {
+        var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        try
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT pg_try_advisory_lock(hashtextextended(@key, 0))";
+            AddTextParam(cmd, "@key", lockKey);
+            var acquired = (bool?)await cmd.ExecuteScalarAsync();
+            acquired.Should().BeTrue("no other session should hold the lock at test arrangement time");
+            return new AdvisoryLockHandle(conn, lockKey);
+        }
+        catch
+        {
+            // Don't leak the open connection (and the lock it would otherwise hold) if the
+            // setup assertion or the SELECT itself throws before the caller receives the handle.
+            await conn.DisposeAsync();
+            throw;
+        }
+    }
+
+    private static void AddTextParam(DbCommand cmd, string name, string value)
+    {
+        var p = cmd.CreateParameter();
+        p.ParameterName = name;
+        p.DbType = DbType.String;
+        p.Value = value;
+        cmd.Parameters.Add(p);
+    }
+
+    private sealed class AdvisoryLockHandle(NpgsqlConnection conn, string lockKey) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync()
+        {
+            try
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT pg_advisory_unlock(hashtextextended(@key, 0))";
+                AddTextParam(cmd, "@key", lockKey);
+                await cmd.ExecuteScalarAsync();
+            }
+            finally
+            {
+                await conn.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Concurrent_ticks_against_the_same_org_send_each_recipient_exactly_one_email()
+    {
+        // Marquee invariant from #25 / ADR 0008. Two replicas firing the same UTC hour both
+        // produce exactly two emails (internal + vendor) — not four. Pre-fix, both ticks would
+        // pre-load an empty alreadySent set, both would call email.SendAsync for each recipient,
+        // and only the DB unique index would protect log integrity (the emails would already be
+        // at Resend twice). The advisory lock prevents the SendAsync from ever firing twice.
+        var seed = await SeedReminderAsync(NyEightAm, notifyInternal: true, notifyVendor: true);
+        var workerA = BuildWorker(NyEightAm);
+        var workerB = BuildWorker(NyEightAm);
+
+        // Task.WhenAll dispatches both immediately. Two outcomes are valid and both must satisfy
+        // the assertion: (a) one wins the lock + sends, the other skips on pg_try → false;
+        // (b) one fully completes before the other reaches the critical section, the second's
+        // alreadySent set then contains both recipients and it sends nothing. Either way the
+        // total send count is 2, the total log count is 2 — the assertions below pin the floor
+        // and the ceiling.
+        //
+        // CAVEAT: this test alone CANNOT detect a regression that silently removes the advisory
+        // lock — under cooperative scheduling path (b) it would pass on the dedupe HashSet
+        // alone. `Held_advisory_lock_on_a_side_connection_causes_the_tick_to_skip_the_org`
+        // below is the canonical lock-presence pin; this test pins the externally observable
+        // invariant (two sends total, two log rows, no matter the interleaving).
+        await Task.WhenAll(
+            workerA.ProcessHourlyTickAsync(CancellationToken.None),
+            workerB.ProcessHourlyTickAsync(CancellationToken.None));
+
+        Email.Sends.Should().HaveCount(2);
+        Email.Sends.Select(s => s.ToEmail).Should()
+            .BeEquivalentTo(["owner@example.com", "vendor@example.com"]);
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Held_advisory_lock_on_a_side_connection_causes_the_tick_to_skip_the_org()
+    {
+        // Pin the lock-acquisition path explicitly. A regression that silently removed the lock
+        // and relied on dedupe alone would still pass the concurrent test above under scheduler
+        // serialisation but would fail this one — the worker would enter the critical section,
+        // find no log rows, and send.
+        var seed = await SeedReminderAsync(NyEightAm);
+        var lockKey = ReminderBackgroundService.BuildOrgDayLockKey(seed.OrgId, new DateOnly(2026, 1, 15));
+
+        await using var holder = await HoldAdvisoryLockAsync(lockKey);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().BeEmpty("the locked org must be skipped, not waited on");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Releasing_the_advisory_lock_lets_a_subsequent_tick_process_the_org()
+    {
+        // The acquire/release round-trip: a lock held during one tick must be releasable before
+        // the next tick, with no residual state blocking the second run. Without this, a one-off
+        // race that took the lock would permanently wedge the org for the rest of the local day.
+        var seed = await SeedReminderAsync(NyEightAm);
+        var lockKey = ReminderBackgroundService.BuildOrgDayLockKey(seed.OrgId, new DateOnly(2026, 1, 15));
+
+        await using (var holder = await HoldAdvisoryLockAsync(lockKey))
+        {
+            await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+        }
+
+        Email.Sends.Should().BeEmpty("first tick: lock held → org skipped");
+
+        // Lock released by the using-block dispose. Next tick must process normally.
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle().Which.ToEmail.Should().Be("owner@example.com");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Different_orgs_can_be_processed_in_the_same_tick_when_one_orgs_lock_is_held()
+    {
+        // Lock granularity is per-(org, sendDate), not global. An external holder of org A's
+        // lock must not block the tick from processing org B in the same run — otherwise scaling
+        // out the workers would serialise reminder processing globally and defeat the point.
+        var orgA = await SeedReminderAsync(NyEightAm, internalEmail: "a@example.com");
+        var orgB = await SeedReminderAsync(NyEightAm, internalEmail: "b@example.com");
+        var lockKeyA = ReminderBackgroundService.BuildOrgDayLockKey(orgA.OrgId, new DateOnly(2026, 1, 15));
+
+        await using var holder = await HoldAdvisoryLockAsync(lockKeyA);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Select(s => s.ToEmail).Should().Equal(["b@example.com"]);
+        (await LogCountAsync(orgA.ReminderId, orgA.DocumentId)).Should().Be(0, "org A is locked, must be skipped");
+        (await LogCountAsync(orgB.ReminderId, orgB.DocumentId)).Should().Be(1, "org B is unlocked, must process");
+    }
+
+    [Fact]
+    public async Task Cancellation_during_tick_releases_the_advisory_lock_for_next_tick()
+    {
+        // Defensive pin on the lock-release-on-cancellation contract. The per-org `finally`
+        // (release lock) and the outer pinned-connection `finally` (close connection — pool
+        // DISCARD ALL is the ultimate safety net) both run on cancellation, and neither
+        // ReleaseOrgLockAsync nor CloseConnectionAsync take the tick's CT. A regression that
+        // wrapped the unlock in `if (!ct.IsCancellationRequested) ...` would leak the lock
+        // for the rest of the local day; this test catches that by running a fresh tick and
+        // asserting the org was actually processed (a leak would have skipped it).
+        var seed = await SeedReminderAsync(NyEightAm);
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        try
+        {
+            await BuildWorker(NyEightAm).ProcessHourlyTickAsync(cts.Token);
+        }
+        catch (OperationCanceledException) { /* expected — cancellation propagates out */ }
+
+        // If the cancelled tick had leaked the (orgId, sendDate) lock, this tick would skip
+        // the org (logged at debug as "advisory lock held by another instance") and write no
+        // ReminderLog row at all. The assertion below would then fail.
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().BeGreaterOrEqualTo(1,
+            "the fresh tick must have acquired the lock — a leaked lock would have blocked the send");
+    }
+
+    [Fact]
+    public void BuildOrgDayLockKey_is_stable_across_calls_and_distinct_across_inputs()
+    {
+        // Pins the lock key's identity at the function level so the integration tests above
+        // can rely on ReminderBackgroundService.BuildOrgDayLockKey returning the same string they
+        // pass to pg_try_advisory_lock manually. A refactor that accidentally collapsed the
+        // granularity (per-org only, per-day only, or constant global) would fail here loudly
+        // — without this, the failure mode would surface only as "the concurrent test
+        // intermittently fails because the manual lock no longer matches the worker's".
+        var orgId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var date = new DateOnly(2026, 1, 15);
+
+        ReminderBackgroundService.BuildOrgDayLockKey(orgId, date)
+            .Should().Be(ReminderBackgroundService.BuildOrgDayLockKey(orgId, date));
+
+        var otherOrg = Guid.Parse("22222222-2222-2222-2222-222222222222");
+        ReminderBackgroundService.BuildOrgDayLockKey(otherOrg, date)
+            .Should().NotBe(ReminderBackgroundService.BuildOrgDayLockKey(orgId, date));
+        ReminderBackgroundService.BuildOrgDayLockKey(orgId, date.AddDays(1))
+            .Should().NotBe(ReminderBackgroundService.BuildOrgDayLockKey(orgId, date));
     }
 }
