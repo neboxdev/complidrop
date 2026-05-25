@@ -1,5 +1,6 @@
 using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Migrations;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
@@ -190,6 +191,9 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         var seed = await SeedReminderAsync(NyEightAm);
 
         // Simulate a prior successful send recorded today by some earlier tick / instance.
+        // SendDate is the org-local calendar day at SentAt (per ADR 0007). For NyEightAm
+        // (13:00 UTC Jan 15 = 08:00 NY-local Jan 15) the value is Jan 15 in either convention,
+        // but writing it as the local date keeps this seed consistent with the live semantic.
         await using (var db = CreateSystemDb())
         {
             db.ReminderLogs.Add(new ReminderLog
@@ -199,7 +203,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
                 DocumentId = seed.DocumentId,
                 RecipientEmail = "owner@example.com",
                 SentAt = NyEightAm.UtcDateTime,
-                SendDate = DateOnly.FromDateTime(NyEightAm.UtcDateTime),
+                SendDate = new DateOnly(2026, 1, 15), // NY-local day
                 ResendMessageId = "resend_pre_existing",
                 Status = "sent",
             });
@@ -291,6 +295,17 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
 
         (await LogCountAsync(ny.ReminderId, ny.DocumentId)).Should().Be(1);
         (await LogCountAsync(tokyo.ReminderId, tokyo.DocumentId)).Should().Be(1);
+
+        // Both orgs' SendDate is org-local Jan 15 per ADR 0007 — even though the two ticks fired
+        // at different UTC instants on different UTC calendar days (Tokyo at 23:00 UTC Jan 14,
+        // NY at 13:00 UTC Jan 15). Asserts the symmetric write site: a regression that fixed only
+        // one zone (or reverted only one to `nowUtc`) would fail here as well as in the dedicated
+        // SendDate tests, so the failure mode is unambiguous.
+        await using var assertDb = CreateSystemDb();
+        var nyLog = await assertDb.ReminderLogs.SingleAsync(l => l.ReminderId == ny.ReminderId);
+        var tokyoLog = await assertDb.ReminderLogs.SingleAsync(l => l.ReminderId == tokyo.ReminderId);
+        nyLog.SendDate.Should().Be(new DateOnly(2026, 1, 15));
+        tokyoLog.SendDate.Should().Be(new DateOnly(2026, 1, 15));
     }
 
     // ----- Other meaningful branches ---------------------------------------------------------
@@ -422,7 +437,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
                 DocumentId = seed.DocumentId,
                 RecipientEmail = "owner@example.com",
                 SentAt = NyEightAm.UtcDateTime,
-                SendDate = DateOnly.FromDateTime(NyEightAm.UtcDateTime),
+                SendDate = new DateOnly(2026, 1, 15), // NY-local day per ADR 0007
                 ResendMessageId = preExistingId,
                 Status = "sent",
             });
@@ -549,16 +564,10 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
 
         await using (var db = CreateSystemDb())
         {
-            // Identical SQL to the migration. Kept in sync by code review — diverging here means
-            // the migration ships untested SQL, which the bug-fix epic exists to prevent.
-            await db.Database.ExecuteSqlRawAsync("""
-                UPDATE "ReminderLogs" AS l
-                SET "SendDate" = ((l."SentAt" AT TIME ZONE o."TimeZone"))::date
-                FROM "Reminders" AS r
-                INNER JOIN "Organizations" AS o ON o."Id" = r."OrganizationId"
-                WHERE r."Id" = l."ReminderId"
-                  AND ((l."SentAt" AT TIME ZONE o."TimeZone"))::date <> l."SendDate";
-                """);
+            // Sourced from the migration class's `const` so test and prod execute the same
+            // statement byte-for-byte. A typo or guard removed from `UpSql` would surface here
+            // automatically — no copy-paste drift.
+            await db.Database.ExecuteSqlRawAsync(BackfillReminderLogSendDateToOrgLocal.UpSql);
         }
 
         await using (var db = CreateSystemDb())
@@ -567,6 +576,63 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             tokyoLog.SendDate.Should().Be(new DateOnly(2026, 1, 15)); // shifted from Jan 14 → Jan 15
             var nyLog = await db.ReminderLogs.SingleAsync(l => l.ReminderId == nyOnSameTokyoDay.ReminderId);
             nyLog.SendDate.Should().Be(new DateOnly(2026, 1, 15));   // unchanged (already matched)
+        }
+    }
+
+    [Fact]
+    public async Task Backfill_sql_skips_rows_whose_org_has_a_time_zone_postgres_cannot_resolve()
+    {
+        // The migration's `pg_timezone_names` guard means a single bad TimeZone value can't
+        // abort the entire deploy. Today no writer produces such a value (NormalizeTimeZone in
+        // AuthEndpoints validates), but the column has no DB-level CHECK constraint so a future
+        // admin tool / seed script could. This test inserts a row directly (bypassing the worker
+        // and SeedReminderAsync's CLR TimeZoneInfo lookup) and asserts the row's SendDate is
+        // unchanged after the backfill — silently skipped, not failed.
+        var orgId = Guid.NewGuid();
+        var reminderId = Guid.NewGuid();
+        var docId = Guid.NewGuid();
+        var vendorId = Guid.NewGuid();
+        var logId = Guid.NewGuid();
+        var now = TokyoEightAm.UtcDateTime;
+        var legacySendDate = new DateOnly(2026, 1, 14);
+
+        await using (var db = CreateSystemDb())
+        {
+            db.Organizations.Add(new Organization
+            {
+                Id = orgId,
+                Name = $"Org-{orgId:N}",
+                TimeZone = "Mars/Olympus", // not in pg_timezone_names
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = orgId, Name = "V", CreatedAt = now, UpdatedAt = now });
+            db.Documents.Add(new Document { Id = docId, OrganizationId = orgId, VendorId = vendorId, OriginalFileName = "p.pdf", BlobStorageUrl = "b", FileSizeBytes = 1, ContentType = "application/pdf", CreatedAt = now, UpdatedAt = now });
+            db.Reminders.Add(new Reminder { Id = reminderId, OrganizationId = orgId, DaysBefore = 30, NotifyInternalUser = true, IsActive = true });
+            db.ReminderLogs.Add(new ReminderLog
+            {
+                Id = logId,
+                ReminderId = reminderId,
+                DocumentId = docId,
+                RecipientEmail = "mars@example.com",
+                SentAt = now,
+                SendDate = legacySendDate, // would be Jan 15 if backfill ran for this row
+                ResendMessageId = "resend_mars",
+                Status = "sent",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await using (var db = CreateSystemDb())
+        {
+            // Must NOT throw despite the unrecognised TZ — the guard skips the row.
+            await db.Database.ExecuteSqlRawAsync(BackfillReminderLogSendDateToOrgLocal.UpSql);
+        }
+
+        await using (var db = CreateSystemDb())
+        {
+            var log = await db.ReminderLogs.SingleAsync(l => l.Id == logId);
+            log.SendDate.Should().Be(legacySendDate); // unchanged — skipped by the guard
         }
     }
 
