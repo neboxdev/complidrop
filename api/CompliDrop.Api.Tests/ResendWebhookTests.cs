@@ -334,4 +334,35 @@ public sealed class ResendWebhookTests(IntegrationTestFixture fixture) : Integra
 
         (await StatusOf(messageId)).Should().Be("complained");
     }
+
+    /// <summary>
+    /// Resend's at-least-once delivery model can produce truly-concurrent webhooks for the same
+    /// email_id (a retry overlapping with a fresh event, or two distinct events arriving close in
+    /// time). The handler's atomic <c>ExecuteUpdateAsync</c> + the precedence block list must
+    /// hold the rule even when both requests are mid-flight: under Postgres Read Committed, the
+    /// second UPDATE re-evaluates its WHERE against the first's committed row, so the negative
+    /// always wins regardless of which thread commits first. Without the atomic UPDATE (the
+    /// previous read-then-write design), this test could fail intermittently — that's the
+    /// regression guard.
+    /// </summary>
+    [Fact]
+    public async Task Concurrent_positive_and_negative_for_same_message_id_settle_on_negative()
+    {
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var positivePayload = EventPayload("email.opened", messageId);
+        var negativePayload = EventPayload("email.bounced", messageId);
+
+        // Fire both at once. Either commit order satisfies the precedence rule:
+        //   - if positive commits first, the negative's WHERE matches (status != 'bounced') and
+        //     overwrites it to 'bounced';
+        //   - if negative commits first, the positive's WHERE excludes 'bounced' from its block
+        //     list and matches 0 rows, leaving 'bounced' in place.
+        var posTask = PostWebhook(positivePayload, Sign(positivePayload));
+        var negTask = PostWebhook(negativePayload, Sign(negativePayload));
+        await Task.WhenAll(posTask, negTask);
+
+        (await posTask).StatusCode.Should().Be(HttpStatusCode.OK);
+        (await negTask).StatusCode.Should().Be(HttpStatusCode.OK);
+        (await StatusOf(messageId)).Should().Be("bounced");
+    }
 }

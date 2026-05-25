@@ -106,4 +106,54 @@ public class ReminderStatusPrecedenceTests
         // is a deliberate decision, not an accident.
         ReminderStatusPrecedence.ShouldApply("Delivered", "delivered").Should().BeTrue();
     }
+
+    // -- Agreement between ShouldApply (human-readable) and CurrentStatusesToIgnore (SQL-block) --
+
+    /// <summary>
+    /// The handler issues an atomic <c>ExecuteUpdateAsync</c> with
+    /// <c>WHERE Status NOT IN (CurrentStatusesToIgnore(incoming))</c>. For that to enforce the
+    /// same rule the unit-tested <see cref="ReminderStatusPrecedence.ShouldApply"/> defines, the
+    /// block list must contain exactly those current values for which ShouldApply returns false.
+    /// This cross-check pins that invariant for every reachable (current, incoming) pair so a
+    /// future change to either method without the other will fail loudly.
+    /// </summary>
+    [Theory]
+    [InlineData("delivered")]
+    [InlineData("opened")]
+    [InlineData("clicked")]
+    [InlineData("bounced")]
+    [InlineData("complained")]
+    public void CurrentStatusesToIgnore_agrees_with_ShouldApply_for_every_reachable_current(string incoming)
+    {
+        // ReminderLog.Status is NOT NULL in the schema, so we don't test current=null here — SQL
+        // `NULL NOT IN (...)` evaluates to NULL (not true), which would diverge from
+        // ShouldApply(null, ...). This is documented on CurrentStatusesToIgnore and unreachable.
+        var blockList = ReminderStatusPrecedence.CurrentStatusesToIgnore(incoming).ToHashSet(StringComparer.Ordinal);
+
+        var reachableCurrents = new[]
+        {
+            "sent", "delivered", "opened", "clicked", "bounced", "complained",
+            "failed",          // produced by ReminderBackgroundService when Resend returns no id
+            "garbage-status",  // any unrecognized value — rank -1 path
+            ""                 // pathological but well-defined under string.Equals/Ordinal
+        };
+        foreach (var current in reachableCurrents)
+        {
+            var blocked = blockList.Contains(current);
+            var shouldApply = ReminderStatusPrecedence.ShouldApply(current, incoming);
+            blocked.Should().Be(!shouldApply,
+                $"CurrentStatusesToIgnore and ShouldApply must agree on (current='{current}', incoming='{incoming}')");
+        }
+    }
+
+    [Fact]
+    public void CurrentStatusesToIgnore_throws_for_a_status_outside_the_webhook_whitelist()
+    {
+        // The webhook handler's `type switch` produces exactly these five strings or null
+        // (returned early). If a sixth event type is ever added to that switch without updating
+        // CurrentStatusesToIgnore, this guard makes the omission loud rather than silently
+        // sending the row through an empty block list (which would let any current overwrite).
+        var act = () => ReminderStatusPrecedence.CurrentStatusesToIgnore("sent");
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
 }
