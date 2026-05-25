@@ -308,9 +308,11 @@ public sealed class ResendWebhookTests(IntegrationTestFixture fixture) : Integra
     [Fact]
     public async Task Duplicate_negative_redelivery_is_idempotent()
     {
-        // The existing Duplicate_valid_delivery_is_idempotent test covers positive-duplicate;
-        // assert the same for a negative, which under the precedence rule is also a no-op write
-        // when current == incoming.
+        // The existing Duplicate_valid_delivery_is_idempotent test covers positive-duplicate.
+        // Under the atomic-UPDATE design, the first POST advances 'sent' → 'bounced' (block list
+        // for 'bounced' = ['bounced'], which excludes 'sent', so the WHERE matches); the second
+        // POST's WHERE excludes 'bounced' from the same list, so 0 rows are affected. End state
+        // is 'bounced' and no spurious row was written.
         var messageId = await SeedReminderLogAsync(status: "sent");
         var payload = EventPayload("email.bounced", messageId);
         var svix = Sign(payload);

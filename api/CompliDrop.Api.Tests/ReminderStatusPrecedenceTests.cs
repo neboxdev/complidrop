@@ -135,7 +135,9 @@ public class ReminderStatusPrecedenceTests
             "sent", "delivered", "opened", "clicked", "bounced", "complained",
             "failed",          // produced by ReminderBackgroundService when Resend returns no id
             "garbage-status",  // any unrecognized value — rank -1 path
-            ""                 // pathological but well-defined under string.Equals/Ordinal
+            "",                // pathological but well-defined under string.Equals/Ordinal
+            "Delivered"        // case-sensitivity: agreement must hold if either method ever
+                               // changes its casing posture without updating the other
         };
         foreach (var current in reachableCurrents)
         {
@@ -146,14 +148,24 @@ public class ReminderStatusPrecedenceTests
         }
     }
 
-    [Fact]
-    public void CurrentStatusesToIgnore_throws_for_a_status_outside_the_webhook_whitelist()
+    [Theory]
+    // "sent" is the most illustrative — a legitimate Resend-side word the producer writes but
+    // the webhook handler intentionally doesn't map (no email.sent event), so a future dev
+    // adding email.sent to the type switch without updating CurrentStatusesToIgnore would land
+    // here. The other inputs pin the contract for the other shapes of "outside the whitelist".
+    [InlineData("sent")]
+    [InlineData("")]
+    [InlineData("failed")]
+    [InlineData("Delivered")]   // casing — exact-match constants, no case folding
+    [InlineData("garbage")]
+    public void CurrentStatusesToIgnore_throws_for_any_status_outside_the_webhook_whitelist(string incoming)
     {
-        // The webhook handler's `type switch` produces exactly these five strings or null
-        // (returned early). If a sixth event type is ever added to that switch without updating
-        // CurrentStatusesToIgnore, this guard makes the omission loud rather than silently
-        // sending the row through an empty block list (which would let any current overwrite).
-        var act = () => ReminderStatusPrecedence.CurrentStatusesToIgnore("sent");
+        // The webhook handler's `type switch` produces exactly the five whitelisted strings or
+        // null (returned early). If a sixth event type is ever added to that switch without
+        // updating CurrentStatusesToIgnore, this guard makes the omission loud rather than
+        // silently sending the row through an empty block list (which would let any current
+        // overwrite).
+        var act = () => ReminderStatusPrecedence.CurrentStatusesToIgnore(incoming);
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
 }
