@@ -75,6 +75,22 @@ Multi-agent code review runs on every ticket before PR (`/start <n>` Phase 4). *
 
 Never silently diverge from a ticket's acceptance criteria — update the ticket first.
 
+### Rolling bug-fix epic (#48)
+
+Bug-fix and latent-issue tickets are indexed in one rolling epic — **[#48 Bug fixes & latent issues](https://github.com/neboxdev/complidrop/issues/48)** — so open defects are visible in one place and historical fixes stay browseable. See [ADR 0006](docs/adr/0006-rolling-bug-fix-epic.md) for the rationale.
+
+- **How a ticket joins**: apply the `bug` label. Any GitHub issue with `bug` (open or closed) is auto-listed in the epic body by `.github/workflows/bugfix-epic-sync.yml` (event-triggered + daily cron).
+- **What counts as `bug`**: a defect, a latent fragility (race/TZ/multi-instance assumption), a correctness/semantic decision needed to resolve wrong behavior, a contract ambiguity producing wrong client behavior. Not a feature, refactor, or test scaffolding.
+- **When deferring a review finding to its own ticket** (per the three-way triage above), apply the `bug` label so the workflow picks it up.
+- **Crossing off**: closing the ticket (a merged PR with `Closes #N` does this) flips the checkbox to `[x]` on the next workflow run. Re-opening unticks it.
+- **Dual epic membership is fine**: a `bug` ticket can also be listed in another epic (e.g. a launch-blocker tracked in #1). The rolling epic is a discovery index, not an ownership claim.
+
+Other epics today:
+- #1 Backend hardening before launch (closing out)
+- #33 Frontend test hardening (in progress)
+- #41 Codebase simplification pass (gated on #1 + #33; one-time)
+- #48 Bug fixes & latent issues (rolling; never closes)
+
 ## Slash commands
 
 | Command | Purpose |
