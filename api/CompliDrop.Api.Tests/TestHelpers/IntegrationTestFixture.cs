@@ -87,13 +87,34 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        if (_respawnConnection is not null)
-            await _respawnConnection.DisposeAsync();
-        if (Factory is not null)
-            await Factory.DisposeAsync();
-        await _container.DisposeAsync();
-
-        // Restore the process-global env var we mutated in InitializeAsync.
-        Environment.SetEnvironmentVariable("ConnectionStrings__Database", _priorDbConnEnv);
+        // Each disposal is independent — a throw in one must not skip the others, and the env-var
+        // restore is the most important: leaving the container's (now-dead) conn string in
+        // process-global state breaks any subsequent test that reads ConnectionStrings__Database.
+        // try/finally chains let the first exception surface while still running the rest.
+        try
+        {
+            if (_respawnConnection is not null)
+                await _respawnConnection.DisposeAsync();
+        }
+        finally
+        {
+            try
+            {
+                if (Factory is not null)
+                    await Factory.DisposeAsync();
+            }
+            finally
+            {
+                try
+                {
+                    await _container.DisposeAsync();
+                }
+                finally
+                {
+                    // Restore the process-global env var we mutated in InitializeAsync.
+                    Environment.SetEnvironmentVariable("ConnectionStrings__Database", _priorDbConnEnv);
+                }
+            }
+        }
     }
 }
