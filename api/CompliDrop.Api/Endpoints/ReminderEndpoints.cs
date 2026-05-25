@@ -151,11 +151,13 @@ public static class ReminderEndpoints
         };
         if (status is null) return Results.Ok(new { data = (object?)null, error = (object?)null });
 
-        // No explicit event-id dedupe (unlike the Stripe webhook's ProcessedStripeEvent): this
-        // handler only assigns log.Status = status, which is idempotent under redelivery, so a
-        // duplicate Svix delivery within the timestamp window produces the same end state.
+        // No explicit event-id dedupe (unlike the Stripe webhook's ProcessedStripeEvent): the
+        // status mutation is guarded by ReminderStatusPrecedence.ShouldApply, which is idempotent
+        // under redelivery (same status in → no write) AND ordering-aware (a positive event that
+        // arrives or is redelivered after a higher-ranked positive or a negative is rejected, so
+        // the displayed state cannot regress). See that helper for the lifecycle rules.
         var log = await db.ReminderLogs.FirstOrDefaultAsync(l => l.ResendMessageId == messageId, ct);
-        if (log is not null)
+        if (log is not null && ReminderStatusPrecedence.ShouldApply(log.Status, status))
         {
             log.Status = status;
             await db.SaveChangesAsync(ct);
