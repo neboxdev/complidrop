@@ -46,7 +46,11 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 
 /* ── Page ─────────────────────────────────────────────────────────── */
 export default function Home() {
-  const { data: me } = useMe();
+  // skipRefresh keeps the anonymous-visitor cost to a single auth round-trip
+  // (no automatic POST /api/auth/refresh on the 401). This hook is opt-in
+  // because authenticated routes — dashboard layout, settings, etc. — still
+  // need refresh-on-401 to survive an expired cd_session. See useAuth.ts (#30).
+  const { data: me } = useMe({ skipRefresh: true });
   const authed = !!me;
 
   return (
