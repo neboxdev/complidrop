@@ -31,11 +31,16 @@ public abstract class IntegrationTestBase(IntegrationTestFixture fixture) : IAsy
 
     /// <summary>
     /// Constructs a <see cref="SystemDbContext"/> against the test container with the
-    /// <see cref="AuditSaveChangesInterceptor"/> wired — mirrors
-    /// <see cref="DbContextFactory.CreateSystem"/> so seeds/reads via the harness see the same
-    /// behavior as production code paths (UpdatedAt auto-set, soft-delete translation, audit-log
-    /// emission when a user is supplied). Passing <c>null</c> for the user skips audit-log
-    /// emission but still applies UpdatedAt — the right semantic for test fixture setup.
+    /// <see cref="AuditSaveChangesInterceptor"/> wired so seeds/reads via the harness see the
+    /// same behavior as production code paths (UpdatedAt auto-set, soft-delete translation,
+    /// audit-log emission when a user is supplied). Passing <c>null</c> for the user skips
+    /// audit-log emission but still applies UpdatedAt — the right semantic for test fixture
+    /// setup.
+    /// <para/>
+    /// Note: because the interceptor is wired, <c>db.Remove(entity)</c> on a soft-deletable
+    /// entity here is translated to a soft delete (UPDATE DeletedAt=now). If a test needs a
+    /// genuine hard delete, run it directly against the EF Core context without going through
+    /// this helper, or use <c>ExecuteDeleteAsync</c>.
     /// </summary>
     protected SystemDbContext CreateSystemDb(ICurrentUser? user = null) =>
         new(new DbContextOptionsBuilder<SystemDbContext>()
@@ -81,8 +86,9 @@ public abstract class IntegrationTestBase(IntegrationTestFixture fixture) : IAsy
     /// Posts <c>/api/auth/login</c> for an existing user and returns a cookie-authenticated
     /// client. Caller is responsible for having registered <paramref name="email"/> first —
     /// typically via <see cref="RegisterAndLoginAsync"/> in arrangement, then discarding that
-    /// client and logging back in with <c>LoginAsync</c> when the test scenario needs a
-    /// post-registration login path (token refresh, re-auth after logout, etc.).
+    /// client and logging back in with <c>LoginAsync</c> when the test scenario needs an
+    /// independent login (e.g. a second session for the same user, or proving the login path
+    /// itself works given the user already exists).
     /// </summary>
     protected async Task<AuthenticatedClient> LoginAsync(
         string email, string password = "Password1234")

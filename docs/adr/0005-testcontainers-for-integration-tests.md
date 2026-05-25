@@ -25,7 +25,7 @@ Adopt **Testcontainers** for the throwaway Postgres instance, **Respawn** for be
 - **Respawn for cleanup** — `IntegrationTestFixture.ResetAsync` calls `Respawner.ResetAsync` against the container, then re-seeds system compliance templates and clears the in-memory fake state. `IntegrationTestBase.InitializeAsync` invokes it before every test. The `__EFMigrationsHistory` table is in `TablesToIgnore` so the schema and migration record survive.
 - **CI dependency on Docker** — GitHub Actions runs the integration job on `ubuntu-latest` which has Docker pre-installed; Windows developers run Docker Desktop. The CI workflow no longer gates the integration suite on a secret; if Testcontainers can't reach Docker, the job fails (which is what we want).
 
-The `IntegrationTestFixture` also publishes the container connection string to the process-global `ConnectionStrings__Database` env var on startup (and restores the prior value on dispose) so the legacy `DbContextFactory` path used by `MultiTenancyTests` transparently points at the same container.
+The API host receives the container connection string via `CustomWebApplicationFactory`'s in-memory configuration override; the fixture itself never mutates process-global state (an earlier iteration published `ConnectionStrings__Database` to support a legacy `DbContextFactory`-based test path, removed in ticket #13).
 
 ## Consequences
 
@@ -41,13 +41,12 @@ The `IntegrationTestFixture` also publishes the container connection string to t
 
 - **Docker is a hard prerequisite** — the suite cannot run on a machine without a Docker daemon. This is documented in `README` and the API project's onboarding notes; CI provides it for free.
 - **First test in a fresh process is slow** — container start + migrations + host boot is ~3–5 seconds. Once warm, individual tests run in tens of ms. We accept the cold-start cost because it only hits once per `dotnet test` invocation.
-- **Process-global env-var mutation** — `IntegrationTestFixture` writes `ConnectionStrings__Database` so the `DbContextFactory` legacy path uses the container. The fixture restores the prior value on dispose, wrapped in `try/finally` so a partial-disposal exception cannot leak a dead-container value. This is a sharp edge — if a new test helper reads the env var directly outside the fixture's lifetime, it gets back whatever the developer had set (or null). Mitigation: prefer `Fixture.ConnectionString` (via `IntegrationTestBase`) for new code; `DbContextFactory` remains for the `MultiTenancyTests` path.
 
 ### Neutral
 
 - **Pure-unit tests stay parallel** — only `[Collection("integration")]` tests serialize. Tests under `CompliDrop.Api.Tests` that don't touch the fixture (e.g. `PasswordHasherTests`, `TokenServiceTests`, `SvixWebhookVerifierTests`) parallelise normally.
 - **System-template reseed runs every reset** — `ResetAsync` wipes everything Respawn knows about, including the system Organization row that templates FK to, so the seed runs again. At MVP scale (5 templates × handful of rules) the cost is ~50ms/test; not yet worth the complexity of teaching Respawn to ignore a specific row. Tracked as a follow-up if test count grows.
-- **`MultiTenancyTests` was originally pre-fixture** and self-managed cleanup against `DbContextFactory`. Ticket #13 migrated it onto `IntegrationTestBase` so all integration tests share one reset strategy.
+- **`MultiTenancyTests` was originally pre-fixture** and self-managed cleanup against a now-removed `DbContextFactory` helper. Ticket #13 migrated it onto `IntegrationTestBase` so all integration tests share one reset strategy.
 
 ## Alternatives considered
 
