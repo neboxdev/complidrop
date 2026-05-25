@@ -61,6 +61,37 @@ public class ExtractionWorker(
     }
 
     /// <summary>
+    /// The atomic claim/zombie-reclaim SQL. Both `ProcessingStartedAt` (timestamptz, via Npgsql's
+    /// default mapping for `DateTime`) and `now()` (timestamptz, per Postgres) are compared and
+    /// written as timestamptz — no `at time zone 'utc'` conversion. Mixing in a naive
+    /// `timestamp without time zone` would force Postgres to bridge it via the SESSION TimeZone,
+    /// which is UTC on Neon/postgres:17-alpine today but is latent on any connection that ever
+    /// runs with a non-UTC session TZ. Exposed as `internal` so the regression suite can drive
+    /// the exact same string through a connection with a non-UTC session and prove the SQL is
+    /// TZ-independent end-to-end.
+    /// </summary>
+    internal const string ClaimSql = """
+        UPDATE "Documents"
+        SET "ExtractionStatus" = 'Processing',
+            "ProcessingStartedAt" = now(),
+            "ProcessingAttempts" = "ProcessingAttempts" + 1,
+            "UpdatedAt" = now()
+        WHERE "Id" = (
+          SELECT "Id" FROM "Documents"
+          WHERE "DeletedAt" IS NULL
+            AND (
+                "ExtractionStatus" = 'Pending'
+                OR ("ExtractionStatus" = 'Processing'
+                    AND "ProcessingStartedAt" < now() - interval '5 minutes')
+            )
+          ORDER BY "CreatedAt"
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+        )
+        RETURNING "Id";
+        """;
+
+    /// <summary>
     /// Atomically claims the next processable document via <c>UPDATE … FOR UPDATE SKIP LOCKED</c>
     /// (a Pending doc, or a Processing doc whose claim went stale past the zombie timeout), flips it
     /// to Processing, and increments its attempt counter. Returns the claimed id, or null when
@@ -71,27 +102,6 @@ public class ExtractionWorker(
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<SystemDbContext>();
 
-        var claimSql = """
-            UPDATE "Documents"
-            SET "ExtractionStatus" = 'Processing',
-                "ProcessingStartedAt" = now() at time zone 'utc',
-                "ProcessingAttempts" = "ProcessingAttempts" + 1,
-                "UpdatedAt" = now() at time zone 'utc'
-            WHERE "Id" = (
-              SELECT "Id" FROM "Documents"
-              WHERE "DeletedAt" IS NULL
-                AND (
-                    "ExtractionStatus" = 'Pending'
-                    OR ("ExtractionStatus" = 'Processing'
-                        AND "ProcessingStartedAt" < now() at time zone 'utc' - interval '5 minutes')
-                )
-              ORDER BY "CreatedAt"
-              FOR UPDATE SKIP LOCKED
-              LIMIT 1
-            )
-            RETURNING "Id";
-            """;
-
         // Run the claim as raw SQL — single UPDATE...RETURNING statement, atomic in
         // Postgres without an explicit transaction. The scope's `await using` disposes
         // the DbContext (and returns the connection to the pool) when this method
@@ -100,7 +110,7 @@ public class ExtractionWorker(
         var conn = db.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open) await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = claimSql;
+        cmd.CommandText = ClaimSql;
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         if (await reader.ReadAsync(ct)) return reader.GetGuid(0);
         return null;
