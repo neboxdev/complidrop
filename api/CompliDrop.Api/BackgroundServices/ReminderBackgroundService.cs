@@ -135,7 +135,7 @@ public class ReminderBackgroundService(
                     // 08:00 on Jan 15 (23:00 UTC Jan 14) the column reads Jan 15 — matching what
                     // any analytics query, the Resend dashboard, or the org's audit log expects.
                     // SentAt (timestamptz) still stores the precise UTC instant.
-                    // See ADR 0002 for the lifecycle of this decision.
+                    // See ADR 0007 (revises the SendDate Neutral consequence in ADR 0002).
                     var sendDate = localDate;
 
                     // Pull the set of recipients we've already logged for this (reminder, doc,
