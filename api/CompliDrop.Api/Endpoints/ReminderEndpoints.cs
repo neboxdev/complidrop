@@ -151,15 +151,21 @@ public static class ReminderEndpoints
         };
         if (status is null) return Results.Ok(new { data = (object?)null, error = (object?)null });
 
-        // No explicit event-id dedupe (unlike the Stripe webhook's ProcessedStripeEvent): this
-        // handler only assigns log.Status = status, which is idempotent under redelivery, so a
-        // duplicate Svix delivery within the timestamp window produces the same end state.
-        var log = await db.ReminderLogs.FirstOrDefaultAsync(l => l.ResendMessageId == messageId, ct);
-        if (log is not null)
-        {
-            log.Status = status;
-            await db.SaveChangesAsync(ct);
-        }
+        // No explicit event-id dedupe (unlike the Stripe webhook's ProcessedStripeEvent): the
+        // status mutation is gated by an atomic conditional UPDATE whose WHERE clause encodes the
+        // lifecycle precedence rule (ReminderStatusPrecedence.CurrentStatusesToIgnore). This is
+        //   - idempotent under redelivery (same status → block list contains it → 0 rows),
+        //   - ordering-aware (a late lower-rank positive or a positive-after-negative is excluded
+        //     by the WHERE clause → 0 rows, so the displayed state cannot regress),
+        //   - race-free under concurrent deliveries for the same ResendMessageId (Postgres
+        //     serializes the row updates and re-evaluates the second UPDATE's WHERE against the
+        //     first's committed value, per Read Committed semantics — so even an overlapping
+        //     bounced + opened pair settles deterministically on the negative).
+        // See ReminderStatusPrecedence for the rule and its proof of agreement with ShouldApply.
+        var ignoreCurrent = ReminderStatusPrecedence.CurrentStatusesToIgnore(status);
+        await db.ReminderLogs
+            .Where(l => l.ResendMessageId == messageId && !ignoreCurrent.Contains(l.Status))
+            .ExecuteUpdateAsync(s => s.SetProperty(l => l.Status, status), ct);
         return Results.Ok(new { data = (object?)null, error = (object?)null });
     }
 
