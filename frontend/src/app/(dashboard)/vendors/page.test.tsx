@@ -67,7 +67,7 @@ describe("VendorsPage — state matrix (#36)", () => {
     );
   });
 
-  it("error: page chrome renders, vendor list falls back to the empty fallback", async () => {
+  it("error: a 5xx surfaces an error card with the server message and a Retry affordance, NOT the empty fallback (#80)", async () => {
     server.use(
       http.get(url("/api/vendors"), () =>
         jsonError("server.error", "vendor index down", { status: 500 }),
@@ -77,18 +77,60 @@ describe("VendorsPage — state matrix (#36)", () => {
     renderWithProviders(<VendorsPage />, { auth: authedMe });
 
     // Wait for the query to settle (the Loading row disappears) before
-    // checking the empty fallback — the in-flight Loading row would
-    // otherwise race the assertion.
+    // asserting the error state. After #80, the page branches into a
+    // distinct error row instead of falling through to "No vendors yet"
+    // — a backend outage must NOT read like a brand-new org.
     await waitFor(() =>
       expect(screen.queryByText(/^loading…$/i)).toBeNull(),
     );
     expect(
       screen.getByRole("heading", { name: /^vendors$/i }),
     ).toBeInTheDocument();
-    // The page's branching is `vendors.isLoading || empty || .map`.
-    // On error, isLoading is false and data is undefined → `vendors.data ?? []`
-    // is empty → the "No vendors yet" row renders.
-    expect(screen.getByText(/no vendors yet/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/couldn't load vendors/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText("vendor index down")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /retry/i }),
+    ).toBeInTheDocument();
+    // Negative: the empty-state copy must NOT appear on error.
+    expect(screen.queryByText(/no vendors yet/i)).toBeNull();
+  });
+
+  it("retry-on-5xx: clicking Retry fires a second fetch; a subsequent 200 swaps the error card for the populated list (#80)", async () => {
+    // Pins the affordance #80 added: the Retry button must actually
+    // re-issue the vendors fetch. Without this test, swapping
+    // `onClick={() => vendors.refetch()}` for a no-op or a wrong query
+    // would slip past every other test in this file.
+    let calls = 0;
+    server.use(
+      http.get(url("/api/vendors"), () => {
+        calls++;
+        if (calls === 1) {
+          return jsonError("server.error", "DB blip.", { status: 500 });
+        }
+        return jsonOk(VENDORS);
+      }),
+    );
+
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+
+    await waitFor(() =>
+      expect(screen.getByText(/couldn't load vendors/i)).toBeInTheDocument(),
+    );
+    expect(calls).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+
+    // Second fetch fires AND its 200 response swaps the error card for
+    // the populated row.
+    await waitFor(() => expect(calls).toBe(2));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("link", { name: /acme subcontractor/i }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/couldn't load vendors/i)).toBeNull();
   });
 
   it("populated: every vendor renders with their template + counts + portal-link badge", async () => {

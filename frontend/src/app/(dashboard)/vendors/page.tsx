@@ -3,12 +3,13 @@
 import { useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Plus, ExternalLink } from "lucide-react";
+import { Plus, ExternalLink, AlertTriangle, RotateCw } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useVendors, useCreateVendor } from "@/hooks/useVendors";
+import { cn } from "@/lib/utils";
 
 export default function VendorsPage() {
   const vendors = useVendors();
@@ -66,6 +67,44 @@ export default function VendorsPage() {
             <tbody>
               {vendors.isLoading ? (
                 <tr><td colSpan={5} className="py-8 text-center text-slate-400">Loading…</td></tr>
+              ) : vendors.isError ? (
+                // Error state distinct from empty so a backend outage is not
+                // mistaken for an org with zero vendors (#80). `err.message`
+                // is the human server message from the ApiError envelope;
+                // api.ts substitutes statusText for non-JSON 5xx, with the
+                // jargon-free fallback handled in #77.
+                //
+                // role="alert" gets the error announced by assistive tech the
+                // moment isError flips true, matching the convention in
+                // frontend/src/test/example.test.tsx.
+                <tr>
+                  <td colSpan={5} className="py-12 text-center" role="alert">
+                    <AlertTriangle className="w-8 h-8 mx-auto text-rose-500" />
+                    <p className="mt-2 text-sm font-medium text-slate-800">
+                      Couldn&apos;t load vendors.
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      {vendors.error instanceof Error && vendors.error.message.trim()
+                        ? vendors.error.message
+                        : "Something went wrong. Try again."}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-3"
+                      onClick={() => vendors.refetch()}
+                      disabled={vendors.isFetching}
+                    >
+                      <RotateCw
+                        className={cn(
+                          "w-3.5 h-3.5 mr-1",
+                          vendors.isFetching && "animate-spin",
+                        )}
+                      />
+                      Retry
+                    </Button>
+                  </td>
+                </tr>
               ) : (vendors.data ?? []).length === 0 ? (
                 <tr><td colSpan={5} className="py-10 text-center text-slate-500">No vendors yet.</td></tr>
               ) : (vendors.data ?? []).map((v) => (

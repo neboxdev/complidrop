@@ -13,7 +13,7 @@
  */
 import { afterEach, describe, it, expect, vi, beforeEach } from "vitest";
 import { http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import DocumentsPage from "./page";
 import {
   renderWithProviders,
@@ -82,7 +82,7 @@ describe("DocumentsPage — state matrix (#36)", () => {
     expect(screen.getByText(/0 total/i)).toBeInTheDocument();
   });
 
-  it("error: a 5xx still renders the page chrome, list shows the empty fallback (graceful degradation)", async () => {
+  it("error: a 5xx surfaces an error card with the server message and a Retry affordance, NOT the empty fallback (#80)", async () => {
     server.use(
       http.get(url("/api/documents"), () =>
         jsonError("server.error", "DB down.", { status: 500 }),
@@ -91,16 +91,11 @@ describe("DocumentsPage — state matrix (#36)", () => {
 
     renderWithProviders(<DocumentsPage />, { auth: authedMe });
 
-    // Page heading still renders; the list shows the empty branch
-    // because `docs.data?.items ?? []` is empty on error. This is
-    // imperfect UX (the page doesn't surface the error to the user
-    // today) and a candidate for a separate UX ticket, but the
-    // assertion below pins TODAY's behavior so a future fix flips this
-    // test rather than silently changing copy.
-    //
-    // Wait for the query to settle (isLoading → false) before checking
-    // the empty fallback — the in-flight Loading row would otherwise
-    // race the assertion.
+    // Page chrome still renders. The list row reports the error
+    // distinctly from the empty-org state (#80) — a brand-new org
+    // with zero documents must NOT be visually indistinguishable from
+    // a backend outage. `err.message` carries the human server copy
+    // from the ApiError envelope.
     await waitFor(() =>
       expect(screen.queryByText(/loading documents/i)).toBeNull(),
     );
@@ -108,8 +103,55 @@ describe("DocumentsPage — state matrix (#36)", () => {
       screen.getByRole("heading", { name: /^documents$/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/no documents yet/i),
+      screen.getByText(/couldn't load documents/i),
     ).toBeInTheDocument();
+    expect(screen.getByText("DB down.")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /retry/i }),
+    ).toBeInTheDocument();
+    // Negative: the empty-state copy must NOT appear on error.
+    expect(screen.queryByText(/no documents yet/i)).toBeNull();
+  });
+
+  it("retry-on-5xx: clicking Retry fires a second fetch; a subsequent 200 swaps the error card for the populated list (#80)", async () => {
+    // Pins the affordance #80 added: the Retry button must actually
+    // re-issue the documents fetch. Without this test, swapping
+    // `onClick={() => docs.refetch()}` for a no-op or a wrong query
+    // would slip past every other test in this file.
+    let calls = 0;
+    server.use(
+      http.get(url("/api/documents"), () => {
+        calls++;
+        if (calls === 1) {
+          return jsonError("server.error", "DB blip.", { status: 500 });
+        }
+        return jsonOk(
+          makeDocumentsResponse({
+            items: [{ ...documentsAllStatuses[2] }],
+            total: 1,
+          }),
+        );
+      }),
+    );
+
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+
+    // Wait for the first fetch to land on the error card.
+    await waitFor(() =>
+      expect(screen.getByText(/couldn't load documents/i)).toBeInTheDocument(),
+    );
+    expect(calls).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+
+    // The second fetch fires AND its 200 response swaps the error card
+    // for the populated row — the user gets out of the failure state
+    // without a manual reload.
+    await waitFor(() => expect(calls).toBe(2));
+    await waitFor(() =>
+      expect(screen.getByText("coi-completed.pdf")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/couldn't load documents/i)).toBeNull();
   });
 
   it("populated: renders every documentsAllStatuses row with extraction + compliance badges", async () => {
