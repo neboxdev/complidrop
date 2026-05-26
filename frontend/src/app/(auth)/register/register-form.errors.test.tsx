@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import RegisterForm from "./register-form";
 import {
   renderWithProviders,
@@ -24,18 +24,24 @@ import {
   authedMe,
   toastSuccess,
   toastError,
+  fillInputByName,
+  submitFormIn,
 } from "@/test";
 import { ME_KEY } from "@/hooks/useAuth";
 
 // sonner mock + spies are provided by the harness; afterEach in the
 // setup file resets all toast spies between tests (#74).
 
+// Container captured per-test from renderWithProviders. The shared
+// fillInputByName / submitFormIn helpers from @/test enforce container
+// scoping so two simultaneous forms can't collide (#75).
+let container: HTMLElement;
 function fillField(name: string, value: string) {
-  const input = document.querySelector(`input[name="${name}"]`) as HTMLInputElement;
-  if (!input) throw new Error(`no input named "${name}"`);
-  fireEvent.input(input, { target: { value } });
+  fillInputByName(container, name, value);
 }
-
+function submitForm() {
+  submitFormIn(container);
+}
 function fillFullForm() {
   fillField("fullName", "Owner Name");
   fillField("companyName", "Acme Inc");
@@ -43,17 +49,11 @@ function fillFullForm() {
   fillField("password", "verystrongpass1");
 }
 
-function submitForm() {
-  const form = document.querySelector("form");
-  if (!form) throw new Error("no form rendered");
-  fireEvent.submit(form);
-}
-
 // Validation copy lives in zod schema (`register-form.tsx`). Test the
 // client-side branches before we exercise the server-side ones.
 describe("RegisterForm — validation (#35)", () => {
   it("flags a short password with the user-facing copy", async () => {
-    renderWithProviders(<RegisterForm />, { auth: null });
+    ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
     fillField("fullName", "Owner Name");
     fillField("companyName", "Acme Inc");
     fillField("email", "owner@acme.test");
@@ -69,7 +69,7 @@ describe("RegisterForm — validation (#35)", () => {
   });
 
   it("flags a missing letter in the password", async () => {
-    renderWithProviders(<RegisterForm />, { auth: null });
+    ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
     fillField("fullName", "Owner Name");
     fillField("companyName", "Acme Inc");
     fillField("email", "owner@acme.test");
@@ -84,7 +84,7 @@ describe("RegisterForm — validation (#35)", () => {
   });
 
   it("flags a missing digit in the password", async () => {
-    renderWithProviders(<RegisterForm />, { auth: null });
+    ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
     fillField("fullName", "Owner Name");
     fillField("companyName", "Acme Inc");
     fillField("email", "owner@acme.test");
@@ -99,7 +99,7 @@ describe("RegisterForm — validation (#35)", () => {
   });
 
   it("flags a missing full name with the user-facing copy", async () => {
-    renderWithProviders(<RegisterForm />, { auth: null });
+    ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
     fillField("companyName", "Acme Inc");
     fillField("email", "owner@acme.test");
     fillField("password", "verystrongpass1");
@@ -124,10 +124,12 @@ describe("RegisterForm — happy path (#35)", () => {
     );
 
     const pushSpy = vi.fn();
-    const { queryClient } = renderWithProviders(<RegisterForm />, {
+    const rendered = renderWithProviders(<RegisterForm />, {
       auth: null,
       router: { push: pushSpy },
     });
+    container = rendered.container;
+    const { queryClient } = rendered;
     fillFullForm();
     submitForm();
 
@@ -167,11 +169,11 @@ describe("RegisterForm — happy path (#35)", () => {
       }),
     );
 
-    renderWithProviders(<RegisterForm />, {
+    ({ container } = renderWithProviders(<RegisterForm />, {
       auth: null,
       router: { push: vi.fn() },
       searchParams: { plan: "annual" },
-    });
+    }));
 
     // UI side: heading + upsell banner reflect annual.
     expect(
@@ -233,10 +235,10 @@ describe("RegisterForm — server-side error copy (#35)", () => {
       );
 
       const pushSpy = vi.fn();
-      renderWithProviders(<RegisterForm />, {
+      ({ container } = renderWithProviders(<RegisterForm />, {
         auth: null,
         router: { push: pushSpy },
-      });
+      }));
       fillFullForm();
       submitForm();
 
@@ -270,7 +272,7 @@ describe("RegisterForm — loading state (#35)", () => {
       }),
     );
 
-    renderWithProviders(<RegisterForm />, { auth: null });
+    ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
     fillFullForm();
     submitForm();
 

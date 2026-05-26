@@ -28,6 +28,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import RegisterForm from "./register-form";
+import { fillInputByName } from "@/test";
 
 vi.mock("next/link", () => ({
   __esModule: true,
@@ -146,13 +147,12 @@ describe("RegisterForm — submission payload (#31 Non-goals: no billing)", () =
     mockMutateAsync.mockResolvedValue({});
   });
 
-  // Labels in the markup are not associated via htmlFor, so query by the
-  // `name` attribute that react-hook-form sets via {...r("…")}.
-  function setField(container: HTMLElement, name: string, value: string) {
-    const el = container.querySelector(`input[name="${name}"]`) as HTMLInputElement | null;
-    if (!el) throw new Error(`no input named "${name}"`);
-    fireEvent.input(el, { target: { value } });
-  }
+  // After #76 the form labels are wired via htmlFor/id so
+  // `getByLabelText` would also work, but these tests pre-date that
+  // change and query inputs by the `name` attribute that react-hook-
+  // form sets via {...r("…")}. The shared `fillInputByName` helper
+  // (container-scoped) does exactly the same lookup. (#75)
+  const setField = fillInputByName;
 
   it("does not forward the selected plan to /api/auth/register", async () => {
     setPlanParam("annual");

@@ -17,7 +17,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import LoginPage from "./page";
 import {
   renderWithProviders,
@@ -28,6 +28,8 @@ import {
   authedMe,
   toastSuccess,
   toastError,
+  fillInputByName,
+  submitFormIn,
 } from "@/test";
 import { ME_KEY } from "@/hooks/useAuth";
 
@@ -36,21 +38,21 @@ import { ME_KEY } from "@/hooks/useAuth";
 // sonner mock + spies are provided by the harness; afterEach in the
 // setup file resets all toast spies between tests (#74).
 
+// Container captured per-test from renderWithProviders so a future
+// composite test rendering two forms can't collide on the global
+// document.querySelector. The shared fillInputByName / submitFormIn
+// helpers from @/test enforce the container-scoped contract (#75).
+let container: HTMLElement;
 function fillField(name: string, value: string) {
-  const input = document.querySelector(`input[name="${name}"]`) as HTMLInputElement;
-  if (!input) throw new Error(`no input named "${name}"`);
-  fireEvent.input(input, { target: { value } });
+  fillInputByName(container, name, value);
 }
-
 function submitForm() {
-  const form = document.querySelector("form");
-  if (!form) throw new Error("no form rendered");
-  fireEvent.submit(form);
+  submitFormIn(container);
 }
 
 describe("LoginPage — validation (#35)", () => {
   it("renders the form with email + password inputs and a sign-in button", () => {
-    renderWithProviders(<LoginPage />, { auth: null });
+    ({ container } = renderWithProviders(<LoginPage />, { auth: null }));
     expect(
       screen.getByRole("heading", { name: /welcome back/i }),
     ).toBeInTheDocument();
@@ -60,7 +62,7 @@ describe("LoginPage — validation (#35)", () => {
   });
 
   it("flags an invalid email format with the user-facing copy", async () => {
-    renderWithProviders(<LoginPage />, { auth: null });
+    ({ container } = renderWithProviders(<LoginPage />, { auth: null }));
     fillField("email", "not-an-email");
     fillField("password", "anything");
     submitForm();
@@ -74,7 +76,7 @@ describe("LoginPage — validation (#35)", () => {
   });
 
   it("flags an empty password with the user-facing copy", async () => {
-    renderWithProviders(<LoginPage />, { auth: null });
+    ({ container } = renderWithProviders(<LoginPage />, { auth: null }));
     fillField("email", "owner@acme.test");
     submitForm();
 
@@ -89,10 +91,12 @@ describe("LoginPage — happy path (#35)", () => {
     server.use(http.post(url("/api/auth/login"), () => jsonOk(authedMe)));
 
     const pushSpy = vi.fn();
-    const { queryClient } = renderWithProviders(<LoginPage />, {
+    const rendered = renderWithProviders(<LoginPage />, {
       auth: null,
       router: { push: pushSpy },
     });
+    container = rendered.container;
+    const { queryClient } = rendered;
 
     fillField("email", "owner@acme.test");
     fillField("password", "verystrongpass1");
@@ -160,10 +164,10 @@ describe("LoginPage — server-side error copy (#35)", () => {
       );
 
       const pushSpy = vi.fn();
-      renderWithProviders(<LoginPage />, {
+      ({ container } = renderWithProviders(<LoginPage />, {
         auth: null,
         router: { push: pushSpy },
-      });
+      }));
 
       fillField("email", "owner@acme.test");
       fillField("password", "anything");
@@ -201,7 +205,7 @@ describe("LoginPage — loading state (#35)", () => {
       }),
     );
 
-    renderWithProviders(<LoginPage />, { auth: null });
+    ({ container } = renderWithProviders(<LoginPage />, { auth: null }));
     fillField("email", "owner@acme.test");
     fillField("password", "verystrongpass1");
     submitForm();
