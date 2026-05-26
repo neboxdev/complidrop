@@ -73,6 +73,14 @@ Returns the RTL `RenderResult` plus the `QueryClient`, so a test can assert e.g.
 
 Use the seeds for component tests that aren't about the auth fetch. Drop the seed when the auth fetch _is_ the subject (use `renderHook` + MSW directly in that case).
 
+### Why `gcTime: Infinity` on the test QueryClient
+
+The harness's test client sets `gcTime: Infinity`. Per-render isolation comes from spawning a **fresh** QueryClient per `renderWithProviders` call — not from per-query GC. The `Infinity` GC ensures cache entries written by a mutation's `onSuccess` (or by the `auth` seed itself) survive long enough for the test to read them, even when no rendered component subscribes to the key.
+
+Concrete case: `LoginPage` mounts `useLogin` (a mutation) but NOT `useMe` (a query). With `gcTime: 0`, TanStack Query reaps a query entry the moment its observer count drops to zero — including entries written via `setQueryData` from a mutation `onSuccess` when nothing is subscribed. The cache assertion `expect(qc.getQueryData(ME_KEY)).toMatchObject(...)` would race the GC sweep and return `undefined`. With `gcTime: Infinity`, the entry persists for the lifetime of the (per-test) QueryClient, so the assertion is deterministic. Cross-test leakage is impossible because the entire client is unreachable as soon as the test scope ends.
+
+When asserting on cache state, use the **exported** `ME_KEY` / `ME_PROBE_KEY` constants from `@/hooks/useAuth`, not the literal `["auth", "me"]` — a rename in `useAuth.ts` then fails the assertion loudly instead of silently matching `undefined` against the stale literal.
+
 > **Pinning the no-fetch contract.** When the test's whole point is "no fetch fires," install an MSW handler that THROWS for the URL you don't expect to hit (see the anonymous case in `example.test.tsx`). The default 401 handler would silently satisfy a regression where seeding stopped working — pinning the contract with a throwing override turns a silent false-green into a loud failure.
 
 ## Routing mocks — when to use which
