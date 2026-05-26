@@ -18,7 +18,12 @@
  * React Testing Library or MSW). This index is the convenience surface;
  * the leaf paths are the precise surface.
  */
-export { renderWithProviders, type RenderWithProvidersOptions } from "./render";
+export {
+  renderWithProviders,
+  createTestQueryClient,
+  createTestWrapper,
+  type RenderWithProvidersOptions,
+} from "./render";
 export { server } from "./server";
 export * from "./helpers";
 export * from "./fixtures";

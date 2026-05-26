@@ -24,6 +24,32 @@ import type { ReactElement, ReactNode } from "react";
 import { ME_KEY, ME_PROBE_KEY, type Me } from "@/hooks/useAuth";
 import { setNavigationState, type NavigationState, type RouterMock } from "./navigation";
 
+/**
+ * `renderHook` wrapper companion to `renderWithProviders`. The 3 hook test
+ * files (useDocuments / useDashboard / useVendors) all need a
+ * `QueryClientProvider` with the same retry / staleTime / gcTime tuning
+ * as the page-level harness; this helper hands them the same client +
+ * Wrapper without re-deriving it. See `src/test/README.md` for the
+ * `gcTime: Infinity` rationale.
+ *
+ * Usage:
+ *
+ *     const { qc, Wrapper } = createTestWrapper();
+ *     const { result } = renderHook(() => useDocuments(), { wrapper: Wrapper });
+ *     // …
+ *     expect(qc.getQueryData(["documents", "list"])).toMatchObject(...);
+ */
+export function createTestWrapper(): {
+  qc: QueryClient;
+  Wrapper: (props: { children: ReactNode }) => ReactElement;
+} {
+  const qc = createTestQueryClient();
+  function Wrapper({ children }: { children: ReactNode }) {
+    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+  }
+  return { qc, Wrapper };
+}
+
 export type RenderWithProvidersOptions = Omit<RenderOptions, "wrapper"> & {
   /**
    * Prime the `useMe()` query cache.
@@ -71,7 +97,7 @@ export type RenderWithProvidersOptions = Omit<RenderOptions, "wrapper"> & {
   pathname?: string;
 };
 
-function createTestQueryClient(): QueryClient {
+export function createTestQueryClient(): QueryClient {
   return new QueryClient({
     defaultOptions: {
       // - retry: false        — a 4xx in a test should fail fast.
