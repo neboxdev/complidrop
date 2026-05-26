@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import { useState, useCallback, useEffect } from "react";
-import { useDropzone } from "react-dropzone";
+import { useDropzone, type FileRejection } from "react-dropzone";
 import { UploadCloud, CheckCircle2, ShieldCheck } from "lucide-react";
 import { ApiEnvelope } from "@/lib/api";
 
@@ -23,6 +23,26 @@ type UploadResponse = {
   message: string;
 };
 
+// Map react-dropzone's machine-readable rejection codes to vendor-facing
+// human copy. Keep the strings short — the portal target audience is a
+// non-technical user landing here once.
+function rejectionCopy(rejections: FileRejection[]): string | null {
+  if (rejections.length === 0) return null;
+  const first = rejections[0].errors[0];
+  switch (first?.code) {
+    case "file-invalid-type":
+      return "That file type isn't accepted. Please upload a PDF, JPEG, or PNG.";
+    case "file-too-large":
+      return "That file is too large. The 10 MB cap is per file — try splitting it or compressing it.";
+    case "file-too-small":
+      return "That file is empty.";
+    case "too-many-files":
+      return "Please drop one file at a time.";
+    default:
+      return first?.message ?? "That file couldn't be accepted.";
+  }
+}
+
 export default function PortalPage() {
   const params = useParams<{ token: string }>();
   const [info, setInfo] = useState<PortalInfo | null>(null);
@@ -36,20 +56,50 @@ export default function PortalPage() {
       setLoading(true);
       const res = await fetch(`${API_BASE}/api/portal/${params.token}`);
       const body = (await res.json()) as ApiEnvelope<PortalInfo>;
-      if (body.error) throw new Error(body.error.message);
+      if (body.error) {
+        // Server-curated error message — explicitly vendor-facing copy
+        // the backend chose to render. Safe to surface as the detail
+        // line below the static recovery copy.
+        setError(body.error.message);
+        return;
+      }
       setInfo(body.data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load portal.");
+    } catch {
+      // Network failure, JSON parse error, or any other low-level
+      // issue. `err.message` here is a browser/JS internal (e.g.
+      // "Failed to fetch", "Unexpected token < in JSON at …") and
+      // would leak implementation details to vendors. The static
+      // recovery copy alone is sufficient — leave `error` null.
     } finally {
       setLoading(false);
     }
   }, [params.token]);
 
   const onDrop = useCallback(
-    async (accepted: File[]) => {
+    async (accepted: File[], rejected: FileRejection[]) => {
+      // react-dropzone returns rejected files separately from accepted
+      // ones. Surface the rejection reason so the vendor knows why
+      // nothing happened — silent rejection is hostile UX on a
+      // one-shot upload surface.
+      const rejectionMessage = rejectionCopy(rejected);
+      if (rejectionMessage) {
+        setError(rejectionMessage);
+        // Don't return: still process any ACCEPTED files alongside.
+      }
       if (accepted.length === 0) return;
+
+      // Client-side quota guard: the backend will also enforce this via
+      // a 409 on /upload, but blocking it here saves the vendor the
+      // wasted POST and gives a clearer error.
+      if (info && info.uploadCount + uploaded.length >= info.maxUploads) {
+        setError(
+          "You've used every upload on this link. Ask your customer for a fresh link if you need to send more.",
+        );
+        return;
+      }
+
       setUploading(true);
-      setError(null);
+      if (!rejectionMessage) setError(null);
       try {
         for (const file of accepted) {
           const form = new FormData();
@@ -68,8 +118,12 @@ export default function PortalPage() {
         setUploading(false);
       }
     },
-    [params.token],
+    [params.token, info, uploaded.length],
   );
+
+  // Quota-exhausted disables the dropzone client-side. The backend
+  // still enforces via 409 — this is a UX guard, not a security one.
+  const atQuota = info ? info.uploadCount >= info.maxUploads : false;
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -79,6 +133,7 @@ export default function PortalPage() {
       "image/png": [".png"],
     },
     maxSize: 10 * 1024 * 1024,
+    disabled: atQuota,
   });
 
   useEffect(() => {
@@ -93,12 +148,27 @@ export default function PortalPage() {
     );
   }
 
-  if (!info || error && !info) {
+  // `info` is the only signal for the bad-link branch — `error && !info`
+  // is redundant (subset of `!info`). When the GET /api/portal/{token}
+  // failed for any reason (4xx, 5xx, network error, malformed body),
+  // setInfo was never called and we land here. Always show the static
+  // recovery copy (AC #3: "shows the recovery copy"); render the
+  // curated server message as a small detail line BELOW it when
+  // available so transient failures stay diagnosable without leaking
+  // codes or stack traces. AC #2 says "does not expose INTERNAL
+  // errors" — internal = dot-namespaced codes, stack traces. The
+  // server's human message is vendor-facing copy by definition.
+  if (!info) {
     return (
       <main className="min-h-screen flex items-center justify-center">
         <div className="max-w-md text-center p-6">
           <p className="text-rose-600 font-medium">This link is no longer available.</p>
-          <p className="text-sm text-slate-500 mt-2">{error ?? "Ask your customer for a fresh upload link."}</p>
+          <p className="text-sm text-slate-500 mt-2">
+            Ask your customer for a fresh upload link.
+          </p>
+          {error && error !== "This link is no longer available." && (
+            <p className="text-xs text-slate-400 mt-3">{error}</p>
+          )}
         </div>
       </main>
     );
@@ -121,14 +191,23 @@ export default function PortalPage() {
 
         <div
           {...getRootProps()}
-          className={`bg-white border-2 border-dashed rounded-xl p-10 text-center shadow-sm cursor-pointer transition ${
-            isDragActive ? "border-sky-500 bg-sky-50" : "border-slate-200 hover:border-sky-300 hover:bg-sky-50/30"
+          aria-disabled={atQuota || undefined}
+          className={`bg-white border-2 border-dashed rounded-xl p-10 text-center shadow-sm transition ${
+            atQuota
+              ? "border-slate-200 opacity-60 cursor-not-allowed"
+              : isDragActive
+                ? "border-sky-500 bg-sky-50 cursor-pointer"
+                : "border-slate-200 hover:border-sky-300 hover:bg-sky-50/30 cursor-pointer"
           }`}
         >
           <input {...getInputProps()} />
           <UploadCloud className="w-12 h-12 mx-auto text-sky-500" />
           <p className="mt-3 text-base font-medium text-slate-800">
-            {isDragActive ? "Drop to upload…" : "Drag a file here or click to select"}
+            {atQuota
+              ? "Upload limit reached on this link"
+              : isDragActive
+                ? "Drop to upload…"
+                : "Drag a file here or click to select"}
           </p>
           <p className="text-sm text-slate-500 mt-1">PDF, JPEG, or PNG · 10 MB max</p>
           <p className="text-xs text-slate-400 mt-2">
