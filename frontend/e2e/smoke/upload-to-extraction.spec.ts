@@ -170,15 +170,17 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
       timeout: 10_000,
     });
 
-    // First detail render: Pending. Use .first() because the table-
-    // header text "Extraction" + the badge "Pending" both appear,
-    // and the compliance-status was overridden to NonCompliant so
-    // there's no Pending-Pending ambiguity.
-    await expect(page.getByText("Pending").first()).toBeVisible();
+    // First detail render: Pending. The extraction badge carries
+    // `data-testid="extraction-status"` (#92) so the assertion is
+    // pinned to the badge regardless of how many other "Pending"
+    // strings end up on the page over time (compliance, audit,
+    // tooltips, headings).
+    const extractionStatus = page.getByTestId("extraction-status");
+    await expect(extractionStatus).toHaveText("Pending");
     expect(detailCalls).toBeGreaterThanOrEqual(1);
 
     // After 3s, refetchInterval fires: Pending → Processing.
-    await expect(page.getByText("Processing").first()).toBeVisible({
+    await expect(extractionStatus).toHaveText("Processing", {
       timeout: 10_000,
     });
     expect(detailCalls).toBeGreaterThanOrEqual(2);
@@ -186,7 +188,7 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
     // After another 3s, refetchInterval fires again: Processing →
     // Completed. The predicate returns false on Completed so polling
     // stops naturally.
-    await expect(page.getByText("Completed").first()).toBeVisible({
+    await expect(extractionStatus).toHaveText("Completed", {
       timeout: 10_000,
     });
     expect(detailCalls).toBeGreaterThanOrEqual(3);

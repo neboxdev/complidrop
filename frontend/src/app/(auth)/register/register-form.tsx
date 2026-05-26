@@ -111,8 +111,10 @@ export default function RegisterForm() {
           // role="status" / aria-live (architecture-review #31) so screen
           // readers don't re-announce on every render. The banner is selected
           // in tests by its leading copy ("You selected the …") which appears
-          // nowhere else in the form — keeps the suite on accessible-text
-          // selectors instead of introducing the codebase's first data-testid.
+          // nowhere else in the form — accessible-text selectors are preferred
+          // where they disambiguate naturally; data-testid is reserved for
+          // surfaces that are ambiguous-by-design (see status-badge testids
+          // added in #92 and the CLAUDE.md "Frontend testid policy" note).
           <div className="flex items-center justify-between gap-3 rounded-lg border border-sky-100 bg-sky-50 px-4 py-3 text-sm text-sky-900">
             <span>{copy.banner}</span>
             <Link

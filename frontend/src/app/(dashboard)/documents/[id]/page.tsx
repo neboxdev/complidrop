@@ -129,18 +129,24 @@ export default function DocumentDetailPage() {
 
       <section className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
         <SummaryCell label="Extraction" value={
-          <Badge className={cn("border-transparent",
-            doc.extractionStatus === "Completed" ? "bg-emerald-100 text-emerald-700"
-              : doc.extractionStatus === "Failed" ? "bg-rose-100 text-rose-700"
-              : "bg-sky-100 text-sky-700")}>
+          <Badge
+            data-testid="extraction-status"
+            className={cn("border-transparent",
+              doc.extractionStatus === "Completed" ? "bg-emerald-100 text-emerald-700"
+                : doc.extractionStatus === "Failed" ? "bg-rose-100 text-rose-700"
+                : "bg-sky-100 text-sky-700")}
+          >
             {doc.extractionStatus}
           </Badge>
         } />
         <SummaryCell label="Compliance" value={
-          <Badge className={cn("border-transparent",
-            doc.complianceStatus === "Compliant" ? "bg-emerald-100 text-emerald-700"
-              : doc.complianceStatus === "NonCompliant" ? "bg-rose-100 text-rose-700"
-              : "bg-slate-100 text-slate-700")}>
+          <Badge
+            data-testid="compliance-status"
+            className={cn("border-transparent",
+              doc.complianceStatus === "Compliant" ? "bg-emerald-100 text-emerald-700"
+                : doc.complianceStatus === "NonCompliant" ? "bg-rose-100 text-rose-700"
+                : "bg-slate-100 text-slate-700")}
+          >
             {doc.complianceStatus}
           </Badge>
         } />
