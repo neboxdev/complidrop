@@ -98,7 +98,9 @@ export default function PortalPage() {
       <main className="min-h-screen flex items-center justify-center">
         <div className="max-w-md text-center p-6">
           <p className="text-rose-600 font-medium">This link is no longer available.</p>
-          <p className="text-sm text-slate-500 mt-2">{error ?? "Ask your customer for a fresh upload link."}</p>
+          <p className="text-sm text-slate-500 mt-2">
+            Ask your customer for a fresh upload link.
+          </p>
         </div>
       </main>
     );
