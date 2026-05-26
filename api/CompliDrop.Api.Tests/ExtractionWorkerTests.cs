@@ -319,11 +319,18 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     [Fact]
     public async Task Stale_processing_document_is_reclaimed_after_the_zombie_timeout()
     {
-        // Claimed >5 min ago and never finished (the owning process died). The next claim reclaims it.
+        // Boundary-tight: ProcessingStartedAt is 30 seconds PAST the 5-min
+        // zombie threshold (-5m30s). Wide enough to absorb sub-millisecond
+        // jitter between SeedDocAsync's clock read and the worker's
+        // `now() - interval '5 minutes'` comparison, narrow enough that a
+        // regression changing the threshold to 6 minutes would fail this
+        // assertion (the seeded value would no longer cross the larger
+        // threshold). Pins the threshold against drift in either direction
+        // — see also the fresh-boundary pair below. (#62)
         var (_, docId) = await SeedDocAsync(
             status: ExtractionStatus.Processing,
             attempts: 1,
-            processingStartedAt: DateTime.UtcNow.AddMinutes(-10));
+            processingStartedAt: DateTime.UtcNow.AddMinutes(-5).AddSeconds(-30));
         var worker = BuildWorker();
 
         var claimed = await worker.ClaimNextAsync(CancellationToken.None);
@@ -335,11 +342,18 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     [Fact]
     public async Task Recently_claimed_processing_document_is_not_reclaimed()
     {
-        // Freshly claimed and still within the 5-min window — owned by another worker, must be left alone.
+        // Boundary-tight: ProcessingStartedAt is 30 seconds BEFORE the 5-min
+        // zombie threshold (-4m30s). Wide enough to absorb sub-millisecond
+        // jitter, narrow enough that a regression changing the threshold to
+        // 4 minutes would fail this assertion (the seeded value would now
+        // cross the smaller threshold and the doc would be wrongly
+        // reclaimed). Combined with the stale-boundary pair above, the two
+        // tests bracket the 5-min threshold and would catch a ±1-min drift
+        // in either direction. (#62)
         var (_, docId) = await SeedDocAsync(
             status: ExtractionStatus.Processing,
             attempts: 1,
-            processingStartedAt: DateTime.UtcNow);
+            processingStartedAt: DateTime.UtcNow.AddMinutes(-4).AddSeconds(-30));
         var worker = BuildWorker();
 
         var claimed = await worker.ClaimNextAsync(CancellationToken.None);
