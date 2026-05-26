@@ -10,11 +10,17 @@
  *       authedMe,
  *       documentsAllStatusesResponse,
  *       portalInfo,
- *       expiredLink404,
+ *       expiredPortalLinkHandler,
  *     } from "@/test";
  *
- * Keep this file a thin re-export. New harness primitives go in their own
- * module first (so they can be tree-shaken / read in isolation) and only
- * surface here once they're part of the documented template.
+ * Each leaf module owns its own responsibility and stays cheap to import
+ * directly (e.g. `import { url } from "@/test/helpers"` doesn't drag in
+ * React Testing Library or MSW). This index is the convenience surface;
+ * the leaf paths are the precise surface.
  */
-export * from "./render";
+export { renderWithProviders, type RenderWithProvidersOptions } from "./render";
+export { server } from "./server";
+export * from "./helpers";
+export * from "./fixtures";
+export { navState, resetNavigation, setNavigationState } from "./navigation";
+export type { NavigationState, RouterMock } from "./navigation";

@@ -9,6 +9,11 @@
  * Any other endpoint hit without an explicit override raises an unhandled
  * request in tests — that's a feature, not a gap: it forces each test to
  * declare exactly which network surface it intends to exercise.
+ *
+ * Internal to the harness — `server.ts` is the only consumer. Keeping this
+ * list server-private prevents a contributor from accidentally building a
+ * SECOND MSW server in some test file, which would split state and break
+ * the "one server for the whole run" invariant `server.ts` relies on.
  */
 import { http } from "msw";
 import { jsonError, url } from "./helpers";

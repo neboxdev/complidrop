@@ -13,21 +13,23 @@ import { navState, resetNavigation } from "./src/test/navigation";
 
 // Default mock for `next/navigation`. Test files that need different shapes
 // (e.g. a hoisted `useSearchParams` spy) still call `vi.mock("next/navigation",
-// …)` at the top of their own file — Vitest hoists the file-level mock above
-// this setup-file one, so per-file overrides win.
+// …)` at the top of their own file — Vitest's per-file mock registry
+// overrides any setup-file mock within the file's own module scope
+// (file-level mocks win because they're file-scoped, not because of hoist
+// order across files).
 //
 // Reads from `navState` (a mutable container in `src/test/navigation.ts`);
 // tests drive routing via `renderWithProviders({ router, params, ... })` or
-// the lower-level `setNavigationState(…)` helper.
+// the lower-level `setNavigationState(…)` helper. `notFound` and `redirect`
+// throw a sentinel error so component code after them cannot silently keep
+// running (matching real Next semantics); tests still assert on the spy.
 vi.mock("next/navigation", () => ({
   useRouter: () => navState.router,
   useParams: () => navState.params,
   useSearchParams: () => navState.searchParams,
   usePathname: () => navState.pathname,
-  // notFound() throws in real Next; tests assert on the spy instead.
-  notFound: vi.fn(),
-  // redirect() throws in real Next too; same treatment.
-  redirect: vi.fn(),
+  notFound: (...args: unknown[]) => navState.notFound(...args),
+  redirect: (...args: unknown[]) => navState.redirect(...args),
 }));
 
 // MSW lifecycle:

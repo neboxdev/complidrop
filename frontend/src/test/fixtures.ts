@@ -10,28 +10,41 @@
  *     so a TS rename catches stale fixtures at compile time.
  *
  * Conventions:
- *   - Every exported fixture is a `const` declared `as const`-safe value, OR
- *     a factory that takes optional `overrides` and `Object.assign`s onto a
- *     fresh copy. Use the factory whenever a test needs to mutate fields.
- *   - Dates are absolute ISO-8601 UTC strings so a test running on Mar-31
- *     doesn't render a different "days until expiry" than one running on
- *     Apr-01. Pin `Date.now` separately if you want deterministic relative
- *     copy assertions.
+ *   - Every exported fixture value is typed `Readonly<…>` / `readonly`-array
+ *     so a misbehaving test that mutates `documentsAllStatuses[0]` is a
+ *     compile error, not a silent leak into the next test. The README's
+ *     "use the factory whenever a test needs to mutate fields" guidance is
+ *     thus type-enforced, not just convention.
+ *   - Every shared shape has a matching `makeXxx(overrides)` factory that
+ *     spreads onto a fresh copy. Tests that need a variant call the factory.
+ *   - Dates are absolute ISO-8601 UTC strings with the explicit `Z` suffix
+ *     so they parse identically to the backend's `DateTime` (Kind=Utc)
+ *     serialization. A date-only string like `"2026-12-31"` parses as UTC
+ *     midnight, but a no-Z string like `"2026-12-31T00:00:00"` parses as
+ *     LOCAL midnight — the two render different days across the dateline,
+ *     so the `Z` matters for test determinism.
+ *   - `complianceStatus` values are restricted to what the backend enum
+ *     `ComplianceStatus` actually emits — `Pending | Compliant |
+ *     NonCompliant | ExpiringSoon | Expired`. Never `"Unknown"`: the
+ *     backend never returns it, so a test that depends on that branch is
+ *     testing a state production cannot produce.
  */
 import type { Me } from "@/hooks/useAuth";
 import type {
   DocumentListItem,
   DocumentListResponse,
 } from "@/hooks/useDocuments";
+import { jsonError, url } from "./helpers";
+import { http, type HttpHandler } from "msw";
 
 // -------- Auth --------
 
 /**
  * An admin user on the Pro plan in a UTC org. The default for any test that
- * just needs "someone is logged in" — use a factory call below if your test
+ * just needs "someone is logged in" — use `makeMe(overrides)` if the test
  * cares about role / plan / timezone branching.
  */
-export const authedMe: Me = {
+export const authedMe: Readonly<Me> = {
   userId: "u_owner_01",
   organizationId: "o_acme_01",
   email: "owner@acme.test",
@@ -55,8 +68,13 @@ export function makeMe(overrides: Partial<Me> = {}): Me {
  * Order matches the documents page's default sort (newest first); status
  * order is Pending → Processing → Completed → Failed so reviewers scanning
  * the fixture can see the full state machine at a glance.
+ *
+ * The compliance-status field follows the backend enum — Pending while
+ * extraction is still in flight or failed, Compliant once the extracted
+ * dates are valid. ExpiringSoon / Expired / NonCompliant are exposed via
+ * the factory below for tests that need them.
  */
-export const documentsAllStatuses: DocumentListItem[] = [
+export const documentsAllStatuses: ReadonlyArray<Readonly<DocumentListItem>> = [
   {
     id: "d_pending_01",
     originalFileName: "coi-pending.pdf",
@@ -65,7 +83,7 @@ export const documentsAllStatuses: DocumentListItem[] = [
     vendorId: "v_pending_01",
     extractionStatus: "Pending",
     extractionConfidence: null,
-    complianceStatus: "Unknown",
+    complianceStatus: "Pending",
     effectiveDate: null,
     expirationDate: null,
     daysUntilExpiry: null,
@@ -79,7 +97,7 @@ export const documentsAllStatuses: DocumentListItem[] = [
     vendorId: "v_processing_01",
     extractionStatus: "Processing",
     extractionConfidence: null,
-    complianceStatus: "Unknown",
+    complianceStatus: "Pending",
     effectiveDate: null,
     expirationDate: null,
     daysUntilExpiry: null,
@@ -94,8 +112,8 @@ export const documentsAllStatuses: DocumentListItem[] = [
     extractionStatus: "Completed",
     extractionConfidence: 0.94,
     complianceStatus: "Compliant",
-    effectiveDate: "2026-01-01",
-    expirationDate: "2026-12-31",
+    effectiveDate: "2026-01-01T00:00:00Z",
+    expirationDate: "2026-12-31T00:00:00Z",
     daysUntilExpiry: 219,
     createdAt: "2026-05-25T09:30:00Z",
   },
@@ -107,7 +125,7 @@ export const documentsAllStatuses: DocumentListItem[] = [
     vendorId: null,
     extractionStatus: "Failed",
     extractionConfidence: null,
-    complianceStatus: "Unknown",
+    complianceStatus: "Pending",
     effectiveDate: null,
     expirationDate: null,
     daysUntilExpiry: null,
@@ -115,12 +133,23 @@ export const documentsAllStatuses: DocumentListItem[] = [
   },
 ];
 
-export const documentsAllStatusesResponse: DocumentListResponse = {
-  items: documentsAllStatuses,
+export const documentsAllStatusesResponse: Readonly<DocumentListResponse> = {
+  items: documentsAllStatuses as DocumentListItem[],
   total: documentsAllStatuses.length,
   page: 1,
   pageSize: 50,
 };
+
+/**
+ * Build a single document with whatever fields a test wants to vary. Use
+ * for ExpiringSoon / Expired / NonCompliant rows that the canonical set
+ * deliberately doesn't carry.
+ */
+export function makeDocument(
+  overrides: Partial<DocumentListItem> = {},
+): DocumentListItem {
+  return { ...documentsAllStatuses[2], ...overrides };
+}
 
 // -------- Vendor portal --------
 
@@ -130,6 +159,12 @@ export const documentsAllStatusesResponse: DocumentListResponse = {
  * so the type lives in the page file — duplicate the shape here rather than
  * exporting it from the route, which would force the route into the test
  * compilation graph just for a type.
+ *
+ * NOTE: the portal page parses the envelope INLINE — it doesn't go through
+ * `lib/api.ts`. MSW handlers still match on URL, but `ApiError` is never
+ * thrown for portal responses; the page's own `try/catch` maps `body.error`
+ * to a string. Portal tests assert on inline error-string state, not
+ * `ApiError` instances.
  */
 export type PortalInfoFixture = {
   vendorName: string;
@@ -143,7 +178,7 @@ export type PortalInfoFixture = {
 /**
  * Healthy portal link: active, under quota, with simple instructions.
  */
-export const portalInfo: PortalInfoFixture = {
+export const portalInfo: Readonly<PortalInfoFixture> = {
   vendorName: "Beachfront Janitorial",
   orgName: "Acme Inc",
   instructions:
@@ -153,14 +188,39 @@ export const portalInfo: PortalInfoFixture = {
   maxUploads: 5,
 };
 
+export function makePortalInfo(
+  overrides: Partial<PortalInfoFixture> = {},
+): PortalInfoFixture {
+  return { ...portalInfo, ...overrides };
+}
+
 /**
- * The body the API returns for an expired or revoked portal link — same
- * envelope `lib/api.ts` parses for any 4xx, status 404. Tests assert the
- * portal page renders the "no longer available" UI on this response.
+ * MSW handler factory for an expired/revoked portal link. Composes with the
+ * shared `jsonError` helper so the response shape stays in lockstep with
+ * every other 4xx in the harness — no hand-rolled `new Response(...)`.
+ *
+ * Usage:
+ *
+ *     server.use(expiredPortalLinkHandler("any-token"));
+ *     // or, for the path-param form:
+ *     server.use(expiredPortalLinkHandler(":token"));
+ */
+export function expiredPortalLinkHandler(token = ":token"): HttpHandler {
+  return http.get(url(`/api/portal/${token}`), () =>
+    jsonError("portal.expired", "This link is no longer available.", {
+      status: 404,
+    }),
+  );
+}
+
+/**
+ * The raw envelope shape an expired-link response carries. Useful for tests
+ * that want to inspect the literal payload (e.g. assert the page renders
+ * the backend's error message verbatim).
  */
 export const expiredLink404 = {
   status: 404,
-  body: {
+  envelope: {
     data: null,
     error: {
       code: "portal.expired",
