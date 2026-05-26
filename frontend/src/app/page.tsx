@@ -7,6 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Logo } from "@/components/Logo";
 import { cn } from "@/lib/utils";
 import { useMe } from "@/hooks/useAuth";
+import { PLANS } from "@/lib/plans";
 import {
   Upload,
   ShieldCheck,
@@ -387,7 +388,7 @@ export default function Home() {
                     Pro
                   </h3>
                   <p className="mt-2" style={{ color: C.text }}>
-                    <span className="text-4xl font-extrabold">$49</span>
+                    <span className="text-4xl font-extrabold">{PLANS.pro.monthlyPriceLabel}</span>
                     <span
                       className="text-base font-normal"
                       style={{ color: C.muted }}
@@ -432,7 +433,7 @@ export default function Home() {
                     Annual
                   </h3>
                   <p className="mt-2" style={{ color: C.text }}>
-                    <span className="text-4xl font-extrabold">$39</span>
+                    <span className="text-4xl font-extrabold">{PLANS.annual.monthlyPriceLabel}</span>
                     <span
                       className="text-base font-normal"
                       style={{ color: C.muted }}
@@ -441,7 +442,7 @@ export default function Home() {
                     </span>
                   </p>
                   <p className="mt-1 text-sm font-semibold" style={{ color: C.sky }}>
-                    Billed $468/year &mdash; save $120
+                    {PLANS.annual.annualBilledLabel} &mdash; {PLANS.annual.annualSavingsLabel?.toLowerCase()}
                   </p>
                   <p
                     className="mt-4 flex-1 text-sm leading-relaxed"
