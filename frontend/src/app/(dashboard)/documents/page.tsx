@@ -4,7 +4,7 @@ import { useState, useCallback } from "react";
 import Link from "next/link";
 import { useDropzone } from "react-dropzone";
 import { toast } from "sonner";
-import { UploadCloud, FileText, Trash2 } from "lucide-react";
+import { UploadCloud, FileText, Trash2, AlertTriangle, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -113,6 +113,44 @@ export default function DocumentsPage() {
                 <tr>
                   <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-400">
                     Loading documents…
+                  </td>
+                </tr>
+              ) : docs.isError ? (
+                // Error state distinct from empty so a backend outage is not
+                // mistaken for a brand-new org with zero documents (#80).
+                // `err.message` is the human server message from the ApiError
+                // envelope; api.ts already substitutes statusText for non-JSON
+                // 5xx, with the jargon-free fallback handled in #77.
+                //
+                // role="alert" gets the error announced by assistive tech the
+                // moment isError flips true, matching the convention in
+                // frontend/src/test/example.test.tsx.
+                <tr>
+                  <td colSpan={7} className="px-4 py-12 text-center" role="alert">
+                    <AlertTriangle className="w-8 h-8 mx-auto text-rose-500" />
+                    <p className="mt-2 text-sm font-medium text-slate-800">
+                      Couldn&apos;t load documents.
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      {docs.error instanceof Error && docs.error.message.trim()
+                        ? docs.error.message
+                        : "Something went wrong. Try again."}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-3"
+                      onClick={() => docs.refetch()}
+                      disabled={docs.isFetching}
+                    >
+                      <RotateCw
+                        className={cn(
+                          "w-3.5 h-3.5 mr-1",
+                          docs.isFetching && "animate-spin",
+                        )}
+                      />
+                      Retry
+                    </Button>
                   </td>
                 </tr>
               ) : items.length === 0 ? (
