@@ -38,8 +38,14 @@ export type UseMeOptions = {
 // Distinct cache key for the landing-page probe so a 401-mapped-to-null from a
 // skipRefresh call cannot poison the authoritative useMe() cache that dashboard
 // routes depend on. Login/register/logout mirror writes across both keys below.
-const ME_KEY = ["auth", "me"] as const;
-const ME_PROBE_KEY = ["auth", "me", "probe"] as const;
+//
+// Exported so the test harness (src/test/render.tsx) can seed both keys
+// without duplicating the literal — a rename of either key here is otherwise
+// silently survived by tests that prime the OLD key into a cache nothing
+// reads, falling through to MSW and either hanging in waitFor or quietly
+// rendering the anonymous branch.
+export const ME_KEY = ["auth", "me"] as const;
+export const ME_PROBE_KEY = ["auth", "me", "probe"] as const;
 
 function setMeCache(qc: QueryClient, me: Me | null) {
   qc.setQueryData(ME_KEY, me);

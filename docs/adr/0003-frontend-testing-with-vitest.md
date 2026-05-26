@@ -57,6 +57,13 @@ Conventions established by the first suite (`frontend/src/app/page.test.tsx`):
 ### Neutral
 - No end-to-end runner (Playwright/Cypress) is adopted here; if cross-page flows need
   coverage later, that's a separate decision/ADR.
+- "Mock the boundaries" is generic; the specific layer used for URL-level interception
+  in component/hook tests is **MSW** (`msw/node`'s `setupServer`), wired into
+  `vitest.setup.ts` with `onUnhandledRequest: "error"`. The reusable harness lives at
+  `frontend/src/test/` with its own README — see ticket [#34](https://github.com/neboxdev/complidrop/issues/34).
+  Tests that pin the api client's own fetch contract (`lib/api.test.ts`,
+  `hooks/useAuth.test.tsx`) keep using `vi.stubGlobal("fetch", …)` because they need to
+  count calls and replace the global symbol entirely. Both approaches coexist.
 
 ## Alternatives considered
 
