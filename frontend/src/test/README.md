@@ -16,6 +16,7 @@ Reusable test scaffolding for the Next.js frontend. Pairs with [ADR 0003](../../
 | `polling.ts`           | `sequencedJsonOk(...responses)` returns an MSW handler that yields responses in order, then repeats the last (terminal state). |
 | `dropzone.ts`          | `dropFilesIn(container, files)` + `makeFile(name, type?, size?)` — container-scoped helpers for driving `react-dropzone` in tests. |
 | `security.ts`          | `assertNotInDom(value, root?)` — assert a sensitive value is NOT rendered into the DOM (scans both `textContent` and `innerHTML`). |
+| `forms.ts`             | `fillInputByName(container, name, value)` + `submitFormIn(container)` — container-scoped form-driving helpers. Prefer `getByLabelText` after #76. |
 | `example.test.tsx`     | Template test — **copy this as the starting point for new suites.**                    |
 
 `src/test/index.ts` re-exports the common surface, so most test files only need:
