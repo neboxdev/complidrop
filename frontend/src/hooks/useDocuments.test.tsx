@@ -32,6 +32,7 @@ import {
   documentsAllStatuses,
   makeDocument,
   makeDocumentsResponse,
+  sequencedJsonOk,
 } from "@/test";
 import { ApiError } from "@/lib/api";
 
@@ -110,11 +111,14 @@ describe("useDocuments — 5-second polling while any row is Pending/Processing 
       extractionStatus: "Completed",
       complianceStatus: "Compliant",
     });
+    const seq = sequencedJsonOk(
+      makeDocumentsResponse({ items: [processingRow], total: 1 }),
+      makeDocumentsResponse({ items: [completedRow], total: 1 }),
+    );
     server.use(
       http.get(url("/api/documents"), () => {
         calls++;
-        const item = calls === 1 ? processingRow : completedRow;
-        return jsonOk(makeDocumentsResponse({ items: [item], total: 1 }));
+        return seq();
       }),
     );
 
@@ -200,15 +204,14 @@ describe("useDocuments — 5-second polling while any row is Pending/Processing 
       daysUntilExpiry: null,
       extractionConfidence: null,
     });
+    const seq = sequencedJsonOk(
+      makeDocumentsResponse({ items: [pending], total: 1 }),
+      makeDocumentsResponse({ items: [failed], total: 1 }),
+    );
     server.use(
       http.get(url("/api/documents"), () => {
         calls++;
-        return jsonOk(
-          makeDocumentsResponse({
-            items: [calls === 1 ? pending : failed],
-            total: 1,
-          }),
-        );
+        return seq();
       }),
     );
 
