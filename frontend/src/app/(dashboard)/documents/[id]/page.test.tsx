@@ -27,19 +27,11 @@ import {
   makeDocumentDetail,
 } from "@/test";
 
-const { toastSuccess, toastError } = vi.hoisted(() => ({
-  toastSuccess: vi.fn(),
-  toastError: vi.fn(),
-}));
-vi.mock("sonner", () => ({
-  toast: { success: toastSuccess, error: toastError },
-  Toaster: () => null,
-}));
-
-beforeEach(() => {
-  toastSuccess.mockClear();
-  toastError.mockClear();
-});
+// sonner mock is provided by the harness (vitest.setup.ts +
+// src/test/sonner.ts). This file doesn't assert on toast calls — the
+// reextract / saveFields mutation paths that fire toasts are not
+// driven by any test here. If a future test needs to assert on a
+// toast, add `toastSuccess` / `toastError` to the @/test import. (#74)
 
 describe("DocumentDetailPage — basic states (#36)", () => {
   it("isLoading: renders the loading copy", () => {

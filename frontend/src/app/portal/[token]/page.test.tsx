@@ -20,7 +20,7 @@
  * into the DOM (no debug crumb, no analytics tag, no aria-label
  * containing it).
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { http, HttpResponse } from "msw";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import PortalPage from "./page";
@@ -36,12 +36,8 @@ import {
 } from "@/test";
 
 // Sonner not used by the portal page (it has its own inline error UI),
-// but we mock to silence any indirect import. Toaster stub avoids
-// jsdom portal-mount churn.
-vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
-  Toaster: () => null,
-}));
+// but the harness mocks it anyway (vitest.setup.ts + src/test/sonner.ts)
+// to silence any indirect import. See #74.
 
 // Helper: drive react-dropzone via the hidden file input it renders.
 // fireEvent.change on the input flows through onDrop with the supplied

@@ -11,7 +11,7 @@
  * test. Two test files for one component, by design — they pin two
  * different contracts.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import RegisterForm from "./register-form";
@@ -22,17 +22,13 @@ import {
   jsonOk,
   jsonError,
   authedMe,
+  toastSuccess,
+  toastError,
 } from "@/test";
 import { ME_KEY } from "@/hooks/useAuth";
 
-const { toastSuccess, toastError } = vi.hoisted(() => ({
-  toastSuccess: vi.fn(),
-  toastError: vi.fn(),
-}));
-vi.mock("sonner", () => ({
-  toast: { success: toastSuccess, error: toastError },
-  Toaster: () => null,
-}));
+// sonner mock + spies are provided by the harness; afterEach in the
+// setup file resets all toast spies between tests (#74).
 
 function fillField(name: string, value: string) {
   const input = document.querySelector(`input[name="${name}"]`) as HTMLInputElement;
@@ -56,11 +52,6 @@ function submitForm() {
 // Validation copy lives in zod schema (`register-form.tsx`). Test the
 // client-side branches before we exercise the server-side ones.
 describe("RegisterForm — validation (#35)", () => {
-  beforeEach(() => {
-    toastSuccess.mockClear();
-    toastError.mockClear();
-  });
-
   it("flags a short password with the user-facing copy", async () => {
     renderWithProviders(<RegisterForm />, { auth: null });
     fillField("fullName", "Owner Name");
@@ -123,11 +114,6 @@ describe("RegisterForm — validation (#35)", () => {
 });
 
 describe("RegisterForm — happy path (#35)", () => {
-  beforeEach(() => {
-    toastSuccess.mockClear();
-    toastError.mockClear();
-  });
-
   it("on 200 toasts a welcome, routes to /dashboard, and primes the Me cache", async () => {
     let receivedBody: Record<string, unknown> | undefined;
     server.use(
@@ -237,11 +223,6 @@ const serverErrorCases: ReadonlyArray<{
 ];
 
 describe("RegisterForm — server-side error copy (#35)", () => {
-  beforeEach(() => {
-    toastSuccess.mockClear();
-    toastError.mockClear();
-  });
-
   it.each(serverErrorCases)(
     "$label surfaces the human message, NEVER the raw code or status",
     async ({ status, code, message }) => {
@@ -279,11 +260,6 @@ describe("RegisterForm — server-side error copy (#35)", () => {
 });
 
 describe("RegisterForm — loading state (#35)", () => {
-  beforeEach(() => {
-    toastSuccess.mockClear();
-    toastError.mockClear();
-  });
-
   it("disables the submit button + flips copy while the mutation is pending", async () => {
     let release: () => void = () => {};
     const settled = new Promise<void>((r) => (release = r));

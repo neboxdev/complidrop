@@ -12,6 +12,7 @@ Reusable test scaffolding for the Next.js frontend. Pairs with [ADR 0003](../../
 | `helpers.ts`           | `TEST_API_BASE`, `url("/api/...")`, `jsonOk(data)`, `jsonError(code, msg, { status })`. |
 | `fixtures.ts`          | Named typed fixtures — `authedMe`, `documentsAllStatuses{Response}`, `portalInfo`, `expiredPortalLinkHandler`, `expiredLink404`. |
 | `navigation.ts`        | Mutable container behind the global `vi.mock("next/navigation", ...)`.                 |
+| `sonner.ts`            | Mutable `toast.*` spies behind the global `vi.mock("sonner", ...)`. Import `toastSuccess`/`toastError` from `@/test` and assert on them.   |
 | `example.test.tsx`     | Template test — **copy this as the starting point for new suites.**                    |
 
 `src/test/index.ts` re-exports the common surface, so most test files only need:
@@ -82,6 +83,24 @@ Concrete case: `LoginPage` mounts `useLogin` (a mutation) but NOT `useMe` (a que
 When asserting on cache state, use the **exported** `ME_KEY` / `ME_PROBE_KEY` constants from `@/hooks/useAuth`, not the literal `["auth", "me"]` — a rename in `useAuth.ts` then fails the assertion loudly instead of silently matching `undefined` against the stale literal.
 
 > **Pinning the no-fetch contract.** When the test's whole point is "no fetch fires," install an MSW handler that THROWS for the URL you don't expect to hit (see the anonymous case in `example.test.tsx`). The default 401 handler would silently satisfy a regression where seeding stopped working — pinning the contract with a throwing override turns a silent false-green into a loud failure.
+
+## Toasts
+
+`vitest.setup.ts` mocks `sonner` once against mutable spies in `sonner.ts`. Tests import the spies from `@/test`:
+
+```ts
+import { toastSuccess, toastError } from "@/test";
+
+it("on save → success toast", async () => {
+  // ... drive the component ...
+  await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Saved"));
+  expect(toastError).not.toHaveBeenCalled();
+});
+```
+
+The setup file's `afterEach` calls `resetSonner()` so a `toastSuccess` from one test never leaks into the next. `toast.info`, `toast.warning`, `toast.loading`, `toast.dismiss`, `toast.message`, and `toast.promise` are all spied too — import the matching `toastInfo` / `toastWarning` / … as needed.
+
+Per-file `vi.mock("sonner", …)` still works as an escape hatch (Vitest's per-file mock registry overrides the setup-file mock within the file's own scope) — reach for it only when a test needs a custom shape (e.g. a spy that throws, a real `toast.promise` implementation).
 
 ## Routing mocks — when to use which
 

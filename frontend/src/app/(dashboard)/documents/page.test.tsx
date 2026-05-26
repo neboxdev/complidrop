@@ -11,7 +11,7 @@
  * to drive end-to-end; covered in the polling test (#34 example) and
  * the hook test instead.
  */
-import { afterEach, describe, it, expect, vi, beforeEach } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { http } from "msw";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import DocumentsPage from "./page";
@@ -33,19 +33,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-const { toastSuccess, toastError } = vi.hoisted(() => ({
-  toastSuccess: vi.fn(),
-  toastError: vi.fn(),
-}));
-vi.mock("sonner", () => ({
-  toast: { success: toastSuccess, error: toastError },
-  Toaster: () => null,
-}));
-
-beforeEach(() => {
-  toastSuccess.mockClear();
-  toastError.mockClear();
-});
+// sonner mock + toastSuccess/toastError spies are provided by the
+// harness (see vitest.setup.ts + src/test/sonner.ts). The harness's
+// afterEach resets all toast spies between tests — no per-file
+// beforeEach mockClear needed (#74).
 
 describe("DocumentsPage — state matrix (#36)", () => {
   it("loading: renders the loading row before the fetch resolves", () => {

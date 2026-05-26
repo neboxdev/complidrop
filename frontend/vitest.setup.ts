@@ -3,6 +3,17 @@ import { afterAll, afterEach, beforeAll, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { server } from "./src/test/server";
 import { navState, resetNavigation } from "./src/test/navigation";
+import {
+  toastSuccess,
+  toastError,
+  toastInfo,
+  toastWarning,
+  toastLoading,
+  toastDismiss,
+  toastMessage,
+  toastPromise,
+  resetSonner,
+} from "./src/test/sonner";
 
 // `NEXT_PUBLIC_API_URL` is pinned in `vitest.config.mts` via `test.env`, which
 // runs strictly before this file's imports resolve. `frontend/src/lib/api.ts`'s
@@ -30,6 +41,30 @@ vi.mock("next/navigation", () => ({
   redirect: (...args: unknown[]) => navState.redirect(...args),
 }));
 
+// Default mock for `sonner`. Same shape as the navigation mock — reads
+// the stable spy references exported by `src/test/sonner.ts` so per-file
+// `vi.hoisted` + `vi.mock` boilerplate isn't needed. The 14 component-
+// test files that used to redeclare this drop their copies and `import
+// { toastSuccess, toastError } from "@/test"` directly. `Toaster` is
+// stubbed to render nothing.
+//
+// Test files that need a custom shape (e.g. throw on success) can still
+// call `vi.mock("sonner", …)` at the top of their own file; Vitest's
+// per-file mock registry wins for that file.
+vi.mock("sonner", () => ({
+  toast: {
+    success: toastSuccess,
+    error: toastError,
+    info: toastInfo,
+    warning: toastWarning,
+    loading: toastLoading,
+    dismiss: toastDismiss,
+    message: toastMessage,
+    promise: toastPromise,
+  },
+  Toaster: () => null,
+}));
+
 // MSW lifecycle:
 //   - `listen({ onUnhandledRequest: 'error' })` makes any unmocked request
 //     fail the test — that's the whole point of "no real network calls".
@@ -45,6 +80,7 @@ afterEach(() => {
   cleanup();
   server.resetHandlers();
   resetNavigation();
+  resetSonner();
 });
 
 afterAll(() => server.close());

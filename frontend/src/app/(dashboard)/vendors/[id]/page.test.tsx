@@ -7,7 +7,7 @@
  *   - Loading copy while the detail fetch is in flight.
  *   - Populated render: name, contact, portal link list.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { http } from "msw";
 import { screen, waitFor } from "@testing-library/react";
 import VendorDetailPage from "./page";
@@ -17,21 +17,14 @@ import {
   url,
   jsonOk,
   authedMe,
+  toastSuccess,
+  toastError,
 } from "@/test";
 
-const { toastSuccess, toastError } = vi.hoisted(() => ({
-  toastSuccess: vi.fn(),
-  toastError: vi.fn(),
-}));
-vi.mock("sonner", () => ({
-  toast: { success: toastSuccess, error: toastError },
-  Toaster: () => null,
-}));
-
-beforeEach(() => {
-  toastSuccess.mockClear();
-  toastError.mockClear();
-});
+// sonner mock + spies are provided by the harness; afterEach in the
+// setup file resets all toast spies between tests (#74). These smoke
+// renders don't drive any mutation path, so no toast should fire —
+// the negative assertions in each test pin that contract.
 
 const VENDOR_DETAIL = {
   id: "v_acme_01",
@@ -74,6 +67,10 @@ describe("VendorDetailPage — smoke (#36)", () => {
     });
 
     expect(screen.getByText(/loading vendor/i)).toBeInTheDocument();
+    // Loading-state smoke renders no mutation paths, so toasts must
+    // not fire (#74 review).
+    expect(toastSuccess).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
   });
 
   it("populated: renders the vendor name + contact + portal link", async () => {
@@ -97,5 +94,10 @@ describe("VendorDetailPage — smoke (#36)", () => {
     expect(
       screen.getByDisplayValue("http://example.test/portal/abc"),
     ).toBeInTheDocument();
+    // Populated smoke renders no mutation path, so toasts must not
+    // fire (#74 review). A regression that auto-fired a toast on
+    // mount would trip this.
+    expect(toastSuccess).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
   });
 });
