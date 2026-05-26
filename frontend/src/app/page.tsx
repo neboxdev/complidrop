@@ -309,7 +309,10 @@ export default function Home() {
         </section>
 
         {/* ── Pricing ───────────────────────────────────────────── */}
-        <section className="py-24 sm:py-32" style={{ backgroundColor: C.white }}>
+        {/* id="pricing" backs the /#pricing deep-link the register page's
+            plan-banner "Change" affordance uses to send a user who picked
+            the wrong CTA back to the pricing cards (#31). */}
+        <section id="pricing" className="py-24 sm:py-32" style={{ backgroundColor: C.white }}>
           <div className="mx-auto max-w-6xl px-4 sm:px-6">
             <SectionLabel>Pricing</SectionLabel>
             <h2

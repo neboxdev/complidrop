@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import Home from "./page";
+import { KNOWN_PLANS } from "./(auth)/register/register-form";
 
 // next/link needs a router context in a real app; in unit tests render it as a plain anchor
 // so we can assert exactly which routes the landing-page CTAs point at.
@@ -30,10 +31,13 @@ describe("Landing page CTAs", () => {
     const hrefs = linkHrefs();
     expect(hrefs).toContain("/login");
     expect(hrefs).toContain("/register");
-    // every pricing CTA carries its plan
-    expect(hrefs).toContain("/register?plan=free");
-    expect(hrefs).toContain("/register?plan=pro");
-    expect(hrefs).toContain("/register?plan=annual");
+    // Every plan the register page knows how to render copy for must have a
+    // pricing CTA on the landing page — otherwise the round-trip (#31) is
+    // broken on one side: either a CTA emits a plan register-form falls back
+    // to free for, or a plan register-form supports has no CTA pointing at it.
+    for (const plan of KNOWN_PLANS) {
+      expect(hrefs).toContain(`/register?plan=${plan}`);
+    }
     // the waitlist gate is gone, in links and in copy
     expect(hrefs).not.toContain("#waitlist");
     expect(screen.queryByText(/waitlist/i)).toBeNull();

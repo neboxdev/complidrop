@@ -33,12 +33,21 @@ type RegisterForm = z.infer<typeof schema>;
 // Billing/Stripe enforcement of the chosen plan is a separate ticket (#31 Non-goals);
 // today the value only drives copy on the signup screen. The backend `RegisterRequest`
 // DTO does not accept `plan`, so we deliberately do NOT send it to /api/auth/register.
-const KNOWN_PLANS = ["free", "pro", "annual"] as const;
+// Exported so the landing-page test (src/app/page.test.tsx) can iterate the
+// same set to assert every plan has a corresponding /register?plan=X CTA —
+// pinning the round-trip contract between the pricing cards and this page.
+export const KNOWN_PLANS = ["free", "pro", "annual"] as const;
 type Plan = (typeof KNOWN_PLANS)[number];
 
+// Tolerant parse: marketing emails and copy/pasted links occasionally arrive
+// with mixed case (?plan=Annual) or trailing spaces. Lowercasing + trimming
+// before the allowlist check keeps the user's choice instead of silently
+// reverting to free. The allowlist itself remains the security boundary —
+// anything outside { free, pro, annual } still falls back to "free".
 function parsePlan(raw: string | null | undefined): Plan {
-  return (KNOWN_PLANS as readonly string[]).includes(raw ?? "")
-    ? (raw as Plan)
+  const value = (raw ?? "").trim().toLowerCase();
+  return (KNOWN_PLANS as readonly string[]).includes(value)
+    ? (value as Plan)
     : "free";
 }
 
@@ -98,8 +107,12 @@ export default function RegisterForm() {
         </div>
 
         {copy.banner && (
+          // Static page content rendered once from the URL; deliberately NOT
+          // role="status" / aria-live (architecture-review #31) so screen
+          // readers don't re-announce on every render. data-testid lets the
+          // test pin the contract without coupling to copy.
           <div
-            role="status"
+            data-testid="plan-banner"
             className="flex items-center justify-between gap-3 rounded-lg border border-sky-100 bg-sky-50 px-4 py-3 text-sm text-sky-900"
           >
             <span>{copy.banner}</span>
@@ -165,16 +178,37 @@ export default function RegisterForm() {
 // Server-rendered placeholder for the Suspense boundary in page.tsx. The form
 // itself depends on useSearchParams(), which forces client-side rendering for
 // everything inside the boundary; this fallback is what ships in the initial
-// HTML before hydration. Match the real card's shape so layout doesn't jump.
+// HTML before hydration. Shape mirrors the real form (heading + 4 input rows
+// + button + footer) so layout doesn't jump on hydration. aria-hidden because
+// the live form will replace it within hydration — no need to announce twice.
 export function RegisterFormSkeleton() {
+  const Row = () => (
+    <div>
+      <div className="h-4 w-24 rounded bg-slate-100" />
+      <div className="mt-2 h-10 w-full rounded bg-slate-50" />
+    </div>
+  );
   return (
-    <Card className="shadow-lg border-sky-100">
+    <Card className="shadow-lg border-sky-100" aria-hidden="true">
       <CardContent className="p-8 space-y-6">
         <div>
           <div className="h-7 w-56 rounded bg-slate-100" />
           <div className="mt-2 h-4 w-72 rounded bg-slate-100" />
         </div>
-        <div className="h-40 w-full rounded bg-slate-50" />
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <Row />
+            <Row />
+          </div>
+          <Row />
+          <Row />
+          <div className="grid grid-cols-2 gap-3">
+            <Row />
+            <Row />
+          </div>
+          <div className="h-10 w-full rounded bg-slate-100" />
+        </div>
+        <div className="mx-auto h-4 w-48 rounded bg-slate-50" />
       </CardContent>
     </Card>
   );
