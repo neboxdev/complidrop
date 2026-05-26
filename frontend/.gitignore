@@ -43,7 +43,10 @@ next-env.d.ts
 # Claude Code local skills cache
 .claude/
 
-# Playwright artifacts (#38)
+# Playwright artifacts (#38). Reporter writes HTML/JSON under
+# test-results/ per playwright.config.ts; /playwright-report/ is left
+# in case a future config flip ever moves outputFolder back to the
+# Playwright default.
 /test-results/
 /playwright-report/
 /blob-report/

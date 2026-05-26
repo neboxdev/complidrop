@@ -58,8 +58,8 @@ The backend test tree at [`api/CompliDrop.Api.Tests/ExtractionFixtures/`](../../
 - **Retries:** 1 in CI, 0 locally. Locally a flake is a bug — fix it. CI absorbs the most common transient causes (cold-jit, port-bind, dev-server warmup) once.
 - **Per-test timeout:** 30s local, 60s CI.
 - **Per-assertion timeout:** 5s (`expect.timeout`).
-- **Workers:** 1 in CI to avoid port collision with the single `webServer`; fully-parallel locally for fast feedback.
-- **Quarantine:** flaky tests are tagged `@quarantine` (Playwright `test.fixme` with a TODO referencing a ticket). The ticket is `bug`-labelled so it joins the rolling bug-fix epic [#48](https://github.com/neboxdev/complidrop/issues/48) until the test is either fixed or deleted.
+- **Workers:** 1 in CI to keep CPU/memory bounded on the cheap runner and serialize against the single dev-server's JIT pressure (the bottleneck is the dev server, not the runner). Fully-parallel locally for fast feedback. Earlier drafts of this ADR said "to avoid port collision" — that was wrong (multiple workers share one webServer), corrected on the same PR.
+- **Quarantine:** flaky tests are tagged `@quarantine` (Playwright `test.fixme` with a TODO referencing a ticket). The ticket is `bug`-labelled so it joins the rolling bug-fix epic [#48](https://github.com/neboxdev/complidrop/issues/48) until the test is either fixed or deleted. A meta-tracker issue ([#87](https://github.com/neboxdev/complidrop/issues/87)) keeps the current parking lot visible so a flake parked six months ago doesn't decay into "we forgot why this was skipped."
 - **Red E2E blocks merge.** No skip-without-ticket. CI's frontend-ci.yml gates `playwright test` AND the secret-scan as required checks.
 
 ## Consequences
@@ -82,6 +82,8 @@ The backend test tree at [`api/CompliDrop.Api.Tests/ExtractionFixtures/`](../../
 
 - Single browser (Chromium) at launch. Firefox/WebKit are a follow-on decision pending evidence; documenting that here so a future contributor knows the gap is intentional, not accidental.
 - Single port (3100) for the E2E dev server. If a future test needs a second port (e.g. parallel Stripe-mock server), the port allocation lives in the config, not in individual tests.
+- E2E runs against `next dev`, NOT `next build && next start`. Regressions that only manifest in the production bundle (SSR-only paths, optimized chunks, cookie-domain quirks) are NOT caught here — smoke for the production bundle is a separate manual pre-launch step captured in launch docs. Switch the `webServer.command` to `next build && next start` once the smoke set is stable enough that the ~30s extra build time per CI run is a worthwhile trade.
+- The `NEXT_PUBLIC_API_URL=http://127.0.0.1:1` safety net (unmocked /api calls fail with ECONNREFUSED) is a CI-only guarantee. Locally, `webServer.reuseExistingServer: true` means a leftover `next dev --port 3100` from a prior session bypasses the pin and inherits `.env.local`. The README documents this; devs running E2E against a stale dev server may see unexpected real-network traffic.
 
 ## Alternatives considered
 

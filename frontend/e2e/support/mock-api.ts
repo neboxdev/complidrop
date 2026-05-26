@@ -15,15 +15,29 @@
  * The `playwright.config.ts` `webServer.env` also pins
  * `NEXT_PUBLIC_API_URL=http://127.0.0.1:1` so any code path that
  * forgot to install a mock fails LOUDLY (ECONNREFUSED) rather than
- * silently leaking traffic to a real origin.
+ * silently leaking traffic to a real origin. Note: this CI safety
+ * net relies on Playwright actually STARTING the dev server. Locally,
+ * `webServer.reuseExistingServer: true` means a pre-existing
+ * `next dev --port 3100` from a previous session inherits .env.local
+ * and bypasses the pin — see the README's "Local dev caveat" section.
  */
 import type { Page, Route, Request } from "@playwright/test";
 
 export type ApiRouteHandler = (route: Route, request: Request) => Promise<void> | void;
 
 /**
- * The route table is matched in declared order; first prefix-match wins.
- * Use `:token` / `:id` path-param syntax exactly as in the actual route.
+ * The route table is matched in declared order; first MATCH wins.
+ *
+ * Matching is EXACT segment-count with `:param` wildcards — not
+ * prefix matching. `path: "/api/portal"` will NOT match
+ * `/api/portal/abc/info`; declare the full path or use `:token`:
+ *
+ *     { path: "/api/portal/:token" }            // matches one segment
+ *     { path: "/api/portal/:token/upload" }     // matches two segments
+ *
+ * Order matters: a wildcard route declared BEFORE a literal sibling
+ * with the same segment count will shadow the literal. Declare
+ * more-specific (literal) paths first.
  */
 export type MockRoutes = Array<{
   method?: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
@@ -81,9 +95,16 @@ export function jsonError(code: string, message: string, status = 400) {
   };
 }
 
-// Minimal `:token`-style path matcher. Avoids pulling in a routing
-// library for two test segments.
+// EXACT segment-count path matcher with `:param` wildcards. Avoids
+// pulling in a routing library for two test segments. Rejects empty
+// segments in the template so a typo'd `/api//portal` is caught at
+// registration via the explicit `EMPTY_SEGMENT` throw.
 function pathMatches(template: string, actual: string): boolean {
+  if (template.includes("//")) {
+    throw new Error(
+      `mockApi: template "${template}" contains an empty segment ('//') — likely a typo`,
+    );
+  }
   const tParts = template.split("/").filter(Boolean);
   const aParts = actual.split("/").filter(Boolean);
   if (tParts.length !== aParts.length) return false;

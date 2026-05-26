@@ -52,7 +52,7 @@ test("logged-out home page", async ({ page }) => {
 });
 ```
 
-The list is matched in declared order; first prefix-match wins. Use `:token` / `:id` for path-param wildcards (e.g. `path: "/api/portal/:token"`).
+Routes match in declared order; first MATCH wins. Matching is **exact segment-count** with `:param` wildcards — NOT prefix matching. `path: "/api/portal"` does NOT match `/api/portal/abc/info`; declare the full path or use `:token` (e.g. `path: "/api/portal/:token"`). Declare more-specific (literal) paths before wildcards so a `:id` route doesn't accidentally shadow a literal sibling.
 
 ## Artifact hygiene
 
@@ -63,17 +63,27 @@ The list is matched in declared order; first prefix-match wins. Use `:token` / `
 
 ## Secret-scan gate
 
-The `scan-secrets.mjs` script runs in CI after every Playwright job and fails the build if any artifact contains:
+The `scan-secrets.mjs` script runs in CI after every Playwright job (and locally via `posttest:e2e`) and fails the build if any artifact contains:
 
 - `cd_session=` / `cd_refresh=` (CLAUDE.md's httpOnly JWT cookies — must never appear in a trace)
-- `Authorization: Bearer` / `Authorization: Basic` headers
-- `portal-token:` headers with a value
+- Any value-bearing `Authorization:` header (Bearer / Basic / bare token — the project doesn't use Authorization at all, so any occurrence is suspicious)
+- `/api/portal/{token}` URL paths where the token is ≥16 chars (the production form of vendor-portal tokens)
 - SSN-shaped patterns (`\d{3}-\d{2}-\d{4}`)
 - EIN-shaped patterns (`\d{2}-\d{7}`)
 
-If a finding is a documented false-positive (e.g. a test that intentionally renders a redacted SSN), add the file path to the `ALLOWLISTED_FILES` array in the script with a one-line comment.
+Playwright's `trace.zip` is a real compressed archive — the scanner uses `adm-zip` to unzip and recursively scan each entry, so the diagnostic file most likely to contain a leak IS covered.
 
-The script is also invoked by `pretest:e2e` so devs catch leaks locally before push.
+If a finding is a documented false-positive (e.g. a test that intentionally renders a redacted SSN), add the file path to `ALLOWLISTED_FILES` in the script with a one-line comment. Allowlist entries are POSIX-shaped (forward slashes) and normalized at comparison time so Windows runs match Linux CI.
+
+The CI workflow gates the artifact upload on `steps.playwright.outcome == 'failure' && steps.scan.outcome == 'success'` — if the scan finds a leak, the upload is SKIPPED, so a leaked cookie never reaches GitHub's artifact store.
+
+## AC #6 enforcement — no backend imports
+
+`lint-imports.mjs` walks `frontend/e2e/` and fails if any test file imports from `api/CompliDrop.Api*` or references `ExtractionFixtures` in a code-level import statement. Convention via README is not enough; the script makes it mechanical. Runs in CI under `npm run test:e2e:lint-imports`.
+
+## Local dev caveat — the ECONNREFUSED safety net is CI-only
+
+`playwright.config.ts` pins `NEXT_PUBLIC_API_URL=http://127.0.0.1:1` on the dev server it spawns, so any unmocked /api call fails LOUDLY in CI. Locally, `webServer.reuseExistingServer: true` means a leftover `next dev --port 3100` from a previous session is reused — and that server inherited `.env.local`'s real `NEXT_PUBLIC_API_URL`. If you've been running a dev server on port 3100, restart it (or kill it) before running E2E so Playwright spawns a fresh one with the pinned env.
 
 ## Flake policy
 
@@ -95,3 +105,10 @@ The backend [`api/CompliDrop.Api.Tests/ExtractionFixtures/`](../../../api/Compli
 3. Declare every `/api/*` your flow hits — the harness fails LOUDLY on unmocked routes.
 4. Run `npm run test:e2e -- smoke/your-flow.spec.ts` to iterate.
 5. Add the flow to the smoke set documented in [ADR 0010](../../docs/adr/0010-frontend-e2e-with-playwright.md).
+
+## When NOT to use this harness
+
+- **Component-level assertions** (one component's render, prop, or hook): use the Vitest harness at [`frontend/src/test/`](../test/README.md). Playwright is slower per test and overkill for unit-scope coverage.
+- **Hook contract tests** (refresh-on-401, cache key behavior, retry sequencing): use `renderHook` + `vi.stubGlobal("fetch", ...)` inside Vitest — see `src/lib/api.test.ts` for the pattern.
+- **Anything that doesn't cross a page boundary or a multi-step user flow.** Playwright is for "go to /login, submit, land on /dashboard, see the welcome" — not "the welcome heading renders when isAuthed is true." The latter is a Vitest job.
+- **Production-mode SSR regressions.** The harness runs against `next dev`, not `next build && next start`. Regressions that only present in the production bundle are not caught here; smoke for the production bundle is a separate manual pre-launch step captured in launch docs.
