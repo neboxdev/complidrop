@@ -62,9 +62,22 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
       }),
     ).toBeVisible({ timeout: 10_000 });
 
-    // Drop a PDF via the hidden file input that react-dropzone
-    // renders. setInputFiles drives the same code path users hit when
-    // clicking the dropzone and picking a file.
+    // Wait on the upload POST response BEFORE asserting the Received
+    // card. The hidden file input that react-dropzone wraps fires
+    // onDrop on change; the page then POSTs to /upload and renders
+    // the Received row on success. Arming the listener before the
+    // setInputFiles call avoids the race where the response fires
+    // before the listener is set up.
+    const uploadResponse = page.waitForResponse(
+      (res) =>
+        res.url().includes(`/api/portal/${TOKEN}/upload`) &&
+        res.status() === 200,
+      { timeout: 15_000 },
+    );
+
+    // Drop a PDF via the hidden file input. setInputFiles drives the
+    // same code path users hit when clicking the dropzone and
+    // picking a file.
     const fileBytes = Buffer.from("%PDF-1.7\nfake-but-pdf-shaped\n%%EOF");
     await page
       .locator('input[type="file"]')
@@ -74,9 +87,11 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
         buffer: fileBytes,
       });
 
+    await uploadResponse;
+
     // Received card appears with the file name; "Processing…" tag is
     // the page's per-file status during extraction.
-    await expect(page.getByText(/^received$/i)).toBeVisible();
+    await expect(page.getByText(/^received$/i)).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText("vendor-coi.pdf")).toBeVisible();
     await expect(page.getByText(/processing…/i)).toBeVisible();
   });
