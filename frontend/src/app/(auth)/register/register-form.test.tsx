@@ -76,7 +76,7 @@ describe("RegisterForm — ?plan= consumption (#31)", () => {
     render(<RegisterForm />);
 
     expect(screen.getByRole("heading", { name: /annual account/i })).toBeInTheDocument();
-    const banner = screen.getByTestId("plan-banner");
+    const banner = screen.getByText(/you selected the/i);
     expect(banner.textContent).toMatch(/annual plan/i);
     expect(banner.textContent).toMatch(/\$39/);
     expect(banner.textContent).toMatch(/\$468/);
@@ -89,7 +89,7 @@ describe("RegisterForm — ?plan= consumption (#31)", () => {
     render(<RegisterForm />);
 
     expect(screen.getByRole("heading", { name: /pro account/i })).toBeInTheDocument();
-    const banner = screen.getByTestId("plan-banner");
+    const banner = screen.getByText(/you selected the/i);
     expect(banner.textContent).toMatch(/pro plan/i);
     expect(banner.textContent).toMatch(/\$49/);
   });
@@ -100,7 +100,7 @@ describe("RegisterForm — ?plan= consumption (#31)", () => {
 
     expect(screen.getByRole("heading", { name: /start dropping docs/i })).toBeInTheDocument();
     expect(screen.getByText(/free forever for 5 documents/i)).toBeInTheDocument();
-    expect(screen.queryByTestId("plan-banner")).toBeNull();
+    expect(screen.queryByText(/you selected the/i)).toBeNull();
   });
 
   it("defaults to the free-tier copy when no plan param is present", () => {
@@ -109,7 +109,7 @@ describe("RegisterForm — ?plan= consumption (#31)", () => {
 
     expect(screen.getByRole("heading", { name: /start dropping docs/i })).toBeInTheDocument();
     expect(screen.getByText(/free forever for 5 documents/i)).toBeInTheDocument();
-    expect(screen.queryByTestId("plan-banner")).toBeNull();
+    expect(screen.queryByText(/you selected the/i)).toBeNull();
   });
 
   // Plan parsing is tolerant of mixed case + surrounding whitespace (real
@@ -132,10 +132,10 @@ describe("RegisterForm — ?plan= consumption (#31)", () => {
     const normalized = value.trim().toLowerCase();
     const isKnown = ["free", "pro", "annual"].includes(normalized);
     if (isKnown && normalized !== "free") {
-      expect(screen.getByTestId("plan-banner")).toBeInTheDocument();
+      expect(screen.getByText(/you selected the/i)).toBeInTheDocument();
     } else {
       expect(screen.getByRole("heading", { name: /start dropping docs/i })).toBeInTheDocument();
-      expect(screen.queryByTestId("plan-banner")).toBeNull();
+      expect(screen.queryByText(/you selected the/i)).toBeNull();
     }
     // Garbage value must not reach the DOM as markup, regardless of parse outcome.
     expect(document.querySelector("script")).toBeNull();

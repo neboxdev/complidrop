@@ -99,7 +99,7 @@ export default function RegisterForm() {
   };
 
   return (
-    <Card className="shadow-lg border-sky-100" data-plan={plan}>
+    <Card className="shadow-lg border-sky-100">
       <CardContent className="p-8 space-y-6">
         <div>
           <h1 className="text-2xl font-semibold text-sky-900">{copy.heading}</h1>
@@ -109,12 +109,11 @@ export default function RegisterForm() {
         {copy.banner && (
           // Static page content rendered once from the URL; deliberately NOT
           // role="status" / aria-live (architecture-review #31) so screen
-          // readers don't re-announce on every render. data-testid lets the
-          // test pin the contract without coupling to copy.
-          <div
-            data-testid="plan-banner"
-            className="flex items-center justify-between gap-3 rounded-lg border border-sky-100 bg-sky-50 px-4 py-3 text-sm text-sky-900"
-          >
+          // readers don't re-announce on every render. The banner is selected
+          // in tests by its leading copy ("You selected the …") which appears
+          // nowhere else in the form — keeps the suite on accessible-text
+          // selectors instead of introducing the codebase's first data-testid.
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-sky-100 bg-sky-50 px-4 py-3 text-sm text-sky-900">
             <span>{copy.banner}</span>
             <Link
               href="/#pricing"
