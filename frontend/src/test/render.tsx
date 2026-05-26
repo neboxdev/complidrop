@@ -74,15 +74,21 @@ export type RenderWithProvidersOptions = Omit<RenderOptions, "wrapper"> & {
 function createTestQueryClient(): QueryClient {
   return new QueryClient({
     defaultOptions: {
-      // No retries: a 4xx in a test should fail fast, not hammer the mock.
-      // staleTime: Infinity so a seeded cache is never considered stale —
-      // a hook with its own staleTime override still wins (it's per-query,
-      // and TanStack Query merges hook options OVER client defaults), but
-      // the harness no longer SILENTLY depends on every consuming hook
-      // setting one.
+      // - retry: false        — a 4xx in a test should fail fast.
+      // - staleTime: Infinity — seeded cache entries never go stale.
+      // - gcTime: Infinity    — seeded entries must SURVIVE for cache
+      //   assertions even when no component is observing them. The login
+      //   page, for example, only uses useLogin (a mutation) — nothing
+      //   subscribes to ME_KEY directly, so with the default `gcTime: 0`
+      //   the mutation's onSuccess write would be reaped before the test
+      //   could read it. Per-render isolation is provided by spawning a
+      //   fresh QueryClient (line 91), not by per-query GC, so Infinity
+      //   here doesn't leak between tests.
+      // - refetchOnWindowFocus: false — jsdom triggers focus events
+      //   from the test runner; refetches would race the MSW handlers.
       queries: {
         retry: false,
-        gcTime: 0,
+        gcTime: Infinity,
         staleTime: Infinity,
         refetchOnWindowFocus: false,
       },
