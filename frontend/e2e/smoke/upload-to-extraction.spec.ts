@@ -1,71 +1,78 @@
 /**
  * Flow 3 smoke E2E (#39 AC #3): authed user uploads a document, sees
- * extraction status advance, lands on the detail view.
+ * extraction status advance through the full Pending → Processing →
+ * Completed state machine, lands on the detail view.
  *
  * Spans three pages: /documents (list), the upload action, and
  * /documents/[id] (detail). The detail page polls every 3s while
  * extraction is Pending/Processing — this test sequences the GET
- * /api/documents/:id responses so the FIRST call returns Pending and
- * the SECOND call (after the poll fires) returns Completed. Total
- * wall-clock is ~4s for the polling segment, which keeps the smoke
- * suite under the ADR's "< 90s on CI" target.
+ * /api/documents/:id responses so:
+ *   call #1 → Pending
+ *   call #2 (after 3s poll) → Processing
+ *   call #3 (after another 3s poll) → Completed
  *
- * The TanStack Query cache from `useUploadDocument.onSuccess`
- * invalidates `['documents']`, so the list re-fetches when the user
- * returns to /documents. The detail page's standalone `useQuery` is
- * scoped to `['documents', id]` and uses its own refetchInterval.
+ * Total wall-clock is ~7-8s for the polling segment. Stays under
+ * the ADR's "< 90s on CI" target.
+ *
+ * Upload race avoidance: the list mock returns an empty list BEFORE
+ * the upload POST and the populated list ONLY after the upload
+ * succeeds — so the link-to-detail click can't race ahead of the
+ * mutation's cache invalidation. Combined with an explicit
+ * waitForResponse on the upload POST, the test pins that the upload
+ * actually fired.
  */
 import { test, expect } from "@playwright/test";
 import { mockApi, jsonOk } from "../support/mock-api";
-import { authedMe } from "../support/fixtures";
+import {
+  authedMeRoute,
+  makeDocumentDetail,
+  makeFakePdf,
+} from "../support/fixtures";
 
 const DOC_ID = "d_smoke_pending_01";
 
 test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
-  test("authed user uploads a doc, polls status from Pending to Completed, sees the field", async ({
+  test("authed user uploads a doc, polls status Pending → Processing → Completed, sees the field", async ({
     page,
   }) => {
     let detailCalls = 0;
+    let didUpload = false;
 
     await mockApi(page, [
-      // Cookie-based session: useMe() returns the authed Me on every
-      // page-load probe.
-      {
-        method: "GET",
-        path: "/api/auth/me",
-        handler: jsonOk(authedMe),
-      },
-      // Documents list: empty initially. After the upload mutation
-      // invalidates the cache, the SAME route returns a list with
-      // the new pending row. We use a call counter to sequence.
+      authedMeRoute,
+      // Documents list: empty BEFORE upload, populated AFTER. The
+      // `didUpload` flag flips inside the upload POST handler below;
+      // closures share scope across route entries within this
+      // mockApi call. This gates the link click on the upload's
+      // cache-invalidation actually happening.
       {
         method: "GET",
         path: "/api/documents",
         handler: async (route) => {
-          // Always include the smoke doc — both before and after
-          // upload, so the link-to-detail is rendered without race.
           await route.fulfill({
             status: 200,
             contentType: "application/json",
             body: JSON.stringify({
               data: {
-                items: [
-                  {
-                    id: DOC_ID,
-                    originalFileName: "smoke.pdf",
-                    documentType: "COI",
-                    vendorName: null,
-                    vendorId: null,
-                    extractionStatus: "Pending",
-                    extractionConfidence: null,
-                    complianceStatus: "Pending",
-                    effectiveDate: null,
-                    expirationDate: null,
-                    daysUntilExpiry: null,
-                    createdAt: "2026-05-26T12:00:00Z",
-                  },
-                ],
-                total: 1,
+                items: didUpload
+                  ? [
+                      {
+                        id: DOC_ID,
+                        originalFileName: "smoke.pdf",
+                        documentType: "COI",
+                        vendorName: null,
+                        vendorId: null,
+                        extractionStatus: "Pending",
+                        extractionConfidence: null,
+                        complianceStatus: "Pending",
+                        effectiveDate: null,
+                        expirationDate: null,
+                        daysUntilExpiry: null,
+                        createdAt: "2026-05-26T12:00:00Z",
+                      },
+                    ]
+                  : [],
+                total: didUpload ? 1 : 0,
                 page: 1,
                 pageSize: 50,
               },
@@ -74,51 +81,43 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
           });
         },
       },
-      // Upload endpoint: returns the upload id + pending status.
+      // Upload endpoint: flips `didUpload` so the next list-fetch
+      // (triggered by useUploadDocument.onSuccess's invalidation)
+      // returns the new row.
       {
         method: "POST",
         path: "/api/documents/upload",
-        handler: jsonOk({
-          id: DOC_ID,
-          originalFileName: "smoke.pdf",
-          extractionStatus: "Pending",
-        }),
+        handler: async (route) => {
+          didUpload = true;
+          return jsonOk({
+            id: DOC_ID,
+            originalFileName: "smoke.pdf",
+            extractionStatus: "Pending",
+          })(route);
+        },
       },
-      // Detail page: first call → Pending, subsequent calls (after
-      // the 3s poll) → Completed. The refetchInterval predicate
-      // returns false on Completed so polling stops naturally.
+      // Detail page sequence:
+      //   call #1 → Pending     (initial mount)
+      //   call #2 → Processing  (worker grabbed the doc)
+      //   call #3+ → Completed  (extraction finished)
+      // Asserts the full state machine, not just one transition.
       {
         method: "GET",
         path: "/api/documents/:id",
         handler: async (route) => {
           detailCalls++;
-          const pending = {
+          const pending = makeDocumentDetail({
             id: DOC_ID,
-            originalFileName: "smoke.pdf",
-            documentType: "COI",
-            documentSubType: null,
-            vendorName: null,
             extractionStatus: "Pending",
-            extractionConfidence: null,
-            complianceStatus: "NonCompliant", // not "Pending" so the
-            // detail page's badge negation assertion isn't ambiguous
-            // if a future tightening matches Pending text twice.
-            effectiveDate: null,
-            expirationDate: null,
-            daysUntilExpiry: null,
-            isManuallyVerified: false,
-            uploadedBy: null,
-            blobStorageUrl: null,
-            generalLiabilityLimit: null,
-            fields: [],
-            extractionFields: null,
-            extractionPromptVersion: null,
-            processingError: null,
-            createdAt: "2026-05-26T12:00:00Z",
-            updatedAt: "2026-05-26T12:00:00Z",
-          };
-          const completed = {
-            ...pending,
+            complianceStatus: "NonCompliant",
+          });
+          const processing = makeDocumentDetail({
+            id: DOC_ID,
+            extractionStatus: "Processing",
+            complianceStatus: "NonCompliant",
+          });
+          const completed = makeDocumentDetail({
+            id: DOC_ID,
             extractionStatus: "Completed",
             extractionConfidence: 0.94,
             complianceStatus: "Compliant",
@@ -134,14 +133,13 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
                 originalValue: null,
               },
             ],
-          };
+          });
+          const payload =
+            detailCalls === 1 ? pending : detailCalls === 2 ? processing : completed;
           await route.fulfill({
             status: 200,
             contentType: "application/json",
-            body: JSON.stringify({
-              data: detailCalls === 1 ? pending : completed,
-              error: null,
-            }),
+            body: JSON.stringify({ data: payload, error: null }),
           });
         },
       },
@@ -152,33 +150,46 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
       page.getByRole("heading", { name: /^documents$/i }),
     ).toBeVisible();
 
-    // Trigger an upload via the dropzone input.
-    const fileBytes = Buffer.from("%PDF-1.7\nsmoke-pdf\n%%EOF");
+    // Arm the upload-response wait BEFORE setInputFiles so the test
+    // pins the upload actually fired (sibling to flow 2's pattern).
+    const uploadResponse = page.waitForResponse(
+      (res) =>
+        res.url().includes("/api/documents/upload") && res.status() === 200,
+      { timeout: 15_000 },
+    );
+
     await page
       .locator('input[type="file"]')
-      .setInputFiles({
-        name: "smoke.pdf",
-        mimeType: "application/pdf",
-        buffer: fileBytes,
-      });
+      .setInputFiles(makeFakePdf("smoke.pdf"));
+    await uploadResponse;
 
-    // After upload + invalidation, the list still shows the smoke row
-    // (the mock returns it in every call). Click into the detail page.
+    // The list mock's `didUpload` gate is now true. The link surfaces
+    // via the post-upload refetch. Click into the detail page.
     await page.getByRole("link", { name: /smoke\.pdf/ }).click();
     await page.waitForURL((u) => u.pathname === `/documents/${DOC_ID}`, {
       timeout: 10_000,
     });
 
-    // First detail render: Pending.
+    // First detail render: Pending. Use .first() because the table-
+    // header text "Extraction" + the badge "Pending" both appear,
+    // and the compliance-status was overridden to NonCompliant so
+    // there's no Pending-Pending ambiguity.
     await expect(page.getByText("Pending").first()).toBeVisible();
     expect(detailCalls).toBeGreaterThanOrEqual(1);
 
-    // Wait for the 3s refetchInterval to fire and the status to flip
-    // to Completed. Allow up to 10s so flaky-CI doesn't trip.
-    await expect(page.getByText("Completed").first()).toBeVisible({
+    // After 3s, refetchInterval fires: Pending → Processing.
+    await expect(page.getByText("Processing").first()).toBeVisible({
       timeout: 10_000,
     });
     expect(detailCalls).toBeGreaterThanOrEqual(2);
+
+    // After another 3s, refetchInterval fires again: Processing →
+    // Completed. The predicate returns false on Completed so polling
+    // stops naturally.
+    await expect(page.getByText("Completed").first()).toBeVisible({
+      timeout: 10_000,
+    });
+    expect(detailCalls).toBeGreaterThanOrEqual(3);
 
     // Extracted field surfaces in the detail UI. The field NAME
     // appears as a label; the field VALUE is on the input's `value`

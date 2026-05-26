@@ -10,16 +10,14 @@
  *
  * Per CLAUDE.md: portal endpoints are PUBLIC, treat token as
  * untrusted. The scan-secrets gate enforces no token leakage into
- * uploaded artifacts; we use a synthetic token here.
+ * uploaded artifacts; the test token is intentionally <16 chars to
+ * stay under the scanner's URL-path threshold (production tokens are
+ * much longer; the synthetic length only affects test data).
  */
 import { test, expect } from "@playwright/test";
 import { mockApi, jsonOk } from "../support/mock-api";
-import { portalInfo } from "../support/fixtures";
+import { makeFakePdf, portalInfo } from "../support/fixtures";
 
-// Keep tokens UNDER 16 chars so scan-secrets's "vendor portal token
-// in URL path" pattern doesn't self-trip on a Playwright trace that
-// captured this synthetic URL. Production tokens are much longer; a
-// 12-char synthetic is enough to exercise the routing.
 const TOKEN = "smoke-tok-12";
 
 test.describe("Flow 2 — vendor portal upload (#39)", () => {
@@ -43,10 +41,8 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
       },
     ]);
 
-    // Wait for the GET /api/portal/{token} to fire BEFORE asserting
-    // on the heading — explicit wait surfaces a mock-routing problem
-    // (e.g. the interceptor not matching) as a clear timeout on this
-    // line instead of as a misleading "heading not found" later.
+    // Arm the portal-info wait BEFORE goto — explicit timing surfaces
+    // a mock-routing problem as a clear timeout on this line.
     const portalInfoResponse = page.waitForResponse(
       (res) => res.url().includes(`/api/portal/${TOKEN}`) && res.status() === 200,
       { timeout: 15_000 },
@@ -62,12 +58,8 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
       }),
     ).toBeVisible({ timeout: 10_000 });
 
-    // Wait on the upload POST response BEFORE asserting the Received
-    // card. The hidden file input that react-dropzone wraps fires
-    // onDrop on change; the page then POSTs to /upload and renders
-    // the Received row on success. Arming the listener before the
-    // setInputFiles call avoids the race where the response fires
-    // before the listener is set up.
+    // Arm the upload POST wait BEFORE setInputFiles so the response
+    // is observable before assertions.
     const uploadResponse = page.waitForResponse(
       (res) =>
         res.url().includes(`/api/portal/${TOKEN}/upload`) &&
@@ -75,30 +67,18 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
       { timeout: 15_000 },
     );
 
-    // Drop a PDF via the hidden file input. setInputFiles drives the
-    // same code path users hit when clicking the dropzone and
-    // picking a file.
-    const fileBytes = Buffer.from("%PDF-1.7\nfake-but-pdf-shaped\n%%EOF");
-    await page
-      .locator('input[type="file"]')
-      .setInputFiles({
-        name: "vendor-coi.pdf",
-        mimeType: "application/pdf",
-        buffer: fileBytes,
-      });
-
+    await page.locator('input[type="file"]').setInputFiles(makeFakePdf("vendor-coi.pdf"));
     await uploadResponse;
 
-    // Received card appears with the file name; "Processing…" tag is
-    // the page's per-file status during extraction.
-    //
-    // Playwright's `getByText` uses substring matching by default and
-    // doesn't normalize whitespace the way RTL does — the rendered
-    // `<p>` text is " Received" (leading space from the CheckCircle2
-    // icon sibling), so an `/^received$/i` strict regex misses while
-    // a substring match cleanly hits.
-    await expect(page.getByText("Received").first()).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText("vendor-coi.pdf")).toBeVisible();
-    await expect(page.getByText("Processing").first()).toBeVisible();
+    // Received card appears with the file name. Scope the
+    // "Processing" assertion to the row containing the uploaded file
+    // so a future copy change in the dropzone idle/quota states
+    // can't accidentally satisfy a substring-only match.
+    await expect(page.getByText("Received").first()).toBeVisible({
+      timeout: 10_000,
+    });
+    const row = page.locator("li").filter({ hasText: "vendor-coi.pdf" });
+    await expect(row).toBeVisible();
+    await expect(row.getByText(/processing/i)).toBeVisible();
   });
 });

@@ -33,3 +33,172 @@ export const portalInfo = {
   uploadCount: 0,
   maxUploads: 5,
 } as const;
+
+/**
+ * Build a tiny but PDF-magic-byte-valid Buffer for `setInputFiles`.
+ * The leading `%PDF-1.7` is the canonical magic byte sequence the
+ * backend's file validator looks for (CLAUDE.md: "File validation
+ * must use magic bytes, not Content-Type"). The trailing `%%EOF` is
+ * cosmetic — a real PDF would have a xref table between them, but
+ * the project's validator only inspects the prefix.
+ *
+ * Returns the shape `setInputFiles` accepts directly.
+ */
+export function makeFakePdf(name: string): {
+  name: string;
+  mimeType: string;
+  buffer: Buffer;
+} {
+  return {
+    name,
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-1.7\nsynthetic-e2e-fixture\n%%EOF"),
+  };
+}
+
+// --- Shared route entries ---------------------------------------
+//
+// Re-usable route table entries for the most-repeated mocks. Specs
+// spread these into their own route arrays so the handler shape lives
+// in ONE place. #40 (rules / billing / export / reminders) will add
+// more flows that need authed/anon Me handlers; lifting them now
+// avoids each new spec re-declaring the same shape.
+//
+// Imported here (not from `./mock-api` at this file's top) to keep
+// the file's import surface stable — these are co-located conveniences,
+// not the harness's primary API.
+import { jsonOk, jsonError } from "./mock-api";
+
+/**
+ * `GET /api/auth/me` returning 401 — the logged-out baseline. Use in
+ * specs whose user-state is anonymous.
+ */
+export const anonMeRoute = {
+  method: "GET" as const,
+  path: "/api/auth/me",
+  handler: jsonError("auth.unauthorized", "Not authenticated", 401),
+};
+
+/**
+ * `GET /api/auth/me` returning the standard `authedMe` envelope. Use
+ * in specs whose user-state is authenticated.
+ */
+export const authedMeRoute = {
+  method: "GET" as const,
+  path: "/api/auth/me",
+  handler: jsonOk(authedMe),
+};
+
+/**
+ * The three dashboard-page endpoints that fire on `/dashboard` mount.
+ * Returning empty/zero payloads keeps a flow that navigates through
+ * the dashboard quiet — no `test.no_mock` 404 spam in trace files.
+ * Each spec can override individual entries if it cares about a
+ * specific dashboard cell.
+ */
+export const emptyDashboardRoutes = [
+  {
+    method: "GET" as const,
+    path: "/api/dashboard/stats",
+    handler: jsonOk({
+      totalDocuments: 0,
+      compliant: 0,
+      nonCompliant: 0,
+      expiringSoon: 0,
+      expired: 0,
+      pendingExtraction: 0,
+      totalVendors: 0,
+      complianceRate: 0,
+    }),
+  },
+  {
+    method: "GET" as const,
+    path: "/api/dashboard/expiry-pipeline",
+    handler: jsonOk({
+      expired: 0,
+      bucket30: 0,
+      bucket60: 0,
+      bucket90: 0,
+      beyond: 0,
+    }),
+  },
+  {
+    method: "GET" as const,
+    path: "/api/dashboard/recent-activity",
+    handler: jsonOk([]),
+  },
+];
+
+// --- Document-detail factory ------------------------------------
+//
+// Mirror of `frontend/src/test/fixtures.ts:makeDocumentDetail`. ADR
+// 0010 says the E2E equivalent lives here so the Vitest tree isn't
+// dragged into the Playwright compile graph. Shape kept in sync at
+// the field-name level; drift surfaces at runtime via mock-response
+// assertions.
+
+export type DocumentDetailFixtureE2E = {
+  id: string;
+  originalFileName: string;
+  documentType: string;
+  documentSubType: string | null;
+  vendorName: string | null;
+  extractionStatus: string;
+  extractionConfidence: number | null;
+  complianceStatus: string;
+  effectiveDate: string | null;
+  expirationDate: string | null;
+  daysUntilExpiry: number | null;
+  isManuallyVerified: boolean;
+  uploadedBy: string | null;
+  blobStorageUrl: string | null;
+  generalLiabilityLimit: number | null;
+  fields: Array<{
+    id: string;
+    fieldName: string;
+    fieldValue: string | null;
+    fieldType: string | null;
+    confidence: number;
+    isManuallyEdited: boolean;
+    originalValue: string | null;
+  }>;
+  extractionFields: unknown;
+  extractionPromptVersion: string | null;
+  processingError: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+const DOCUMENT_DETAIL_BASE: DocumentDetailFixtureE2E = {
+  id: "d_smoke_01",
+  originalFileName: "smoke.pdf",
+  documentType: "COI",
+  documentSubType: null,
+  vendorName: null,
+  extractionStatus: "Pending",
+  extractionConfidence: null,
+  complianceStatus: "NonCompliant",
+  effectiveDate: null,
+  expirationDate: null,
+  daysUntilExpiry: null,
+  isManuallyVerified: false,
+  uploadedBy: null,
+  blobStorageUrl: null,
+  generalLiabilityLimit: null,
+  fields: [],
+  extractionFields: null,
+  extractionPromptVersion: null,
+  processingError: null,
+  createdAt: "2026-05-26T12:00:00Z",
+  updatedAt: "2026-05-26T12:00:00Z",
+};
+
+export function makeDocumentDetail(
+  overrides: Partial<DocumentDetailFixtureE2E> = {},
+): DocumentDetailFixtureE2E {
+  return {
+    ...DOCUMENT_DETAIL_BASE,
+    fields: DOCUMENT_DETAIL_BASE.fields.map((f) => ({ ...f })),
+    ...overrides,
+  };
+}

@@ -1,63 +1,66 @@
 /**
  * Flow 1 smoke E2E (#39 AC #1): sign-up → land on dashboard.
  *
- * The full user journey: visit /register, fill the form, submit
- * against a mocked /api/auth/register that returns the Me envelope,
- * confirm the SPA redirects to /dashboard, and confirm the dashboard
- * layout renders the personalized "Welcome" heading sourced from the
- * cached Me — proving cookie-set-by-server semantics flow through the
- * SPA without any test code touching the cookie value.
+ * Visit /register, fill the form, submit against a mocked POST
+ * /api/auth/register that returns the Me envelope, confirm the SPA
+ * redirects to /dashboard, and confirm the dashboard chrome renders
+ * the personalized "Welcome" heading + the org name + a navigation
+ * item, sourced from the cached Me — proving cookie-set-by-server
+ * semantics flow through the SPA without any test code touching the
+ * cookie value.
  *
  * Auth is httpOnly-cookie per CLAUDE.md (cd_session/cd_refresh). The
- * mock does NOT emit Set-Cookie — the scan-secrets gate would flag it.
- * The SPA flow works WITHOUT cookies because `useRegister.onSuccess`
- * seeds the Me into the TanStack Query cache, and the dashboard
- * layout reads from that cache (staleTime: 30s in production) before
- * useMe's queryFn fires. A real production round-trip would also set
- * the cookies via Set-Cookie; the test asserts the SPA chrome
- * regardless.
+ * mock does NOT emit Set-Cookie — the scan-secrets gate would flag
+ * it. The SPA flow works WITHOUT cookies because
+ * `useRegister.onSuccess` seeds the Me into the TanStack Query cache,
+ * and the dashboard layout reads from that cache (staleTime: 30s in
+ * production) before useMe's queryFn fires. A real production
+ * round-trip would also set the cookies via Set-Cookie; the test
+ * asserts the SPA chrome regardless.
+ *
+ * Login-flow smoke is deliberately NOT included here — useLogin's
+ * cache-seeding contract has comprehensive Vitest coverage in
+ * `src/app/(auth)/login/page.test.tsx`. See PR body for the trade-off.
  */
 import { test, expect } from "@playwright/test";
 import { mockApi, jsonOk } from "../support/mock-api";
-import { authedMe } from "../support/fixtures";
+import {
+  authedMe,
+  authedMeRoute,
+  emptyDashboardRoutes,
+} from "../support/fixtures";
 
 test.describe("Flow 1 — sign-up → dashboard (#39)", () => {
-  test("a new user fills the register form, lands on /dashboard with their org name visible", async ({
+  test("a new user fills the register form, lands on /dashboard with the full chrome visible", async ({
     page,
   }) => {
-    // Capture the POST body the form sends so the test also pins the
-    // request-shape contract (no plan, fields the backend DTO accepts,
-    // an IANA timezone derived from Intl).
+    // Capture the POST body for the request-shape pin.
     let registerBody: Record<string, unknown> | undefined;
 
     await mockApi(page, [
-      {
-        // useMe(skipRefresh:true) fires on the homepage / register page
-        // before the form is submitted. Anonymous initially.
-        method: "GET",
-        path: "/api/auth/me",
-        handler: async (route) => {
-          await route.fulfill({
-            status: 401,
-            contentType: "application/json",
-            body: JSON.stringify({
-              data: null,
-              error: { code: "auth.unauthorized", message: "Not authenticated" },
-            }),
-          });
-        },
-      },
+      // POST /api/auth/register: returns the Me. NOTE: no Set-Cookie
+      // emitted (the scan-secrets gate would flag it; the SPA's
+      // cache-seeding handles auth state in the test environment).
       {
         method: "POST",
         path: "/api/auth/register",
         handler: async (route, request) => {
           registerBody = JSON.parse(request.postData() ?? "{}");
-          // The mocked response does NOT set Set-Cookie — see file
-          // docstring. The SPA's cache-seeding flow handles auth in
-          // the test environment.
           return jsonOk(authedMe)(route);
         },
       },
+      // useMe() on the dashboard layout reads from cache (seeded by
+      // useRegister.onSuccess). It SHOULDN'T fire the queryFn within
+      // its 60s staleTime, but if it does for any reason (e.g. cache
+      // eviction), the authedMe handler keeps the dashboard authed
+      // instead of bouncing to /login.
+      authedMeRoute,
+      // The dashboard PAGE renders three independent queries. Mock
+      // them with empty payloads so trace files aren't polluted with
+      // `test.no_mock` 404s and a future page-body assertion
+      // (welcome heading is checked below) isn't fragile against
+      // missing data.
+      ...emptyDashboardRoutes,
     ]);
 
     await page.goto("/register");
@@ -66,38 +69,45 @@ test.describe("Flow 1 — sign-up → dashboard (#39)", () => {
       page.getByRole("heading", { name: /start dropping docs/i }),
     ).toBeVisible();
 
-    // Fill the form. Labels aren't htmlFor-wired in production yet
-    // (tracked in #76), so query by placeholder + autocomplete.
-    await page
-      .locator('input[name="fullName"]')
-      .fill("Smoke Owner");
-    await page
-      .locator('input[name="companyName"]')
-      .fill("Smoke Test Inc");
-    await page
-      .locator('input[name="email"]')
-      .fill("owner@smoke.test");
+    // Arm the register POST listener BEFORE the click so the test
+    // pins "the form actually submitted" rather than "the SPA happened
+    // to navigate."
+    const registerResponse = page.waitForResponse(
+      (res) =>
+        res.url().includes("/api/auth/register") && res.status() === 200,
+      { timeout: 15_000 },
+    );
+
+    await page.locator('input[name="fullName"]').fill("Smoke Owner");
+    await page.locator('input[name="companyName"]').fill("Smoke Test Inc");
+    await page.locator('input[name="email"]').fill("owner@smoke.test");
     await page
       .locator('input[name="password"]')
       .fill("verystrongsmokepass1");
 
     await page.getByRole("button", { name: /create my account/i }).click();
+    await registerResponse;
 
     // Landed on /dashboard.
     await page.waitForURL((u) => u.pathname === "/dashboard", {
       timeout: 10_000,
     });
 
-    // Dashboard layout uses useMe()'s cached Me — assert the
-    // organization name surfaces in the sidebar (proves the cache
-    // wire-through worked from useRegister.onSuccess into the layout).
+    // Full-chrome assertions: org name in sidebar + Documents nav link
+    // + welcome heading on the dashboard page body. A regression in
+    // either the (dashboard)/layout.tsx (sidebar) OR /dashboard/page.tsx
+    // (body) trips here.
     await expect(
       page.getByText(authedMe.organizationName).first(),
     ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: /documents/i }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /welcome,/i }),
+    ).toBeVisible();
 
-    // Request-shape pin: the POST body carries the backend DTO fields
-    // AND a timeZone from Intl, and does NOT carry plan (which is a
-    // landing-page URL param only — see #31).
+    // Request-shape pin.
     expect(registerBody).toMatchObject({
       fullName: "Smoke Owner",
       companyName: "Smoke Test Inc",
