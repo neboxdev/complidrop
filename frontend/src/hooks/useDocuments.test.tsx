@@ -18,14 +18,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { http } from "msw";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ReactNode } from "react";
 import {
   useDocuments,
   useUploadDocument,
   useDeleteDocument,
 } from "./useDocuments";
 import {
+  createTestWrapper,
   server,
   url,
   jsonOk,
@@ -44,22 +43,6 @@ vi.mock("@/lib/analytics", () => ({
   track,
 }));
 
-function makeWrapper() {
-  // gcTime: Infinity so cache writes from mutations survive long enough
-  // for assertions to read them (mirrors the harness's main client; see
-  // src/test/render.tsx + README for the rationale).
-  const qc = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false, gcTime: Infinity },
-      mutations: { retry: false },
-    },
-  });
-  function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  }
-  return { qc, Wrapper };
-}
-
 describe("useDocuments — basic query states (#36)", () => {
   it("isPending → isSuccess on 200, surfaces the items array", async () => {
     const response = makeDocumentsResponse({
@@ -68,7 +51,7 @@ describe("useDocuments — basic query states (#36)", () => {
     });
     server.use(http.get(url("/api/documents"), () => jsonOk(response)));
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useDocuments(), { wrapper: Wrapper });
 
     expect(result.current.isPending).toBe(true);
@@ -86,7 +69,7 @@ describe("useDocuments — basic query states (#36)", () => {
       ),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useDocuments(), { wrapper: Wrapper });
 
     await waitFor(() => expect(result.current.isError).toBe(true));
@@ -97,6 +80,11 @@ describe("useDocuments — basic query states (#36)", () => {
 
 describe("useDocuments — 5-second polling while any row is Pending/Processing (#36)", () => {
   beforeEach(() => {
+    // `shouldAdvanceTime: true` is REQUIRED because RTL's `waitFor`
+    // polls via real `setTimeout`, which is itself faked here — pure
+    // fake timers cause `waitFor` to hang. The race risk (real ms
+    // elapsed during waitFor potentially crossing the 5-second
+    // boundary) is absorbed by delta-based assertions on `calls`.
     vi.useFakeTimers({ shouldAdvanceTime: true });
   });
   afterEach(() => {
@@ -130,28 +118,66 @@ describe("useDocuments — 5-second polling while any row is Pending/Processing 
       }),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useDocuments(), { wrapper: Wrapper });
 
     // First fetch: Processing.
     await waitFor(() =>
       expect(result.current.data?.items[0].extractionStatus).toBe("Processing"),
     );
-    expect(calls).toBe(1);
+    expect(calls).toBeGreaterThanOrEqual(1);
 
-    // Advance 5s — the refetchInterval predicate sees Processing in the
-    // CURRENT data and schedules another fetch.
+    // Snapshot pre-advance count. The explicit 5-second advance must
+    // trigger at least one new refetch; delta-based so an auto-fire
+    // absorbed during `waitFor` (from `shouldAdvanceTime: true`) doesn't
+    // break the assertion on slower CIs.
+    const beforeAdvance = calls;
     await vi.advanceTimersByTimeAsync(5000);
 
     await waitFor(() =>
       expect(result.current.data?.items[0].extractionStatus).toBe("Completed"),
     );
-    expect(calls).toBe(2);
+    expect(calls).toBeGreaterThanOrEqual(beforeAdvance + 1);
 
     // Now every row is Completed → predicate returns false → interval
     // stops. Advance 15 seconds to confirm no further fetches.
+    const afterCompleted = calls;
     await vi.advanceTimersByTimeAsync(15_000);
-    expect(calls).toBe(2);
+    expect(calls).toBe(afterCompleted);
+  });
+
+  it("terminal-only initial state: NO polling fires (steady-state for any healthy account)", async () => {
+    // Production's most common case: every document is already Completed.
+    // refetchInterval predicate evaluates `items.some(...)` to false on
+    // first read, so no interval is ever scheduled. A regression that
+    // flipped the predicate polarity would still pass the Pending →
+    // Completed test because that test STARTS in Pending; only this
+    // test catches "polls when nothing is pending".
+    let calls = 0;
+    server.use(
+      http.get(url("/api/documents"), () => {
+        calls++;
+        return jsonOk(
+          makeDocumentsResponse({
+            items: [{ ...documentsAllStatuses[2] }], // Completed only
+            total: 1,
+          }),
+        );
+      }),
+    );
+
+    const { Wrapper } = createTestWrapper();
+    const { result } = renderHook(() => useDocuments(), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(calls).toBe(1);
+
+    // Advance 20 seconds — four polling windows would have fired if the
+    // predicate were inverted. The terminal-only branch returns false,
+    // so no interval is ever scheduled and calls stays at 1.
+    const afterSettle = calls;
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls).toBe(afterSettle);
   });
 
   it("Pending → Failed transition still stops the interval (Failed is terminal)", async () => {
@@ -186,21 +212,24 @@ describe("useDocuments — 5-second polling while any row is Pending/Processing 
       }),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useDocuments(), { wrapper: Wrapper });
 
     await waitFor(() =>
       expect(result.current.data?.items[0].extractionStatus).toBe("Pending"),
     );
+    const beforeAdvance = calls;
     await vi.advanceTimersByTimeAsync(5000);
     await waitFor(() =>
       expect(result.current.data?.items[0].extractionStatus).toBe("Failed"),
     );
+    expect(calls).toBeGreaterThanOrEqual(beforeAdvance + 1);
 
     // Failed is NOT Pending/Processing → predicate returns false → no
     // more polling. Confirm by advancing a long way without new calls.
+    const afterFailed = calls;
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(calls).toBe(2);
+    expect(calls).toBe(afterFailed);
   });
 });
 
@@ -228,7 +257,7 @@ describe("useUploadDocument / useDeleteDocument — cache invalidation (#36)", (
       ),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const docs = renderHook(() => useDocuments(), { wrapper: Wrapper });
     await waitFor(() => expect(docs.result.current.isSuccess).toBe(true));
     expect(listCalls).toBe(1);
@@ -262,7 +291,7 @@ describe("useUploadDocument / useDeleteDocument — cache invalidation (#36)", (
       http.delete(url("/api/documents/:id"), () => new Response(null, { status: 204 })),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const docs = renderHook(() => useDocuments(), { wrapper: Wrapper });
     await waitFor(() => expect(docs.result.current.isSuccess).toBe(true));
     expect(listCalls).toBe(1);

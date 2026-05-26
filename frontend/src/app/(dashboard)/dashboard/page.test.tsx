@@ -155,8 +155,12 @@ describe("DashboardPage — state matrix (#36)", () => {
     );
     // Pipeline panel populated normally.
     expect(screen.getByText(/expiry pipeline/i)).toBeInTheDocument();
-    // Stats panel falls back to zeroes (no crash).
-    // Multiple cards show "0" — assert via getAllByText.
-    expect(screen.getAllByText(/^0$/).length).toBeGreaterThan(0);
+    // Stats panel falls back to zeroes (no crash). The page renders
+    // exactly SIX cards bound to `stats.data?.xxx ?? 0`: Total documents,
+    // Compliant, Expiring ≤ 30d, Non-compliant, Vendors tracked, Awaiting
+    // extraction (compliance rate has its own `%` suffix so it doesn't
+    // match `^0$`). Requiring ≥6 means a regression that drops the
+    // fallback on most stats — but leaves one intact — still fails.
+    expect(screen.getAllByText(/^0$/).length).toBeGreaterThanOrEqual(6);
   });
 });

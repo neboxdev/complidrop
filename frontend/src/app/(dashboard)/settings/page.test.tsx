@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
-import { waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import SettingsPage from "./page";
 import {
   renderWithProviders,
@@ -23,7 +23,7 @@ vi.mock("sonner", () => ({
 }));
 
 describe("SettingsPage — smoke (#36)", () => {
-  it("populated: renders without crashing and surfaces the plan info", async () => {
+  it("populated: renders the free-plan usage badge with the documents-used / limit pair", async () => {
     server.use(
       http.get(url("/api/billing/subscription"), () =>
         jsonOk({
@@ -40,8 +40,12 @@ describe("SettingsPage — smoke (#36)", () => {
 
     renderWithProviders(<SettingsPage />, { auth: authedMe });
 
-    // The page shows usage somewhere — assert "2" (used) reads correctly.
-    // Don't pin specific copy here; this is the smoke tier.
-    await waitFor(() => expect(document.body.textContent).toContain("2"));
+    // The page surfaces the `documentsUsed / documentLimit` pair as
+    // "2 / 5" in the usage tile. Pin that specifically — `toContain("2")`
+    // would pass for a stray '2' anywhere on the page (date strings,
+    // CSS pixel values that leak into textContent, etc.).
+    await waitFor(() =>
+      expect(screen.getByText(/2\s*\/\s*5/)).toBeInTheDocument(),
+    );
   });
 });

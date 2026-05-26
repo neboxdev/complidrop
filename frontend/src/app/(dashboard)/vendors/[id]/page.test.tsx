@@ -1,12 +1,11 @@
 /**
- * Vendor detail page — smoke + portal-link generation contract (#36).
+ * Vendor detail page — smoke (#36).
  *
- * Tier-1 page but the form fields are derived from useState (one-time
- * init from props) so most coverage lives at the useVendors hook level.
- * Here we pin:
+ * Tier-1 page but most contract lives at the useVendors hook level
+ * (see useVendors.test.tsx for the portal-link generate/revoke
+ * invalidation contract). Here we pin:
  *   - Loading copy while the detail fetch is in flight.
  *   - Populated render: name, contact, portal link list.
- *   - Portal-link generation toasts success.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { http } from "msw";

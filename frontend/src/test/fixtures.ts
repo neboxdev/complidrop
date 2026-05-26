@@ -133,6 +133,94 @@ export const documentsAllStatuses: ReadonlyArray<Readonly<DocumentListItem>> = [
   },
 ];
 
+// -------- Document detail --------
+
+/**
+ * Mirror of the inline `DocDetail` type from
+ * `frontend/src/app/(dashboard)/documents/[id]/page.tsx`. The detail
+ * page hand-rolls the type inline (its own `useQuery` on a per-id key
+ * lives next to the page), so this fixture's shape DOES drift if the
+ * page renames a field — that's intentional. Keeping the fixture here
+ * lets portal extraction-error tests in #37 reuse the same shape
+ * without re-deriving it from a page-private type.
+ */
+export type DocumentDetailField = {
+  id: string;
+  fieldName: string;
+  fieldValue: string | null;
+  fieldType: string | null;
+  confidence: number;
+  isManuallyEdited: boolean;
+  originalValue: string | null;
+};
+
+export type DocumentDetailFixture = {
+  id: string;
+  originalFileName: string;
+  documentType: string;
+  documentSubType: string | null;
+  vendorName: string | null;
+  extractionStatus: string;
+  extractionConfidence: number | null;
+  complianceStatus: string;
+  effectiveDate: string | null;
+  expirationDate: string | null;
+  daysUntilExpiry: number | null;
+  isManuallyVerified: boolean;
+  uploadedBy: string | null;
+  blobStorageUrl: string | null;
+  generalLiabilityLimit: number | null;
+  fields: DocumentDetailField[];
+  extractionFields: unknown;
+  extractionPromptVersion: string | null;
+  processingError: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+const DOCUMENT_DETAIL_BASE: Readonly<DocumentDetailFixture> = {
+  id: "d_completed_01",
+  originalFileName: "coi.pdf",
+  documentType: "COI",
+  documentSubType: null,
+  vendorName: null,
+  extractionStatus: "Pending",
+  extractionConfidence: null,
+  complianceStatus: "Pending",
+  effectiveDate: null,
+  expirationDate: null,
+  daysUntilExpiry: null,
+  isManuallyVerified: false,
+  uploadedBy: null,
+  blobStorageUrl: null,
+  generalLiabilityLimit: null,
+  fields: [],
+  extractionFields: null,
+  extractionPromptVersion: null,
+  processingError: null,
+  createdAt: "2026-05-26T12:00:00Z",
+  updatedAt: "2026-05-26T12:00:00Z",
+};
+
+export const documentDetail = DOCUMENT_DETAIL_BASE;
+
+/**
+ * Build a fresh `DocumentDetailFixture` deep-copying every nested field
+ * so the caller can mutate freely without affecting the shared base.
+ * Test files use this to construct the polling-transition fixtures
+ * (Pending → Completed, Processing → Failed) and the failed-path
+ * extraction-error card.
+ */
+export function makeDocumentDetail(
+  overrides: Partial<DocumentDetailFixture> = {},
+): DocumentDetailFixture {
+  return {
+    ...DOCUMENT_DETAIL_BASE,
+    fields: DOCUMENT_DETAIL_BASE.fields.map((f) => ({ ...f })),
+    ...overrides,
+  };
+}
+
 /**
  * Build a fresh `DocumentListResponse`, deep-copying every entry so the
  * caller gets a value totally disconnected from the shared array. Override

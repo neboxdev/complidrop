@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import DocumentDetailPage from "./page";
 import {
   renderWithProviders,
@@ -24,6 +24,7 @@ import {
   jsonOk,
   jsonError,
   authedMe,
+  makeDocumentDetail,
 } from "@/test";
 
 const { toastSuccess, toastError } = vi.hoisted(() => ({
@@ -34,61 +35,6 @@ vi.mock("sonner", () => ({
   toast: { success: toastSuccess, error: toastError },
   Toaster: () => null,
 }));
-
-// Minimal fixture builder for the detail endpoint — only the fields the
-// page actually reads. The page accepts a `DocDetail` shape defined
-// inline at [id]/page.tsx; we keep this fixture local so a future page
-// refactor doesn't ripple to harness fixtures.
-function makeDetail(
-  overrides: Partial<{
-    id: string;
-    originalFileName: string;
-    documentType: string;
-    extractionStatus: string;
-    extractionConfidence: number | null;
-    complianceStatus: string;
-    effectiveDate: string | null;
-    expirationDate: string | null;
-    daysUntilExpiry: number | null;
-    isManuallyVerified: boolean;
-    blobStorageUrl: string | null;
-    processingError: string | null;
-    fields: Array<{
-      id: string;
-      fieldName: string;
-      fieldValue: string | null;
-      fieldType: string | null;
-      confidence: number;
-      isManuallyEdited: boolean;
-      originalValue: string | null;
-    }>;
-  }> = {},
-) {
-  return {
-    id: "d_x_01",
-    originalFileName: "coi.pdf",
-    documentType: "COI",
-    documentSubType: null,
-    vendorName: null,
-    extractionStatus: "Pending",
-    extractionConfidence: null,
-    complianceStatus: "Pending",
-    effectiveDate: null,
-    expirationDate: null,
-    daysUntilExpiry: null,
-    isManuallyVerified: false,
-    uploadedBy: null,
-    blobStorageUrl: null,
-    generalLiabilityLimit: null,
-    fields: [],
-    extractionFields: null,
-    extractionPromptVersion: null,
-    processingError: null,
-    createdAt: "2026-05-26T12:00:00Z",
-    updatedAt: "2026-05-26T12:00:00Z",
-    ...overrides,
-  };
-}
 
 beforeEach(() => {
   toastSuccess.mockClear();
@@ -103,7 +49,7 @@ describe("DocumentDetailPage — basic states (#36)", () => {
     server.use(
       http.get(url("/api/documents/:id"), async () => {
         await settled;
-        return jsonOk(makeDetail());
+        return jsonOk(makeDocumentDetail());
       }),
     );
 
@@ -140,7 +86,7 @@ describe("DocumentDetailPage — basic states (#36)", () => {
     server.use(
       http.get(url("/api/documents/:id"), () =>
         jsonOk(
-          makeDetail({
+          makeDocumentDetail({
             extractionStatus: "Completed",
             extractionConfidence: 0.92,
             complianceStatus: "Compliant",
@@ -175,11 +121,10 @@ describe("DocumentDetailPage — basic states (#36)", () => {
     expect(screen.getByText("Compliant")).toBeInTheDocument();
     // Field row rendered.
     expect(screen.getByText("PolicyNumber")).toBeInTheDocument();
-    expect(
-      (document.querySelector(
-        'input[value="POL-12345"]',
-      ) as HTMLInputElement) ?? null,
-    ).not.toBeNull();
+    // RTL idiom for "input is rendered with this value" — better than
+    // `document.querySelector('input[value=…]')` because it's
+    // container-scoped and won't pick up an input from a stray portal.
+    expect(screen.getByDisplayValue("POL-12345")).toBeInTheDocument();
   });
 });
 
@@ -188,7 +133,7 @@ describe("DocumentDetailPage — extraction-error card (#36 AC #3)", () => {
     server.use(
       http.get(url("/api/documents/:id"), () =>
         jsonOk(
-          makeDetail({
+          makeDocumentDetail({
             extractionStatus: "Failed",
             processingError:
               "OCR confidence below threshold; manual review required.",
@@ -213,7 +158,7 @@ describe("DocumentDetailPage — extraction-error card (#36 AC #3)", () => {
   it("does NOT render the extraction-error card when processingError is null", async () => {
     server.use(
       http.get(url("/api/documents/:id"), () =>
-        jsonOk(makeDetail({ extractionStatus: "Completed" })),
+        jsonOk(makeDocumentDetail({ extractionStatus: "Completed" })),
       ),
     );
 
@@ -231,6 +176,13 @@ describe("DocumentDetailPage — extraction-error card (#36 AC #3)", () => {
 
 describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
   beforeEach(() => {
+    // `shouldAdvanceTime: true` is REQUIRED here because RTL's
+    // `waitFor` polls via real `setTimeout`, which is itself faked by
+    // `vi.useFakeTimers()` — pure fake timers cause `waitFor` to hang.
+    // The race-against-real-time concern (real ms elapsed during
+    // waitFor potentially crossing the 3-second refetchInterval
+    // boundary) is absorbed by snapshotting the call count BEFORE each
+    // explicit advance and asserting deltas, not absolute counts.
     vi.useFakeTimers({ shouldAdvanceTime: true });
   });
   afterEach(() => {
@@ -250,11 +202,11 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
         calls++;
         return jsonOk(
           calls === 1
-            ? makeDetail({
+            ? makeDocumentDetail({
                 extractionStatus: "Pending",
                 complianceStatus: "NonCompliant",
               })
-            : makeDetail({
+            : makeDocumentDetail({
                 extractionStatus: "Completed",
                 extractionConfidence: 0.91,
                 complianceStatus: "Compliant",
@@ -274,22 +226,33 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
       expect(screen.getByText("Pending")).toBeInTheDocument(),
     );
     expect(screen.getByText(/extraction in progress/i)).toBeInTheDocument();
-    expect(calls).toBe(1);
+    expect(calls).toBeGreaterThanOrEqual(1);
 
-    // Tick past the 3-second poll window. The page refetches, sees
-    // Completed, and the badge swaps.
+    // Snapshot pre-advance count so the assertion is delta-based: the
+    // explicit 3-second advance must trigger AT LEAST one refetch, and
+    // the post-state must be Completed. Tolerates one extra auto-fire
+    // from `shouldAdvanceTime: true` absorbing real wall-clock during
+    // the preceding `waitFor`.
+    const beforeAdvance = calls;
     await vi.advanceTimersByTimeAsync(3000);
 
     await waitFor(() =>
       expect(screen.getByText("Completed")).toBeInTheDocument(),
     );
-    expect(screen.queryByText("Pending")).toBeNull();
-    expect(calls).toBe(2);
+    expect(calls).toBeGreaterThanOrEqual(beforeAdvance + 1);
+    // Scope the negative assertion to the Extraction summary cell, not
+    // the whole document, so a future page restructure that surfaces
+    // "Pending" elsewhere (e.g. a compliance-stub badge in a tooltip)
+    // doesn't trip it.
+    const extractionCell = screen.getByText("Extraction").closest("div")!;
+    expect(within(extractionCell).queryByText("Pending")).toBeNull();
 
     // Completed is terminal — refetchInterval returns false, no more
-    // polls. Advance another 10s and confirm the call count stays put.
+    // polls. Snapshot the post-completed count then advance another 10s
+    // and confirm it doesn't change.
+    const afterCompleted = calls;
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(calls).toBe(2);
+    expect(calls).toBe(afterCompleted);
   });
 
   it("Processing → Failed: UI advances to the failed badge + processingError card", async () => {
@@ -299,11 +262,11 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
         calls++;
         return jsonOk(
           calls === 1
-            ? makeDetail({
+            ? makeDocumentDetail({
                 extractionStatus: "Processing",
                 complianceStatus: "NonCompliant",
               })
-            : makeDetail({
+            : makeDocumentDetail({
                 extractionStatus: "Failed",
                 complianceStatus: "NonCompliant",
                 processingError: "OCR engine timed out after 30 seconds.",
@@ -322,20 +285,24 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
     );
     // The error card should NOT be visible while Processing.
     expect(screen.queryByText(/extraction error/i)).toBeNull();
+    expect(calls).toBeGreaterThanOrEqual(1);
 
+    const beforeAdvance = calls;
     await vi.advanceTimersByTimeAsync(3000);
 
     // Failed badge appears AND the processingError card pops in.
     await waitFor(() =>
       expect(screen.getByText("Failed")).toBeInTheDocument(),
     );
+    expect(calls).toBeGreaterThanOrEqual(beforeAdvance + 1);
     expect(screen.getByText(/extraction error/i)).toBeInTheDocument();
     expect(
       screen.getByText(/OCR engine timed out after 30 seconds/i),
     ).toBeInTheDocument();
 
     // Failed is terminal — no further polls.
+    const afterFailed = calls;
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(calls).toBe(2);
+    expect(calls).toBe(afterFailed);
   });
 });

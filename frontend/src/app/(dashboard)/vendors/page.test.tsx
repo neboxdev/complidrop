@@ -127,9 +127,17 @@ describe("VendorsPage — add-vendor mutation (#36)", () => {
     );
     expect(listCalls).toBe(1);
 
-    const inputs = document.querySelectorAll("input");
-    fireEvent.input(inputs[0], { target: { value: "New Sub LLC" } });
-    fireEvent.input(inputs[1], { target: { value: "ops@new.test" } });
+    // Query by placeholder (stable contract) rather than positional
+    // `document.querySelectorAll("input")[0/1]`, so a future header
+    // search/filter input doesn't shift the indices silently.
+    fireEvent.input(
+      screen.getByPlaceholderText(/mike's electrical/i),
+      { target: { value: "New Sub LLC" } },
+    );
+    fireEvent.input(
+      screen.getByPlaceholderText(/mike@acme\.com/i),
+      { target: { value: "ops@new.test" } },
+    );
     fireEvent.click(screen.getByRole("button", { name: /add vendor/i }));
 
     await waitFor(() =>
@@ -137,10 +145,13 @@ describe("VendorsPage — add-vendor mutation (#36)", () => {
     );
     // Invalidation re-reads the list.
     await waitFor(() => expect(listCalls).toBe(2));
-    // Form cleared.
-    const refreshedInputs = document.querySelectorAll("input");
-    expect((refreshedInputs[0] as HTMLInputElement).value).toBe("");
-    expect((refreshedInputs[1] as HTMLInputElement).value).toBe("");
+    // Form cleared — reads the same placeholder-scoped inputs.
+    expect(
+      (screen.getByPlaceholderText(/mike's electrical/i) as HTMLInputElement).value,
+    ).toBe("");
+    expect(
+      (screen.getByPlaceholderText(/mike@acme\.com/i) as HTMLInputElement).value,
+    ).toBe("");
   });
 
   it("error: server-side error surfaces via toast.error with the human message", async () => {
@@ -162,8 +173,10 @@ describe("VendorsPage — add-vendor mutation (#36)", () => {
       ).toBeInTheDocument(),
     );
 
-    const inputs = document.querySelectorAll("input");
-    fireEvent.input(inputs[0], { target: { value: "Acme Subcontractor" } });
+    fireEvent.input(
+      screen.getByPlaceholderText(/mike's electrical/i),
+      { target: { value: "Acme Subcontractor" } },
+    );
     fireEvent.click(screen.getByRole("button", { name: /add vendor/i }));
 
     await waitFor(() =>

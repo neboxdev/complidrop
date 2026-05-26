@@ -11,7 +11,7 @@
  * to drive end-to-end; covered in the polling test (#34 example) and
  * the hook test instead.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { afterEach, describe, it, expect, vi, beforeEach } from "vitest";
 import { http } from "msw";
 import { screen, waitFor } from "@testing-library/react";
 import DocumentsPage from "./page";
@@ -25,6 +25,13 @@ import {
   documentsAllStatuses,
   makeDocumentsResponse,
 } from "@/test";
+
+afterEach(() => {
+  // Belt-and-suspenders — any test that flipped fake timers (the new
+  // page-level polling test) and threw before its `finally` block must
+  // not leak fake timers into the next test.
+  vi.useRealTimers();
+});
 
 const { toastSuccess, toastError } = vi.hoisted(() => ({
   toastSuccess: vi.fn(),
@@ -141,6 +148,73 @@ describe("DocumentsPage — state matrix (#36)", () => {
 
     // Total counter is correct.
     expect(screen.getByText(/4 total/i)).toBeInTheDocument();
+  });
+
+  it("polling transition: a Processing row's badge swaps to Completed without a manual reload", async () => {
+    // AC #2 requires the LIST page (not just the detail) to assert the
+    // polling transition. useDocuments.test.tsx pins the 5s interval
+    // contract at the hook level; this test pins that the LIST PAGE
+    // actually re-renders the new badge after the refetch.
+    //
+    // Fake timers MUST be active before the component mounts so the
+    // refetchInterval is scheduled on the fake queue (otherwise the
+    // first interval was scheduled with real timers and is orphaned
+    // when we flip — the polling never fires inside the test).
+    // `shouldAdvanceTime: true` keeps RTL's waitFor's own setTimeout
+    // polls served via real-time elapsed.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      server.use(
+        http.get(url("/api/documents"), () => {
+          calls++;
+          return jsonOk(
+            calls === 1
+              ? makeDocumentsResponse({
+                  items: [
+                    {
+                      ...documentsAllStatuses[1], // Processing row
+                      complianceStatus: "NonCompliant",
+                      // Override the fixture's "Processing Vendor" cell
+                      // so `getByText(/^Processing$/)` matches only the
+                      // extraction badge, not the vendor-name cell.
+                      vendorName: "Acme Sub",
+                    },
+                  ],
+                  total: 1,
+                })
+              : makeDocumentsResponse({
+                  items: [
+                    {
+                      ...documentsAllStatuses[2], // Completed row
+                      // Same vendor-name override so the assertion
+                      // matches the extraction badge unambiguously.
+                      vendorName: "Acme Sub",
+                    },
+                  ],
+                  total: 1,
+                }),
+          );
+        }),
+      );
+
+      renderWithProviders(<DocumentsPage />, { auth: authedMe });
+
+      await waitFor(() =>
+        expect(screen.getByText(/^Processing$/)).toBeInTheDocument(),
+      );
+
+      const beforeAdvance = calls;
+      await vi.advanceTimersByTimeAsync(5000);
+
+      await waitFor(() =>
+        expect(screen.getByText(/^Completed/)).toBeInTheDocument(),
+      );
+      expect(calls).toBeGreaterThanOrEqual(beforeAdvance + 1);
+      expect(screen.queryByText(/^Processing$/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rows link to /documents/[id] so the user can drill into a single document", async () => {

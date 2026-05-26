@@ -13,8 +13,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { http } from "msw";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ReactNode } from "react";
 import {
   useVendor,
   useVendors,
@@ -26,7 +24,7 @@ import {
   type VendorDetail,
   type VendorSummary,
 } from "./useVendors";
-import { server, url, jsonOk, jsonError } from "@/test";
+import { createTestWrapper, server, url, jsonOk, jsonError } from "@/test";
 import { ApiError } from "@/lib/api";
 
 vi.mock("@/lib/analytics", () => ({
@@ -34,19 +32,6 @@ vi.mock("@/lib/analytics", () => ({
   resetIdentity: vi.fn(),
   track: vi.fn(),
 }));
-
-function makeWrapper() {
-  const qc = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false, gcTime: Infinity },
-      mutations: { retry: false },
-    },
-  });
-  function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  }
-  return { qc, Wrapper };
-}
 
 const VENDORS: VendorSummary[] = [
   {
@@ -100,7 +85,7 @@ const VENDOR_DETAIL: VendorDetail = {
 describe("useVendors — list query (#36)", () => {
   it("isPending → isSuccess populates the list", async () => {
     server.use(http.get(url("/api/vendors"), () => jsonOk(VENDORS)));
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useVendors(), { wrapper: Wrapper });
 
     expect(result.current.isPending).toBe(true);
@@ -115,7 +100,7 @@ describe("useVendors — list query (#36)", () => {
         jsonError("server.error", "vendor index down.", { status: 500 }),
       ),
     );
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useVendors(), { wrapper: Wrapper });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect((result.current.error as ApiError).message).toBe(
@@ -125,7 +110,7 @@ describe("useVendors — list query (#36)", () => {
 
   it("empty list (organization has no vendors yet) is a success path", async () => {
     server.use(http.get(url("/api/vendors"), () => jsonOk([])));
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useVendors(), { wrapper: Wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual([]);
@@ -142,7 +127,7 @@ describe("useVendor — detail query, `enabled` guard (#36)", () => {
       }),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useVendor(null), { wrapper: Wrapper });
 
     // With enabled: false, the query stays in idle — neither isPending
@@ -156,7 +141,7 @@ describe("useVendor — detail query, `enabled` guard (#36)", () => {
       http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useVendor("v_acme_01"), {
       wrapper: Wrapper,
     });
@@ -185,7 +170,7 @@ describe("useCreateVendor / useUpdateVendor / useDeleteVendor — cache invalida
       http.post(url("/api/vendors"), () => jsonOk({ id: "v_new_01" })),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const list = renderHook(() => useVendors(), { wrapper: Wrapper });
     await waitFor(() => expect(list.result.current.isSuccess).toBe(true));
     expect(listCalls).toBe(1);
@@ -209,7 +194,7 @@ describe("useCreateVendor / useUpdateVendor / useDeleteVendor — cache invalida
       http.put(url("/api/vendors/:id"), () => jsonOk({ id: "v_acme_01" })),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const list = renderHook(() => useVendors(), { wrapper: Wrapper });
     const detail = renderHook(() => useVendor("v_acme_01"), {
       wrapper: Wrapper,
@@ -251,7 +236,7 @@ describe("useCreateVendor / useUpdateVendor / useDeleteVendor — cache invalida
       ),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const list = renderHook(() => useVendors(), { wrapper: Wrapper });
     await waitFor(() => expect(list.result.current.isSuccess).toBe(true));
 
@@ -279,7 +264,7 @@ describe("useGeneratePortalLink / useRevokePortalLink — invalidate the detail 
       ),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const detail = renderHook(() => useVendor("v_acme_01"), {
       wrapper: Wrapper,
     });
@@ -306,7 +291,7 @@ describe("useGeneratePortalLink / useRevokePortalLink — invalidate the detail 
       ),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const detail = renderHook(() => useVendor("v_acme_01"), {
       wrapper: Wrapper,
     });

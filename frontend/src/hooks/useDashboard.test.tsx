@@ -15,8 +15,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
 import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ReactNode } from "react";
 import {
   useDashboardStats,
   useExpiryPipeline,
@@ -25,7 +23,7 @@ import {
   type ExpiryPipeline,
   type ActivityEntry,
 } from "./useDashboard";
-import { server, url, jsonOk, jsonError } from "@/test";
+import { createTestWrapper, server, url, jsonOk, jsonError } from "@/test";
 import { ApiError } from "@/lib/api";
 
 vi.mock("@/lib/analytics", () => ({
@@ -33,19 +31,6 @@ vi.mock("@/lib/analytics", () => ({
   resetIdentity: vi.fn(),
   track: vi.fn(),
 }));
-
-function makeWrapper() {
-  const qc = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false, gcTime: Infinity },
-      mutations: { retry: false },
-    },
-  });
-  function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-  }
-  return { qc, Wrapper };
-}
 
 const STATS: DashboardStats = {
   totalDocuments: 12,
@@ -86,7 +71,7 @@ const ACTIVITY: ActivityEntry[] = [
 describe("useDashboardStats (#36)", () => {
   it("isPending → isSuccess populates the stats record", async () => {
     server.use(http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)));
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useDashboardStats(), { wrapper: Wrapper });
 
     expect(result.current.isPending).toBe(true);
@@ -100,7 +85,7 @@ describe("useDashboardStats (#36)", () => {
         jsonError("server.error", "Stats down.", { status: 500 }),
       ),
     );
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useDashboardStats(), { wrapper: Wrapper });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect((result.current.error as ApiError).message).toBe("Stats down.");
@@ -112,7 +97,7 @@ describe("useExpiryPipeline (#36)", () => {
     server.use(
       http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
     );
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useExpiryPipeline(), { wrapper: Wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual(PIPELINE);
@@ -124,7 +109,7 @@ describe("useRecentActivity (#36)", () => {
     server.use(
       http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
     );
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useRecentActivity(), { wrapper: Wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toHaveLength(2);
@@ -135,7 +120,7 @@ describe("useRecentActivity (#36)", () => {
     server.use(
       http.get(url("/api/dashboard/recent-activity"), () => jsonOk([])),
     );
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(() => useRecentActivity(), { wrapper: Wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual([]);
@@ -151,7 +136,7 @@ describe("Combined: dashboard page fans out three independent queries (#36)", ()
       http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(
       () => ({
         stats: useDashboardStats(),
@@ -182,7 +167,7 @@ describe("Combined: dashboard page fans out three independent queries (#36)", ()
       http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
     );
 
-    const { Wrapper } = makeWrapper();
+    const { Wrapper } = createTestWrapper();
     const { result } = renderHook(
       () => ({
         stats: useDashboardStats(),

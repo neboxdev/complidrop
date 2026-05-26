@@ -46,14 +46,18 @@ describe("RulesPage — smoke (#36)", () => {
     );
   });
 
-  it("empty-state: renders the page chrome without crashing on an empty list", async () => {
+  it("empty-state: renders the page chrome and the create-template input", async () => {
     server.use(
       http.get(url("/api/compliance/templates"), () => jsonOk([])),
     );
 
     renderWithProviders(<RulesPage />, { auth: authedMe });
 
-    // Page renders; templates section is empty but the heading shows.
-    expect(document.body.textContent?.length).toBeGreaterThan(0);
+    // The new-template input is unconditional — a regression that
+    // hides the template editor would drop this placeholder.
+    expect(
+      screen.getByPlaceholderText(/template name/i) ??
+        screen.getByPlaceholderText(/new template/i),
+    ).toBeInTheDocument();
   });
 });
