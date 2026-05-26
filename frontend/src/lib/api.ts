@@ -5,7 +5,49 @@ export type ApiEnvelope<T> = {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5292";
 
+// Refresh-coalescing singleton. Under bursty parallel 401s (e.g. the
+// dashboard mounting five queries at once on a stale session) we want
+// every 401-recovery path to share ONE POST /api/auth/refresh — not
+// five. The naive `refreshing = refreshing ?? doRefresh()` + eager
+// `refreshing = null` pattern coalesced concurrent calls that all
+// reached the 401 branch before the first awaiter nulled out the
+// promise, but a FOURTH call arriving AFTER the first batch nulled
+// the singleton but BEFORE its retry fetches completed would fire a
+// second doRefresh() POST that races the first batch's retries
+// (#68 — three reviewers flagged this on #30).
+//
+// Refcount-based reset keeps the singleton alive exactly as long as
+// any consumer is still inside the 401-recovery window (await refresh
+// → retry fetch → unwind). Once the LAST consumer releases, the next
+// 401 starts a fresh refresh — which is the right semantics if the
+// just-refreshed token has itself expired by then.
+//
+// CAVEAT: the singleton-reuse window assumes JWT TTL (15 min) >>
+// typical retry-unwind (~10 ms). If TTL were dropped below ~1 s, a
+// late awaiter joining mid-unwind could reuse a "true" result from a
+// token that has since expired and retry with stale credentials.
+// Not a realistic concern at CompliDrop's TTL.
 let refreshing: Promise<boolean> | null = null;
+let refreshConsumers = 0;
+
+function getRefreshPromise(): Promise<boolean> {
+  refreshConsumers++;
+  refreshing ??= doRefresh();
+  return refreshing;
+}
+
+function releaseRefresh(): void {
+  refreshConsumers--;
+  // Under correct paired usage via try/finally, the count returns to
+  // exactly 0. The `<= 0` clamp is defense-in-depth against a future
+  // refactor that introduces an unpaired releaseRefresh() (e.g. a
+  // cleanup-on-unmount hook) — it keeps the singleton from getting
+  // stuck above zero forever, even if a buggy double-release occurs.
+  if (refreshConsumers <= 0) {
+    refreshConsumers = 0;
+    refreshing = null;
+  }
+}
 
 async function doRefresh(): Promise<boolean> {
   try {
@@ -79,11 +121,16 @@ async function request<T>(path: string, init: RequestInitEx = {}): Promise<T> {
   let res = await fetchOrFriendlyThrow(url, { ...init, credentials: "include", headers });
 
   if (res.status === 401 && !init.skipRefresh) {
-    refreshing = refreshing ?? doRefresh();
-    const refreshed = await refreshing;
-    refreshing = null;
-    if (refreshed) {
-      res = await fetchOrFriendlyThrow(url, { ...init, credentials: "include", headers });
+    // try/finally pairs every getRefreshPromise() with exactly one
+    // releaseRefresh(), even if the retry fetch throws — so the
+    // refcount can never leak and strand the singleton.
+    try {
+      const refreshed = await getRefreshPromise();
+      if (refreshed) {
+        res = await fetchOrFriendlyThrow(url, { ...init, credentials: "include", headers });
+      }
+    } finally {
+      releaseRefresh();
     }
   }
 
