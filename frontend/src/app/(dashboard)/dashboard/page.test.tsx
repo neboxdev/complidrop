@@ -9,7 +9,7 @@
  * gracefully via fallback values), and the partial-success path (one
  * hook fails, two resolve).
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { http } from "msw";
 import { screen, waitFor } from "@testing-library/react";
 import DashboardPage from "./page";
@@ -22,10 +22,7 @@ import {
   authedMe,
 } from "@/test";
 
-vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
-  Toaster: () => null,
-}));
+// sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
 
 const STATS = {
   totalDocuments: 12,

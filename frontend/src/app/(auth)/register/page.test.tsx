@@ -37,9 +37,7 @@ vi.mock("@/hooks/useAuth", () => ({
   useRegister: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
-vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
-}));
+// sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
 
 describe("RegisterPage — Suspense wrapper (#31)", () => {
   it("returns a Suspense element at its root (structural contract)", () => {

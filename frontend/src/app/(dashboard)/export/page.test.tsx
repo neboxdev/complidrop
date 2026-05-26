@@ -5,15 +5,12 @@
  * doesn't fan out to any /api/* endpoint until a button is clicked.
  * Smoke test: render-without-crash + the two from/to date inputs.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { screen } from "@testing-library/react";
 import ExportPage from "./page";
 import { renderWithProviders, authedMe } from "@/test";
 
-vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
-  Toaster: () => null,
-}));
+// sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
 
 describe("ExportPage — smoke (#36)", () => {
   it("renders without crashing and exposes a from/to date pair", () => {

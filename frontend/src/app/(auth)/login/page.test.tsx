@@ -15,7 +15,7 @@
  * call — fails the test. The harness's `auth: null` seed keeps useMe()
  * silent on the auth layout so the form is the only thing under test.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import LoginPage from "./page";
@@ -26,19 +26,15 @@ import {
   jsonOk,
   jsonError,
   authedMe,
+  toastSuccess,
+  toastError,
 } from "@/test";
 import { ME_KEY } from "@/hooks/useAuth";
 
 // Sonner emits portals — assert on the spy, not on the rendered toast,
-// because the rendered toast is async and stale across reflows.
-const { toastSuccess, toastError } = vi.hoisted(() => ({
-  toastSuccess: vi.fn(),
-  toastError: vi.fn(),
-}));
-vi.mock("sonner", () => ({
-  toast: { success: toastSuccess, error: toastError },
-  Toaster: () => null,
-}));
+// because the rendered toast is async and stale across reflows. The
+// sonner mock + spies are provided by the harness; afterEach in the
+// setup file resets all toast spies between tests (#74).
 
 function fillField(name: string, value: string) {
   const input = document.querySelector(`input[name="${name}"]`) as HTMLInputElement;
@@ -53,11 +49,6 @@ function submitForm() {
 }
 
 describe("LoginPage — validation (#35)", () => {
-  beforeEach(() => {
-    toastSuccess.mockClear();
-    toastError.mockClear();
-  });
-
   it("renders the form with email + password inputs and a sign-in button", () => {
     renderWithProviders(<LoginPage />, { auth: null });
     expect(
@@ -94,11 +85,6 @@ describe("LoginPage — validation (#35)", () => {
 });
 
 describe("LoginPage — happy path (#35)", () => {
-  beforeEach(() => {
-    toastSuccess.mockClear();
-    toastError.mockClear();
-  });
-
   it("on 200 routes to /dashboard, toasts welcome, and primes the Me cache", async () => {
     server.use(http.post(url("/api/auth/login"), () => jsonOk(authedMe)));
 
@@ -164,11 +150,6 @@ const errorCases: ReadonlyArray<{
 ];
 
 describe("LoginPage — server-side error copy (#35)", () => {
-  beforeEach(() => {
-    toastSuccess.mockClear();
-    toastError.mockClear();
-  });
-
   it.each(errorCases)(
     "$label surfaces the human message, NEVER the raw code or status",
     async ({ status, code, message }) => {
@@ -209,11 +190,6 @@ describe("LoginPage — server-side error copy (#35)", () => {
 });
 
 describe("LoginPage — loading state (#35)", () => {
-  beforeEach(() => {
-    toastSuccess.mockClear();
-    toastError.mockClear();
-  });
-
   it("disables the submit button + flips copy to Signing in… while the mutation is pending", async () => {
     // Hold the response so the test sees the isPending branch.
     let release: () => void = () => {};

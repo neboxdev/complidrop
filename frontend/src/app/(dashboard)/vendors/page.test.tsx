@@ -1,7 +1,7 @@
 /**
  * Vendors list page — state matrix + new-vendor mutation (#36).
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { http } from "msw";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import VendorsPage from "./page";
@@ -12,21 +12,12 @@ import {
   jsonOk,
   jsonError,
   authedMe,
+  toastSuccess,
+  toastError,
 } from "@/test";
 
-const { toastSuccess, toastError } = vi.hoisted(() => ({
-  toastSuccess: vi.fn(),
-  toastError: vi.fn(),
-}));
-vi.mock("sonner", () => ({
-  toast: { success: toastSuccess, error: toastError },
-  Toaster: () => null,
-}));
-
-beforeEach(() => {
-  toastSuccess.mockClear();
-  toastError.mockClear();
-});
+// sonner mock + spies are provided by the harness; afterEach in the
+// setup file resets all toast spies between tests (#74).
 
 const VENDORS = [
   {

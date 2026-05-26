@@ -5,7 +5,7 @@
  * rules. Smoke: render-without-crash + populated state surfaces a
  * template by name.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { http } from "msw";
 import { screen, waitFor } from "@testing-library/react";
 import RulesPage from "./page";
@@ -17,10 +17,7 @@ import {
   authedMe,
 } from "@/test";
 
-vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
-  Toaster: () => null,
-}));
+// sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
 
 describe("RulesPage — smoke (#36)", () => {
   it("renders the templates list when the API returns at least one", async () => {
