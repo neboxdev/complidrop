@@ -133,6 +133,27 @@ builder.Services.AddRateLimiter(opts =>
 {
     opts.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 
+    // Write an explicit ApiEnvelope on a rate-limit rejection so the
+    // response is distinguishable from a quota-exceeded 429 (which the
+    // endpoint itself returns with `vendor.portal_quota_exceeded` and
+    // a `Upload quota reached for this link.` message). Without this
+    // hook ASP.NET emits an empty 429 body — clients have to guess by
+    // body-shape whether to retry-next-hour (transient rate limit) or
+    // never-retry (link permanently exhausted). See #45 and ADR 0004.
+    //
+    // `rate_limit.exceeded` is the only code emitted here; the
+    // portal-token vs portal-ip distinction is internal accounting and
+    // not actionable for the client (both reset hourly).
+    opts.OnRejected = async (ctx, ct) =>
+    {
+        ctx.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        ctx.HttpContext.Response.ContentType = "application/json";
+        var envelope = """
+            {"data":null,"error":{"code":"rate_limit.exceeded","message":"Too many requests. Please try again later."}}
+            """;
+        await ctx.HttpContext.Response.WriteAsync(envelope, ct);
+    };
+
     opts.AddPolicy("auth-strict", ctx => RateLimitPartition.GetFixedWindowLimiter(
         ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions { PermitLimit = 5, Window = TimeSpan.FromMinutes(1) }));
