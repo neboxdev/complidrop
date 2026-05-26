@@ -96,8 +96,16 @@ Rejected because:
 - For the comparison side, this would require evaluating "now" twice (once in .NET, once in PG) and they would not agree to the microsecond. The 5-minute window is robust to that, but the asymmetry adds nothing.
 - For the write side this is fine and is what EF Core LINQ does by default. The rule above explicitly allows it. We just prefer `now()` for raw SQL where the worker is already executing inside Postgres and a parameter round-trip is unnecessary.
 
+## Enforcement (addendum, [#64](https://github.com/neboxdev/complidrop/issues/64))
+
+The rule is mechanically enforced by [`api/CompliDrop.Api.Tests/Adr0009EnforcementTests.cs`](../../api/CompliDrop.Api.Tests/Adr0009EnforcementTests.cs), an xUnit test that fails the build whenever a production-code `.cs` file under `api/CompliDrop.Api/` introduces `AT TIME ZONE` (case-insensitive) on a non-comment line outside the explicit `ClauseThreeAllowList` in the test. Today the only allow-list entry is `Migrations/20260525101534_BackfillReminderLogSendDateToOrgLocal.cs` — the clause-3 legitimate use that derives a `date` from a `timestamptz` for the ADR 0007 org-local SendDate backfill.
+
+The test runs under the standard `dotnet test` invocation — no separate CI step. A new clause-3 site adds an entry to `ClauseThreeAllowList` with the clause-reason; everything else is a build break.
+
+Pattern follows ADR 0006's precedent: documentation conventions worth backing with mechanical enforcement get a companion CI gate (the rolling bug-fix epic's `bugfix-epic-sync.yml` workflow is the analogue at the GitHub-actions layer).
+
 ## References
 
-- Tickets: [#26](https://github.com/neboxdev/complidrop/issues/26) (the fix that prompted this ADR), [#60](https://github.com/neboxdev/complidrop/issues/60) (initial project-wide audit confirming every other raw-SQL path is clean or clause-3 legitimate; codifies the rule in `CLAUDE.md` Rules of engagement)
+- Tickets: [#26](https://github.com/neboxdev/complidrop/issues/26) (the fix that prompted this ADR), [#60](https://github.com/neboxdev/complidrop/issues/60) (initial project-wide audit confirming every other raw-SQL path is clean or clause-3 legitimate; codifies the rule in `CLAUDE.md` Rules of engagement), [#64](https://github.com/neboxdev/complidrop/issues/64) (the mechanical CI gate enforcing this ADR)
 - ADRs: [0007](0007-reminder-log-send-date-is-org-local.md) (sibling — calendar-day extraction via `AT TIME ZONE org."TimeZone"`, the legitimate use covered by clause 3), [0008](0008-reminder-multi-instance-coordination-via-advisory-lock.md) (other raw-SQL path, no timestamp surface, audited clean)
 - External: [Postgres docs — Date/Time Types §8.5.1.3](https://www.postgresql.org/docs/current/datatype-datetime.html#DATATYPE-TIMEZONES) on session TimeZone semantics
