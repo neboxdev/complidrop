@@ -23,7 +23,7 @@
  * `src/app/(auth)/login/page.test.tsx`. See PR body for the trade-off.
  */
 import { test, expect } from "@playwright/test";
-import { mockApi, jsonOk } from "../support/mock-api";
+import { mockApi, jsonOk, waitForApi } from "../support/mock-api";
 import {
   authedMe,
   authedMeRoute,
@@ -72,11 +72,9 @@ test.describe("Flow 1 — sign-up → dashboard (#39)", () => {
     // Arm the register POST listener BEFORE the click so the test
     // pins "the form actually submitted" rather than "the SPA happened
     // to navigate."
-    const registerResponse = page.waitForResponse(
-      (res) =>
-        res.url().includes("/api/auth/register") && res.status() === 200,
-      { timeout: 15_000 },
-    );
+    const registerResponse = waitForApi(page, "POST", "/api/auth/register", {
+      status: 200,
+    });
 
     await page.locator('input[name="fullName"]').fill("Smoke Owner");
     await page.locator('input[name="companyName"]').fill("Smoke Test Inc");

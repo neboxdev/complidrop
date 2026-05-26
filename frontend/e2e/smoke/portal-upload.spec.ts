@@ -15,7 +15,7 @@
  * much longer; the synthetic length only affects test data).
  */
 import { test, expect } from "@playwright/test";
-import { mockApi, jsonOk } from "../support/mock-api";
+import { mockApi, jsonOk, waitForApi } from "../support/mock-api";
 import { makeFakePdf, portalInfo } from "../support/fixtures";
 
 const TOKEN = "smoke-tok-12";
@@ -43,10 +43,9 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
 
     // Arm the portal-info wait BEFORE goto — explicit timing surfaces
     // a mock-routing problem as a clear timeout on this line.
-    const portalInfoResponse = page.waitForResponse(
-      (res) => res.url().includes(`/api/portal/${TOKEN}`) && res.status() === 200,
-      { timeout: 15_000 },
-    );
+    const portalInfoResponse = waitForApi(page, "GET", "/api/portal/:token", {
+      status: 200,
+    });
 
     await page.goto(`/portal/${TOKEN}`);
     await portalInfoResponse;
@@ -60,11 +59,11 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
 
     // Arm the upload POST wait BEFORE setInputFiles so the response
     // is observable before assertions.
-    const uploadResponse = page.waitForResponse(
-      (res) =>
-        res.url().includes(`/api/portal/${TOKEN}/upload`) &&
-        res.status() === 200,
-      { timeout: 15_000 },
+    const uploadResponse = waitForApi(
+      page,
+      "POST",
+      "/api/portal/:token/upload",
+      { status: 200 },
     );
 
     await page.locator('input[type="file"]').setInputFiles(makeFakePdf("vendor-coi.pdf"));

@@ -22,7 +22,7 @@
  * actually fired.
  */
 import { test, expect } from "@playwright/test";
-import { mockApi, jsonOk } from "../support/mock-api";
+import { mockApi, jsonOk, waitForApi } from "../support/mock-api";
 import {
   authedMeRoute,
   makeDocumentDetail,
@@ -152,11 +152,9 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
 
     // Arm the upload-response wait BEFORE setInputFiles so the test
     // pins the upload actually fired (sibling to flow 2's pattern).
-    const uploadResponse = page.waitForResponse(
-      (res) =>
-        res.url().includes("/api/documents/upload") && res.status() === 200,
-      { timeout: 15_000 },
-    );
+    const uploadResponse = waitForApi(page, "POST", "/api/documents/upload", {
+      status: 200,
+    });
 
     await page
       .locator('input[type="file"]')

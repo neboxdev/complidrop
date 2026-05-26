@@ -95,11 +95,57 @@ export function jsonError(code: string, message: string, status = 400) {
   };
 }
 
-// EXACT segment-count path matcher with `:param` wildcards. Avoids
-// pulling in a routing library for two test segments. Rejects empty
-// segments in the template so a typo'd `/api//portal` is caught at
-// registration via the explicit `EMPTY_SEGMENT` throw.
-function pathMatches(template: string, actual: string): boolean {
+/**
+ * Wait for an API response matching the given method + path template.
+ *
+ * Uses the same `:param` path-template grammar as the `mockApi` route
+ * table, so the route declaration and its wait read identically for
+ * the same endpoint. Returns the Playwright `Response` so the caller
+ * can `await` it and inspect status / body if needed.
+ *
+ * Arm BEFORE the user action that triggers the request (click,
+ * setInputFiles, etc.), otherwise the listener may miss the response:
+ *
+ *     const response = waitForApi(page, "POST", "/api/portal/:token/upload");
+ *     await page.locator('input[type="file"]').setInputFiles(file);
+ *     await response;
+ *
+ * `status`: defaults to "any 2xx-5xx" — pass an exact number (e.g.
+ *   200, 429) to pin the success or error path.
+ * `timeout`: defaults to 15s, matches the project's existing inline
+ *   `waitForResponse` calls.
+ */
+export function waitForApi(
+  page: Page,
+  method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH",
+  path: string,
+  opts: { status?: number; timeout?: number } = {},
+): ReturnType<Page["waitForResponse"]> {
+  const { status, timeout = 15_000 } = opts;
+  const upperMethod = method.toUpperCase();
+  return page.waitForResponse(
+    (res) => {
+      if (res.request().method().toUpperCase() !== upperMethod) return false;
+      const actualPath = new URL(res.url()).pathname;
+      if (!pathMatches(path, actualPath)) return false;
+      if (status !== undefined && res.status() !== status) return false;
+      return true;
+    },
+    { timeout },
+  );
+}
+
+/**
+ * EXACT segment-count path matcher with `:param` wildcards. Avoids
+ * pulling in a routing library for two test segments. Rejects empty
+ * segments in the template so a typo'd `/api//portal` is caught at
+ * registration via the explicit empty-segment throw.
+ *
+ * Exported so `waitForApi` can use the same matcher the `mockApi`
+ * route table uses — the route declaration and its wait must agree on
+ * what a `:token` matches.
+ */
+export function pathMatches(template: string, actual: string): boolean {
   if (template.includes("//")) {
     throw new Error(
       `mockApi: template "${template}" contains an empty segment ('//') — likely a typo`,
