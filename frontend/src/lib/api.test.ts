@@ -179,13 +179,34 @@ describe("api.* — credentials: include on every verb (#35)", () => {
     vi.restoreAllMocks();
   });
 
-  it.each(["get", "post", "put", "delete"] as const)(
-    "api.%s sends credentials: 'include' so cd_session / cd_refresh cookies attach",
+  it.each(["get", "delete"] as const)(
+    "api.%s (no body) sends credentials: 'include' so cd_session / cd_refresh cookies attach",
     async (verb) => {
       const callable = api[verb] as (path: string) => Promise<unknown>;
       await callable("/api/auth/me");
       expect(inits).toHaveLength(1);
       expect(inits[0].credentials).toBe("include");
+    },
+  );
+
+  // Body-bearing verbs route through a separate branch in request() that
+  // sets Content-Type: application/json. Exercise it explicitly — testing
+  // only the no-body path would miss a regression that dropped credentials
+  // OR mangled the Content-Type ONLY when a body is present.
+  it.each([
+    ["post", { name: "Acme Inc" }],
+    ["put", { name: "Updated" }],
+  ] as const)(
+    "api.%s (with JSON body) sends credentials: 'include' AND Content-Type: application/json",
+    async (verb, body) => {
+      const callable = api[verb] as (path: string, body?: unknown) => Promise<unknown>;
+      await callable("/api/vendors", body);
+      expect(inits).toHaveLength(1);
+      expect(inits[0].credentials).toBe("include");
+      const headers = new Headers(inits[0].headers ?? {});
+      expect(headers.get("Content-Type")).toBe("application/json");
+      // Body serialized to JSON, not posted raw.
+      expect(inits[0].body).toBe(JSON.stringify(body));
     },
   );
 

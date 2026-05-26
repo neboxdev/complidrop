@@ -23,6 +23,7 @@ import {
   jsonError,
   authedMe,
 } from "@/test";
+import { ME_KEY } from "@/hooks/useAuth";
 
 const { toastSuccess, toastError } = vi.hoisted(() => ({
   toastSuccess: vi.fn(),
@@ -148,21 +149,57 @@ describe("RegisterForm — happy path (#35)", () => {
       expect(toastSuccess).toHaveBeenCalledWith("Account created. Welcome!"),
     );
     expect(pushSpy).toHaveBeenCalledWith("/dashboard");
-    expect(queryClient.getQueryData(["auth", "me"])).toMatchObject({
+    expect(queryClient.getQueryData([...ME_KEY])).toMatchObject({
       email: authedMe.email,
     });
 
-    // Body contract guard: form forwards every field the backend accepts
-    // INCLUDING the IANA timezone, but deliberately NOT `plan` (#31
-    // Non-goals — billing is a separate ticket, the backend DTO doesn't
-    // accept it).
+    // Body contract: form forwards every field the backend RegisterRequest
+    // accepts (fullName + companyName + email + password + timeZone). The
+    // IANA timezone is derived client-side via Intl; pin the SHAPE not the
+    // value (different CI hosts report different default zones).
     expect(receivedBody).toMatchObject({
       fullName: "Owner Name",
       companyName: "Acme Inc",
       email: "owner@acme.test",
       password: "verystrongpass1",
     });
-    expect(receivedBody).toHaveProperty("timeZone");
+    expect(receivedBody?.timeZone).toMatch(/^(UTC|.+\/.+)$/);
+  });
+
+  // Pins the #31 contract from the OTHER direction: register-form.test.tsx
+  // mocks useRegister and asserts the form NEVER calls it with `plan`; this
+  // test exercises the actual wire — with ?plan=annual ACTUALLY set, the
+  // form must (a) reflect it in the UI and (b) NOT forward it to the
+  // backend. Without (a) the (b) assertion would be a tautology (nothing
+  // could forward what wasn't read).
+  it("with ?plan=annual: reflects it in UI but does NOT forward plan to /api/auth/register", async () => {
+    let receivedBody: Record<string, unknown> | undefined;
+    server.use(
+      http.post(url("/api/auth/register"), async ({ request }) => {
+        receivedBody = (await request.json()) as Record<string, unknown>;
+        return jsonOk(authedMe);
+      }),
+    );
+
+    renderWithProviders(<RegisterForm />, {
+      auth: null,
+      router: { push: vi.fn() },
+      searchParams: { plan: "annual" },
+    });
+
+    // UI side: heading + upsell banner reflect annual.
+    expect(
+      screen.getByRole("heading", { name: /annual account/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/you selected the annual plan/i)).toBeInTheDocument();
+
+    fillFullForm();
+    submitForm();
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+
+    // Wire side: plan absent from the POST body, even though useSearchParams
+    // saw it. The backend DTO doesn't accept it (#31 Non-goals — billing
+    // remains a separate ticket).
     expect(receivedBody).not.toHaveProperty("plan");
   });
 });
@@ -226,8 +263,14 @@ describe("RegisterForm — server-side error copy (#35)", () => {
         expect(toastError).toHaveBeenCalledWith(message),
       );
       const toastText = (toastError.mock.calls[0][0] ?? "") as string;
-      // No dot-namespaced codes ever reach the toast.
+      // Jargon-free guard class: no dot-namespaced (auth.x, validation.y),
+      // no SCREAMING_SNAKE error codes, no bare 3-digit status string.
+      // The toHaveBeenCalledWith(message) above already pins the EXACT
+      // copy; these regex bands catch the broader class of regression
+      // where a future code (not in this table) leaked through.
       expect(toastText).not.toContain(code);
+      expect(toastText).not.toMatch(/(?:[a-z]+\.)+[a-z_]+/i);
+      expect(toastText).not.toMatch(/^[A-Z][A-Z_]{2,}$/);
       expect(toastText).not.toMatch(/^\d{3}$/);
       expect(toastSuccess).not.toHaveBeenCalled();
       expect(pushSpy).not.toHaveBeenCalled();
@@ -255,12 +298,20 @@ describe("RegisterForm — loading state (#35)", () => {
     fillFullForm();
     submitForm();
 
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: /creating account/i }),
-      ).toBeDisabled(),
-    );
-
-    release();
+    // try/finally so release() runs even if the disabled-button assertion
+    // throws — otherwise the MSW handler stays awaiting `settled` forever
+    // and the leaked closure is held across the next test's cleanup.
+    try {
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: /creating account/i }),
+        ).toBeDisabled(),
+      );
+    } finally {
+      release();
+    }
+    // Await observable settlement so the mutation's onSuccess can't fire
+    // mid-afterEach against an unmounted tree.
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
   });
 });

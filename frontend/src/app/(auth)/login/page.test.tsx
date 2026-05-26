@@ -27,6 +27,7 @@ import {
   jsonError,
   authedMe,
 } from "@/test";
+import { ME_KEY } from "@/hooks/useAuth";
 
 // Sonner emits portals — assert on the spy, not on the rendered toast,
 // because the rendered toast is async and stale across reflows.
@@ -116,7 +117,9 @@ describe("LoginPage — happy path (#35)", () => {
     );
     expect(pushSpy).toHaveBeenCalledWith("/dashboard");
     // useLogin's onSuccess writes the Me into both auth-keys (see useAuth.ts).
-    expect(queryClient.getQueryData(["auth", "me"])).toMatchObject({
+    // Use the exported ME_KEY so a rename in useAuth.ts fails this test
+    // instead of silently matching `undefined` against the literal.
+    expect(queryClient.getQueryData([...ME_KEY])).toMatchObject({
       email: authedMe.email,
     });
   });
@@ -188,13 +191,16 @@ describe("LoginPage — server-side error copy (#35)", () => {
       await waitFor(() =>
         expect(toastError).toHaveBeenCalledWith(message),
       );
-      // The smoking gun: a regression that toasted err.code instead of
-      // err.message would fail HERE. Every code in this suite is
-      // dot-namespaced (auth.*, validation.*, server.*); asserting the
-      // toast text has no period makes the contract loud.
+      // Jargon-free guard class: the toHaveBeenCalledWith(message) above
+      // already pins the EXACT copy for THIS row. These regex bands catch
+      // the broader class of regression — a future code (not in this
+      // table) leaking through as `auth.x` (dot-namespaced),
+      // `E_AUTH_LOCKED` (SCREAMING_SNAKE), or "423" (bare status).
       const toastText = (toastError.mock.calls[0][0] ?? "") as string;
       expect(toastText).not.toContain(code);
-      expect(toastText).not.toMatch(/^\d{3}$/); // not bare status
+      expect(toastText).not.toMatch(/(?:[a-z]+\.)+[a-z_]+/i);
+      expect(toastText).not.toMatch(/^[A-Z][A-Z_]{2,}$/);
+      expect(toastText).not.toMatch(/^\d{3}$/);
       // The success branch must NOT have fired on any error.
       expect(toastSuccess).not.toHaveBeenCalled();
       expect(pushSpy).not.toHaveBeenCalled();
@@ -224,12 +230,19 @@ describe("LoginPage — loading state (#35)", () => {
     fillField("password", "verystrongpass1");
     submitForm();
 
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: /signing in/i }),
-      ).toBeDisabled(),
-    );
-
-    release();
+    // try/finally so release() runs even if the disabled-button assertion
+    // throws — otherwise the MSW handler stays awaiting `settled` forever.
+    try {
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: /signing in/i }),
+        ).toBeDisabled(),
+      );
+    } finally {
+      release();
+    }
+    // Await observable settlement so the mutation's onSuccess can't fire
+    // mid-afterEach against an unmounted tree.
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
   });
 });
