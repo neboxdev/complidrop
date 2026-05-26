@@ -24,6 +24,7 @@ import {
   authedMe,
   documentsAllStatuses,
   makeDocumentsResponse,
+  sequencedJsonOk,
 } from "@/test";
 
 afterEach(() => {
@@ -198,36 +199,36 @@ describe("DocumentsPage — state matrix (#36)", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       let calls = 0;
+      const seq = sequencedJsonOk(
+        makeDocumentsResponse({
+          items: [
+            {
+              ...documentsAllStatuses[1], // Processing row
+              complianceStatus: "NonCompliant",
+              // Override the fixture's "Processing Vendor" cell so
+              // `getByText(/^Processing$/)` matches only the extraction
+              // badge, not the vendor-name cell.
+              vendorName: "Acme Sub",
+            },
+          ],
+          total: 1,
+        }),
+        makeDocumentsResponse({
+          items: [
+            {
+              ...documentsAllStatuses[2], // Completed row
+              // Same vendor-name override so the assertion matches the
+              // extraction badge unambiguously.
+              vendorName: "Acme Sub",
+            },
+          ],
+          total: 1,
+        }),
+      );
       server.use(
         http.get(url("/api/documents"), () => {
           calls++;
-          return jsonOk(
-            calls === 1
-              ? makeDocumentsResponse({
-                  items: [
-                    {
-                      ...documentsAllStatuses[1], // Processing row
-                      complianceStatus: "NonCompliant",
-                      // Override the fixture's "Processing Vendor" cell
-                      // so `getByText(/^Processing$/)` matches only the
-                      // extraction badge, not the vendor-name cell.
-                      vendorName: "Acme Sub",
-                    },
-                  ],
-                  total: 1,
-                })
-              : makeDocumentsResponse({
-                  items: [
-                    {
-                      ...documentsAllStatuses[2], // Completed row
-                      // Same vendor-name override so the assertion
-                      // matches the extraction badge unambiguously.
-                      vendorName: "Acme Sub",
-                    },
-                  ],
-                  total: 1,
-                }),
-          );
+          return seq();
         }),
       );
 

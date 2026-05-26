@@ -13,6 +13,7 @@ Reusable test scaffolding for the Next.js frontend. Pairs with [ADR 0003](../../
 | `fixtures.ts`          | Named typed fixtures — `authedMe`, `documentsAllStatuses{Response}`, `portalInfo`, `expiredPortalLinkHandler`, `expiredLink404`. |
 | `navigation.ts`        | Mutable container behind the global `vi.mock("next/navigation", ...)`.                 |
 | `sonner.ts`            | Mutable `toast.*` spies behind the global `vi.mock("sonner", ...)`. Import `toastSuccess`/`toastError` from `@/test` and assert on them.   |
+| `polling.ts`           | `sequencedJsonOk(...responses)` returns an MSW handler that yields responses in order, then repeats the last (terminal state). |
 | `example.test.tsx`     | Template test — **copy this as the starting point for new suites.**                    |
 
 `src/test/index.ts` re-exports the common surface, so most test files only need:
@@ -83,6 +84,37 @@ Concrete case: `LoginPage` mounts `useLogin` (a mutation) but NOT `useMe` (a que
 When asserting on cache state, use the **exported** `ME_KEY` / `ME_PROBE_KEY` constants from `@/hooks/useAuth`, not the literal `["auth", "me"]` — a rename in `useAuth.ts` then fails the assertion loudly instead of silently matching `undefined` against the stale literal.
 
 > **Pinning the no-fetch contract.** When the test's whole point is "no fetch fires," install an MSW handler that THROWS for the URL you don't expect to hit (see the anonymous case in `example.test.tsx`). The default 401 handler would silently satisfy a regression where seeding stopped working — pinning the contract with a throwing override turns a silent false-green into a loud failure.
+
+## Polling tests
+
+When a hook polls via TanStack Query's `refetchInterval`, tests sequence MSW responses to drive the state machine. `sequencedJsonOk` lifts the mechanical bit:
+
+```ts
+import { sequencedJsonOk } from "@/test";
+
+let calls = 0;
+const seq = sequencedJsonOk(
+  makeDocumentDetail({ extractionStatus: "Pending" }),
+  makeDocumentDetail({ extractionStatus: "Processing" }),
+  makeDocumentDetail({ extractionStatus: "Completed" }),
+);
+server.use(
+  http.get(url("/api/documents/:id"), () => {
+    calls++;
+    return seq();
+  }),
+);
+// ... drive timers ...
+expect(calls).toBeGreaterThanOrEqual(3);
+```
+
+The handler clamps to the LAST response after the list is exhausted — matches the "terminal state stays terminal" contract of `refetchInterval` predicates that return `false` once the response reaches a terminal status.
+
+**Gotchas** (the helper does NOT solve these for you):
+
+- `vi.useFakeTimers({ shouldAdvanceTime: true })` is REQUIRED for RTL's `waitFor` to work — without it the `waitFor` polling loop blocks on the fake-timer queue.
+- Fake timers must be activated BEFORE the component mounts so the `refetchInterval` is scheduled on the fake queue. Activate them in a `beforeEach`, not inside the test body.
+- For call-count assertions, keep a `let calls = 0; calls++` outside the handler — `sequencedJsonOk` doesn't expose its internal counter on purpose (keeps the signature simple).
 
 ## Toasts
 

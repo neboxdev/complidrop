@@ -25,6 +25,7 @@ import {
   jsonError,
   authedMe,
   makeDocumentDetail,
+  sequencedJsonOk,
 } from "@/test";
 
 // sonner mock is provided by the harness (vitest.setup.ts +
@@ -189,21 +190,21 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
     // returns 3000 while extraction is Pending/Processing, false on
     // terminal states.
     let calls = 0;
+    const seq = sequencedJsonOk(
+      makeDocumentDetail({
+        extractionStatus: "Pending",
+        complianceStatus: "NonCompliant",
+      }),
+      makeDocumentDetail({
+        extractionStatus: "Completed",
+        extractionConfidence: 0.91,
+        complianceStatus: "Compliant",
+      }),
+    );
     server.use(
       http.get(url("/api/documents/:id"), () => {
         calls++;
-        return jsonOk(
-          calls === 1
-            ? makeDocumentDetail({
-                extractionStatus: "Pending",
-                complianceStatus: "NonCompliant",
-              })
-            : makeDocumentDetail({
-                extractionStatus: "Completed",
-                extractionConfidence: 0.91,
-                complianceStatus: "Compliant",
-              }),
-        );
+        return seq();
       }),
     );
 
@@ -249,21 +250,21 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
 
   it("Processing → Failed: UI advances to the failed badge + processingError card", async () => {
     let calls = 0;
+    const seq = sequencedJsonOk(
+      makeDocumentDetail({
+        extractionStatus: "Processing",
+        complianceStatus: "NonCompliant",
+      }),
+      makeDocumentDetail({
+        extractionStatus: "Failed",
+        complianceStatus: "NonCompliant",
+        processingError: "OCR engine timed out after 30 seconds.",
+      }),
+    );
     server.use(
       http.get(url("/api/documents/:id"), () => {
         calls++;
-        return jsonOk(
-          calls === 1
-            ? makeDocumentDetail({
-                extractionStatus: "Processing",
-                complianceStatus: "NonCompliant",
-              })
-            : makeDocumentDetail({
-                extractionStatus: "Failed",
-                complianceStatus: "NonCompliant",
-                processingError: "OCR engine timed out after 30 seconds.",
-              }),
-        );
+        return seq();
       }),
     );
 
