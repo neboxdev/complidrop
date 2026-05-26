@@ -105,12 +105,15 @@ export default defineConfig({
     },
   },
 
-  // CI reporter prints a summary + writes HTML/JSON; local reporter
-  // is the default (list).
+  // CI reporter prints a summary + writes HTML + JSON. The HTML
+  // reporter's outputFolder must NOT live inside `outputDir`
+  // ("./test-results") — Playwright errors on the clash. Use the
+  // Playwright default location instead. scan-secrets walks BOTH
+  // directories so leaks in either are caught.
   reporter: IS_CI
     ? [
         ["list"],
-        ["html", { open: "never", outputFolder: "./test-results/html" }],
+        ["html", { open: "never", outputFolder: "./playwright-report" }],
         ["json", { outputFile: "./test-results/results.json" }],
       ]
     : "list",

@@ -10,9 +10,9 @@
     "test": "vitest run",
     "test:e2e": "playwright test",
     "test:e2e:ci": "playwright test",
-    "test:e2e:scan": "node e2e/scripts/scan-secrets.mjs test-results",
+    "test:e2e:scan": "node e2e/scripts/scan-secrets.mjs test-results && node e2e/scripts/scan-secrets.mjs playwright-report",
     "test:e2e:lint-imports": "node e2e/scripts/lint-imports.mjs",
-    "posttest:e2e": "node e2e/scripts/scan-secrets.mjs test-results"
+    "posttest:e2e": "node e2e/scripts/scan-secrets.mjs test-results && node e2e/scripts/scan-secrets.mjs playwright-report"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",

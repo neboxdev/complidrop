@@ -41,7 +41,9 @@ test.describe("E2E harness sanity (#38)", () => {
     // Logged-out CTA only shows when useMe resolves to null — proves
     // the mocked response flowed all the way through the SPA's auth
     // state into the UI, not just the static SSR shell.
-    await expect(page.getByRole("link", { name: /sign in/i })).toBeVisible();
+    // Landing page uses "Log in" copy for the logged-out CTA (see
+    // src/app/page.tsx); only renders when useMe resolves to null.
+    await expect(page.getByRole("link", { name: /log in/i }).first()).toBeVisible();
   });
 
   test("unmocked /api/* requests return the harness's 'no mock registered' error (404)", async ({ page }) => {
@@ -130,7 +132,7 @@ test.describe("E2E harness sanity (#38)", () => {
     // (anonymous), so the logged-out CTAs still render — proving the
     // safety net catches a forgotten mock at the network layer.
     await page.goto("/");
-    await expect(page.getByRole("link", { name: /sign in/i })).toBeVisible({
+    await expect(page.getByRole("link", { name: /log in/i }).first()).toBeVisible({
       timeout: 15_000,
     });
   });
