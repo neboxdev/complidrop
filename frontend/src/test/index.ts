@@ -42,3 +42,4 @@ export {
 } from "./sonner";
 export { sequencedJsonOk } from "./polling";
 export { dropFilesIn, makeFile } from "./dropzone";
+export { assertNotInDom } from "./security";

@@ -15,6 +15,7 @@ Reusable test scaffolding for the Next.js frontend. Pairs with [ADR 0003](../../
 | `sonner.ts`            | Mutable `toast.*` spies behind the global `vi.mock("sonner", ...)`. Import `toastSuccess`/`toastError` from `@/test` and assert on them.   |
 | `polling.ts`           | `sequencedJsonOk(...responses)` returns an MSW handler that yields responses in order, then repeats the last (terminal state). |
 | `dropzone.ts`          | `dropFilesIn(container, files)` + `makeFile(name, type?, size?)` — container-scoped helpers for driving `react-dropzone` in tests. |
+| `security.ts`          | `assertNotInDom(value, root?)` — assert a sensitive value is NOT rendered into the DOM (scans both `textContent` and `innerHTML`). |
 | `example.test.tsx`     | Template test — **copy this as the starting point for new suites.**                    |
 
 `src/test/index.ts` re-exports the common surface, so most test files only need:
@@ -189,6 +190,22 @@ Only if every test would otherwise have to redeclare it. The bar is high: a defa
 - `server.listen({ onUnhandledRequest: "error" })` so missed handlers fail loudly.
 - After every test: RTL cleanup, `server.resetHandlers()`, `resetNavigation()` (rebuilds every spy in `navState`, including `notFound` / `redirect`).
 - After the suite: `server.close()`.
+
+## Security assertions
+
+For tests verifying that a session / portal / credential value is NOT rendered into the DOM, use `assertNotInDom`:
+
+```ts
+import { assertNotInDom } from "@/test";
+
+const sensitiveToken = "very-secret-vendor-token-XYZ";
+renderWithProviders(<PortalPage />, { params: { token: sensitiveToken } });
+await waitFor(() => expect(screen.getByRole("heading", { name: /hi /i })).toBeInTheDocument());
+
+assertNotInDom(sensitiveToken);
+```
+
+Scans BOTH `root.textContent` (visible copy) AND `root.innerHTML` (attribute values, hidden nodes). Skipping either scan leaves a hole — a leak via `aria-label`, `data-*`, `title`, or a hidden `<input>` value would slip past a `textContent`-only check. Defaults to `document.body`; pass an explicit `root` to narrow further. `<head>` injection paths are out of scope for component tests — chase those in the Playwright E2E layer.
 
 ## When NOT to use this harness
 

@@ -35,6 +35,7 @@ import {
   portalInfo,
   dropFilesIn,
   makeFile,
+  assertNotInDom,
 } from "@/test";
 
 // Sonner not used by the portal page (it has its own inline error UI),
@@ -481,15 +482,11 @@ describe("PortalPage — security: no token leakage into DOM (#37)", () => {
       ).toBeInTheDocument(),
     );
 
-    // The token MUST stay in the URL/request layer. Should not be
-    // rendered as visible copy, an aria-label, a debug ID, or a
-    // tooltip. Scan both textContent and serialized innerHTML so
-    // attribute values are also covered. Scope is intentionally
-    // `document.body` — `<head>` injection paths (analytics meta tags
-    // etc.) are out of scope for this component-level assertion.
-    const tree = document.body;
-    expect(tree.textContent ?? "").not.toContain(sensitiveToken);
-    expect(tree.innerHTML).not.toContain(sensitiveToken);
+    // The token MUST stay in the URL/request layer. Helper scans both
+    // document.body.textContent AND innerHTML so leaks through visible
+    // copy OR attribute values (aria-label, data-*, title, etc.) are
+    // caught. See src/test/security.ts (#85).
+    assertNotInDom(sensitiveToken);
   });
 
   it("error path: the URL :token is also NOT echoed inside the bad-link UI", async () => {
@@ -512,9 +509,9 @@ describe("PortalPage — security: no token leakage into DOM (#37)", () => {
       ).toBeInTheDocument(),
     );
 
-    const tree = document.body;
-    expect(tree.textContent ?? "").not.toContain(sensitiveToken);
-    expect(tree.innerHTML).not.toContain(sensitiveToken);
+    // Same contract on the error path — the token must not echo into
+    // the bad-link UI either. (#85)
+    assertNotInDom(sensitiveToken);
   });
 });
 
