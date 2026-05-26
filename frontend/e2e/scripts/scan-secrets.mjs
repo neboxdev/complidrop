@@ -46,13 +46,27 @@ if (!existsSync(root)) {
  * key string in the rate-limit code (Program.cs) is server-internal and
  * never crosses the wire. The pattern below catches the URL form.
  */
+// Patterns require an ACTUAL value after the cookie name / scheme
+// keyword — the bare prefix `cd_session=` appears in this file's docs,
+// the README, and CLAUDE.md (legitimately, as documentation of what
+// the scanner catches). A real leak looks like
+// `cd_session=eyJ0eXAi...` with 8+ characters of base64/JWT value
+// trailing; documentation mentions look like `cd_session=` followed
+// by a backtick, a slash, a quote, or end-of-line. The value-shape
+// filter cleanly distinguishes them.
 const PATTERNS = [
-  { name: "cd_session cookie value", re: /cd_session=/i },
-  { name: "cd_refresh cookie value", re: /cd_refresh=/i },
-  // Any value-bearing Authorization header — Bearer, Basic, Token, or
-  // bare JWT. The project doesn't use Authorization anywhere in
-  // production, so the pattern is broad on purpose.
-  { name: "Authorization header", re: /\bauthorization:\s*\S/i },
+  // Cookie value: 8+ characters of cookie-value alphabet (RFC 6265).
+  // Base64/JWT tokens include `=` `+` `/` `.` `_` `-` `~`.
+  { name: "cd_session cookie value", re: /cd_session=[A-Za-z0-9._~+/=-]{8,}/i },
+  { name: "cd_refresh cookie value", re: /cd_refresh=[A-Za-z0-9._~+/=-]{8,}/i },
+  // Authorization with a scheme keyword AND a 16+ char token value.
+  // The project doesn't use Authorization at all in production so any
+  // genuine occurrence is suspicious; the value-length filter avoids
+  // matching documentation mentions like `Authorization: Bearer ...`.
+  {
+    name: "Authorization header with token",
+    re: /\bauthorization:\s*(bearer|basic|token|jwt)\s+[A-Za-z0-9._-]{16,}/i,
+  },
   // Vendor-portal token in URL path. Tokens are opaque ids ≥16 chars
   // of [A-Za-z0-9_-]; this min-length filter excludes the routes
   // themselves (`/api/portal/...` with no token following) and the
