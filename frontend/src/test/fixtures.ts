@@ -133,12 +133,32 @@ export const documentsAllStatuses: ReadonlyArray<Readonly<DocumentListItem>> = [
   },
 ];
 
-export const documentsAllStatusesResponse: Readonly<DocumentListResponse> = {
-  items: documentsAllStatuses as DocumentListItem[],
-  total: documentsAllStatuses.length,
-  page: 1,
-  pageSize: 50,
-};
+/**
+ * Build a fresh `DocumentListResponse`, deep-copying every entry so the
+ * caller gets a value totally disconnected from the shared array. Override
+ * any top-level field (e.g. `total`, `page`) or pass a fresh `items` list
+ * built from `makeDocument(...)` for variants the canonical set doesn't
+ * carry.
+ *
+ * Prefer this factory in tests that want isolation. The exported
+ * `documentsAllStatusesResponse` const is a stable snapshot for read-only
+ * uses (MSW handlers that `JSON.stringify` the value, deep-equality
+ * assertions).
+ */
+export function makeDocumentsResponse(
+  overrides: Partial<DocumentListResponse> = {},
+): DocumentListResponse {
+  return {
+    items: documentsAllStatuses.map((d) => ({ ...d })),
+    total: documentsAllStatuses.length,
+    page: 1,
+    pageSize: 50,
+    ...overrides,
+  };
+}
+
+export const documentsAllStatusesResponse: Readonly<DocumentListResponse> =
+  makeDocumentsResponse();
 
 /**
  * Build a single document with whatever fields a test wants to vary. Use
@@ -199,11 +219,16 @@ export function makePortalInfo(
  * shared `jsonError` helper so the response shape stays in lockstep with
  * every other 4xx in the harness — no hand-rolled `new Response(...)`.
  *
- * Usage:
+ * Pass the EXACT token the test will request, e.g.:
  *
- *     server.use(expiredPortalLinkHandler("any-token"));
- *     // or, for the path-param form:
- *     server.use(expiredPortalLinkHandler(":token"));
+ *     server.use(expiredPortalLinkHandler("abc"));
+ *     renderWithProviders(<Portal />, { params: { token: "abc" } });
+ *
+ * The default `":token"` is MSW's path-param syntax — it matches any token
+ * value on `/api/portal/*`. Use it when the test doesn't care which token
+ * the page fetches, only that the response is the expired-link envelope.
+ *
+ *     server.use(expiredPortalLinkHandler()); // matches any /api/portal/*
  */
 export function expiredPortalLinkHandler(token = ":token"): HttpHandler {
   return http.get(url(`/api/portal/${token}`), () =>

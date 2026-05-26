@@ -20,7 +20,11 @@ export type DocumentListItem = {
 };
 
 export type DocumentListResponse = {
-  items: DocumentListItem[];
+  // `readonly` so the response shape is immutable at the type level —
+  // consumers (and test fixtures) can't accidentally `items.push(...)` or
+  // mutate an entry. The page-level code only reads from items, so this
+  // doesn't constrain any real call site.
+  readonly items: readonly DocumentListItem[];
   total: number;
   page: number;
   pageSize: number;

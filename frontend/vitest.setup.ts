@@ -1,15 +1,13 @@
 import "@testing-library/jest-dom/vitest";
 import { afterAll, afterEach, beforeAll, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
-
-// Pin the API origin BEFORE `frontend/src/lib/api.ts` is imported by any test —
-// `API_BASE` is computed once at module load, so a later assignment wouldn't
-// take effect. Tests + MSW handlers must agree on this exact origin, which is
-// the production fallback ("http://localhost:5292").
-process.env.NEXT_PUBLIC_API_URL = "http://localhost:5292";
-
 import { server } from "./src/test/server";
 import { navState, resetNavigation } from "./src/test/navigation";
+
+// `NEXT_PUBLIC_API_URL` is pinned in `vitest.config.mts` via `test.env`, which
+// runs strictly before this file's imports resolve. `frontend/src/lib/api.ts`'s
+// module-load-time `API_BASE` therefore sees the test origin
+// ("http://localhost:5292") and MSW handlers built from `TEST_API_BASE` agree.
 
 // Default mock for `next/navigation`. Test files that need different shapes
 // (e.g. a hoisted `useSearchParams` spy) still call `vi.mock("next/navigation",

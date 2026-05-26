@@ -8,14 +8,21 @@
  *   - `renderWithProviders` with `auth: authedMe` + MSW handler + fixture
  *   - `renderWithProviders` with `auth + GET 5xx` error-envelope path
  *   - `renderWithProviders` with `params` / `router` / returned `queryClient`
- *   - `renderWithProviders` with `portalInfo` fixture + the
- *     `expiredPortalLinkHandler` factory
+ *   - `renderWithProviders` driven by the `expiredPortalLinkHandler` factory
  *
  * The subjects under test are intentionally trivial inline components so
  * the template stands on its own without depending on any real page or
  * component — the harness itself is the thing under demonstration.
+ *
+ * NOTE for the upcoming portal-page suite (#37): the inline `SettingsTile`
+ * below uses `useQuery` + `api.get<…>(…)` because that's the cookie-bearing
+ * dashboard pattern. The real `frontend/src/app/portal/[token]/page.tsx`
+ * uses bare `fetch()` and parses the envelope inline — portal tests must
+ * follow THAT pattern (assert on inline error-string state, not on
+ * `useQuery.isError`). See `src/test/README.md` ("Portal-page caveat").
  */
 import { describe, it, expect, vi } from "vitest";
+import { useEffect, useState } from "react";
 import { http } from "msw";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { useQuery } from "@tanstack/react-query";
@@ -26,7 +33,8 @@ import {
   jsonOk,
   jsonError,
   authedMe,
-  documentsAllStatusesResponse,
+  documentsAllStatuses,
+  makeDocumentsResponse,
   portalInfo,
   expiredPortalLinkHandler,
 } from "@/test";
@@ -59,35 +67,34 @@ function DocsBadge() {
   return <AuthedBadge name={me.data.fullName} />;
 }
 
-type PortalInfoLike = {
-  vendorName: string;
-  orgName: string;
-  isActive: boolean;
+type SettingsResponse = {
+  organizationName: string;
 };
 
-function PortalInner({ token }: { token: string }) {
-  // Real dashboards use TanStack Query, so the template does too. Portal
-  // tests in #37 will mirror this against the actual portal route, which
-  // uses bare fetch — the assertion shape stays the same.
-  const probe = useQuery<PortalInfoLike>({
-    queryKey: ["portal", token],
-    queryFn: () => api.get<PortalInfoLike>(`/api/portal/${token}`),
-  });
-  if (probe.isPending) return <span>loading portal…</span>;
-  if (probe.isError) return <span role="alert">link gone</span>;
-  return <span>Hi {probe.data?.vendorName}</span>;
-}
-
-function PortalGreeting() {
-  const params = useParams<{ token: string }>();
+function SettingsTile() {
+  // A dashboard-style settings tile: reads `:tab` route param, fetches
+  // tab-scoped settings via the api client, and exposes a "save" button
+  // that re-navigates. Covers `params` + `router.push` spy + the api
+  // client's full envelope-error path.
+  const params = useParams<{ tab: string }>();
   const router = useRouter();
+  const settings = useQuery<SettingsResponse>({
+    queryKey: ["settings", params.tab],
+    queryFn: () => api.get<SettingsResponse>(`/api/settings/${params.tab}`),
+  });
+  // The tab label is param-driven and available synchronously — render it
+  // outside the loading gate so tests can assert on it without waiting.
   return (
     <div>
-      <span data-testid="token">token: {params.token}</span>
-      <button onClick={() => router.push(`/portal/${params.token}/done`)}>
-        finish
-      </button>
-      <PortalInner token={params.token} />
+      <span data-testid="tab">tab: {params.tab}</span>
+      {settings.isPending && <span>loading settings…</span>}
+      {settings.isError && <span role="alert">couldn’t load settings</span>}
+      {settings.data && (
+        <>
+          <span>org: {settings.data.organizationName}</span>
+          <button onClick={() => router.push("/settings/saved")}>save</button>
+        </>
+      )}
     </div>
   );
 }
@@ -113,15 +120,22 @@ describe("Template: renderWithProviders + MSW + fixtures", () => {
   });
 
   it("authed (auth: authedMe) + documents fixture renders the populated badge", async () => {
-    server.use(
-      http.get(url("/api/documents"), () => jsonOk(documentsAllStatusesResponse)),
-    );
+    // Use a completed-only response so the happy-path test doesn't schedule
+    // `useDocuments`'s 5-second `refetchInterval` (which fires only when
+    // Pending/Processing rows are present in the fixture). Cleanup would
+    // cancel the timer regardless, but the explicit fixture variant keeps
+    // the test predictable on slow CI machines.
+    const completedOnly = makeDocumentsResponse({
+      items: [{ ...documentsAllStatuses[2] }],
+      total: 1,
+    });
+    server.use(http.get(url("/api/documents"), () => jsonOk(completedOnly)));
 
     renderWithProviders(<DocsBadge />, { auth: authedMe });
 
     await waitFor(() =>
       expect(
-        screen.getByText(/Hi Acme Owner — 4 documents/),
+        screen.getByText(/Hi Acme Owner — 1 documents/),
       ).toBeInTheDocument(),
     );
   });
@@ -143,43 +157,81 @@ describe("Template: renderWithProviders + MSW + fixtures", () => {
   });
 
   it("exercises params + router.push spy + returned queryClient introspection", async () => {
-    server.use(http.get(url("/api/portal/abc"), () => jsonOk(portalInfo)));
+    server.use(
+      http.get(url("/api/settings/billing"), () =>
+        jsonOk({ organizationName: "Acme Inc" } satisfies SettingsResponse),
+      ),
+    );
 
     const pushSpy = vi.fn();
-    const { queryClient } = renderWithProviders(<PortalGreeting />, {
+    const { queryClient } = renderWithProviders(<SettingsTile />, {
       auth: authedMe,
-      params: { token: "abc" },
+      params: { tab: "billing" },
       router: { push: pushSpy },
     });
 
-    expect(screen.getByTestId("token")).toHaveTextContent("token: abc");
+    expect(screen.getByTestId("tab")).toHaveTextContent("tab: billing");
     await waitFor(() =>
-      expect(
-        screen.getByText(`Hi ${portalInfo.vendorName}`),
-      ).toBeInTheDocument(),
+      expect(screen.getByText("org: Acme Inc")).toBeInTheDocument(),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /finish/i }));
-    expect(pushSpy).toHaveBeenCalledWith("/portal/abc/done");
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    expect(pushSpy).toHaveBeenCalledWith("/settings/saved");
 
     // queryClient access lets tests assert post-mutation cache state
     // without re-querying the network. Here we just confirm the harness
-    // returns a real client whose cache reflects the fetched portal info.
-    expect(queryClient.getQueryData(["portal", "abc"])).toMatchObject({
-      vendorName: portalInfo.vendorName,
+    // returns a real client whose cache reflects the fetched settings.
+    expect(queryClient.getQueryData(["settings", "billing"])).toMatchObject({
+      organizationName: "Acme Inc",
     });
   });
 
-  it("portal: expiredPortalLinkHandler() drops the link-gone branch", async () => {
+  it("portal: expiredPortalLinkHandler + portalInfo demonstrate the portal-style fixtures", async () => {
+    // Inline portal-shape subject: bare fetch (NOT the api client), inline
+    // envelope parse — this is what the real `portal/[token]/page.tsx`
+    // does. Portal tests in #37 will mirror this shape; tickets #35/#36
+    // use the SettingsTile shape above.
+    function MiniPortal() {
+      const { token } = useParams<{ token: string }>();
+      const [state, setState] = useState<{ info: typeof portalInfo | null; err: string | null }>({
+        info: null,
+        err: null,
+      });
+      useEffect(() => {
+        let alive = true;
+        fetch(url(`/api/portal/${token}`))
+          .then(async (r) => {
+            const body = (await r.json()) as {
+              data: typeof portalInfo | null;
+              error: { message: string } | null;
+            };
+            if (!alive) return;
+            if (body.error) setState({ info: null, err: body.error.message });
+            else setState({ info: body.data, err: null });
+          })
+          .catch(() => alive && setState({ info: null, err: "network" }));
+        return () => {
+          alive = false;
+        };
+      }, [token]);
+      if (state.err) return <span role="alert">{state.err}</span>;
+      if (!state.info) return <span>loading portal…</span>;
+      return <span>Hi {state.info.vendorName}</span>;
+    }
+
+    // The handler matches /api/portal/abc literally; pair the matching
+    // token in the route params.
     server.use(expiredPortalLinkHandler("abc"));
 
-    renderWithProviders(<PortalGreeting />, {
+    renderWithProviders(<MiniPortal />, {
       auth: authedMe,
       params: { token: "abc" },
     });
 
     await waitFor(() =>
-      expect(screen.getByRole("alert")).toHaveTextContent(/link gone/i),
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        /this link is no longer available/i,
+      ),
     );
   });
 });
