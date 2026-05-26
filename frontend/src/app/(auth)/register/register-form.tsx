@@ -1,5 +1,6 @@
 "use client";
 
+import { useId } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useForm } from "react-hook-form";
@@ -80,6 +81,15 @@ export default function RegisterForm() {
   const copy = PLAN_COPY[plan];
 
   const register = useRegister();
+  // useId() per field for label/input association — a11y + unlocks
+  // RTL's getByLabelText for tests (#76). RHF's register("name") does
+  // not auto-emit an id, so we thread it through explicitly.
+  const fullNameId = useId();
+  const companyNameId = useId();
+  const emailId = useId();
+  const passwordId = useId();
+  const industryId = useId();
+  const companySizeId = useId();
   const {
     register: r,
     handleSubmit,
@@ -129,35 +139,35 @@ export default function RegisterForm() {
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-sm font-medium text-slate-700">Full name</label>
-              <Input {...r("fullName")} className="mt-1" />
+              <label htmlFor={fullNameId} className="text-sm font-medium text-slate-700">Full name</label>
+              <Input {...r("fullName")} id={fullNameId} className="mt-1" />
               {errors.fullName && <p className="text-xs text-red-600 mt-1">{errors.fullName.message}</p>}
             </div>
             <div>
-              <label className="text-sm font-medium text-slate-700">Company</label>
-              <Input {...r("companyName")} className="mt-1" />
+              <label htmlFor={companyNameId} className="text-sm font-medium text-slate-700">Company</label>
+              <Input {...r("companyName")} id={companyNameId} className="mt-1" />
               {errors.companyName && <p className="text-xs text-red-600 mt-1">{errors.companyName.message}</p>}
             </div>
           </div>
           <div>
-            <label className="text-sm font-medium text-slate-700">Work email</label>
-            <Input {...r("email")} type="email" autoComplete="email" className="mt-1" />
+            <label htmlFor={emailId} className="text-sm font-medium text-slate-700">Work email</label>
+            <Input {...r("email")} id={emailId} type="email" autoComplete="email" className="mt-1" />
             {errors.email && <p className="text-xs text-red-600 mt-1">{errors.email.message}</p>}
           </div>
           <div>
-            <label className="text-sm font-medium text-slate-700">Password</label>
-            <Input {...r("password")} type="password" autoComplete="new-password" className="mt-1" />
+            <label htmlFor={passwordId} className="text-sm font-medium text-slate-700">Password</label>
+            <Input {...r("password")} id={passwordId} type="password" autoComplete="new-password" className="mt-1" />
             {errors.password && <p className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
             <p className="text-xs text-slate-500 mt-1">Min 12 chars, with a letter and a digit.</p>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-sm font-medium text-slate-700">Industry</label>
-              <Input {...r("industry")} placeholder="Construction, healthcare…" className="mt-1" />
+              <label htmlFor={industryId} className="text-sm font-medium text-slate-700">Industry</label>
+              <Input {...r("industry")} id={industryId} placeholder="Construction, healthcare…" className="mt-1" />
             </div>
             <div>
-              <label className="text-sm font-medium text-slate-700">Size</label>
-              <Input {...r("companySize")} placeholder="10-30" className="mt-1" />
+              <label htmlFor={companySizeId} className="text-sm font-medium text-slate-700">Size</label>
+              <Input {...r("companySize")} id={companySizeId} placeholder="10-30" className="mt-1" />
             </div>
           </div>
           <Button type="submit" className="w-full" disabled={register.isPending}>

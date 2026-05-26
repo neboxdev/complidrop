@@ -17,7 +17,7 @@ import {
 } from "@/hooks/useVendors";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { useState } from "react";
+import { useId, useState } from "react";
 
 type TemplateSummary = { id: string; name: string; isSystemTemplate: boolean };
 
@@ -51,6 +51,10 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
     category: vendor.category ?? "",
     complianceTemplateId: vendor.complianceTemplateId ?? "",
   });
+  // a11y: each form control gets its own id so labels can wire via
+  // htmlFor (#76). LabeledInput owns its own useId; the select below
+  // needs its id at this level so the label can reference it.
+  const templateSelectId = useId();
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
@@ -67,8 +71,9 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
             <LabeledInput label="Contact phone" value={form.contactPhone} onChange={(v) => setForm({ ...form, contactPhone: v })} />
             <LabeledInput label="Category" value={form.category} onChange={(v) => setForm({ ...form, category: v })} />
             <div>
-              <label className="text-xs text-slate-500">Compliance template</label>
+              <label htmlFor={templateSelectId} className="text-xs text-slate-500">Compliance template</label>
               <select
+                id={templateSelectId}
                 value={form.complianceTemplateId}
                 onChange={(e) => setForm({ ...form, complianceTemplateId: e.target.value })}
                 className="mt-1 w-full border border-slate-200 rounded-md h-9 px-2 text-sm"
@@ -164,10 +169,14 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
 }
 
 function LabeledInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  // a11y: per-instance id wires label→input via htmlFor (#76). useId
+  // gives a stable id per LabeledInput instance, so two inputs with
+  // the same `label` prop on the same page each get their own id.
+  const id = useId();
   return (
     <div>
-      <label className="text-xs text-slate-500">{label}</label>
-      <Input value={value} onChange={(e) => onChange(e.target.value)} className="mt-1" />
+      <label htmlFor={id} className="text-xs text-slate-500">{label}</label>
+      <Input id={id} value={value} onChange={(e) => onChange(e.target.value)} className="mt-1" />
     </div>
   );
 }
