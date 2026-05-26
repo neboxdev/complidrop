@@ -454,6 +454,12 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
 
         var throttled = await UploadAsync(client, seeded.Token, PdfBytes(), "11.pdf", "application/pdf");
         throttled.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        // #45: the rate-limit rejection must surface as a distinct
+        // envelope code from the quota-exceeded 429 below — clients
+        // must be able to tell "retry next hour" (rate limit, this
+        // path) from "never retry, link permanently exhausted" (quota,
+        // vendor.portal_quota_exceeded).
+        (await ErrorCode(throttled)).Should().Be("rate_limit.exceeded");
 
         // The 11th request was rejected by the limiter middleware *before* the handler ran, so the
         // upload count is still 10 (no 11th document was created).
@@ -485,6 +491,10 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
 
         var throttled = await client.PostAsync($"/api/portal/ip-31-{Guid.NewGuid():N}/upload", null);
         throttled.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        // #45: same rate-limit envelope from the ip partition as from
+        // the token partition — both reset hourly and look identical
+        // to the client.
+        (await ErrorCode(throttled)).Should().Be("rate_limit.exceeded");
     }
 
     [Fact]
