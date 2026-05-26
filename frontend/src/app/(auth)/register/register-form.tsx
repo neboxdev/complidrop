@@ -34,51 +34,43 @@ type RegisterForm = z.infer<typeof schema>;
 // Billing/Stripe enforcement of the chosen plan is a separate ticket (#31 Non-goals);
 // today the value only drives copy on the signup screen. The backend `RegisterRequest`
 // DTO does not accept `plan`, so we deliberately do NOT send it to /api/auth/register.
-// Exported so the landing-page test (src/app/page.test.tsx) can iterate the
-// same set to assert every plan has a corresponding /register?plan=X CTA —
-// pinning the round-trip contract between the pricing cards and this page.
-export const KNOWN_PLANS = ["free", "pro", "annual"] as const;
-type Plan = (typeof KNOWN_PLANS)[number];
+//
+// Plan ids + display copy live in src/lib/plans.ts — the single source of truth
+// across the landing page, this form, the opengraph image, and the settings
+// page (#71). KNOWN_PLANS is re-exported so the landing-page test can iterate
+// the same set to assert every plan has a corresponding /register?plan=X CTA.
+import { KNOWN_PLAN_IDS, parsePlanId, PLANS, type PlanId } from "@/lib/plans";
+export const KNOWN_PLANS = KNOWN_PLAN_IDS;
 
-// Tolerant parse: marketing emails and copy/pasted links occasionally arrive
-// with mixed case (?plan=Annual) or trailing spaces. Lowercasing + trimming
-// before the allowlist check keeps the user's choice instead of silently
-// reverting to free. The allowlist itself remains the security boundary —
-// anything outside { free, pro, annual } still falls back to "free".
-function parsePlan(raw: string | null | undefined): Plan {
-  const value = (raw ?? "").trim().toLowerCase();
-  return (KNOWN_PLANS as readonly string[]).includes(value)
-    ? (value as Plan)
-    : "free";
-}
-
-const PLAN_COPY: Record<
-  Plan,
-  { heading: string; subtitle: string; banner: string | null }
+// Per-plan banner heading/subtitle stays here; the banner BODY copy
+// (with the dollar values) lives in PLANS so it can't drift from the
+// landing page's pricing cards.
+const PLAN_HEADINGS: Record<
+  PlanId,
+  { heading: string; subtitle: string }
 > = {
   free: {
     heading: "Start dropping docs",
     subtitle: "Free forever for 5 documents. No credit card.",
-    banner: null,
   },
   pro: {
     heading: "Start your Pro account",
     subtitle: "Unlimited documents, vendor portal, multi-channel reminders.",
-    banner: "You selected the Pro plan — $49/month. Cancel anytime.",
   },
   annual: {
     heading: "Start your Annual account",
     subtitle: "Unlimited documents, vendor portal, multi-channel reminders.",
-    banner:
-      "You selected the Annual plan — $39/month, billed $468/year. Save $120.",
   },
 };
 
 export default function RegisterForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const plan = parsePlan(searchParams.get("plan"));
-  const copy = PLAN_COPY[plan];
+  const plan = parsePlanId(searchParams.get("plan"));
+  const copy = {
+    ...PLAN_HEADINGS[plan],
+    banner: PLANS[plan].bannerCopy,
+  };
 
   const register = useRegister();
   // useId() per field for label/input association — a11y + unlocks
