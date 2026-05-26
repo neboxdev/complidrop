@@ -32,6 +32,42 @@ export class ApiError extends Error {
 
 type RequestInitEx = RequestInit & { skipRefresh?: boolean; idempotencyKey?: string };
 
+// User-facing fallback when the server's error message is unavailable
+// (non-JSON 5xx body) OR when fetch() itself rejects (network failure,
+// CORS drop, offline). #35's AC #3 demands jargon-free toast copy — no
+// raw HTTP statusText ("Bad Gateway"), no browser TypeError ("Failed to
+// fetch") — so api.ts converts both to this string before the page
+// layer forwards it to toast.error / a list-error-card. See #77 for the
+// decision and the rejected option (b) of exempting opaque proxy errors.
+const GENERIC_FALLBACK_MESSAGE = "Something went wrong. Try again.";
+
+async function fetchOrFriendlyThrow(
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  // fetch() throws a TypeError on network failure (offline, DNS, CORS,
+  // connection reset). Wrap it in an ApiError so callers get the same
+  // shape they get from a non-OK HTTP response — `err.message` stays
+  // jargon-free and `err.status === 0` signals "never reached the
+  // server" without leaking the browser's raw TypeError string.
+  //
+  // AbortError (DOMException) is deliberately re-thrown unchanged. A
+  // future caller that passes an AbortSignal (e.g. via TanStack
+  // Query's `queryFn({ signal })`) needs the cancellation to surface
+  // as a cancellation, NOT as a network error — otherwise an unmount
+  // / route-change mid-fetch would trigger a real-looking toast.
+  //
+  // doRefresh() at the top of this module keeps its own bare-fetch
+  // try/catch returning false; only request()'s body calls funnel
+  // through here.
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new ApiError("network.unreachable", GENERIC_FALLBACK_MESSAGE, 0);
+  }
+}
+
 async function request<T>(path: string, init: RequestInitEx = {}): Promise<T> {
   const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
   const headers = new Headers(init.headers ?? {});
@@ -40,28 +76,41 @@ async function request<T>(path: string, init: RequestInitEx = {}): Promise<T> {
   }
   if (init.idempotencyKey) headers.set("Idempotency-Key", init.idempotencyKey);
 
-  let res = await fetch(url, { ...init, credentials: "include", headers });
+  let res = await fetchOrFriendlyThrow(url, { ...init, credentials: "include", headers });
 
   if (res.status === 401 && !init.skipRefresh) {
     refreshing = refreshing ?? doRefresh();
     const refreshed = await refreshing;
     refreshing = null;
     if (refreshed) {
-      res = await fetch(url, { ...init, credentials: "include", headers });
+      res = await fetchOrFriendlyThrow(url, { ...init, credentials: "include", headers });
     }
   }
 
   if (!res.ok) {
     let code = "server.error";
-    let message = res.statusText;
+    // Initialize to the generic fallback BEFORE attempting the envelope
+    // parse. If res.json() fails (non-JSON body — most commonly a
+    // Cloudflare/proxy/CDN HTML error page on a 502/503), the fallback
+    // wins; only a successful envelope parse with a present
+    // body.error.message can override it. statusText ("Bad Gateway",
+    // "Service Unavailable") is HTTP jargon hostile to the SMB target
+    // audience (#77).
+    let message = GENERIC_FALLBACK_MESSAGE;
     let correlationId: string | undefined;
     try {
       const body = (await res.json()) as ApiEnvelope<unknown>;
       code = body.error?.code ?? code;
-      message = body.error?.message ?? message;
+      // .trim() guards against a server that returns
+      // `{ error: { message: "" } }` (or whitespace-only). `??`
+      // alone would let an empty string overwrite the fallback and
+      // surface an empty toast. The trimmed string is preserved as
+      // the override only when it has actual content.
+      const envMessage = body.error?.message?.trim();
+      if (envMessage) message = envMessage;
       correlationId = body.error?.correlationId;
     } catch {
-      /* non-JSON error */
+      /* non-JSON error body — message stays as the generic fallback */
     }
     throw new ApiError(code, message, res.status, correlationId);
   }

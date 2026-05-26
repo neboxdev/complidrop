@@ -118,13 +118,13 @@ export default function DocumentsPage() {
               ) : docs.isError ? (
                 // Error state distinct from empty so a backend outage is not
                 // mistaken for a brand-new org with zero documents (#80).
-                // `err.message` is the human server message from the ApiError
-                // envelope; api.ts already substitutes statusText for non-JSON
-                // 5xx, with the jargon-free fallback handled in #77.
+                // `err.message` is the human server message from the
+                // ApiError envelope, or lib/api.ts's jargon-free fallback
+                // when the body is non-JSON or fetch itself rejected (#77).
                 //
-                // role="alert" gets the error announced by assistive tech the
-                // moment isError flips true, matching the convention in
-                // frontend/src/test/example.test.tsx.
+                // role="alert" gets the error announced by assistive tech
+                // the moment isError flips true, matching the convention
+                // in frontend/src/test/example.test.tsx.
                 <tr>
                   <td colSpan={7} className="px-4 py-12 text-center" role="alert">
                     <AlertTriangle className="w-8 h-8 mx-auto text-rose-500" />

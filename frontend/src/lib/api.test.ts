@@ -300,7 +300,19 @@ describe("api.* — error-envelope → ApiError message mapping (#35)", () => {
     expect((err as ApiError).correlationId).toBe("trace-abc-123");
   });
 
-  it("non-JSON error body falls back to res.statusText, NOT to the bare status code", async () => {
+  it("non-JSON error body uses the jargon-free generic fallback, NOT res.statusText (#77)", async () => {
+    // Most production 5xx responses from a Cloudflare/proxy/CDN edge
+    // arrive as HTML, not the JSON ApiEnvelope. Before #77, api.ts
+    // initialized `message = res.statusText`, so err.message became
+    // "Bad Gateway" / "Service Unavailable" — HTTP jargon hostile to
+    // the SMB target audience, violating #35 AC #3 ("toast copy must
+    // be human and jargon-free, no raw codes (no auth.email_taken,
+    // no bare status string)").
+    //
+    // After #77, the fallback is a jargon-free user-facing string; the
+    // envelope's `error.message` still wins when the body is valid
+    // JSON with a present message. ApiError.status preserves 502 so
+    // Sentry / logs can still discriminate by code.
     fetchMock.mockResolvedValueOnce(
       new Response("internal server error html page", {
         status: 502,
@@ -314,9 +326,114 @@ describe("api.* — error-envelope → ApiError message mapping (#35)", () => {
       .catch((e) => e as ApiError);
 
     expect(err).toBeInstanceOf(ApiError);
-    // The page forwards err.message to toast.error; statusText is at
-    // least a real noun phrase, not a numeric string.
-    expect((err as ApiError).message).toBe("Bad Gateway");
+    expect((err as ApiError).message).toBe("Something went wrong. Try again.");
+    // statusText must NOT leak through under any circumstance.
+    expect((err as ApiError).message).not.toMatch(/bad gateway/i);
     expect((err as ApiError).status).toBe(502);
+    // code stays as the default "server.error" — symmetric with the
+    // network-failure test which pins code === "network.unreachable",
+    // so a consumer branching on code can discriminate the two.
+    expect((err as ApiError).code).toBe("server.error");
+  });
+
+  it("non-OK with a valid JSON envelope whose `error` is null falls back to the generic message (#77)", async () => {
+    // The third envelope-parse branch added by #77: body is valid JSON
+    // and parses fine, but `error` is null (a malformed-by-edge-layer
+    // response or a misbehaving backend). Pre-#77 this would have
+    // surfaced res.statusText; post-#77 it falls through to the
+    // generic fallback because `body.error?.message` is undefined.
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ data: null, error: null }), {
+        status: 500,
+        statusText: "Internal Server Error",
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    const err = await api
+      .post("/api/auth/login", {})
+      .catch((e) => e as ApiError);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).message).toBe("Something went wrong. Try again.");
+    expect((err as ApiError).code).toBe("server.error");
+    expect((err as ApiError).status).toBe(500);
+  });
+
+  it("non-OK envelope with an empty / whitespace-only error.message falls back to the generic message (#77)", async () => {
+    // Belt-and-braces against a server that returns `{ error: { code,
+    // message: "" } }`. `??` alone would let the empty string
+    // overwrite the fallback. api.ts uses `.trim()` so only a string
+    // with content can override.
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          data: null,
+          error: { code: "server.error", message: "   " },
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+
+    const err = await api
+      .post("/api/auth/login", {})
+      .catch((e) => e as ApiError);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).message).toBe("Something went wrong. Try again.");
+  });
+
+  it("network failure (fetch reject) surfaces as ApiError with the jargon-free fallback, NOT a raw TypeError (#77)", async () => {
+    // fetch() throws a TypeError on offline / DNS-fail / CORS-drop /
+    // connection-reset. Before #77, the TypeError escaped unhandled,
+    // and any consumer that surfaced `err.message` (login/register
+    // toasts, the documents/vendors list error card from #80) would
+    // render the browser's raw "Failed to fetch" (Chromium) or "Load
+    // failed" (Safari) — the same HTTP-jargon class as "Bad Gateway"
+    // above. api.ts now wraps fetch() and converts any reject into an
+    // ApiError with the generic fallback message and status=0 ("never
+    // reached the server"). Downstream `instanceof Error` checks still
+    // succeed since ApiError extends Error.
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    const err = await api
+      .post("/api/auth/login", {})
+      .catch((e) => e as ApiError);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).message).toBe("Something went wrong. Try again.");
+    expect((err as ApiError).code).toBe("network.unreachable");
+    // status=0 signals "no HTTP response was received" so callers /
+    // Sentry can distinguish a network failure from a 5xx.
+    expect((err as ApiError).status).toBe(0);
+    // No raw browser-jargon must leak.
+    expect((err as ApiError).message).not.toMatch(/failed to fetch/i);
+    expect((err as ApiError).message).not.toMatch(/\btypeerror\b/i);
+    // Pin the no-retry contract: a network failure must NOT trigger
+    // the 401-refresh retry loop. A future refactor that added bare
+    // retries on the first fetch would silently regress this without
+    // the explicit call-count assertion.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("AbortError (DOMException) is re-thrown unchanged, NOT wrapped as a network failure (#77)", async () => {
+    // A future caller passing an AbortSignal (e.g. TanStack Query's
+    // built-in queryFn cancellation on unmount) needs the abort to
+    // surface as cancellation, NOT as a real-looking network error
+    // toast. api.ts deliberately re-throws DOMException("AbortError")
+    // instead of wrapping it in ApiError("network.unreachable").
+    fetchMock.mockRejectedValueOnce(new DOMException("aborted", "AbortError"));
+
+    const err = await api
+      .post("/api/auth/login", {})
+      .catch((e) => e as Error);
+
+    // Came back as the original DOMException, NOT an ApiError.
+    expect(err).toBeInstanceOf(DOMException);
+    expect((err as DOMException).name).toBe("AbortError");
+    expect(err).not.toBeInstanceOf(ApiError);
   });
 });
