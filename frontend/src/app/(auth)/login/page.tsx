@@ -1,5 +1,6 @@
 "use client";
 
+import { useId } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
@@ -21,6 +22,13 @@ type LoginForm = z.infer<typeof schema>;
 export default function LoginPage() {
   const router = useRouter();
   const login = useLogin();
+  // React Hook Form's `register("name")` does NOT auto-emit an id, so
+  // we generate one per field with `useId()` and thread it into both
+  // the label's `htmlFor` and the input's `id` prop. Wires screen-
+  // reader announcements and unlocks RTL's `getByLabelText` for tests.
+  // (#76)
+  const emailId = useId();
+  const passwordId = useId();
   const {
     register,
     handleSubmit,
@@ -48,13 +56,13 @@ export default function LoginPage() {
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div>
-            <label className="text-sm font-medium text-slate-700">Email</label>
-            <Input {...register("email")} type="email" autoComplete="email" className="mt-1" />
+            <label htmlFor={emailId} className="text-sm font-medium text-slate-700">Email</label>
+            <Input {...register("email")} id={emailId} type="email" autoComplete="email" className="mt-1" />
             {errors.email && <p className="text-xs text-red-600 mt-1">{errors.email.message}</p>}
           </div>
           <div>
-            <label className="text-sm font-medium text-slate-700">Password</label>
-            <Input {...register("password")} type="password" autoComplete="current-password" className="mt-1" />
+            <label htmlFor={passwordId} className="text-sm font-medium text-slate-700">Password</label>
+            <Input {...register("password")} id={passwordId} type="password" autoComplete="current-password" className="mt-1" />
             {errors.password && <p className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
           </div>
           <Button type="submit" className="w-full" disabled={login.isPending}>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import { Plus, ExternalLink, AlertTriangle, RotateCw } from "lucide-react";
@@ -16,6 +16,10 @@ export default function VendorsPage() {
   const createVendor = useCreateVendor();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  // a11y: wire each label to its input via htmlFor + id so screen
+  // readers announce the field context (#76).
+  const nameId = useId();
+  const emailId = useId();
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
@@ -27,12 +31,12 @@ export default function VendorsPage() {
       <Card>
         <CardContent className="p-5 flex gap-3 items-end">
           <div className="flex-1">
-            <label className="text-xs text-slate-500">Name</label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Mike's Electrical" />
+            <label htmlFor={nameId} className="text-xs text-slate-500">Name</label>
+            <Input id={nameId} value={name} onChange={(e) => setName(e.target.value)} placeholder="Mike's Electrical" />
           </div>
           <div className="flex-1">
-            <label className="text-xs text-slate-500">Contact email</label>
-            <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="mike@acme.com" />
+            <label htmlFor={emailId} className="text-xs text-slate-500">Contact email</label>
+            <Input id={emailId} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="mike@acme.com" />
           </div>
           <Button
             disabled={!name || createVendor.isPending}

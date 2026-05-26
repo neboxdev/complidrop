@@ -188,8 +188,11 @@ export default function DocumentDetailPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {doc.fields.map((f) => (
                 <div key={f.id} className="space-y-1">
-                  <label className="text-xs uppercase tracking-wide text-slate-500">{f.fieldName}</label>
+                  {/* a11y: scope id to the field row so screen readers
+                      announce each input with its field-name context (#76). */}
+                  <label htmlFor={`docfield-${f.id}`} className="text-xs uppercase tracking-wide text-slate-500">{f.fieldName}</label>
                   <Input
+                    id={`docfield-${f.id}`}
                     defaultValue={f.fieldValue ?? ""}
                     onChange={(e) => setEdits((prev) => ({ ...prev, [f.fieldName]: e.target.value }))}
                   />

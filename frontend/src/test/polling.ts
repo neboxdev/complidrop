@@ -37,7 +37,6 @@
  *   than re-reading a closure — pass a counter ref if you need to pin
  *   the exact number of fetches.
  */
-import { HttpResponse } from "msw";
 import { jsonOk } from "./helpers";
 
 /**
@@ -58,7 +57,7 @@ import { jsonOk } from "./helpers";
  * @throws RangeError on construction if `responses` is empty — a
  *   handler with zero responses is always a programming error.
  */
-export function sequencedJsonOk<T>(...responses: T[]): () => HttpResponse {
+export function sequencedJsonOk<T>(...responses: T[]): () => Response {
   if (responses.length === 0) {
     throw new RangeError(
       "sequencedJsonOk: at least one response is required",
