@@ -47,13 +47,14 @@ if (!existsSync(root)) {
  * never crosses the wire. The pattern below catches the URL form.
  */
 // Patterns require an ACTUAL value after the cookie name / scheme
-// keyword — the bare prefix `cd_session=` appears in this file's docs,
-// the README, and CLAUDE.md (legitimately, as documentation of what
-// the scanner catches). A real leak looks like
-// `cd_session=eyJ0eXAi...` with 8+ characters of base64/JWT value
-// trailing; documentation mentions look like `cd_session=` followed
-// by a backtick, a slash, a quote, or end-of-line. The value-shape
-// filter cleanly distinguishes them.
+// keyword — the bare prefix (cookie name + equals) appears in this
+// file's docs, the README, and CLAUDE.md (legitimately, as
+// documentation of what the scanner catches). A real leak has 8+
+// characters of base64/JWT value after the equals; documentation
+// mentions look like the bare prefix followed by a backtick, a
+// slash, a quote, or end-of-line. The value-shape filter cleanly
+// distinguishes them. Docstrings here deliberately avoid writing
+// out a value-shaped example so the script doesn't trip its own gate.
 const PATTERNS = [
   // Cookie value: 8+ characters of cookie-value alphabet (RFC 6265).
   // Base64/JWT tokens include `=` `+` `/` `.` `_` `-` `~`.
