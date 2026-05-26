@@ -22,7 +22,7 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import { http, HttpResponse } from "msw";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import PortalPage from "./page";
 import {
   renderWithProviders,
@@ -33,33 +33,21 @@ import {
   expiredPortalLinkHandler,
   makePortalInfo,
   portalInfo,
+  dropFilesIn,
+  makeFile,
 } from "@/test";
 
 // Sonner not used by the portal page (it has its own inline error UI),
 // but the harness mocks it anyway (vitest.setup.ts + src/test/sonner.ts)
 // to silence any indirect import. See #74.
 
-// Helper: drive react-dropzone via the hidden file input it renders.
-// fireEvent.change on the input flows through onDrop with the supplied
-// files. Depends on react-dropzone@^15's contract that `accept` and
-// `maxSize` are evaluated INSIDE its onDrop callback (not at the
-// browser-level input filter), which jsdom can't enforce — a v16
-// release that changed that contract would need this helper updated
-// or a switch to `fireEvent.drop` on the root element.
+// Local wrapper around the harness's container-scoped dropFilesIn (#84).
+// Each `it` captures the rendered container in `container` so a future
+// composite test that renders two trees at once can't accidentally
+// share a file input between them via document.querySelector.
+let container: HTMLElement;
 function dropFiles(files: File[]) {
-  const input = document.querySelector(
-    'input[type="file"]',
-  ) as HTMLInputElement | null;
-  if (!input) throw new Error("portal: no file input rendered");
-  Object.defineProperty(input, "files", {
-    value: files,
-    configurable: true,
-  });
-  fireEvent.change(input);
-}
-
-function makeFile(name: string, type = "application/pdf", sizeBytes = 1024) {
-  return new File(["x".repeat(sizeBytes)], name, { type });
+  dropFilesIn(container, files);
 }
 
 const TOKEN = "vendor-token-abc";
@@ -76,7 +64,7 @@ describe("PortalPage — loading state (#37)", () => {
       }),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
     expect(screen.getByText(/^loading…$/i)).toBeInTheDocument();
 
@@ -98,7 +86,7 @@ describe("PortalPage — success state (#37)", () => {
       ),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
     await waitFor(() =>
       expect(
@@ -118,7 +106,7 @@ describe("PortalPage — success state (#37)", () => {
       http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
     await waitFor(() =>
       expect(
@@ -140,7 +128,7 @@ describe("PortalPage — bad-link state (#37)", () => {
     // surface the code (per AC #2 — internal errors not exposed).
     server.use(expiredPortalLinkHandler(TOKEN));
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
     await waitFor(() =>
       expect(
@@ -176,7 +164,7 @@ describe("PortalPage — bad-link state (#37)", () => {
       ),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
     // Static recovery line still renders.
     await waitFor(() =>
@@ -204,7 +192,7 @@ describe("PortalPage — bad-link state (#37)", () => {
       http.get(url(`/api/portal/${TOKEN}`), () => HttpResponse.error()),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
     await waitFor(() =>
       expect(
@@ -232,7 +220,7 @@ describe("PortalPage — quota-exhausted state (#37)", () => {
       ),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
     await waitFor(() =>
       expect(screen.getByText(/5\s*\/\s*5\s+uploads used/i)).toBeInTheDocument(),
@@ -265,7 +253,7 @@ describe("PortalPage — quota-exhausted state (#37)", () => {
       }),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
     await waitFor(() =>
       expect(screen.getByText(/5\s*\/\s*5\s+uploads used/i)).toBeInTheDocument(),
     );
@@ -299,7 +287,7 @@ describe("PortalPage — quota-exhausted state (#37)", () => {
       ),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
     await waitFor(() =>
       expect(screen.getByText(/4\s*\/\s*5\s+uploads used/i)).toBeInTheDocument(),
@@ -328,7 +316,7 @@ describe("PortalPage — file-rejected state (#37)", () => {
       }),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
     await waitFor(() =>
       expect(
         screen.getByText(/drag a file here or click to select/i),
@@ -361,7 +349,7 @@ describe("PortalPage — file-rejected state (#37)", () => {
       }),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
     await waitFor(() =>
       expect(
         screen.getByText(/drag a file here or click to select/i),
@@ -393,7 +381,7 @@ describe("PortalPage — happy upload + partial-batch failure (#37)", () => {
       ),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
     await waitFor(() =>
       expect(
         screen.getByText(/drag a file here or click to select/i),
@@ -442,7 +430,7 @@ describe("PortalPage — happy upload + partial-batch failure (#37)", () => {
       }),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
     await waitFor(() =>
       expect(
         screen.getByText(/drag a file here or click to select/i),
@@ -555,7 +543,7 @@ describe("PortalPage — uploading-in-flight state (#37)", () => {
       }),
     );
 
-    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
     await waitFor(() =>
       expect(
         screen.getByText(/drag a file here or click to select/i),
