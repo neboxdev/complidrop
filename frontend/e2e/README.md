@@ -36,7 +36,7 @@ Every `/api/**` request must be matched by a `mockApi()` route, or the test fail
 
 ```ts
 import { test, expect } from "@playwright/test";
-import { mockApi, jsonOk, jsonError } from "../support/mock-api";
+import { mockApi, jsonOk, jsonError, waitForApi } from "../support/mock-api";
 import { authedMe } from "../support/fixtures";
 
 test("logged-out home page", async ({ page }) => {
@@ -49,6 +49,14 @@ test("logged-out home page", async ({ page }) => {
   ]);
   await page.goto("/");
   // ...
+});
+
+test("submit fires a register POST", async ({ page }) => {
+  // Arm BEFORE the action that triggers the request. Same `:param`
+  // grammar as the mockApi route table, so route + wait read identically.
+  const registerResponse = waitForApi(page, "POST", "/api/auth/register", { status: 200 });
+  await page.getByRole("button", { name: /sign up/i }).click();
+  await registerResponse;
 });
 ```
 
