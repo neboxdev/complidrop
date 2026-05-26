@@ -14,6 +14,7 @@ Reusable test scaffolding for the Next.js frontend. Pairs with [ADR 0003](../../
 | `navigation.ts`        | Mutable container behind the global `vi.mock("next/navigation", ...)`.                 |
 | `sonner.ts`            | Mutable `toast.*` spies behind the global `vi.mock("sonner", ...)`. Import `toastSuccess`/`toastError` from `@/test` and assert on them.   |
 | `polling.ts`           | `sequencedJsonOk(...responses)` returns an MSW handler that yields responses in order, then repeats the last (terminal state). |
+| `dropzone.ts`          | `dropFilesIn(container, files)` + `makeFile(name, type?, size?)` — container-scoped helpers for driving `react-dropzone` in tests. |
 | `example.test.tsx`     | Template test — **copy this as the starting point for new suites.**                    |
 
 `src/test/index.ts` re-exports the common surface, so most test files only need:
@@ -142,6 +143,21 @@ Two-tier setup, documented here once so it doesn't get re-litigated.
 - **Per-file `vi.mock("next/navigation", ...)`** (escape hatch). Required when the test needs a hoisted spy on `useSearchParams` or wants to capture the call site at module load (see `register-form.test.tsx` for the canonical example). Vitest's per-file mock registry overrides the setup-file mock within the file's own module scope — file-level mocks always win.
 
 Pick the default unless you have a specific reason to escape it.
+
+## Dropzone tests
+
+`react-dropzone` v15+ evaluates `accept` + `maxSize` INSIDE its `onDrop` callback (not at the browser-level input filter), which jsdom can't enforce. Drive uploads through the hidden file input:
+
+```ts
+import { dropFilesIn, makeFile } from "@/test";
+
+const { container } = renderWithProviders(<PortalPage />, { params: { token } });
+await waitFor(() => expect(screen.getByText(/upload/i)).toBeInTheDocument());
+
+dropFilesIn(container, [makeFile("coi.pdf"), makeFile("license.pdf")]);
+```
+
+The container is mandatory: a `document.querySelector('input[type="file"]')` lookup would silently collide if a future composite test rendered two dropzone-bearing trees at once. `makeFile` defaults to a 1 KiB `application/pdf`; pass `type` and `sizeBytes` to drive the size-limit / wrong-MIME error paths.
 
 ## Writing a new test — the mechanical recipe
 

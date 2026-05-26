@@ -41,3 +41,4 @@ export {
   resetSonner,
 } from "./sonner";
 export { sequencedJsonOk } from "./polling";
+export { dropFilesIn, makeFile } from "./dropzone";
