@@ -74,10 +74,14 @@ export function useUpdateVendor(id: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: VendorUpsert) => api.put<{ id: string }>(`/api/vendors/${id}`, payload),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["vendors"] });
-      qc.invalidateQueries({ queryKey: ["vendors", id] });
-    },
+    // invalidateQueries(['vendors']) prefix-matches BOTH the list query
+    // (['vendors']) AND every detail observer (['vendors', :id]) —
+    // TanStack Query's default filter uses prefix matching (exact: false),
+    // so a single invalidate fans out to every key starting with
+    // ['vendors']. Adding an explicit invalidateQueries(['vendors', id])
+    // on top would cause the detail observer to refetch twice per save
+    // (#81).
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
   });
 }
 

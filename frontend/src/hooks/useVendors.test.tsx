@@ -211,16 +211,19 @@ describe("useCreateVendor / useUpdateVendor / useDeleteVendor — cache invalida
     });
     await update.result.current.mutateAsync({ name: "Renamed" });
 
-    // Contract: BOTH the list and the detail re-read after a vendor
-    // update. We accept ≥2 calls each because useUpdateVendor's onSuccess
-    // invokes invalidateQueries(['vendors']) AND invalidateQueries
-    // (['vendors', id]); TQ's prefix-match means the detail key gets
-    // invalidated TWICE (once via the prefix, once explicitly), which
-    // surfaces as a re-fetch each time. The redundant second call is a
-    // soft inefficiency in the hook, not the contract this test pins.
+    // Pin both observers to EXACTLY 2 calls (initial fetch + one
+    // refetch). detailCalls=2 is the #81 regression-detector: re-adding
+    // an explicit invalidateQueries(['vendors', id]) on top of the
+    // prefix invalidate would double-fire the detail refetch and break
+    // this assertion. listCalls=2 is the structural cross-check — the
+    // longer key ['vendors', id] doesn't prefix-match the list query
+    // ['vendors'], so listCalls won't catch the #81 regression on its
+    // own, but the exact pin keeps the contract symmetric.
+    // (See useVendors.ts's useUpdateVendor for the TQ prefix-match
+    // mechanics.)
     await waitFor(() => {
-      expect(listCalls).toBeGreaterThanOrEqual(2);
-      expect(detailCalls).toBeGreaterThanOrEqual(2);
+      expect(listCalls).toBe(2);
+      expect(detailCalls).toBe(2);
     });
   });
 
