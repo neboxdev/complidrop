@@ -16,7 +16,11 @@ import { test, expect } from "@playwright/test";
 import { mockApi, jsonOk } from "../support/mock-api";
 import { portalInfo } from "../support/fixtures";
 
-const TOKEN = "smoke-portal-token-abc";
+// Keep tokens UNDER 16 chars so scan-secrets's "vendor portal token
+// in URL path" pattern doesn't self-trip on a Playwright trace that
+// captured this synthetic URL. Production tokens are much longer; a
+// 12-char synthetic is enough to exercise the routing.
+const TOKEN = "smoke-tok-12";
 
 test.describe("Flow 2 — vendor portal upload (#39)", () => {
   test("vendor opens /portal/{token}, drops a PDF, sees the Received row", async ({
@@ -39,14 +43,24 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
       },
     ]);
 
+    // Wait for the GET /api/portal/{token} to fire BEFORE asserting
+    // on the heading — explicit wait surfaces a mock-routing problem
+    // (e.g. the interceptor not matching) as a clear timeout on this
+    // line instead of as a misleading "heading not found" later.
+    const portalInfoResponse = page.waitForResponse(
+      (res) => res.url().includes(`/api/portal/${TOKEN}`) && res.status() === 200,
+      { timeout: 15_000 },
+    );
+
     await page.goto(`/portal/${TOKEN}`);
+    await portalInfoResponse;
 
     // Greeting renders from the mocked PortalInfo.
     await expect(
       page.getByRole("heading", {
         name: new RegExp(`hi ${portalInfo.vendorName}`, "i"),
       }),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 10_000 });
 
     // Drop a PDF via the hidden file input that react-dropzone
     // renders. setInputFiles drives the same code path users hit when
