@@ -180,13 +180,20 @@ export default function RegisterForm() {
 // HTML before hydration. Shape mirrors the real form (heading + 4 input rows
 // + button + footer) so layout doesn't jump on hydration. aria-hidden because
 // the live form will replace it within hydration — no need to announce twice.
-export function RegisterFormSkeleton() {
-  const Row = () => (
+// Lift `Row` to module scope so it isn't re-created on every render of
+// `RegisterFormSkeleton`. The `react-hooks/static-components` rule fails CI
+// on the prior inline form. Behavior is unchanged — `Row` is a pure
+// stateless component.
+function SkeletonRow() {
+  return (
     <div>
       <div className="h-4 w-24 rounded bg-slate-100" />
       <div className="mt-2 h-10 w-full rounded bg-slate-50" />
     </div>
   );
+}
+
+export function RegisterFormSkeleton() {
   return (
     <Card className="shadow-lg border-sky-100" aria-hidden="true">
       <CardContent className="p-8 space-y-6">
@@ -196,14 +203,14 @@ export function RegisterFormSkeleton() {
         </div>
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
-            <Row />
-            <Row />
+            <SkeletonRow />
+            <SkeletonRow />
           </div>
-          <Row />
-          <Row />
+          <SkeletonRow />
+          <SkeletonRow />
           <div className="grid grid-cols-2 gap-3">
-            <Row />
-            <Row />
+            <SkeletonRow />
+            <SkeletonRow />
           </div>
           <div className="h-10 w-full rounded bg-slate-100" />
         </div>
