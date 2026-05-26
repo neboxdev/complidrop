@@ -91,8 +91,14 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
 
     // Received card appears with the file name; "Processing…" tag is
     // the page's per-file status during extraction.
-    await expect(page.getByText(/^received$/i)).toBeVisible({ timeout: 10_000 });
+    //
+    // Playwright's `getByText` uses substring matching by default and
+    // doesn't normalize whitespace the way RTL does — the rendered
+    // `<p>` text is " Received" (leading space from the CheckCircle2
+    // icon sibling), so an `/^received$/i` strict regex misses while
+    // a substring match cleanly hits.
+    await expect(page.getByText("Received").first()).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText("vendor-coi.pdf")).toBeVisible();
-    await expect(page.getByText(/processing…/i)).toBeVisible();
+    await expect(page.getByText("Processing").first()).toBeVisible();
   });
 });
