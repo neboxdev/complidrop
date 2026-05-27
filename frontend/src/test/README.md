@@ -135,6 +135,8 @@ it("on save → success toast", async () => {
 
 The setup file's `afterEach` calls `resetSonner()` so a `toastSuccess` from one test never leaks into the next. `toast.info`, `toast.warning`, `toast.loading`, `toast.dismiss`, `toast.message`, and `toast.promise` are all spied too — import the matching `toastInfo` / `toastWarning` / … as needed.
 
+**Negative-assertion convention for smoke tests:** when a test renders a component whose subject does NOT fire a toast (smoke renders, loading-state tests, populated-state tests where no mutation runs), explicitly assert `expect(toastSuccess).not.toHaveBeenCalled()` / `expect(toastError).not.toHaveBeenCalled()` at the end of the test. The harness's `resetSonner()` between tests is not a substitute for the assertion — a regression that auto-fires a toast on mount would only surface as a noisy DOM in a later test if the assertion is missing. See `vendors/[id]/page.test.tsx` for the canonical pattern.
+
 Per-file `vi.mock("sonner", …)` still works as an escape hatch (Vitest's per-file mock registry overrides the setup-file mock within the file's own scope) — reach for it only when a test needs a custom shape (e.g. a spy that throws, a real `toast.promise` implementation).
 
 ## Routing mocks — when to use which

@@ -13,9 +13,22 @@
  *     Exporting stable spies from this module and reading them from the
  *     setup-file factory is the standard workaround.
  *   - 14 test files used to redeclare the same `vi.hoisted` + `vi.mock`
- *     pair; lifting it removes the duplication and the foot-gun where a
- *     test file forgot to spy on `info` / `loading` and silently lost
- *     coverage of that path.
+ *     pair; lifting it removes the duplication. As a bonus, the harness
+ *     extends the spy surface to every documented `toast.*` method —
+ *     production code that starts calling `toast.warning(...)` (or any
+ *     currently-unused method) becomes automatically observable in
+ *     tests instead of throwing `TypeError: toast.warning is not a
+ *     function` only in test (because the previous per-file mocks only
+ *     wired the methods each file happened to use).
+ *
+ * Unlike `navigation.ts`, there is NO `setSonnerState` writer. The
+ * spies are stable Mock references and tests assert on them directly;
+ * there is nothing to override field-by-field (the way navigation.ts's
+ * `setNavigationState` swaps a single `router.push` spy while keeping
+ * the other no-op router spies). For a custom shape (a throwing spy,
+ * a real `toast.promise` implementation), use the per-file
+ * `vi.mock("sonner", …)` escape hatch — Vitest's per-file mock
+ * registry overrides the setup-file mock within that file's scope.
  *
  * Each spy is a STABLE reference — `resetSonner()` clears call records
  * but does NOT replace the instances, so test files that
