@@ -82,6 +82,22 @@ describe("composite two-form: container-scoped helpers (#134)", () => {
     expect(bPass.value).toBe("bravo-pass-2");
   });
 
+  it("fillByLabel WITHOUT a container throws when two forms share a label — pins the helper's no-container pass-through", () => {
+    // The previous test's sanity check pinned that the underlying
+    // RTL primitive (`screen.getByLabelText`) throws on multi-match.
+    // This test pins the same thing AT THE HELPER LEVEL — a regression
+    // that changed `fillByLabel` (no container arg) to e.g. take
+    // `getAllByLabelText(...)[0]` and silently fill the first match
+    // would slip past the previous assertion. Direct helper invocation
+    // is the only way to catch that.
+    renderWithProviders(<LoginPage />, { auth: null });
+    renderWithProviders(<LoginPage />, { auth: null });
+
+    expect(() => fillByLabel(/^email$/i, "anything")).toThrow(
+      /found multiple elements/i,
+    );
+  });
+
   it("submitFormIn scopes per-container — each form submits without ambiguity", () => {
     // Each container holds exactly ONE <form>; the multi-form guard
     // (`forms.length > 1` throw) only trips when both forms live in
