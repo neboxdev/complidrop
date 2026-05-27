@@ -1,5 +1,6 @@
 /**
- * Single source of truth for plan IDs + display copy (#71).
+ * Single source of truth for plan IDs + price-bearing display copy
+ * (#71 + #71 followup review).
  *
  * The pricing CTAs on the landing page link to `/register?plan=<id>`;
  * the register page reads the param and renders plan-aware copy; the
@@ -8,18 +9,30 @@
  * carried its own `$49` / `$39` / `$468` literals — five copies of
  * the same numbers, drifting independently.
  *
+ * Scope clarification (per #71 followup architecture review): this
+ * module owns ID + PRICE-BEARING display copy — the dollar amounts
+ * that drift. Per-surface NARRATIVE copy (page headings, subtitles,
+ * marketing taglines) stays in the surface that owns it. A future
+ * contributor tempted to hoist e.g. RegisterForm's `PLAN_HEADINGS`
+ * here should resist: those headings are signup-funnel-specific UX,
+ * not shared facts.
+ *
  * KNOWN VOCAB MISMATCH (out of scope for #71): the frontend UI uses
  * `free | pro | annual` (this file), while
  * `frontend/src/app/(dashboard)/settings/page.tsx`'s
  * `useCheckoutMutation` and the backend `BillingEndpoints` use
  * `monthly | annual | founding` (the Stripe price-ID names). The
  * vocab cleanup requires aligning the backend Stripe config keys with
- * this file's ids — a separate ticket; today this module covers only
- * the display side of `free | pro | annual`.
+ * this file's ids AND deciding what to do with the `founding` tier
+ * which doesn't exist in KNOWN_PLAN_IDS — needs an ADR-level
+ * decision; tracked as a follow-up.
  *
- * Tests that assert on the dollar values import from THIS module
- * (e.g. `expect(banner.textContent).toMatch(PLANS.annual.monthlyPrice)`)
- * so a future price change updates the test and the UI together.
+ * Cross-consistency invariants (pinned in plans.test.ts):
+ *   - Every id in KNOWN_PLAN_IDS has a corresponding PLANS[id] entry.
+ *   - Each plan's `bannerCopy` (when non-null) contains its own
+ *     `monthlyPriceLabel`. A future price change that touched the
+ *     label but forgot the banner would otherwise be silent.
+ *   - Annual's bannerCopy contains both the monthly + billed totals.
  */
 
 export const KNOWN_PLAN_IDS = ["free", "pro", "annual"] as const;
@@ -40,6 +53,14 @@ export type PlanId = (typeof KNOWN_PLAN_IDS)[number];
  * computed prices. A "compute" approach (multiplication, formatting)
  * would obscure the eyeball-check between this file and the
  * marketing-side rendered output.
+ *
+ * `annualSavingsLabel` is stored CANONICALLY LOWERCASE ("save $120")
+ * so call sites render it directly without per-call `.toLowerCase()`
+ * transforms — the previous shape ("Save $120" + landing-page-side
+ * `.toLowerCase()`) undermined the single-source-of-truth promise
+ * because a reader of this file couldn't predict the rendered output.
+ * Sentence-cased usage (register banner) embeds it in `bannerCopy`
+ * directly with explicit Title-cased phrasing.
  */
 export const PLANS: Record<
   PlanId,
@@ -73,7 +94,7 @@ export const PLANS: Record<
     label: "Annual",
     monthlyPriceLabel: "$39",
     annualBilledLabel: "Billed $468/year",
-    annualSavingsLabel: "Save $120",
+    annualSavingsLabel: "save $120",
     bannerCopy:
       "You selected the Annual plan — $39/month, billed $468/year. Save $120.",
   },

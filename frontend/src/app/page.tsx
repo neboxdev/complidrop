@@ -140,7 +140,7 @@ export default function Home() {
             >
               CompliDrop reads your COIs, licenses, and permits in
               seconds&nbsp;&mdash; pulls the dates, checks the coverage, and
-              alerts you before anything expires. $49/month. No contracts.
+              alerts you before anything expires. {PLANS.pro.monthlyPriceLabel}/month. No contracts.
             </p>
 
             <div className="mt-10 flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
@@ -442,7 +442,7 @@ export default function Home() {
                     </span>
                   </p>
                   <p className="mt-1 text-sm font-semibold" style={{ color: C.sky }}>
-                    {PLANS.annual.annualBilledLabel} &mdash; {PLANS.annual.annualSavingsLabel?.toLowerCase()}
+                    {PLANS.annual.annualBilledLabel} &mdash; {PLANS.annual.annualSavingsLabel}
                   </p>
                   <p
                     className="mt-4 flex-1 text-sm leading-relaxed"
