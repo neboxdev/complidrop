@@ -1,3 +1,25 @@
+"use client";
+
+// `"use client"` forces Next.js to treat this module as a Client
+// Component boundary. Without it, the module is implicitly importable
+// from Server Components, Route Handlers, and middleware — and Node's
+// per-process module cache would SHARE the refresh-coalescing
+// singleton state (`refreshing` / `refreshConsumers` declared below)
+// across concurrent SSR requests. That would let one user's refresh
+// promise serve another user's 401, silently contaminating sessions
+// on a tier-1 auth path. With the directive, a future Server
+// Component import would fail-loud at build time. (#120 — latent
+// fragility surfaced by the #68 post-merge correctness review.)
+//
+// The directive only changes Next.js's tree-shaking + import-boundary
+// enforcement — runtime behavior is unchanged. The audit at the time
+// of #120 confirmed every existing importer (every `(dashboard)/**/
+// page.tsx`, every `hooks/use*.ts`, `portal/[token]/page.tsx`,
+// `components/StaleDataBanner.tsx`) already carried `"use client"`,
+// so no importer regresses on this change. Pinned by
+// `api.use-client.test.ts` so a future refactor that removes the
+// directive fails at the test layer before it can ship.
+
 export type ApiEnvelope<T> = {
   data: T | null;
   error: { code: string; message: string; correlationId?: string } | null;
