@@ -99,7 +99,14 @@ export function useGeneratePortalLink(vendorId: string) {
     mutationFn: () => api.post<{ id: string; token: string; url: string; maxUploads: number }>(
       `/api/vendors/${vendorId}/portal-link`,
     ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors", vendorId] }),
+    // Prefix-match `['vendors']` so BOTH the list query (the
+    // VendorSummary.activePortalLinks count rendered as the "X active"
+    // badge on vendors/page.tsx) AND every detail observer refetch
+    // with one invalidate. The narrower `['vendors', vendorId]` only
+    // hits the detail observer and leaves the list count stale until
+    // a manual refresh — the freshness gap #113 was filed against.
+    // See useUpdateVendor above for the TQ prefix-match mechanics.
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
   });
 }
 
@@ -107,6 +114,13 @@ export function useRevokePortalLink(vendorId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (linkId: string) => api.delete<void>(`/api/vendors/${vendorId}/portal-link/${linkId}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors", vendorId] }),
+    // Symmetric with useGeneratePortalLink above — one prefix
+    // invalidate refreshes BOTH the list-summary activePortalLinks
+    // count and the detail-page portal-link list (#113). The
+    // vendorId param is kept on the hook signature for the URL
+    // construction in the mutationFn; the invalidate doesn't need
+    // it because the prefix match covers every vendor's detail
+    // observer too.
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
   });
 }

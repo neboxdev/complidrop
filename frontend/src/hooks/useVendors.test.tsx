@@ -8,7 +8,10 @@
  *   - useCreateVendor / useUpdateVendor / useDeleteVendor: success
  *     invalidates ['vendors'] (and the detail key, for update).
  *   - useGeneratePortalLink / useRevokePortalLink: invalidate the
- *     vendor-detail key so the portal-link list re-reads.
+ *     prefix ['vendors'] so BOTH the list summary's `activePortalLinks`
+ *     count AND the detail's portalLinks list re-read with one
+ *     invalidate (#113 — list-page stale-count gap surfaced by the
+ *     #81 post-merge performance review).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { http } from "msw";
@@ -249,10 +252,26 @@ describe("useCreateVendor / useUpdateVendor / useDeleteVendor — cache invalida
   });
 });
 
-describe("useGeneratePortalLink / useRevokePortalLink — invalidate the detail key (#36)", () => {
-  it("generate invalidates ['vendors', vendorId] so the portal-link list re-reads", async () => {
+describe("useGeneratePortalLink / useRevokePortalLink — prefix-invalidate refreshes both list + detail (#113)", () => {
+  it("generate invalidates ['vendors'] so BOTH the list summary AND the detail observer re-read exactly once", async () => {
+    // Mirrors the useUpdateVendor test shape (#81 prefix-match pattern):
+    // the prefix `['vendors']` invalidate must hit BOTH the list query
+    // (carries VendorSummary.activePortalLinks — the "X active" badge
+    // on the vendors page) AND every detail observer (carries the
+    // portalLinks array) with ONE invalidate call. Exact-2 pin on
+    // BOTH observer counts catches:
+    //   - the original #113 regression (narrow ['vendors', id]
+    //     invalidate would leave listCalls at 1 = stale count),
+    //   - and the symmetric over-invalidation regression (an extra
+    //     explicit ['vendors', vendorId] invalidate on top would
+    //     double-fire the detail refetch, breaking detailCalls=2).
+    let listCalls = 0;
     let detailCalls = 0;
     server.use(
+      http.get(url("/api/vendors"), () => {
+        listCalls++;
+        return jsonOk(VENDORS);
+      }),
       http.get(url("/api/vendors/:id"), () => {
         detailCalls++;
         return jsonOk(VENDOR_DETAIL);
@@ -268,22 +287,41 @@ describe("useGeneratePortalLink / useRevokePortalLink — invalidate the detail 
     );
 
     const { Wrapper } = createTestWrapper();
+    const list = renderHook(() => useVendors(), { wrapper: Wrapper });
     const detail = renderHook(() => useVendor("v_acme_01"), {
       wrapper: Wrapper,
     });
-    await waitFor(() => expect(detail.result.current.isSuccess).toBe(true));
+    await waitFor(() => {
+      expect(list.result.current.isSuccess).toBe(true);
+      expect(detail.result.current.isSuccess).toBe(true);
+    });
+    expect(listCalls).toBe(1);
     expect(detailCalls).toBe(1);
 
     const generate = renderHook(() => useGeneratePortalLink("v_acme_01"), {
       wrapper: Wrapper,
     });
     await generate.result.current.mutateAsync();
-    await waitFor(() => expect(detailCalls).toBe(2));
+
+    await waitFor(() => {
+      expect(listCalls).toBe(2);
+      expect(detailCalls).toBe(2);
+    });
   });
 
-  it("revoke invalidates ['vendors', vendorId]", async () => {
+  it("revoke invalidates ['vendors'] so BOTH the list summary AND the detail observer re-read exactly once", async () => {
+    // Symmetric assertion with the generate test above — same exact-2
+    // pins on both observers. A regression that reverted the
+    // useRevokePortalLink fix to the narrower ['vendors', vendorId]
+    // would leave listCalls at 1 (stale activePortalLinks count) and
+    // fail this test loudly.
+    let listCalls = 0;
     let detailCalls = 0;
     server.use(
+      http.get(url("/api/vendors"), () => {
+        listCalls++;
+        return jsonOk(VENDORS);
+      }),
       http.get(url("/api/vendors/:id"), () => {
         detailCalls++;
         return jsonOk(VENDOR_DETAIL);
@@ -295,16 +333,25 @@ describe("useGeneratePortalLink / useRevokePortalLink — invalidate the detail 
     );
 
     const { Wrapper } = createTestWrapper();
+    const list = renderHook(() => useVendors(), { wrapper: Wrapper });
     const detail = renderHook(() => useVendor("v_acme_01"), {
       wrapper: Wrapper,
     });
-    await waitFor(() => expect(detail.result.current.isSuccess).toBe(true));
+    await waitFor(() => {
+      expect(list.result.current.isSuccess).toBe(true);
+      expect(detail.result.current.isSuccess).toBe(true);
+    });
+    expect(listCalls).toBe(1);
     expect(detailCalls).toBe(1);
 
     const revoke = renderHook(() => useRevokePortalLink("v_acme_01"), {
       wrapper: Wrapper,
     });
     await revoke.result.current.mutateAsync("pl_01");
-    await waitFor(() => expect(detailCalls).toBe(2));
+
+    await waitFor(() => {
+      expect(listCalls).toBe(2);
+      expect(detailCalls).toBe(2);
+    });
   });
 });
