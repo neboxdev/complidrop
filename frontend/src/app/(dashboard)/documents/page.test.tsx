@@ -74,7 +74,7 @@ describe("DocumentsPage — state matrix (#36)", () => {
     expect(screen.getByText(/0 total/i)).toBeInTheDocument();
   });
 
-  it("error: a 5xx surfaces an error card with the server message and a Retry affordance, NOT the empty fallback (#80)", async () => {
+  it("error: a 5xx surfaces an error card with role=alert, the server message, and a Retry affordance, NOT the empty fallback (#80)", async () => {
     server.use(
       http.get(url("/api/documents"), () =>
         jsonError("server.error", "DB down.", { status: 500 }),
@@ -83,26 +83,55 @@ describe("DocumentsPage — state matrix (#36)", () => {
 
     renderWithProviders(<DocumentsPage />, { auth: authedMe });
 
-    // Page chrome still renders. The list row reports the error
-    // distinctly from the empty-org state (#80) — a brand-new org
-    // with zero documents must NOT be visually indistinguishable from
-    // a backend outage. `err.message` carries the human server copy
-    // from the ApiError envelope.
-    await waitFor(() =>
-      expect(screen.queryByText(/loading documents/i)).toBeNull(),
-    );
+    // Co-pin role=alert + headline text on the SAME element so a
+    // regression that drops either property fails loudly (the prior
+    // assertion was via getByText only and would have silently
+    // tolerated removing role=alert — degrading a11y without a
+    // failing test). Wrap in waitFor so a future React work-loop
+    // change that splits loading-gone from error-card-shown doesn't
+    // race the assertion. (#80 followup review)
+    const alert = await waitFor(() => screen.getByRole("alert"));
+    expect(alert).toHaveTextContent(/couldn't load documents/i);
+    expect(alert).toHaveTextContent("DB down.");
+
     expect(
       screen.getByRole("heading", { name: /^documents$/i }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/couldn't load documents/i),
-    ).toBeInTheDocument();
-    expect(screen.getByText("DB down.")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /retry/i }),
     ).toBeInTheDocument();
     // Negative: the empty-state copy must NOT appear on error.
     expect(screen.queryByText(/no documents yet/i)).toBeNull();
+  });
+
+  it("error: non-JSON 5xx (e.g. a proxy HTML page) renders the jargon-free fallback, NOT a raw status-text leak (#80 + #77)", async () => {
+    // Pins the api.ts ↔ page integration for the generic-fallback
+    // branch the new ternary expects. Previously only api.ts's unit
+    // test exercised the GENERIC_FALLBACK_MESSAGE conversion; this
+    // test wires the network-failure / non-JSON-body case end-to-end
+    // through the page render so a future api.ts regression that
+    // dropped the fallback OR a page regression that re-introduced
+    // raw statusText would fail at the list-page layer too.
+    server.use(
+      http.get(url("/api/documents"), () =>
+        Promise.resolve(
+          new Response("<html>502 Bad Gateway</html>", {
+            status: 502,
+            statusText: "Bad Gateway",
+            headers: { "Content-Type": "text/html" },
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+
+    const alert = await waitFor(() => screen.getByRole("alert"));
+    expect(alert).toHaveTextContent(/couldn't load documents/i);
+    expect(alert).toHaveTextContent("Something went wrong. Try again.");
+    // The raw statusText MUST NOT leak through under any path.
+    expect(alert).not.toHaveTextContent(/bad gateway/i);
+    expect(alert).not.toHaveTextContent(/<html>/i);
   });
 
   it("retry-on-5xx: clicking Retry fires a second fetch; a subsequent 200 swaps the error card for the populated list (#80)", async () => {
@@ -143,7 +172,74 @@ describe("DocumentsPage — state matrix (#36)", () => {
     await waitFor(() =>
       expect(screen.getByText("coi-completed.pdf")).toBeInTheDocument(),
     );
+    // Full state swap, not just the headline gone: error card body
+    // text AND the Retry button must also disappear, otherwise a
+    // future refactor that leaves the error <td> stale alongside the
+    // new rows would pass the previous loose assertion. (#80 followup)
     expect(screen.queryByText(/couldn't load documents/i)).toBeNull();
+    expect(screen.queryByText("DB blip.")).toBeNull();
+    expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
+  });
+
+  it("populated-list polling-failure: keeps the rendered rows visible instead of clobbering them with the error card (#80 + #97)", async () => {
+    // The regression #97 was filed against: a poll failure on a
+    // populated list flipped `isError=true` and the new error branch
+    // hid the rows. Fix: gate the error branch on `items.length === 0`
+    // so the cached rows survive a transient poll failure. Pins the
+    // contract so a future refactor that re-removes the gate fails
+    // here loudly. Also verifies `refetchInterval` stops polling on
+    // error so the backend isn't hammered during the outage.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      server.use(
+        http.get(url("/api/documents"), () => {
+          calls++;
+          // First call: populated list with a Pending row (so polling
+          // would normally fire). Subsequent calls: 5xx.
+          if (calls === 1) {
+            return jsonOk(
+              makeDocumentsResponse({
+                items: [
+                  {
+                    ...documentsAllStatuses[0], // Pending row
+                    vendorName: "Acme Sub",
+                  },
+                ],
+                total: 1,
+              }),
+            );
+          }
+          return jsonError("server.error", "Brown-out", { status: 502 });
+        }),
+      );
+
+      renderWithProviders(<DocumentsPage />, { auth: authedMe });
+
+      // First render: populated row visible.
+      await waitFor(() =>
+        expect(screen.getByText("coi-pending.pdf")).toBeInTheDocument(),
+      );
+      expect(calls).toBe(1);
+
+      // Tick past the 5s refetchInterval; the next fetch errors.
+      await vi.advanceTimersByTimeAsync(5000);
+      await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2));
+
+      // Critical: the populated row STAYS visible, and the error card
+      // does NOT replace it.
+      expect(screen.getByText("coi-pending.pdf")).toBeInTheDocument();
+      expect(screen.queryByText(/couldn't load documents/i)).toBeNull();
+      expect(screen.queryByText(/no documents yet/i)).toBeNull();
+
+      // Polling short-circuits on error — advancing another 15s must
+      // NOT trigger more fetches.
+      const afterFirstError = calls;
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(calls).toBe(afterFirstError);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("populated: renders every documentsAllStatuses row with extraction + compliance badges", async () => {

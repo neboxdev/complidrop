@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useVendors, useCreateVendor } from "@/hooks/useVendors";
 import { cn } from "@/lib/utils";
+import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 
 export default function VendorsPage() {
   const vendors = useVendors();
@@ -71,16 +72,20 @@ export default function VendorsPage() {
             <tbody>
               {vendors.isLoading ? (
                 <tr><td colSpan={5} className="py-8 text-center text-slate-400">Loading…</td></tr>
-              ) : vendors.isError ? (
-                // Error state distinct from empty so a backend outage is not
-                // mistaken for an org with zero vendors (#80). `err.message`
-                // is the human server message from the ApiError envelope,
-                // or lib/api.ts's jargon-free fallback when the body is
-                // non-JSON or fetch itself rejected (#77).
+              ) : vendors.isError && (vendors.data ?? []).length === 0 ? (
+                // Error state distinct from empty so a backend outage is
+                // not mistaken for an org with zero vendors (#80). Gate
+                // on `length === 0` so a transient failure does NOT
+                // clobber a previously-populated list. (Symmetric with
+                // documents/page.tsx — see #80 followup review.)
                 //
-                // role="alert" gets the error announced by assistive tech
-                // the moment isError flips true, matching the convention
-                // in frontend/src/test/example.test.tsx.
+                // `err.message` is the human server message; api.ts's
+                // GENERIC_FALLBACK_MESSAGE kicks in when the body is
+                // non-JSON or fetch rejected (#77).
+                //
+                // role="alert" gets the error announced by assistive
+                // tech the moment isError flips true, matching the
+                // convention in frontend/src/test/example.test.tsx.
                 <tr>
                   <td colSpan={5} className="py-12 text-center" role="alert">
                     <AlertTriangle className="w-8 h-8 mx-auto text-rose-500" />
@@ -88,9 +93,7 @@ export default function VendorsPage() {
                       Couldn&apos;t load vendors.
                     </p>
                     <p className="text-xs text-slate-500">
-                      {vendors.error instanceof Error && vendors.error.message.trim()
-                        ? vendors.error.message
-                        : "Something went wrong. Try again."}
+                      {vendors.error?.message?.trim() || GENERIC_FALLBACK_MESSAGE}
                     </p>
                     <Button
                       variant="outline"

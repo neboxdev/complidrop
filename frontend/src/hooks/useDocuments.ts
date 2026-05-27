@@ -35,6 +35,14 @@ export function useDocuments() {
     queryKey: ["documents", "list"],
     queryFn: () => api.get<DocumentListResponse>("/api/documents"),
     refetchInterval: (q) => {
+      // Short-circuit polling when the query is in an error state, even
+      // if the cached `data?.items` still has Pending/Processing rows —
+      // a brown-out where the API tier is failing should not keep
+      // hammering it every 5s × N active dashboards. The Retry button
+      // on the page is the manual recovery affordance; polling resumes
+      // automatically once a refetch succeeds and status flips back to
+      // 'success'. (#80 followup review — performance reviewer)
+      if (q.state.status === "error") return false;
       const items = q.state.data?.items ?? [];
       const pending = items.some((d) => d.extractionStatus === "Pending" || d.extractionStatus === "Processing");
       return pending ? 5_000 : false;
