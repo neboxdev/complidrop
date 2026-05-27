@@ -130,11 +130,16 @@ describe("api.get skipRefresh contract", () => {
       calls.push({ url, method });
       if (url.endsWith("/api/auth/refresh")) {
         refreshCalls++;
-        // Hold the refresh open for a tick so all five 401s have a
-        // chance to enter the 401-recovery branch and accumulate on
-        // the singleton before it resolves. Without this small await,
-        // the first 401's await might resolve synchronously and reset
-        // the refcount before the others arrive, masking the bug.
+        // LOAD-BEARING: this `setTimeout(0)` forces a macrotask
+        // boundary inside doRefresh() so all five concurrent 401
+        // recoveries land on the same singleton BEFORE the refresh
+        // resolves. Without it the first awaiter could resolve, run
+        // its retry, and (under the OLD buggy pre-#68 code) null out
+        // the singleton — letting the remaining four 401s each fire
+        // their own doRefresh, defeating the coalescing the test
+        // exists to verify. DO NOT REMOVE without replacing the
+        // synchronization with another macrotask boundary (e.g.
+        // vi.useFakeTimers + advanceTimersByTime).
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
         return new Response(null, { status: 204 });
       }
@@ -331,6 +336,72 @@ describe("api.get skipRefresh contract", () => {
     // "false" result and these calls would skip the refresh —
     // refreshCalls would stay at 1.
     refreshShouldSucceed = true;
+    const burst2 = await Promise.all(
+      Array.from({ length: 3 }, () =>
+        api.get<{ email: string }>("/api/auth/me"),
+      ),
+    );
+    for (const r of burst2) {
+      expect(r).toEqual({ email: "owner@example.com" });
+    }
+    expect(refreshCalls).toBe(2);
+  });
+
+  it("refresh succeeds + retry fetch THROWS: refcount drains via try/finally so a follow-up burst can refresh again (#68 followup)", async () => {
+    // The try/finally in request() guarantees releaseRefresh() runs
+    // even when fetchOrFriendlyThrow throws on the retry — but no
+    // existing test pins it. A regression that moved releaseRefresh()
+    // inside the `if (refreshed)` block (rather than the finally)
+    // would leak refcount on this path, leaving the singleton stuck
+    // alive and silencing the next 401's refresh attempt forever.
+    //
+    // Sequence: 3 concurrent /me 401s → 1 refresh (204) → 3 retries
+    // all reject with TypeError → 3 ApiError(network.unreachable)
+    // propagate out, refcount drains to 0 via finally → second burst
+    // confirms a new refresh fires.
+    let meCalls = 0;
+    let refreshCalls = 0;
+    let phase: "throw_retry" | "succeed" = "throw_retry";
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/api/auth/refresh")) {
+        refreshCalls++;
+        await new Promise<void>((r) => setTimeout(r, 0));
+        return new Response(null, { status: 204 });
+      }
+      meCalls++;
+      if (phase === "throw_retry") {
+        // First 3 fetches are 401 (trigger refresh), then 3 retries
+        // throw TypeError (network failure post-refresh).
+        if (meCalls <= 3) {
+          return jsonResponse(401, errorEnvelope("auth.unauthorized", "expired"));
+        }
+        throw new TypeError("Failed to fetch");
+      }
+      // Burst 2 (phase=succeed): 3 401 + 3 retry-200.
+      if (meCalls <= 9) {
+        return jsonResponse(401, errorEnvelope("auth.unauthorized", "expired"));
+      }
+      return jsonResponse(200, envelope({ email: "owner@example.com" }));
+    });
+
+    // Burst 1: all 3 throw ApiError(network.unreachable). Refcount
+    // must drain via finally even though the retries threw.
+    const results = await Promise.allSettled(
+      Array.from({ length: 3 }, () => api.get("/api/auth/me")),
+    );
+    for (const r of results) {
+      expect(r.status).toBe("rejected");
+      expect((r as PromiseRejectedResult).reason).toBeInstanceOf(ApiError);
+      expect((r as PromiseRejectedResult).reason.code).toBe("network.unreachable");
+    }
+    expect(refreshCalls).toBe(1);
+
+    // Burst 2: if refcount leaked, the singleton would still hold the
+    // stale "true" result from burst 1 and these calls would skip
+    // refresh entirely. The new refresh confirms try/finally drained
+    // correctly even on the retry-throw path.
+    phase = "succeed";
     const burst2 = await Promise.all(
       Array.from({ length: 3 }, () =>
         api.get<{ email: string }>("/api/auth/me"),
