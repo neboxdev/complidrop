@@ -22,7 +22,7 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import { http, HttpResponse } from "msw";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import PortalPage from "./page";
 import {
   renderWithProviders,
@@ -584,9 +584,22 @@ describe("PortalPage — 429 discriminator branching (#145)", () => {
     ).toBeNull();
     // The error block is keyed by the discriminator — pin the testid
     // so a future copy tweak can't silently flip the branch.
+    const alert = screen.getByTestId("portal-error-rate_limit");
+    expect(alert).toBeInTheDocument();
+    // Defense-in-depth mutual exclusivity at the testid level — a
+    // refactor that left BOTH wrappers rendered would slip past the
+    // copy-absence checks if the quota wrapper happened to be empty.
     expect(
-      screen.getByTestId("portal-error-rate_limit"),
-    ).toBeInTheDocument();
+      screen.queryByTestId("portal-error-quota_exhausted"),
+    ).toBeNull();
+    expect(screen.queryByTestId("portal-error-other")).toBeNull();
+    // Accessibility contract — the vendor portal is the highest-
+    // empathy public surface; assistive-tech users need the error
+    // announced. Pinning role=alert + aria-live=polite catches a
+    // copy-paste regression that dropped either attribute. (#145
+    // review)
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert).toHaveAttribute("aria-live", "polite");
     // The raw code must not leak into the rendered DOM.
     expect(document.body.textContent ?? "").not.toContain(
       "rate_limit.exceeded",
@@ -636,13 +649,58 @@ describe("PortalPage — 429 discriminator branching (#145)", () => {
       screen.queryByText(/try again in about an hour/i),
     ).toBeNull();
     // The error block is keyed by the discriminator.
+    const alert = screen.getByTestId("portal-error-quota_exhausted");
+    expect(alert).toBeInTheDocument();
+    // Defense-in-depth mutual exclusivity at the testid level.
     expect(
-      screen.getByTestId("portal-error-quota_exhausted"),
-    ).toBeInTheDocument();
+      screen.queryByTestId("portal-error-rate_limit"),
+    ).toBeNull();
+    expect(screen.queryByTestId("portal-error-other")).toBeNull();
+    // Accessibility contract — same pinning as the rate_limit branch.
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert).toHaveAttribute("aria-live", "polite");
     // The raw code must not leak into the rendered DOM.
     expect(document.body.textContent ?? "").not.toContain(
       "vendor.portal_quota_exceeded",
     );
+  });
+
+  it("'other' kind with retryFile: NO retry button (button is gated on kind, not on retryFile presence)", async () => {
+    // The `uploadFile` catch path returns `{ kind: "other", retryFile: file }`
+    // when fetch itself rejects (network failure / parse error). The retry
+    // button is conjoined-gated by `error.kind === "rate_limit" &&
+    // error.retryFile` — a future refactor that loosened the guard to
+    // `error.retryFile` alone would silently show the retry button on
+    // the "other" branch, which doesn't have the rate-limit context. This
+    // pins that the button is gated on KIND, not on retryFile presence.
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () =>
+        HttpResponse.error(),
+      ),
+    );
+
+    await renderAndDrop(makeFile("doomed.pdf"));
+
+    // The "other" error block surfaces with the jargon-free fallback.
+    const alert = await screen.findByTestId("portal-error-other");
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert).toHaveAttribute("aria-live", "polite");
+    // The retry button MUST NOT render — kind="other" never qualifies,
+    // even though the catch path captured the file.
+    expect(
+      screen.queryByRole("button", { name: /retry upload/i }),
+    ).toBeNull();
+    // Neither branch's specific copy renders.
+    expect(screen.queryByText(/try again in about an hour/i)).toBeNull();
+    expect(screen.queryByText(/this link is exhausted/i)).toBeNull();
+    // Mutual exclusivity at the testid level.
+    expect(screen.queryByTestId("portal-error-rate_limit")).toBeNull();
+    expect(screen.queryByTestId("portal-error-quota_exhausted")).toBeNull();
+    // No browser internals leak.
+    const visible = document.body.textContent ?? "";
+    expect(visible).not.toMatch(/\bTypeError\b/);
+    expect(visible).not.toMatch(/failed to fetch/i);
   });
 
   it("rate_limit retry: clicking 'Retry upload' replays the SAME file once and clears the error on success", async () => {
@@ -675,16 +733,22 @@ describe("PortalPage — 429 discriminator branching (#145)", () => {
     // First attempt fails: rate-limit branch surfaces.
     const retryBtn = await screen.findByRole("button", { name: /retry upload/i });
 
-    // Click the retry button — captured file replays via the SAME
+    // Click the retry button via fireEvent (codebase convention; see
+    // documents/page.test.tsx) — captured file replays via the SAME
     // upload endpoint; no fresh drop needed.
-    retryBtn.click();
+    fireEvent.click(retryBtn);
 
-    // Second attempt succeeds: Received row appears, error block
-    // disappears, exactly TWO POSTs total.
+    // Second attempt succeeds: Received row appears AND the error
+    // block is fully gone (not just the button). Pinning the entire
+    // alert region disappears catches a regression where a "success"
+    // path forgot to clear `error` but happened to hide the button
+    // (e.g. kind flipped to "other" with no retryFile).
     await waitFor(() => {
       expect(screen.getByText(/^received$/i)).toBeInTheDocument();
       expect(screen.getByText("retry-me.pdf")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: /retry upload/i })).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("portal-error-rate_limit")).toBeNull();
     });
     expect(attempt).toBe(2);
   });
@@ -719,7 +783,7 @@ describe("PortalPage — 429 discriminator branching (#145)", () => {
     await renderAndDrop(makeFile("doomed.pdf"));
 
     const retryBtn = await screen.findByRole("button", { name: /retry upload/i });
-    retryBtn.click();
+    fireEvent.click(retryBtn);
 
     await waitFor(() =>
       expect(
@@ -732,6 +796,11 @@ describe("PortalPage — 429 discriminator branching (#145)", () => {
     expect(
       screen.getByTestId("portal-error-quota_exhausted"),
     ).toBeInTheDocument();
+    // The rate-limit wrapper is gone — true branch swap, not parallel
+    // rendering of both alerts.
+    expect(
+      screen.queryByTestId("portal-error-rate_limit"),
+    ).toBeNull();
     expect(attempt).toBe(2);
   });
 });

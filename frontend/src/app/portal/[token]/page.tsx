@@ -212,18 +212,23 @@ export default function PortalPage() {
   // any fresh error via the same UploadError discriminator. Bound onto
   // the retry button on the rate-limit branch only — the quota branch
   // never renders it (retrying a dead link is hostile UX).
+  //
+  // Dep narrowed to `error?.retryFile` (not the whole `error` object) so
+  // the callback identity only changes when the retry target actually
+  // changes — avoids re-binding on incidental error-message tweaks and
+  // makes the data dependency self-documenting. (#145 review)
+  const retryFile = error?.retryFile;
   const onRetry = useCallback(async () => {
-    if (!error?.retryFile) return;
-    const file = error.retryFile;
+    if (!retryFile) return;
     setUploading(true);
     setError(null);
     try {
-      const err = await uploadFile(file);
+      const err = await uploadFile(retryFile);
       if (err) setError(err);
     } finally {
       setUploading(false);
     }
-  }, [error, uploadFile]);
+  }, [retryFile, uploadFile]);
 
   // Quota-exhausted disables the dropzone client-side. The backend
   // still enforces via 409 — this is a UX guard, not a security one.
@@ -349,16 +354,31 @@ export default function PortalPage() {
              */}
             {error.kind === "rate_limit" && (
               <div className="text-xs text-slate-500 space-y-2">
-                <p>Try again in about an hour, or retry now.</p>
-                {error.retryFile && (
-                  <button
-                    type="button"
-                    onClick={onRetry}
-                    disabled={uploading}
-                    className="inline-flex items-center gap-1 rounded-md border border-sky-300 bg-white px-3 py-1.5 text-sky-700 hover:bg-sky-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" /> Retry upload
-                  </button>
+                {/*
+                 * "or retry now" only makes sense if the retry button
+                 * actually renders. Today the GET-info path can't
+                 * produce kind="rate_limit" (the comment in fetchInfo
+                 * documents that contract) so `retryFile` is always
+                 * non-null on this branch — but coupling the copy to
+                 * the button's presence guards a future refactor that
+                 * widened the path. If retryFile is somehow null, the
+                 * vendor still gets the "try again in about an hour"
+                 * guidance via the fallback below.
+                 */}
+                {error.retryFile ? (
+                  <>
+                    <p>Try again in about an hour, or retry now.</p>
+                    <button
+                      type="button"
+                      onClick={onRetry}
+                      disabled={uploading}
+                      className="inline-flex items-center gap-1 rounded-md border border-sky-300 bg-white px-3 py-1.5 text-sky-700 hover:bg-sky-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" /> Retry upload
+                    </button>
+                  </>
+                ) : (
+                  <p>Try again in about an hour.</p>
                 )}
               </div>
             )}
