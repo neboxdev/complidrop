@@ -22,19 +22,20 @@
  * terminal status (`Completed` / `Failed`), the predicate returns
  * `false` and polling stops naturally — but if the test triggers ONE
  * MORE poll (e.g. via `vi.advanceTimersByTimeAsync(...)` to confirm
- * the no-more-polling contract), `sequencedJsonOk` returns the LAST
+ * the no-more-polling contract), the helper returns the LAST
  * response again instead of throwing "ran out of responses".
  *
- * ## Known limitation
+ * ## Two variants
  *
- * `sequencedJsonOk` wraps EVERY element in `jsonOk` — the entire
- * sequence is success-only. Mixed sequences (e.g. first call 200,
- * second call 5xx, third call 200) cannot use this helper and have
- * to keep the hand-rolled `let calls = 0; if (calls === 1) jsonError
- * (...); return jsonOk(...)` shape (see e.g. the retry-on-5xx tests
- * in `documents/page.test.tsx`). A future `sequencedResponses(
- * ...Response[])` variant taking pre-wrapped Responses would cover
- * the mixed case.
+ * - `sequencedJsonOk(...payloads)` — success-only sugar; wraps every
+ *   element in `jsonOk(...)`. Cleanest for the common polling-
+ *   transition case where every step is a 200.
+ * - `sequencedResponses(...factories)` — general form; each element
+ *   is a `() => Response` factory composable with `jsonOk` /
+ *   `jsonError` (e.g. `() => jsonError("server.error", "...",
+ *   { status: 500 })`). Required for mixed success/error sequences
+ *   like the documents/page retry-on-5xx test (500 → 200) where
+ *   `sequencedJsonOk` can't express the failure step. (#124)
  *
  * ## Polling-test gotchas (not handled here)
  *
@@ -82,18 +83,72 @@ import { jsonOk } from "./helpers";
  *   handler with zero responses is always a programming error.
  */
 export function sequencedJsonOk<T>(...responses: T[]): () => Response {
+  // Empty-check is duplicated here (not delegated to sequencedResponses)
+  // so the call-site RangeError message reads naturally — "at least one
+  // response is required" matches what a sequencedJsonOk caller meant
+  // to say, even though the runtime behavior delegates to
+  // sequencedResponses below. (#124 review)
   if (responses.length === 0) {
     throw new RangeError(
       "sequencedJsonOk: at least one response is required",
     );
   }
+  // Delegate to sequencedResponses so the terminal-clamp + counter +
+  // closure-scoping invariants live in ONE place. A bug in those
+  // invariants now surfaces in BOTH helpers' contract tests, removing
+  // the "the two helpers silently drift in subtle ways" failure mode
+  // the parallel-bodies pattern would have invited. (#124 review)
+  return sequencedResponses(...responses.map((r) => () => jsonOk(r)));
+}
+
+/**
+ * Generalized `sequencedJsonOk` for mixed success/error sequences.
+ * Takes Response FACTORIES — not pre-built Responses — so each
+ * invocation produces a FRESH Response (Response body streams are
+ * single-use; reusing the same instance across multiple fetches
+ * would fail after the first read).
+ *
+ * Composes naturally with the existing `jsonOk` / `jsonError`
+ * helpers via arrow-function wrappers:
+ *
+ *   let calls = 0;
+ *   const seq = sequencedResponses(
+ *     () => jsonError("server.error", "DB blip.", { status: 500 }),
+ *     () => jsonOk(makeDocumentsResponse({ ... })),
+ *   );
+ *   server.use(
+ *     http.get(url("/api/documents"), () => {
+ *       calls++;
+ *       return seq();
+ *     }),
+ *   );
+ *
+ * Mirrors `sequencedJsonOk`'s closure-counter + terminal-clamp +
+ * RangeError semantics exactly — the only contract delta is taking
+ * factories instead of payloads. Use `sequencedJsonOk` when every
+ * step is a success (cleaner call site); reach for this variant only
+ * when the sequence needs to flip between codes.
+ *
+ * @throws RangeError on construction if `factories` is empty.
+ */
+export function sequencedResponses(
+  ...factories: Array<() => Response>
+): () => Response {
+  if (factories.length === 0) {
+    throw new RangeError(
+      "sequencedResponses: at least one factory is required",
+    );
+  }
   let calls = 0;
   return () => {
-    // Index clamps to the last response after it's exhausted so a
-    // terminal-state poll-stop test that does one extra advance to
-    // confirm "no further polls" gets the same terminal payload again.
-    const index = Math.min(calls, responses.length - 1);
+    // Same terminal-clamp semantics as sequencedJsonOk: a refetch-
+    // interval test that does ONE more advance to confirm the
+    // no-more-polling contract gets the last response again instead
+    // of running off the end. Factories called fresh on every
+    // invocation so the returned Response always has an unread body
+    // stream — even on the clamped repeat-calls.
+    const index = Math.min(calls, factories.length - 1);
     calls++;
-    return jsonOk(responses[index]);
+    return factories[index]();
   };
 }
