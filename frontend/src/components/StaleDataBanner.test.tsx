@@ -139,4 +139,52 @@ describe("StaleDataBanner — contract (#97)", () => {
     fireEvent.click(button);
     expect(onRetry).not.toHaveBeenCalled();
   });
+
+  it("isRetrying surfaces a visual + a11y loading affordance (aria-busy + animate-spin)", () => {
+    // Two regression surfaces are pinned together:
+    //   - The button's aria-busy attribute mirrors the visual
+    //     spinning-icon signal for screen-reader users. A regression
+    //     that dropped this would leave assistive-tech users with no
+    //     signal that the retry is in flight (the disabled state
+    //     alone reads as "this button is unavailable", not "this
+    //     button is working").
+    //   - The icon's animate-spin class is the sighted-user signal.
+    //     A regression that dropped the class would leave the button
+    //     visually frozen during the retry.
+    // Both must hold whenever isRetrying=true. (#97 review —
+    // test-quality reviewer)
+    render(
+      <StaleDataBanner onRetry={() => {}} isRetrying={true} noun="documents" />,
+    );
+    const button = screen.getByRole("button", { name: /try again/i });
+    expect(button).toHaveAttribute("aria-busy", "true");
+
+    // The button wraps the RotateCw icon — query its only SVG child
+    // and pin the animate-spin class. Container-scoped via the
+    // button so a future refactor that adds a second SVG elsewhere
+    // in the banner doesn't accidentally satisfy this assertion.
+    const icon = button.querySelector("svg");
+    expect(icon).not.toBeNull();
+    expect(icon).toHaveClass("animate-spin");
+  });
+
+  it("isRetrying=false leaves the button non-busy + the icon non-spinning (negative pair)", () => {
+    // Pairs with the isRetrying=true test so a regression that
+    // hard-coded aria-busy="true" or always-spinning would fail
+    // here. Without the negative test, the previous case alone
+    // would pass even if isRetrying was effectively ignored.
+    render(
+      <StaleDataBanner onRetry={() => {}} isRetrying={false} noun="documents" />,
+    );
+    const button = screen.getByRole("button", { name: /try again/i });
+    // React renders boolean false attribute as the literal string
+    // "false" (because aria-* attributes are stringly-typed). Either
+    // way, the assertion is "NOT true".
+    expect(button).not.toHaveAttribute("aria-busy", "true");
+    expect(button).not.toBeDisabled();
+
+    const icon = button.querySelector("svg");
+    expect(icon).not.toBeNull();
+    expect(icon).not.toHaveClass("animate-spin");
+  });
 });

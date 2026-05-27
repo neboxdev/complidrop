@@ -73,6 +73,125 @@ describe("DocumentDetailPage — basic states (#36)", () => {
     expect(
       screen.getByRole("link", { name: /back to documents/i }),
     ).toHaveAttribute("href", "/documents");
+    // The 404 path stays on the minimal copy — no error card, no
+    // role=alert. Pin the negative so a regression that bucketed
+    // 404 into the new 5xx error card path is caught here.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/couldn't load document/i)).toBeNull();
+  });
+
+  it("error (5xx initial load): renders error card with role=alert + Retry, NOT the not-found copy (#97 symmetrization)", async () => {
+    // The detail page's `!detail.data` early-return used to collapse
+    // 404 / 5xx / network failure into a single "Document not found"
+    // message — surfaced by the test-quality reviewer during the #97
+    // review as the inverse asymmetry of the list page's no-data 5xx
+    // path. Now the detail page splits 404 (minimal copy) from 5xx
+    // (error card with Retry + role=alert) just like the list page.
+    // A brown-out on initial load must not look like the document
+    // was deleted.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonError("server.error", "DB down.", { status: 500 }),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_outage_01" },
+    });
+
+    const alert = await waitFor(() => screen.getByRole("alert"));
+    expect(alert).toHaveTextContent(/couldn't load document/i);
+    expect(alert).toHaveTextContent("DB down.");
+    expect(
+      screen.getByRole("button", { name: /retry/i }),
+    ).toBeInTheDocument();
+    // Negative: the 404 not-found copy must NOT appear on a 5xx.
+    expect(screen.queryByText(/document not found/i)).toBeNull();
+    // The back-to-documents link still renders (matches the list-page
+    // pattern of preserving navigation chrome even on the error path).
+    expect(
+      screen.getByRole("link", { name: /all documents/i }),
+    ).toHaveAttribute("href", "/documents");
+  });
+
+  it("error (5xx initial load): non-JSON body falls back to GENERIC_FALLBACK_MESSAGE (#97 + #77)", async () => {
+    // Symmetric with the list page's same pin — a 502 HTML proxy
+    // page on the initial load must NOT leak `statusText` or raw
+    // HTML into the error card body. The api.ts layer converts to
+    // GENERIC_FALLBACK_MESSAGE; the page must surface that string,
+    // not the raw statusText.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        Promise.resolve(
+          new Response("<html>502 Bad Gateway</html>", {
+            status: 502,
+            statusText: "Bad Gateway",
+            headers: { "Content-Type": "text/html" },
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_outage_02" },
+    });
+
+    const alert = await waitFor(() => screen.getByRole("alert"));
+    expect(alert).toHaveTextContent(/couldn't load document/i);
+    expect(alert).toHaveTextContent("Something went wrong. Try again.");
+    // The raw statusText MUST NOT leak through under any path.
+    expect(alert).not.toHaveTextContent(/bad gateway/i);
+    expect(alert).not.toHaveTextContent(/<html>/i);
+  });
+
+  it("error (5xx initial load): Retry button re-issues the fetch and swaps to the populated detail on 200 (#97 symmetrization)", async () => {
+    // Pins the 5xx-error-card Retry affordance for the detail page,
+    // mirroring the list page's retry-on-5xx test. A regression that
+    // wired Retry to a no-op or the wrong query would slip past the
+    // basic 5xx render test above.
+    let calls = 0;
+    server.use(
+      http.get(url("/api/documents/:id"), () => {
+        calls++;
+        if (calls === 1) {
+          return jsonError("server.error", "DB blip.", { status: 500 });
+        }
+        return jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Completed",
+            complianceStatus: "Compliant",
+          }),
+        );
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_outage_03" },
+    });
+
+    // First render: error card.
+    await waitFor(() =>
+      expect(screen.getByText(/couldn't load document/i)).toBeInTheDocument(),
+    );
+    expect(calls).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+
+    // Second fetch fires, lands the populated detail. Full state
+    // swap: file name + extraction-status testid present, the error
+    // card body + Retry button gone.
+    await waitFor(() => expect(calls).toBe(2));
+    await waitFor(() =>
+      expect(screen.getByText("coi.pdf")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("extraction-status")).toHaveTextContent(
+      "Completed",
+    );
+    expect(screen.queryByText(/couldn't load document/i)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("populated: renders fields + extraction badge + compliance badge", async () => {
@@ -339,14 +458,27 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
     );
     // The "Document not found" copy is the unloaded-data branch, NOT
     // the poll-failure branch — must NOT appear when cached data
-    // exists.
+    // exists. And role=alert is reserved for the no-data error card
+    // path (added in the AC #6 detail-page initial-load 5xx
+    // symmetrization) — the cached-data + poll-failure path uses
+    // role=status (the banner) NOT role=alert. Pin both negatives so
+    // a regression that re-introduced role=alert (interruptive a11y
+    // announcement) on the cached path is caught. Symmetric with the
+    // list-page test at documents/page.test.tsx. (#97 review —
+    // test-quality reviewer)
     expect(screen.queryByText(/document not found/i)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
 
-    // Polling short-circuits on error — advancing 15s of fake time
-    // must NOT trigger any more fetches. Mirrors the same invariant
-    // useDocuments.test.tsx pins for the list-level polling.
+    // Polling short-circuits on error — advancing 60s of fake time
+    // (20 polling windows at the 3s interval, plus enough headroom
+    // for a hypothetical back-off-with-cap implementation up to ~30s)
+    // must NOT trigger any more fetches. Tighter than the previous
+    // 15s window so a future variant that backs off rather than
+    // strict short-circuits would still be caught by this test if
+    // its retry interval ever fired within a minute. (#97 review —
+    // test-quality reviewer)
     const afterFirstError = calls;
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(calls).toBe(afterFirstError);
   });
 
@@ -401,13 +533,82 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
     fireEvent.click(screen.getByRole("button", { name: /try again/i }));
 
     // Banner dismisses + the badge reflects the new Completed status.
+    // Negative-pair: pin that the OLD Processing badge is GONE on the
+    // extraction-status testid (not just that Completed appeared) —
+    // a regression that left both badges side-by-side would pass the
+    // positive assertion. Symmetric with the list-page recovery
+    // test's negative on the old row. (#97 review — test-quality
+    // reviewer)
     await waitFor(() =>
       expect(screen.getByTestId("extraction-status")).toHaveTextContent(
         "Completed",
       ),
     );
+    expect(screen.getByTestId("extraction-status")).not.toHaveTextContent(
+      "Processing",
+    );
     expect(screen.queryByRole("status")).toBeNull();
     expect(screen.queryByText(/couldn't refresh document/i)).toBeNull();
+  });
+
+  it("Try-again that fails too on detail: banner stays visible, button re-enables (#97)", async () => {
+    // Symmetric with the list-page negative-recovery test: a poll
+    // failure → Try-again → ALSO fails → banner must STAY visible,
+    // button must re-enable so the user can keep retrying. Catches a
+    // regression that incorrectly clears isError on click or that
+    // sticks the disabled state after a failed retry. (#97 review —
+    // correctness + test-quality reviewers)
+    let calls = 0;
+    server.use(
+      http.get(url("/api/documents/:id"), () => {
+        calls++;
+        if (calls === 1) {
+          return jsonOk(
+            makeDocumentDetail({
+              extractionStatus: "Processing",
+              complianceStatus: "Pending",
+            }),
+          );
+        }
+        // Every subsequent call (polling + Try-again click) fails.
+        return jsonError("server.error", "Still down", { status: 502 });
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_x_97" },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText("coi.pdf")).toBeInTheDocument(),
+    );
+
+    // Poll fires → fails → banner appears.
+    await vi.advanceTimersByTimeAsync(3000);
+    await waitFor(() =>
+      expect(screen.getByText(/couldn't refresh document/i)).toBeInTheDocument(),
+    );
+
+    // Click Try again → also fails.
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(3));
+
+    // Banner remains with the new server message.
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent(/couldn't refresh document/i);
+    expect(banner).toHaveTextContent(/still down/i);
+    // Cached detail stays rendered — no fallback page.
+    expect(screen.getByText("coi.pdf")).toBeInTheDocument();
+    expect(screen.queryByText(/document not found/i)).toBeNull();
+    expect(screen.queryByText(/couldn't load document/i)).toBeNull();
+
+    // Try-again button is re-enabled once isFetching settles.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /try again/i }),
+      ).not.toBeDisabled(),
+    );
   });
 
   it("Processing → Failed: UI advances to the failed badge + processingError card", async () => {

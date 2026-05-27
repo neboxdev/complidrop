@@ -251,10 +251,15 @@ describe("DocumentsPage — state matrix (#36)", () => {
       // a11y announcement) is caught here.
       expect(screen.queryByRole("alert")).toBeNull();
 
-      // Polling short-circuits on error — advancing another 15s must
-      // NOT trigger more fetches.
+      // Polling short-circuits on error — advancing 60s of fake time
+      // (12 polling windows at the 5s interval, plus enough headroom
+      // for a hypothetical back-off-with-cap implementation up to
+      // ~30s) must NOT trigger any more fetches. Tighter than 15s so a
+      // future variant that backs off rather than strict short-circuits
+      // would still be caught by this test if its retry interval ever
+      // fired within a minute. (#97 review — test-quality reviewer)
       const afterFirstError = calls;
-      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(calls).toBe(afterFirstError);
     } finally {
       vi.useRealTimers();
@@ -324,12 +329,174 @@ describe("DocumentsPage — state matrix (#36)", () => {
       fireEvent.click(screen.getByRole("button", { name: /try again/i }));
 
       // The banner disappears once isError flips back to false on the
-      // 200 response, AND the list reflects the new payload.
+      // 200 response, AND the list reflects the new payload — co-pin
+      // positive (new row present) AND negative (old row gone) so a
+      // regression that spread the new items alongside the old (e.g.
+      // a future refactor to an append-style cache update) would
+      // surface here. (#97 review — test-quality reviewer)
+      await waitFor(() =>
+        expect(screen.getByText("coi-completed.pdf")).toBeInTheDocument(),
+      );
+      expect(screen.queryByText("coi-pending.pdf")).toBeNull();
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.queryByText(/couldn't refresh documents/i)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Try-again that fails too: banner stays visible, button re-enables once isFetching settles (#97)", async () => {
+    // Pins the negative-recovery path the existing tests don't cover:
+    // a regression that incorrectly cleared isError on click (or that
+    // left the disabled state pinned after a failed retry) would slip
+    // past every previous assertion. The banner must STAY visible
+    // after the second failure, and the Try-again button must re-enable
+    // so the user can keep retrying. (#97 review — correctness +
+    // test-quality reviewers)
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      server.use(
+        http.get(url("/api/documents"), () => {
+          calls++;
+          if (calls === 1) {
+            return jsonOk(
+              makeDocumentsResponse({
+                items: [
+                  {
+                    ...documentsAllStatuses[0], // Pending row
+                    vendorName: "Acme Sub",
+                  },
+                ],
+                total: 1,
+              }),
+            );
+          }
+          // Every subsequent call (polling + Try-again click) fails.
+          return jsonError("server.error", "Still down", { status: 502 });
+        }),
+      );
+
+      renderWithProviders(<DocumentsPage />, { auth: authedMe });
+
+      await waitFor(() =>
+        expect(screen.getByText("coi-pending.pdf")).toBeInTheDocument(),
+      );
+
+      // First polling refetch fails → banner appears.
+      await vi.advanceTimersByTimeAsync(5000);
+      await waitFor(() =>
+        expect(screen.getByText(/couldn't refresh documents/i)).toBeInTheDocument(),
+      );
+
+      // Click Try again → second failure → banner stays.
+      fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+      // Wait for the in-flight retry to settle (isFetching → false).
+      await waitFor(() => expect(calls).toBeGreaterThanOrEqual(3));
+
+      // Banner remains visible with the latest server message.
+      const banner = screen.getByRole("status");
+      expect(banner).toHaveTextContent(/couldn't refresh documents/i);
+      expect(banner).toHaveTextContent(/still down/i);
+      // Stale row stays rendered — full-page error card MUST NOT
+      // replace it.
+      expect(screen.getByText("coi-pending.pdf")).toBeInTheDocument();
+      expect(screen.queryByText(/couldn't load documents/i)).toBeNull();
+
+      // The Try-again button is re-enabled — user can keep retrying.
+      // A regression that pinned the disabled state across failures
+      // would lock the user out of the only recovery affordance.
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: /try again/i }),
+        ).not.toBeDisabled(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("polling resumes after recovery when items still have Pending/Processing rows (#97)", async () => {
+    // Pins that the short-circuit-on-error contract is NOT sticky —
+    // once isError flips back to success, refetchInterval re-evaluates
+    // the predicate and resumes polling at 5s for any remaining
+    // Pending/Processing rows. A regression that hard-pinned polling
+    // off after the first error (e.g. by reading a sticky local flag
+    // instead of `q.state.status`) would silently leave the dashboard
+    // unable to update Pending → Completed transitions after any
+    // transient brown-out. (#97 review — correctness reviewer)
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      const pending = makeDocumentsResponse({
+        items: [
+          {
+            ...documentsAllStatuses[0], // Pending row
+            vendorName: "Acme Sub",
+          },
+        ],
+        total: 1,
+      });
+      const completed = makeDocumentsResponse({
+        items: [
+          {
+            ...documentsAllStatuses[2], // Completed row
+            vendorName: "Acme Sub",
+          },
+        ],
+        total: 1,
+      });
+      server.use(
+        http.get(url("/api/documents"), () => {
+          calls++;
+          // Call 1: Pending. Call 2: 5xx (banner appears, polling
+          // stops). Call 3: Try-again succeeds with STILL-Pending
+          // payload (the document hasn't finished extracting yet).
+          // After call 3, polling MUST resume — confirmed by call 4
+          // landing within a 5s tick after the Pending recovery.
+          if (calls === 1 || calls === 3) return jsonOk(pending);
+          if (calls === 2) {
+            return jsonError("server.error", "Brown-out", { status: 502 });
+          }
+          // Call 4: terminal Completed → polling stops naturally.
+          return jsonOk(completed);
+        }),
+      );
+
+      renderWithProviders(<DocumentsPage />, { auth: authedMe });
+
+      await waitFor(() =>
+        expect(screen.getByText("coi-pending.pdf")).toBeInTheDocument(),
+      );
+
+      // Tick into the poll-failure window.
+      await vi.advanceTimersByTimeAsync(5000);
+      await waitFor(() =>
+        expect(screen.getByText(/couldn't refresh documents/i)).toBeInTheDocument(),
+      );
+
+      // Click Try again → 200 with still-Pending → banner dismisses +
+      // polling resumes.
+      fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+      await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+      const beforeResume = calls;
+
+      // The polling-resumed assertion: after the success refetch,
+      // refetchInterval re-evaluates against the Pending row and
+      // schedules the next 5s tick. Advance past it — a new fetch
+      // must fire. A regression that left polling off would leave
+      // `calls` unchanged here.
+      await vi.advanceTimersByTimeAsync(5000);
+      await waitFor(() =>
+        expect(calls).toBeGreaterThanOrEqual(beforeResume + 1),
+      );
+
+      // The 4th call lands the Completed payload → list shows the
+      // new row, banner stays absent, polling stops naturally.
       await waitFor(() =>
         expect(screen.getByText("coi-completed.pdf")).toBeInTheDocument(),
       );
       expect(screen.queryByRole("status")).toBeNull();
-      expect(screen.queryByText(/couldn't refresh documents/i)).toBeNull();
     } finally {
       vi.useRealTimers();
     }

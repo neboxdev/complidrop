@@ -94,6 +94,14 @@ export function StaleDataBanner({
         size="sm"
         onClick={onRetry}
         disabled={isRetrying}
+        // aria-busy mirrors the visual spinning-icon affordance for
+        // assistive tech: screen-reader users get the same "retry is
+        // in flight" signal that the animate-spin class gives sighted
+        // users. Pinned by the StaleDataBanner.test.tsx isRetrying
+        // case so a regression that drops the visual loading
+        // affordance also fails the test. (#97 review — test-quality
+        // reviewer)
+        aria-busy={isRetrying}
         className="shrink-0 border-amber-300 hover:bg-amber-100"
       >
         <RotateCw
