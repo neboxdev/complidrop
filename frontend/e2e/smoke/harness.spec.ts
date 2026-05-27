@@ -29,11 +29,16 @@ test.describe("E2E harness sanity (#38)", () => {
     // Equivalent in semantics to a user whose session lapsed but
     // whose hint cookie survived — the exact scenario #69's AC #3
     // pins at "one /me 401, skipRefresh keeps the cost at one call".
+    // Playwright's addCookies wants `url` XOR `domain+path` (NOT both —
+    // it errors with 'Cookie should have either url or path'). `domain`
+    // + `path` is port-agnostic (PLAYWRIGHT_PORT defaults to 3100 in
+    // CI per playwright.config.ts and may differ locally), so use the
+    // domain form to avoid binding the test to a specific port.
     await page.context().addCookies([
       {
         name: "cd_session_hint",
         value: "1",
-        url: "http://localhost:3000",
+        domain: "localhost",
         path: "/",
       },
     ]);
