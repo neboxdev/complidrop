@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { toast } from "sonner";
 import { FileText, FileSpreadsheet, Calendar } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
@@ -14,6 +14,12 @@ export default function ExportPage() {
   const [from, setFrom] = useState(isoDaysAgo(30));
   const [to, setTo] = useState(isoDaysAgo(0));
   const [busy, setBusy] = useState(false);
+  // a11y: wire the From/To date inputs to their labels via htmlFor +
+  // id so screen readers announce each input with its date-range
+  // context. Missed by the original #76 sweep — only the auth and
+  // vendor dashboard forms were touched. (#76 followup)
+  const fromId = useId();
+  const toId = useId();
 
   const download = async (path: string, filename: string) => {
     setBusy(true);
@@ -72,16 +78,16 @@ export default function ExportPage() {
           </p>
           <div className="grid grid-cols-2 gap-3 items-end">
             <div>
-              <label className="text-xs text-slate-500 flex items-center gap-1">
+              <label htmlFor={fromId} className="text-xs text-slate-500 flex items-center gap-1">
                 <Calendar className="w-3 h-3" /> From
               </label>
-              <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="mt-1" />
+              <Input id={fromId} type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="mt-1" />
             </div>
             <div>
-              <label className="text-xs text-slate-500 flex items-center gap-1">
+              <label htmlFor={toId} className="text-xs text-slate-500 flex items-center gap-1">
                 <Calendar className="w-3 h-3" /> To
               </label>
-              <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="mt-1" />
+              <Input id={toId} type="date" value={to} onChange={(e) => setTo(e.target.value)} className="mt-1" />
             </div>
           </div>
           <Button
