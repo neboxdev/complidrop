@@ -74,13 +74,13 @@ Features begin with `/plan`, run through PM review (6 reviewers including a Comp
 
 Tests are mandatory after implementation — unit tests for pure logic (xUnit), integration tests using `WebApplicationFactory` for boundaries (Postgres, Azure Blob, Document AI, Gemini, Stripe webhook, Resend). Frontend tests use Jest/Vitest.
 
-Multi-agent code review runs on every ticket before PR (`/start <n>` Phase 4). **Every bug the reviewers find gets fixed regardless of severity.** Reviewer **suggestions** are triaged three ways before the PR opens:
+Multi-agent code review runs on every ticket before PR (`/start <n>` Phase 4). **Every bug the reviewers find gets fixed regardless of severity.** Reviewer **suggestions** are triaged three ways before the PR opens — but the first option is the **overwhelming default, target ≥99%**:
 
-1. **Implement in the same PR** — the default. Polish, missing test edges, small refactors, ADRs.
-2. **Defer to a follow-up ticket** — only when the suggestion expands scope, changes data semantics, or contradicts the reviewer's own caveat. The new ticket gets the reviewer's reasoning copied in. The PR body lists the spawned ticket ids.
+1. **Implement in the same PR** — the strong default. Polish, missing test edges, small refactors, ADRs, mid-sized cleanups all land here. Even non-trivial changes are absorbed unless an exception in (2) applies.
+2. **Defer to a follow-up ticket** — **rare**. Permitted only when **(a)** the suggestion strictly requires its own ADR / spec conversation (data-semantics or public-API contract change, or the reviewer explicitly flagged it as deferred-to-later), or **(b)** the 5-hour Claude session budget is approaching its cap with bugs and core suggestions still pending — in which case never defer a `bug`-kind finding. "Bigger refactor" alone is NOT sufficient. The new ticket gets the reviewer's reasoning copied in; the PR body lists the spawned ticket id(s) AND the deferral reason (necessity vs. budget).
 3. **Discard** — only when the suggestion contradicts a project rule (this file, an existing ADR, the ticket's Non-goals). The PR body lists discards with the rule cited.
 
-"Listed in the PR body but not auto-fixed" is no longer a valid outcome.
+"Listed in the PR body but not auto-fixed" is no longer a valid outcome. When unsure between implement and defer, **implement**.
 
 Never silently diverge from a ticket's acceptance criteria — update the ticket first.
 
@@ -95,10 +95,11 @@ Bug-fix and latent-issue tickets are indexed in one rolling epic — **[#48 Bug 
 - **Dual epic membership is fine**: a `bug` ticket can also be listed in another epic (e.g. a launch-blocker tracked in #1). The rolling epic is a discovery index, not an ownership claim.
 
 Other epics today:
-- #1 Backend hardening before launch (closing out)
-- #33 Frontend test hardening (in progress)
-- #41 Codebase simplification pass (gated on #1 + #33; one-time)
+- #1 Backend hardening before launch (closed 2026-05-27)
+- #33 Frontend test hardening (closed 2026-05-27)
+- #41 Codebase simplification pass (gated on launch; one-time)
 - #48 Bug fixes & latent issues (rolling; never closes)
+- #150 Post-launch follow-ups (umbrella for deferred-past-launch work; starts after launch — #40 lives here now)
 
 ## Slash commands
 
