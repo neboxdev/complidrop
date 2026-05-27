@@ -31,8 +31,17 @@ let refreshing: Promise<boolean> | null = null;
 let refreshConsumers = 0;
 
 function getRefreshPromise(): Promise<boolean> {
-  refreshConsumers++;
+  // Assign FIRST, increment AFTER. doRefresh is async so today it
+  // cannot synchronously throw before returning the promise, but a
+  // future inline of its body (or a synchronous validator added at
+  // the top) could throw between the `++` and the assignment under
+  // the previous ordering — leaking the refcount permanently because
+  // the caller's `try/finally { releaseRefresh() }` never runs (the
+  // throw escapes before control returns to the caller's try block).
+  // Reordering keeps the counter consistent regardless of future
+  // refactors. (#68 followup — correctness reviewer)
   refreshing ??= doRefresh();
+  refreshConsumers++;
   return refreshing;
 }
 
