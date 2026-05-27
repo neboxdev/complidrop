@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using FluentAssertions;
 using Xunit;
 
@@ -31,6 +32,19 @@ namespace CompliDrop.Api.Tests;
 /// Allow-list entries name the file + the clause-3 ADR-0009 reason
 /// they're exempt so a future maintainer can audit the allow-list
 /// itself, not just the violations it covers.
+///
+/// ## Self-test (#64 followup)
+///
+/// The scanner is itself test-covered so a future refactor that
+/// silently no-ops the gate (e.g. `IsCommentLine` returning true for
+/// every line, or `FindProductionRoot` resolving to an empty tree)
+/// surfaces as a test failure. The hermetic <c>FindViolations</c>
+/// pure-function path takes a synthetic root in <c>%TEMP%</c> and
+/// exercises both directions: a known-bad fixture must surface as
+/// a violation; a comment-only fixture must not. The
+/// <c>IsCommentLine</c> classifier has its own [Theory] pinning the
+/// contract directly. Together these prevent the gate from silently
+/// regressing into a no-op.
 /// </summary>
 public class Adr0009EnforcementTests
 {
@@ -43,8 +57,10 @@ public class Adr0009EnforcementTests
     ///
     /// Each entry pairs a normalized relative path (forward slashes)
     /// with a one-line rationale. A new clause-3 site should be added
-    /// here at the time the new code lands, and the rationale should
-    /// name which ADR clause makes it legitimate.
+    /// here at the time the new code lands, and the rationale MUST
+    /// name which ADR clause makes it legitimate (the
+    /// <see cref="Clause_three_allow_list_entries_cite_an_ADR_clause"/>
+    /// test enforces a `clause N` or `ADR NNNN` substring).
     /// </summary>
     private static readonly Dictionary<string, string> ClauseThreeAllowList = new()
     {
@@ -54,6 +70,15 @@ public class Adr0009EnforcementTests
         ["Migrations/20260525101534_BackfillReminderLogSendDateToOrgLocal.cs"] =
             "ADR 0009 clause 3 — output-only conversion to date for ADR 0007 org-local SendDate backfill",
     };
+
+    /// <summary>
+    /// Lowest-plausible production-tree file count. A real
+    /// <c>api/CompliDrop.Api/</c> tree contains dozens of .cs files
+    /// (~80 at the time of #64). If the scanner sees fewer than this,
+    /// <see cref="FindProductionRoot"/> almost certainly resolved to
+    /// the wrong directory and the gate is silently a no-op.
+    /// </summary>
+    private const int MinExpectedProductionFiles = 50;
 
     /// <summary>
     /// Resolve the repository's <c>api/CompliDrop.Api/</c> directory.
@@ -85,24 +110,45 @@ public class Adr0009EnforcementTests
 
     /// <summary>
     /// Identify lines that are purely comment content (single-line
-    /// <c>//</c>, XML doc <c>///</c>, or block-style <c>*</c>
-    /// continuation). Does NOT attempt to handle the rare end-of-line
-    /// comment case (e.g. <c>cmd.CommandText = "...AT TIME ZONE..."; // note</c>)
+    /// <c>//</c>, XML doc <c>///</c>, block-comment opener <c>/*</c>,
+    /// or block-comment continuation <c>*</c>). Does NOT attempt to
+    /// handle the rare end-of-line comment case
+    /// (e.g. <c>cmd.CommandText = "...AT TIME ZONE..."; // note</c>)
     /// — that line still contains the offending SQL and should fail.
+    ///
+    /// Internal so the companion theory test can pin the contract;
+    /// a refactor that silently broke this helper would otherwise
+    /// regress the entire gate to a no-op without any test failure.
     /// </summary>
-    private static bool IsCommentLine(string line)
+    internal static bool IsCommentLine(string line)
     {
         var trimmed = line.TrimStart();
         return trimmed.StartsWith("//", StringComparison.Ordinal)
+            || trimmed.StartsWith("/*", StringComparison.Ordinal)
             || trimmed.StartsWith("*", StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void No_raw_SQL_in_production_code_uses_AT_TIME_ZONE_outside_the_clause_three_allow_list()
+    /// <summary>
+    /// Scan every <c>.cs</c> file under <paramref name="productionRoot"/>
+    /// for non-comment lines containing <c>AT TIME ZONE</c>
+    /// (case-insensitive) outside the supplied allow-list. Returns
+    /// the formatted violation strings in deterministic order
+    /// (<c>"{relative-path}:{line-number}: {trimmed-line}"</c>) and
+    /// the count of files actually scanned (so callers can guard
+    /// against a silent zero-file no-op).
+    ///
+    /// Pure relative to its inputs — takes the root + allow-list,
+    /// reads from disk, returns the result. Internal so hermetic
+    /// fixture tests can drive it against a synthetic <c>%TEMP%</c>
+    /// root in <see cref="Scanner_flags_a_known_violation_under_a_temp_root"/>
+    /// and <see cref="Scanner_skips_a_comment_only_line_under_a_temp_root"/>.
+    /// </summary>
+    internal static (IReadOnlyList<string> Violations, int ScannedCount) FindViolations(
+        string productionRoot,
+        IReadOnlyDictionary<string, string> allowList)
     {
-        var productionRoot = FindProductionRoot();
         var violations = new List<string>();
-
+        var scanned = 0;
         foreach (var file in Directory.EnumerateFiles(
                      productionRoot, "*.cs", SearchOption.AllDirectories))
         {
@@ -114,12 +160,13 @@ public class Adr0009EnforcementTests
                 continue;
             }
 
+            scanned++;
+
             // Case-insensitive substring match — Postgres accepts
             // `AT TIME ZONE` in any case, so does the rule. The scan
-            // deliberately ignores single-line / XML-doc / block-style
-            // COMMENT lines: a comment mentioning `AT TIME ZONE` to
-            // EXPLAIN the rule (e.g. the doc-comment on
-            // ExtractionWorker.ClaimSql) is exactly the kind of
+            // deliberately ignores comment lines: a comment mentioning
+            // `AT TIME ZONE` to EXPLAIN the rule (e.g. the doc-comment
+            // on ExtractionWorker.ClaimSql) is exactly the kind of
             // counter-example we WANT future maintainers to read.
             // The rule's intent is to forbid the SQL itself, not the
             // word.
@@ -138,7 +185,7 @@ public class Adr0009EnforcementTests
                     continue;
                 }
 
-                if (ClauseThreeAllowList.ContainsKey(relative))
+                if (allowList.ContainsKey(relative))
                 {
                     // Allow-listed — clause 3 legitimate.
                     break;
@@ -150,6 +197,27 @@ public class Adr0009EnforcementTests
                 break;
             }
         }
+        return (violations, scanned);
+    }
+
+    [Fact]
+    public void No_raw_SQL_in_production_code_uses_AT_TIME_ZONE_outside_the_clause_three_allow_list()
+    {
+        var productionRoot = FindProductionRoot();
+        var (violations, scanned) = FindViolations(productionRoot, ClauseThreeAllowList);
+
+        // Silent-no-op guard: if FindProductionRoot ever resolves to
+        // an empty/wrong tree (e.g. project rename, partial checkout,
+        // broken CI cache layout), the scanner sees zero files,
+        // returns zero violations, and the assertion below would
+        // false-pass. The floor below ensures the gate either does
+        // real work or fails loudly.
+        scanned.Should().BeGreaterOrEqualTo(
+            MinExpectedProductionFiles,
+            $"the api/CompliDrop.Api/ tree should contain at least " +
+            $"{MinExpectedProductionFiles} .cs files; if the scanner sees " +
+            "fewer, FindProductionRoot likely resolved to the wrong " +
+            "directory and the gate would be a silent no-op.");
 
         violations.Should().BeEmpty(
             "ADR 0009 forbids `AT TIME ZONE` on a timestamptz expression " +
@@ -181,6 +249,163 @@ public class Adr0009EnforcementTests
                 "should point at a real file. If the file was " +
                 "intentionally removed (e.g. migrations squashed), " +
                 "drop the corresponding allow-list entry.");
+        }
+    }
+
+    [Fact]
+    public void Clause_three_allow_list_entries_cite_an_ADR_clause()
+    {
+        // The reviewer-audit rationale only works if every entry
+        // actually says WHY the file is exempt. A future contributor
+        // adding `["Migrations/foo.cs"] = ""` or `= "TODO"` defeats
+        // the audit. Regex matches `clause N` or `ADR NNNN` (any
+        // 4-digit number) — both legitimate citations.
+        var citationRegex = new Regex(
+            @"clause\s*\d|ADR\s*\d{4}",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        foreach (var (relative, reason) in ClauseThreeAllowList)
+        {
+            reason.Should().NotBeNullOrWhiteSpace(
+                $"allow-list entry '{relative}' must have a non-empty rationale.");
+            citationRegex.IsMatch(reason).Should().BeTrue(
+                $"allow-list entry '{relative}' rationale '{reason}' must name " +
+                "the ADR clause that makes it legitimate (e.g. " +
+                "\"ADR 0009 clause 3 — ...\"). See the existing entry for " +
+                "the canonical shape.");
+        }
+    }
+
+    [Theory]
+    [InlineData("// foo", true)]
+    [InlineData("    // foo", true)]
+    [InlineData("/// XML doc", true)]
+    [InlineData("    /// XML doc", true)]
+    [InlineData("/* block-comment opener */", true)]
+    [InlineData("    /* opener */", true)]
+    [InlineData(" * continuation", true)]
+    [InlineData("    * continuation", true)]
+    [InlineData("var sql = \"SELECT 1\";", false)]
+    [InlineData("cmd.CommandText = \"...AT TIME ZONE...\"; // note", false)]
+    [InlineData("\"ProcessingStartedAt\" = now() at time zone 'utc',", false)]
+    [InlineData("", false)]
+    [InlineData("   ", false)]
+    public void IsCommentLine_classifies_lines_correctly(string line, bool expected)
+    {
+        // Pins the classifier's contract. The scanner's whole "skip
+        // comments" branch hinges on this — a refactor that broke
+        // IsCommentLine (e.g. returning true for everything) would
+        // silently disable the gate without any other test noticing.
+        // This theory makes that failure mode loud.
+        IsCommentLine(line).Should().Be(expected);
+    }
+
+    [Fact]
+    public void Scanner_flags_a_known_violation_under_a_temp_root()
+    {
+        // Hermetic positive-direction test: write a synthetic fixture
+        // containing the offending SQL into a %TEMP% subdir, run the
+        // scanner against it, assert the violation surfaces. Without
+        // this test, the scanner's "find a violation" branch is
+        // verified only against the production tree's all-clean state
+        // — which proves the negative path but leaves the positive
+        // path untested after merge.
+        var temp = Directory.CreateTempSubdirectory("adr0009-positive-").FullName;
+        try
+        {
+            var fixture = Path.Combine(temp, "Worker.cs");
+            File.WriteAllText(
+                fixture,
+                "var sql = \"SELECT now() AT TIME ZONE 'utc' FROM t\";\n");
+
+            var (violations, scanned) = FindViolations(
+                temp,
+                new Dictionary<string, string>());
+
+            scanned.Should().Be(1, "the temp tree contains exactly one .cs file");
+            violations.Should().ContainSingle()
+                .Which.Should()
+                    .Contain("Worker.cs").And
+                    .Contain("1:").And
+                    .Contain("AT TIME ZONE");
+        }
+        finally
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Scanner_skips_a_comment_only_line_under_a_temp_root()
+    {
+        // Hermetic negative-direction test: write a synthetic fixture
+        // where `AT TIME ZONE` appears ONLY in a comment, run the
+        // scanner against it, assert no violation surfaces. Without
+        // this test, an over-eager refactor of IsCommentLine (e.g.
+        // dropping the check entirely) would surface as a flood of
+        // false positives on production XML-doc comments — but only
+        // AFTER the over-eager change had landed and broken CI for
+        // legitimate code.
+        var temp = Directory.CreateTempSubdirectory("adr0009-negative-").FullName;
+        try
+        {
+            var fixture = Path.Combine(temp, "Worker.cs");
+            File.WriteAllText(
+                fixture,
+                "// AT TIME ZONE is forbidden in raw SQL (this comment is fine).\n" +
+                "/// <summary>Also at time zone in an XML doc.</summary>\n" +
+                " * AT TIME ZONE in a block-comment continuation.\n" +
+                "/* AT TIME ZONE in a block-comment opener */\n" +
+                "var sql = \"SELECT 1\";\n");
+
+            var (violations, _) = FindViolations(
+                temp,
+                new Dictionary<string, string>());
+
+            violations.Should().BeEmpty(
+                "every `AT TIME ZONE` occurrence in the fixture lives inside a " +
+                "comment line; the scanner must skip all four shapes.");
+        }
+        finally
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Scanner_respects_the_allow_list_under_a_temp_root()
+    {
+        // Hermetic allow-list test: write a synthetic fixture WITH a
+        // real violation, but include its relative path in the
+        // supplied allow-list. The scanner must NOT report it. Pins
+        // the allow-list bypass against an over-eager refactor that
+        // forgets to honor the dictionary.
+        var temp = Directory.CreateTempSubdirectory("adr0009-allowlist-").FullName;
+        try
+        {
+            var subdir = Path.Combine(temp, "Migrations");
+            Directory.CreateDirectory(subdir);
+            var fixture = Path.Combine(subdir, "Legitimate.cs");
+            File.WriteAllText(
+                fixture,
+                "var sql = \"SELECT (ts AT TIME ZONE 'UTC')::date\";\n");
+
+            var allowList = new Dictionary<string, string>
+            {
+                ["Migrations/Legitimate.cs"] = "ADR 0009 clause 3 — test fixture",
+            };
+
+            var (violations, scanned) = FindViolations(temp, allowList);
+
+            scanned.Should().Be(1);
+            violations.Should().BeEmpty(
+                "the fixture's relative path is in the allow-list; the violation " +
+                "must be suppressed even though the substring is present on a " +
+                "non-comment line.");
+        }
+        finally
+        {
+            Directory.Delete(temp, recursive: true);
         }
     }
 }
