@@ -44,18 +44,28 @@ import { describe, it, expect } from "vitest";
 
 const useClientDirective = /^["']use client["']\s*;?\s*$/;
 
+// Test-file detector — mirrors the vitest config's
+// `include: ["src/**/*.{test,spec}.{ts,tsx}"]` glob so a future
+// `.spec.tsx` test wouldn't spuriously fail the importer audit.
+// (#120 second-pass review — correctness reviewer.)
+const TEST_FILE_RE = /\.(test|spec)\.tsx?$/;
+
+// BOM strip — uses the explicit `\uFEFF` escape (NOT a literal
+// U+FEFF byte) so the regex source itself survives any aggressive
+// encoding transform (Notepad++ "Encode in UTF-8 (no BOM)",
+// dos2unix --keep-bom no, certain git filter drivers). If an
+// editor stripped a literal BOM from this source file, the regex
+// would silently become a no-op /^/ that always matches at
+// position 0 — and the BOM-strip defense would be gone with no
+// failing test. (#120 second-pass review — correctness reviewer.)
+const BOM_RE = /^\uFEFF/;
+
 const repoFrontendSrc = resolve(__dirname, "..");
 const apiPath = resolve(__dirname, "api.ts");
 
 describe("api.ts — 'use client' directive + client-only guard (#120)", () => {
   it("'use client' is the literal first non-blank source line", () => {
-    // Strip a UTF-8 BOM if present (some Windows editors prepend one)
-    // so the test isn't tripped by encoding artifacts. The `﻿`
-    // escape form is preferred over a literal BOM glyph because the
-    // escape survives any source-file transform (Prettier reformat,
-    // editor encoding re-save) that might invisibly normalize a
-    // literal BOM character.
-    const source = readFileSync(apiPath, "utf8").replace(/^﻿/, "");
+    const source = readFileSync(apiPath, "utf8").replace(BOM_RE, "");
     // Split on either LF or CRLF — Windows checkouts via
     // `core.autocrlf=true` land CRLF on disk while macOS/Linux land
     // LF, so the test must tolerate both regardless of the
@@ -98,7 +108,7 @@ describe("api.ts — 'use client' directive + client-only guard (#120)", () => {
 
 describe("api.ts — every importer must itself be 'use client' (#120 AC #3)", () => {
   // Walk the entire `frontend/src/` tree, find every file that
-  // imports from `@/lib/api` (or a relative-path variant), and
+  // imports from `@/lib/api` (or any relative-path variant), and
   // assert each one starts with the `"use client"` directive. This
   // turns the ticket's human-time-bound audit into an automated
   // invariant: when a future PR adds a new Server Component importer
@@ -113,9 +123,9 @@ describe("api.ts — every importer must itself be 'use client' (#120 AC #3)", (
       const full = join(dir, entry);
       const st = statSync(full);
       if (st.isDirectory()) {
-        // Skip vendored / build directories. These directories
-        // shouldn't exist under src/ in practice, but defending
-        // against an accidental commit is cheap.
+        // Skip vendored / build directories. These shouldn't exist
+        // under src/ in practice, but defending against an accidental
+        // commit is cheap.
         if (entry === "node_modules" || entry === ".next") continue;
         walk(full, out);
       } else if (
@@ -130,52 +140,106 @@ describe("api.ts — every importer must itself be 'use client' (#120 AC #3)", (
 
   const allFiles = walk(repoFrontendSrc);
 
-  // `@/lib/api` and explicit relative variants (../lib/api, ../../
-  // lib/api, etc.). The relative forms cover the case where a future
-  // file outside `src/app` or `src/hooks` imports the api by
-  // relative path.
+  // Broad matcher catches every import shape that pulls in api.ts:
+  //   - `from "@/lib/api"`              alias from anywhere in src/
+  //   - `from "../lib/api"` (any depth) relative
+  //   - `from "./api"`                  sibling within src/lib/
+  //   - `from "@/lib/api.ts"`           with explicit extension
+  //   - `import "@/lib/api"`            side-effect import (no `from`)
+  //   - `await import("@/lib/api")`     dynamic import
+  // `import type` is NOT matched because type-only imports are
+  // erased by the TypeScript compiler before any module-level
+  // code runs — they're safe to use from Server Components.
+  // (#120 second-pass review — correctness reviewer.)
   const importMatcher =
-    /from\s+["'](?:@\/lib\/api|(?:\.\.\/)+lib\/api)["']/;
+    /(?:from\s+|import\s*\(\s*|import\s+)["'](?:@\/lib\/api(?:\.tsx?)?|(?:\.\.\/)+lib\/api(?:\.tsx?)?|\.\/api(?:\.tsx?)?)["']/;
 
   const importers = allFiles.filter((file) => {
-    // Exclude tests so we don't recurse on this very file or
-    // re-check api.test.ts (both call `from "@/lib/api"` but are
-    // themselves vitest tests, not client modules).
-    if (file.endsWith(".test.ts") || file.endsWith(".test.tsx")) {
-      return false;
-    }
-    // Exclude api.ts itself.
+    if (TEST_FILE_RE.test(file)) return false;
+    // Exclude api.ts itself — it's the module being audited, not
+    // an importer of itself.
     if (file === apiPath) return false;
     const source = readFileSync(file, "utf8");
-    return importMatcher.test(source);
+    // For `./api` we need the file to actually live inside
+    // src/lib/ — a `./api` import from elsewhere would resolve to
+    // a different module, not api.ts. The regex above accepts
+    // `./api` from anywhere; this guard tightens it.
+    if (importMatcher.test(source)) {
+      // If the only match is the `./api` form, require the file
+      // to be in src/lib/ for the match to count. Otherwise the
+      // sibling-relative form is a false positive (unlikely but
+      // possible if a future module is also named `api.ts`).
+      const usesSiblingForm = /(?:from\s+|import\s*\(\s*|import\s+)["']\.\/api(?:\.tsx?)?["']/.test(
+        source,
+      );
+      const usesAliasOrParentForm =
+        /(?:from\s+|import\s*\(\s*|import\s+)["'](?:@\/lib\/api|(?:\.\.\/)+lib\/api)(?:\.tsx?)?["']/.test(
+          source,
+        );
+      if (usesAliasOrParentForm) return true;
+      if (usesSiblingForm) {
+        // Allow only if the file lives inside src/lib/.
+        const dir = relative(repoFrontendSrc, file);
+        return dir.split(/[\\/]/)[0] === "lib";
+      }
+      return false;
+    }
+    return false;
   });
 
-  it("the importer audit picks up the known set (regression guard against the walk going dark)", () => {
-    // Sanity-check the walk: a refactor that broke the path
-    // resolution or the import regex would cause `importers` to be
-    // empty, which would make every subsequent assertion vacuously
-    // pass. Pin a floor on the importer count so the test fails
-    // loudly if the walk goes dark. The floor is generous (today's
-    // count is 14 client modules, audited at #120 time); a count
-    // below 10 means something is structurally wrong with the walk.
-    expect(importers.length).toBeGreaterThanOrEqual(10);
+  it("the importer audit walk found files AND picked up the known set (regression guard against silent dark walks)", () => {
+    // Two independent invariants pinned together with a custom
+    // diagnostic message so a future failure points the reader at
+    // the correct resolution:
+    //   1. The walk read SOMETHING — `allFiles` is non-trivial.
+    //   2. The importer regex matched a credible count (today's
+    //      audit found 14 client modules; pinning a floor of 10
+    //      leaves slack for legitimate consolidation while still
+    //      catching a regex regression that drops every match).
+    // If invariant 1 fails the walk is broken; if invariant 2
+    // fails either the regex is broken OR the codebase legitimately
+    // shrank and the floor needs updating. The error message
+    // guides the resolution. (#120 second-pass review —
+    // test-quality reviewer.)
+    expect(
+      allFiles.length,
+      "frontend/src walk found no .ts/.tsx files — either the walk is broken or the path resolution regressed",
+    ).toBeGreaterThan(50);
+    expect(
+      importers.length,
+      "importer audit found fewer client modules than the #120 baseline of 14 — either the import-matching regex regressed (check importMatcher), or the codebase legitimately consolidated and the floor of 10 needs updating",
+    ).toBeGreaterThanOrEqual(10);
   });
+
+  // Throw at MODULE LOAD if the walk produced zero importers — this
+  // is a load-bearing precondition for `it.each` below. Without it,
+  // an `it.each([])` would register zero test cases (silently), and
+  // the floor assertion above (registered as its own `it`) is the
+  // only safety net. If a future refactor disables or renames that
+  // assertion, the audit becomes vacuous with no remaining signal.
+  // A module-load throw fails the entire test file with a clear
+  // diagnostic regardless of which other tests survive. (#120
+  // second-pass review — correctness reviewer.)
+  if (importers.length === 0) {
+    throw new Error(
+      "api.use-client.test.ts: importer walk produced 0 results. " +
+        "Either the path resolution broke (check resolve(__dirname, '..') → repoFrontendSrc), " +
+        "the importMatcher regex regressed, or every importer was inadvertently moved out of src/. " +
+        "See the floor assertion in the same describe block for the upstream diagnostic.",
+    );
+  }
 
   it.each(
-    // Use `it.each` so a failure surfaces ONE bad importer at a time
-    // rather than collapsing every importer into a single failed
-    // expectation. Each file gets its own test case named with its
-    // path relative to frontend/src so the diagnostic message
-    // points directly at the offending file. Static fallback
-    // tuple keeps `it.each` happy even on the unreachable empty
-    // case (the floor assertion above would have already failed).
-    importers.length > 0
-      ? importers.map((file) => [relative(repoFrontendSrc, file), file] as const)
-      : [["<no importers found — see floor assertion above>", apiPath] as const],
+    // One row per importer so a failure surfaces the offending file
+    // path in the test name via `%s` — sharper diagnostic than
+    // collapsing every importer into a single expectation.
+    importers.map(
+      (file) => [relative(repoFrontendSrc, file), file] as const,
+    ),
   )(
     "importer %s starts with the 'use client' directive",
     (_relPath, file) => {
-      const source = readFileSync(file, "utf8").replace(/^﻿/, "");
+      const source = readFileSync(file, "utf8").replace(BOM_RE, "");
       const firstSourceLine = source
         .split(/\r?\n/)
         .find((line) => line.trim().length > 0);
