@@ -47,6 +47,54 @@ export type UseMeOptions = {
 export const ME_KEY = ["auth", "me"] as const;
 export const ME_PROBE_KEY = ["auth", "me", "probe"] as const;
 
+// Name MUST match `CookieAuthSetup.HintCookie` on the backend (#69).
+// Exported so tests can drive the hint state via document.cookie without
+// re-declaring the literal — a rename on either side would otherwise
+// silently make the gate either always-on or always-off in tests.
+export const SESSION_HINT_COOKIE = "cd_session_hint";
+
+/**
+ * Returns true iff the non-httpOnly `cd_session_hint` cookie is present
+ * — the only signal we have on the client that this browser has been
+ * authenticated at some point. The cookie carries NO credential; it
+ * exists solely to gate the landing-page `useMe({ skipRefresh })`
+ * probe behind `useQuery({ enabled })` so anonymous visitors pay ZERO
+ * auth round-trips (#69).
+ *
+ * SSR / first paint: `document` is undefined on the server, so we
+ * return `false`. The landing page renders the logged-out CTAs on the
+ * server, the SPA hydrates, the gate flips to true on hydration if a
+ * hint cookie is present, and `useQuery` fires the probe THEN. The
+ * worst case is a single-frame logged-out flash for a user who lands
+ * via SSR — acceptable because the alternative (firing the probe on
+ * the server) costs every anonymous SSR pass an auth round-trip too.
+ *
+ * Matching is anchored on `; <name>=` (with a leading-`;` sentinel) so
+ * the literal `cd_session_hint=` is matched as a full token rather
+ * than as a substring — a hypothetical sibling cookie named
+ * `bad_cd_session_hint` cannot trigger a false positive.
+ *
+ * Gate re-evaluation is RENDER-DRIVEN — the returned value only flips
+ * when a consumer re-renders. In practice this is fine because
+ * login/register/logout mutations write/clear the Me cache (via
+ * `setMeCache` / `qc.clear()`) which triggers consumer re-renders,
+ * and the cache write also feeds `useQuery` its data directly so the
+ * gate-flip-then-fetch race is moot. An EXTERNAL cookie write
+ * (DevTools tampering, a future non-mutation route that sets the
+ * hint server-side) would not re-evaluate the gate until something
+ * else triggered a render; that's deliberate — we don't subscribe to
+ * cookie events.
+ *
+ * Exported for use in tests; the production caller is `useMe()` below.
+ */
+export function hasSessionHint(): boolean {
+  if (typeof document === "undefined") return false;
+  // `; ` sentinel + leading `; ` on cookies makes startsWith-style
+  // matching unambiguous without parsing every key=value pair.
+  const cookies = `; ${document.cookie}`;
+  return cookies.includes(`; ${SESSION_HINT_COOKIE}=`);
+}
+
 function setMeCache(qc: QueryClient, me: Me | null) {
   qc.setQueryData(ME_KEY, me);
   qc.setQueryData(ME_PROBE_KEY, me);
@@ -54,6 +102,18 @@ function setMeCache(qc: QueryClient, me: Me | null) {
 
 export function useMe(opts: UseMeOptions = {}) {
   const queryKey = opts.skipRefresh ? ME_PROBE_KEY : ME_KEY;
+  // Gate the landing-page probe (skipRefresh) on the hint cookie (#69):
+  // anonymous visitors with no hint pay ZERO auth round-trips. The
+  // authoritative `useMe()` (no opts — dashboard layout, settings) is
+  // deliberately NOT gated: those routes rely on the canonical
+  // 401→refresh→retry chain in `lib/api.ts` to keep a user with an
+  // expired cd_session but valid cd_refresh on their page instead of
+  // bouncing them to /login. Reading `document.cookie` once at the
+  // hook-call site is fine — the gate only matters for the initial
+  // mount; subsequent transitions to "authenticated" go through
+  // useLogin/useRegister, which write the Me cache directly and skip
+  // the network entirely.
+  const enabled = opts.skipRefresh ? hasSessionHint() : true;
   return useQuery<Me | null>({
     queryKey: [...queryKey],
     queryFn: async () => {
@@ -66,6 +126,7 @@ export function useMe(opts: UseMeOptions = {}) {
         throw err;
       }
     },
+    enabled,
     staleTime: 60_000,
   });
 }

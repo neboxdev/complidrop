@@ -16,6 +16,33 @@ import { mockApi, jsonError, waitForApi } from "../support/mock-api";
 
 test.describe("E2E harness sanity (#38)", () => {
   test("the mock interceptor fires AND the landing-page logged-out CTA renders", async ({ page }) => {
+    // Stale-hint path from #69 AC #3: the SPA's landing-page probe
+    // `useMe({ skipRefresh: true })` is gated by the non-httpOnly
+    // `cd_session_hint` cookie. A truly anonymous visitor (no hint)
+    // fires ZERO auth calls — which is correct production behavior
+    // but USELESS for proving the mock interceptor is wired (the
+    // landing page's static SSR shell renders the logged-out CTAs
+    // regardless). To assert the harness end-to-end, force the probe
+    // to fire by planting the hint cookie BEFORE navigation, then
+    // observe that the mocked 401 flows through the SPA into the UI.
+    //
+    // Equivalent in semantics to a user whose session lapsed but
+    // whose hint cookie survived — the exact scenario #69's AC #3
+    // pins at "one /me 401, skipRefresh keeps the cost at one call".
+    // Playwright's addCookies wants `url` XOR `domain+path` (NOT both —
+    // it errors with 'Cookie should have either url or path'). `domain`
+    // + `path` is port-agnostic (PLAYWRIGHT_PORT defaults to 3100 in
+    // CI per playwright.config.ts and may differ locally), so use the
+    // domain form to avoid binding the test to a specific port.
+    await page.context().addCookies([
+      {
+        name: "cd_session_hint",
+        value: "1",
+        domain: "localhost",
+        path: "/",
+      },
+    ]);
+
     // Anonymous /api/auth/me returns 401 — same as production for a
     // logged-out visitor. The landing page's `useMe({ skipRefresh:
     // true })` then resolves to null and renders the logged-out CTAs.

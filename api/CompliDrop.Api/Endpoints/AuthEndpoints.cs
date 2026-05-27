@@ -183,6 +183,13 @@ public static class AuthEndpoints
         http.Response.Cookies.Append(
             CookieAuthSetup.RefreshCookie, string.Empty,
             CookieAuthSetup.BuildExpiredRefreshCookieOptions(cookieOpts.Value));
+        // Clear cd_session_hint too (#69) — otherwise a logged-out user
+        // landing back on `/` would still fire the `useMe` probe because
+        // the frontend's `enabled: hasSessionHint()` gate would see the
+        // stale hint and re-open the round-trip we just eliminated.
+        http.Response.Cookies.Append(
+            CookieAuthSetup.HintCookie, string.Empty,
+            CookieAuthSetup.BuildExpiredHintCookieOptions(cookieOpts.Value));
         return Results.Ok(new { data = new { message = "Logged out." }, error = (object?)null });
     }
 
@@ -249,6 +256,16 @@ public static class AuthEndpoints
         http.Response.Cookies.Append(
             CookieAuthSetup.RefreshCookie, refresh,
             CookieAuthSetup.BuildRefreshCookieOptions(cookieCfg, TimeSpan.FromDays(jwt.RefreshExpiryDays)));
+        // Non-httpOnly hint cookie (#69). TTL tracks the refresh window:
+        // as long as the browser could still resurrect a session via
+        // /api/auth/refresh, the landing page may legitimately fire the
+        // probe; once the refresh expires the hint should expire with it
+        // so anonymous visits return to zero-cost. Refresh() also calls
+        // IssueCookies, so the hint slides forward whenever the session
+        // does.
+        http.Response.Cookies.Append(
+            CookieAuthSetup.HintCookie, CookieAuthSetup.HintCookieValue,
+            CookieAuthSetup.BuildHintCookieOptions(cookieCfg, TimeSpan.FromDays(jwt.RefreshExpiryDays)));
     }
 
     private static AuthMeResponse ToMeResponse(User user, Organization org, string plan) =>
