@@ -17,7 +17,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import LoginPage from "./page";
 import {
   renderWithProviders,
@@ -28,6 +28,7 @@ import {
   authedMe,
   toastSuccess,
   toastError,
+  fillByLabel,
   submitFormIn,
 } from "@/test";
 import { ME_KEY } from "@/hooks/useAuth";
@@ -37,23 +38,18 @@ import { ME_KEY } from "@/hooks/useAuth";
 // sonner mock + spies are provided by the harness; afterEach in the
 // setup file resets all toast spies between tests (#74).
 
-// Fill inputs by their accessible label, not by `name` attribute (#132).
-// #76 wired every <label htmlFor=...> against its input's id, so RTL's
-// `getByLabelText` resolves the same DOM node the user reaches via the
-// label — the test now exercises the same a11y wiring screen readers
-// depend on. Container is still captured per-test for submitFormIn,
-// which retains the multi-form guard from #75.
-let container: HTMLElement;
-function fillField(label: RegExp, value: string) {
-  fireEvent.input(screen.getByLabelText(label), { target: { value } });
-}
-function submitForm() {
-  submitFormIn(container);
-}
+// Inputs are filled via the shared `fillByLabel(label, value)` helper
+// (label-based after #132; lifted from per-file shims in #135). Each
+// `it` captures container locally via `const { container, ... } =
+// renderWithProviders(...)` so module-level `let container` no longer
+// exists — single destructure shape across the file. `submitFormIn`
+// keeps the multi-form guard (#75); `queryClient` is destructured at
+// the call site when an `it` reads the cache (e.g. the happy-path test
+// asserting `useLogin.onSuccess` seeded ME_KEY).
 
 describe("LoginPage — validation (#35)", () => {
   it("renders the form with email + password inputs and a sign-in button", () => {
-    ({ container } = renderWithProviders(<LoginPage />, { auth: null }));
+    renderWithProviders(<LoginPage />, { auth: null });
     expect(
       screen.getByRole("heading", { name: /welcome back/i }),
     ).toBeInTheDocument();
@@ -63,10 +59,10 @@ describe("LoginPage — validation (#35)", () => {
   });
 
   it("flags an invalid email format with the user-facing copy", async () => {
-    ({ container } = renderWithProviders(<LoginPage />, { auth: null }));
-    fillField(/^email$/i, "not-an-email");
-    fillField(/^password$/i, "anything");
-    submitForm();
+    const { container } = renderWithProviders(<LoginPage />, { auth: null });
+    fillByLabel(/^email$/i, "not-an-email");
+    fillByLabel(/^password$/i, "anything");
+    submitFormIn(container);
 
     await waitFor(() =>
       expect(screen.getByText(/enter a valid email/i)).toBeInTheDocument(),
@@ -77,9 +73,9 @@ describe("LoginPage — validation (#35)", () => {
   });
 
   it("flags an empty password with the user-facing copy", async () => {
-    ({ container } = renderWithProviders(<LoginPage />, { auth: null }));
-    fillField(/^email$/i, "owner@acme.test");
-    submitForm();
+    const { container } = renderWithProviders(<LoginPage />, { auth: null });
+    fillByLabel(/^email$/i, "owner@acme.test");
+    submitFormIn(container);
 
     await waitFor(() =>
       expect(screen.getByText(/password is required/i)).toBeInTheDocument(),
@@ -92,16 +88,14 @@ describe("LoginPage — happy path (#35)", () => {
     server.use(http.post(url("/api/auth/login"), () => jsonOk(authedMe)));
 
     const pushSpy = vi.fn();
-    const rendered = renderWithProviders(<LoginPage />, {
+    const { container, queryClient } = renderWithProviders(<LoginPage />, {
       auth: null,
       router: { push: pushSpy },
     });
-    container = rendered.container;
-    const { queryClient } = rendered;
 
-    fillField(/^email$/i, "owner@acme.test");
-    fillField(/^password$/i, "verystrongpass1");
-    submitForm();
+    fillByLabel(/^email$/i, "owner@acme.test");
+    fillByLabel(/^password$/i, "verystrongpass1");
+    submitFormIn(container);
 
     await waitFor(() =>
       expect(toastSuccess).toHaveBeenCalledWith("Welcome back!"),
@@ -165,14 +159,14 @@ describe("LoginPage — server-side error copy (#35)", () => {
       );
 
       const pushSpy = vi.fn();
-      ({ container } = renderWithProviders(<LoginPage />, {
+      const { container } = renderWithProviders(<LoginPage />, {
         auth: null,
         router: { push: pushSpy },
-      }));
+      });
 
-      fillField(/^email$/i, "owner@acme.test");
-      fillField(/^password$/i, "anything");
-      submitForm();
+      fillByLabel(/^email$/i, "owner@acme.test");
+      fillByLabel(/^password$/i, "anything");
+      submitFormIn(container);
 
       await waitFor(() =>
         expect(toastError).toHaveBeenCalledWith(message),
@@ -206,10 +200,10 @@ describe("LoginPage — loading state (#35)", () => {
       }),
     );
 
-    ({ container } = renderWithProviders(<LoginPage />, { auth: null }));
-    fillField(/^email$/i, "owner@acme.test");
-    fillField(/^password$/i, "verystrongpass1");
-    submitForm();
+    const { container } = renderWithProviders(<LoginPage />, { auth: null });
+    fillByLabel(/^email$/i, "owner@acme.test");
+    fillByLabel(/^password$/i, "verystrongpass1");
+    submitFormIn(container);
 
     // try/finally so release() runs even if the disabled-button assertion
     // throws — otherwise the MSW handler stays awaiting `settled` forever.

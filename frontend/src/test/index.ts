@@ -43,4 +43,4 @@ export {
 export { sequencedJsonOk, sequencedResponses } from "./polling";
 export { dropFilesIn, makeFile } from "./dropzone";
 export { assertNotInDom } from "./security";
-export { submitFormIn } from "./forms";
+export { fillByLabel, submitFormIn } from "./forms";

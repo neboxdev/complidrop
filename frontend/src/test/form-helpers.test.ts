@@ -1,11 +1,13 @@
 /**
- * Pins the form-helper contract added in #75 and hardened in the #75
- * followup (defensive guards + multi-form rejection).
+ * Pins the form-helper contracts:
  *
- * Originally exercised `fillInputByName` too, but #132 deleted that
- * helper after every caller migrated to `screen.getByLabelText` — see
- * `forms.ts` for the rationale. `submitFormIn` stayed because the
- * multi-form guard is orthogonal to label-based input lookup.
+ * - `submitFormIn` (#75 + #75 followup): defensive guards + multi-form
+ *   rejection. Originally tested `fillInputByName` alongside it; #132
+ *   deleted that helper after every caller migrated to
+ *   `screen.getByLabelText`.
+ * - `fillByLabel` (#135): the lifted label-based input driver — every
+ *   auth-form test used to duplicate this one-line shim around
+ *   `screen.getByLabelText` + `fireEvent.input`.
  *
  * The companion test mirrors the Wave 3 pattern established by
  * `sonner.test.ts`, `polling.test.ts`, `dropzone.test.ts`, and
@@ -14,11 +16,15 @@
  * "simplification" can't silently regress the foot-gun protections
  * downstream callers depend on.
  *
- * Three invariants matter for downstream tests:
- *   1. `submitFormIn` throws a HELPFUL "did you forget to
+ * Invariants:
+ *   1. `fillByLabel` resolves an input by label and fires an `input`
+ *      event (RHF's auth forms wire `onInput` mode).
+ *   2. `fillByLabel` propagates RTL's "unable to find a label" error
+ *      when the label is missing — no swallowed signal.
+ *   3. `submitFormIn` throws a HELPFUL "did you forget to
  *      destructure?" message when container is undefined.
- *   2. `submitFormIn` throws when no `<form>` exists in the container.
- *   3. `submitFormIn` throws when MULTIPLE forms exist — silently
+ *   4. `submitFormIn` throws when no `<form>` exists in the container.
+ *   5. `submitFormIn` throws when MULTIPLE forms exist — silently
  *      submitting the first would re-introduce the same collision
  *      hazard the lift was meant to eliminate.
  *
@@ -26,8 +32,85 @@
  * `forms.test.tsx` is already taken by #76's label-wiring contract
  * test — a different concern with the same root noun.
  */
-import { describe, it, expect, vi } from "vitest";
-import { submitFormIn } from "./forms";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { fillByLabel, submitFormIn } from "./forms";
+
+// `screen.getByLabelText` walks the global `document` — each fillByLabel
+// test mounts a minimal labeled-input DOM into `document.body` directly
+// (createElement, not JSX) so this stays a `.ts` file consistent with
+// the other helper contracts (`dropzone.test.ts`, `polling.test.ts`).
+function mountLabeledInput(opts: {
+  labelText: string;
+  inputId: string;
+  inputName?: string;
+}): { input: HTMLInputElement; cleanup: () => void } {
+  const form = document.createElement("form");
+  const label = document.createElement("label");
+  label.setAttribute("for", opts.inputId);
+  label.textContent = opts.labelText;
+  const input = document.createElement("input");
+  input.id = opts.inputId;
+  if (opts.inputName) input.name = opts.inputName;
+  form.appendChild(label);
+  form.appendChild(input);
+  document.body.appendChild(form);
+  return {
+    input,
+    cleanup: () => {
+      document.body.removeChild(form);
+    },
+  };
+}
+
+describe("fillByLabel — label-based input driver contract (#135)", () => {
+  let cleanups: Array<() => void> = [];
+
+  afterEach(() => {
+    for (const c of cleanups) c();
+    cleanups = [];
+  });
+
+  it("resolves an input by label text (regex) and fires an `input` event", () => {
+    const { input, cleanup } = mountLabeledInput({
+      labelText: "Email",
+      inputId: "f-email",
+      inputName: "email",
+    });
+    cleanups.push(cleanup);
+
+    const onInput = vi.fn();
+    input.addEventListener("input", onInput);
+
+    fillByLabel(/^email$/i, "owner@acme.test");
+
+    expect(input.value).toBe("owner@acme.test");
+    expect(onInput).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts a plain string label too (passes through to getByLabelText)", () => {
+    const { input, cleanup } = mountLabeledInput({
+      labelText: "Full name",
+      inputId: "f-fullname",
+    });
+    cleanups.push(cleanup);
+
+    fillByLabel("Full name", "Owner Name");
+
+    expect(input.value).toBe("Owner Name");
+  });
+
+  it("propagates RTL's 'unable to find a label' error when the label is missing", () => {
+    const { cleanup } = mountLabeledInput({
+      labelText: "Email",
+      inputId: "f-email",
+    });
+    cleanups.push(cleanup);
+
+    expect(() => fillByLabel(/nonexistent/i, "x")).toThrow(
+      /unable to find a label/i,
+    );
+  });
+});
 
 describe("submitFormIn — container + ambiguity guard contract (#75 followup)", () => {
   it("throws with a helpful 'did you forget to destructure?' message when container is undefined", () => {

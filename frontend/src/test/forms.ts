@@ -1,33 +1,53 @@
 /**
- * Form-test helper — container-scoped submitFormIn.
+ * Form-test helpers — fillByLabel + submitFormIn.
  *
- * Originally exported `fillInputByName` too, but #132 migrated every
- * caller to `screen.getByLabelText(/.../i)` after #76 wired the
- * htmlFor/id pairs that unblocked label-based lookups. The
- * label-based query exercises the same a11y wiring screen readers
- * depend on, so the by-`name` shortcut was dropped along with its
- * contract tests. `submitFormIn` stays because the multi-form guard
- * (below) is orthogonal — it defends against an entirely different
- * hazard that no RTL query handles for us.
+ * The label-based input helper (`fillByLabel`) is the canonical
+ * input-driving shape after #76 wired every `<label htmlFor=…>` ↔
+ * `<input id=…>` and #131 added the lint rule that enforces it. Each
+ * auth form test used to define its own one-line `fillField` shim
+ * around `screen.getByLabelText`; #135 lifted it here so a fourth
+ * form-test file can pick up the same idiom without copy-paste.
  *
- * ## Defensive guards (#75 followup)
+ * `submitFormIn` stays orthogonal — its multi-form guard defends
+ * against a future composite test (#134) rendering two forms in the
+ * same container, which no RTL query handles for us.
  *
- * `submitFormIn` explicitly throws a helpful "did you forget to
- * destructure?" message when `container` is undefined — the exact
- * foot-gun #84 fixed in `dropzone.ts`. The callers in this repo all
- * capture `container` via a module-level `let container: HTMLElement`
- * that's reassigned per-`it` from `renderWithProviders(...)`. A
- * missing reassignment would otherwise surface as
- * `TypeError: Cannot read properties of undefined (reading
- * 'querySelector')` pointing at THIS file rather than the missing
- * destructure in the test.
+ * ## Defensive guards
  *
- * The helper additionally rejects an ambiguous multi-form container —
- * #75's stated rationale was to defend against simultaneous forms, so
- * silently submitting only the first would re-introduce the very
- * hazard the lift was meant to eliminate.
+ * - `fillByLabel` delegates to RTL's `screen.getByLabelText`, which
+ *   throws a useful "unable to find a label" error when the label is
+ *   missing — no custom guard needed.
+ * - `submitFormIn` throws helpful "did you forget to destructure?"
+ *   when container is undefined (mirrors the `dropFilesIn` guard from
+ *   #84), throws on missing form, and REJECTS ambiguous multi-form
+ *   containers. #75's stated rationale was to defend against
+ *   simultaneous forms, so silently submitting only the first would
+ *   re-introduce the very hazard the lift was meant to eliminate.
  */
-import { fireEvent } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
+
+/**
+ * Fill the input associated with the given accessible label by firing
+ * an `input` event. Throws via RTL's own `getByLabelText` if no
+ * matching label exists.
+ *
+ * RHF's auth forms wire `onInput` mode and would NOT see a `change`
+ * event — `fireEvent.input` is deliberate.
+ *
+ * Resolves globally via `screen` (not container-scoped). Today every
+ * auth test renders one form, so the global lookup is unambiguous. If
+ * a future composite test renders two forms in the same document and
+ * both expose the same label, scope the lookup with
+ * `within(container).getByLabelText(...)` at the call site instead of
+ * importing this helper. (#134 will introduce that pattern.)
+ */
+export function fillByLabel(
+  label: RegExp | string,
+  value: string,
+): void {
+  const input = screen.getByLabelText(label);
+  fireEvent.input(input, { target: { value } });
+}
 
 /**
  * Fire a `submit` event on the `<form>` inside `container`. Throws on
