@@ -121,7 +121,7 @@ Land at launch with Vitest only. Rejected:
 
 ## References
 
-- Tickets: [#38](https://github.com/neboxdev/complidrop/issues/38) (this ticket — harness + ADR), [#39](https://github.com/neboxdev/complidrop/issues/39) (smoke E2E flows), [#40](https://github.com/neboxdev/complidrop/issues/40) (remaining E2E flows, deferred post-launch), [#33](https://github.com/neboxdev/complidrop/issues/33) (epic), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic — quarantined-test tickets live here).
+- Tickets: [#38](https://github.com/neboxdev/complidrop/issues/38) (this ticket — harness + ADR), [#39](https://github.com/neboxdev/complidrop/issues/39) (smoke E2E flows), [#40](https://github.com/neboxdev/complidrop/issues/40) (remaining E2E flows, deferred post-launch), [#33](https://github.com/neboxdev/complidrop/issues/33) (epic), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic — individual quarantined-test tickets live here), [#87](https://github.com/neboxdev/complidrop/issues/87) (E2E quarantine registry — meta-tracker for tests currently behind `@quarantine`).
 - ADRs: [0003](0003-frontend-testing-with-vitest.md) (Vitest + RTL — companion choice).
 - Config: `frontend/playwright.config.ts`, `frontend/e2e/`, `frontend/e2e/scripts/scan-secrets.mjs`, `frontend/e2e/README.md`.
 - CI: `.github/workflows/frontend-ci.yml` (Playwright job + scan-secrets gate).
