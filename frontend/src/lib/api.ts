@@ -168,17 +168,19 @@ async function fetchOrFriendlyThrow(
   //     that Error directly, NOT a DOMException.
   //
   // The `(Error || DOMException)` union check is deliberate even
-  // though modern production runtimes (Node 24+, current browsers)
+  // though modern production runtimes (Node 18+, current browsers)
   // make `DOMException extends Error` — so a bare `instanceof
   // Error` would cover both. The redundancy guards the JEST/JSDOM
   // test environment, where `new DOMException("...", "AbortError")
   // instanceof Error` returns FALSE because jsdom's polyfill
-  // doesn't extend Error. Verified empirically; without the
-  // DOMException branch, the test for the default-abort variant
-  // would have failed locally while passing in production. The
-  // belt-and-suspenders pattern keeps production and test parity
-  // without forcing jsdom-specific test rigging. (#118 — latent
-  // fragility surfaced by the #77 review.)
+  // doesn't extend Error. Verified empirically by the parametrized
+  // AbortError pass-through test in api.test.ts (the
+  // `isErrorLike` assertion mirrors this predicate by design); a
+  // future "simplification" to bare `instanceof Error` would fail
+  // that test in the DOMException row. The belt-and-suspenders
+  // pattern keeps production and test parity without forcing
+  // jsdom-specific test rigging. (#118 — latent fragility
+  // surfaced by the #77 review.)
   //
   // doRefresh() at the top of this module keeps its own bare-fetch
   // try/catch returning false; only request()'s body calls funnel

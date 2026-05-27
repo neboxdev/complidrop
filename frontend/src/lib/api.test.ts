@@ -852,45 +852,87 @@ describe("api.* — error-envelope → ApiError message mapping (#35)", () => {
         .post("/api/auth/login", {})
         .catch((e) => e as Error);
 
-      // Came back as the original rejection (DOMException OR plain
-      // Error), NOT an ApiError. The assertion uses the SAME
-      // (Error || DOMException) union shape as the production
-      // predicate in fetchOrFriendlyThrow — because jsdom's
-      // DOMException polyfill doesn't extend Error, a bare
-      // `instanceof Error` here would false-fail on the
+      // Lead with the load-bearing identity check: `expect(...).toBe`
+      // uses Object.is, so a regression that cloned the rejection
+      // (e.g. `throw new (Object.getPrototypeOf(err).constructor)
+      // (err.message, err.name)`) would still pass the supporting
+      // isErrorLike / .name assertions but fail the identity check.
+      // Putting identity first means the FIRST failure line points
+      // at the actual contract violation. The supporting
+      // assertions below serve as readable documentation of the
+      // expected shape. (#118 review — test-quality reviewer.)
+      expect(err).toBe(rejection);
+      expect(err).not.toBeInstanceOf(ApiError);
+
+      // Shape documentation: the SAME (Error || DOMException) union
+      // shape as the production predicate in fetchOrFriendlyThrow.
+      // jsdom's DOMException polyfill doesn't extend Error, so a
+      // bare `instanceof Error` here would false-fail on the
       // DOMException case in this test environment even though
       // the production runtime treats DOMException as Error.
       const isErrorLike =
         err instanceof Error || err instanceof DOMException;
       expect(isErrorLike).toBe(true);
       expect((err as Error | DOMException).name).toBe("AbortError");
-      expect(err).not.toBeInstanceOf(ApiError);
-      // Identity check: the SAME object the caller passed to
-      // `controller.abort(reason)` must reach the caller's catch
-      // handler unchanged — a regression that wrapped + re-threw
-      // (instead of bare re-throw) would lose reference equality.
-      expect(err).toBe(rejection);
     },
   );
 
-  it("non-AbortError Error (e.g. plain new Error('boom')) is wrapped as network.unreachable, NOT passed through (#118 negative)", async () => {
-    // Pin the negative half of the #118 widening: now that the
-    // predicate is `instanceof Error` (not `instanceof DOMException`),
-    // a future regression could over-broaden it by dropping the
-    // `name === "AbortError"` clause and silently letting ANY Error
-    // through. This test catches that regression by feeding a plain
-    // Error with the default name "Error" — it MUST still convert
-    // to the friendly ApiError("network.unreachable"), not bubble up
-    // raw. Symmetric guard with the positive cases above.
-    fetchMock.mockRejectedValueOnce(new Error("boom"));
+  // Negative-pair: every rejection-shape that is NOT a recognized
+  // AbortError must convert to the friendly ApiError("network.
+  // unreachable") so a `.catch((e: ApiError) => e.code)` consumer
+  // never crashes on raw strings/POJOs and a non-abort DOMException
+  // never silently bubbles up. Parametrized so each branch of the
+  // predicate ((Error || DOMException) && name === "AbortError")
+  // has its own negative — a regression that drops EITHER half
+  // would surface as a specific test failure pointing at the gap.
+  // (#118 second-pass review — test-quality reviewer.)
+  it.each([
+    {
+      name: "plain Error with default name 'Error' (no AbortError tag)",
+      rejection: new Error("boom"),
+    },
+    {
+      // Catches the asymmetry the reviewer flagged: a regression
+      // that special-cased `if (err instanceof DOMException) throw
+      // err;` (early-return WITHOUT the name check) would silently
+      // pass through every NotAllowedError, TimeoutError, QuotaExceeded
+      // etc. into a `.catch((e: ApiError) => ...)` consumer and
+      // crash on `.code` access. Pin the DOMException-side name
+      // check explicitly.
+      name: "DOMException with a non-AbortError name (NotAllowedError)",
+      rejection: new DOMException("forbidden", "NotAllowedError"),
+    },
+    {
+      // controller.abort("some string") rejects fetch with the
+      // raw string. The (Error || DOMException) gate correctly
+      // wraps it because surfacing a string to a typed ApiError
+      // consumer would crash on `.code` / `.message` access.
+      name: "string reason (controller.abort('user-cancelled'))",
+      rejection: "user-cancelled",
+    },
+    {
+      // controller.abort({ name: 'AbortError', ... }) — a POJO
+      // that LOOKS like an abort but isn't Error-shaped. The
+      // predicate's `instanceof` gate correctly rejects it; a
+      // future loosening to `if (err?.name === 'AbortError')`
+      // would silently let this through and crash downstream
+      // assumptions of `err instanceof Error`.
+      name: "POJO with abort-error shape but no Error constructor",
+      rejection: { name: "AbortError", message: "cancelled" },
+    },
+  ])(
+    "non-AbortError rejection: $name is wrapped as ApiError('network.unreachable'), NOT passed through (#118 negative)",
+    async ({ rejection }) => {
+      fetchMock.mockRejectedValueOnce(rejection);
 
-    const err = await api
-      .post("/api/auth/login", {})
-      .catch((e) => e as Error);
+      const err = await api
+        .post("/api/auth/login", {})
+        .catch((e) => e as Error);
 
-    expect(err).toBeInstanceOf(ApiError);
-    expect((err as ApiError).code).toBe("network.unreachable");
-    expect((err as ApiError).status).toBe(0);
-    expect((err as ApiError).message).toBe(GENERIC_FALLBACK_MESSAGE);
-  });
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).code).toBe("network.unreachable");
+      expect((err as ApiError).status).toBe(0);
+      expect((err as ApiError).message).toBe(GENERIC_FALLBACK_MESSAGE);
+    },
+  );
 });
