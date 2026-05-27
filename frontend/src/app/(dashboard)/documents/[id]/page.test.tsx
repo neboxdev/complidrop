@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import DocumentDetailPage from "./page";
 import {
   renderWithProviders,
@@ -256,6 +256,158 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
     const afterCompleted = calls;
     await vi.advanceTimersByTimeAsync(10_000);
     expect(calls).toBe(afterCompleted);
+  });
+
+  it("populated-detail polling-failure: keeps the cached detail visible, surfaces the stale-data banner, and stops polling (#97)", async () => {
+    // Symmetric with the documents-list AC #5: a poll failure on the
+    // detail page must NOT clobber the cached detail (the existing
+    // `!detail.data` early-return only protects the never-loaded
+    // case). When the initial load lands a 200 and a subsequent poll
+    // fires a 5xx, TanStack Query preserves `data` while flipping
+    // `isError=true`. Without the AC #5 fix, the user would still
+    // see the cached fields but the polling would keep hammering the
+    // backend every 3 s. With the fix:
+    //   - refetchInterval short-circuits on error (no more polls)
+    //   - StaleDataBanner renders above the summary section so the
+    //     user knows the detail may be stale
+    //   - The full cached payload (title, badges, fields) stays rendered
+    let calls = 0;
+    server.use(
+      http.get(url("/api/documents/:id"), () => {
+        calls++;
+        if (calls === 1) {
+          // Initial load: a Processing document with one extracted
+          // field. Processing status drives the 3s refetchInterval
+          // that the AC #5 fix must short-circuit on the next error.
+          return jsonOk(
+            makeDocumentDetail({
+              extractionStatus: "Processing",
+              complianceStatus: "Pending",
+              fields: [
+                {
+                  id: "f1",
+                  fieldName: "PolicyNumber",
+                  fieldValue: "POL-PRE-ERR",
+                  fieldType: "string",
+                  confidence: 0.91,
+                  isManuallyEdited: false,
+                  originalValue: null,
+                },
+              ],
+            }),
+          );
+        }
+        // Subsequent polls (and an explicit Try-again click) return 5xx.
+        return jsonError("server.error", "Brown-out", { status: 502 });
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_x_99" },
+    });
+
+    // Initial load lands — cached detail visible.
+    await waitFor(() =>
+      expect(screen.getByText("coi.pdf")).toBeInTheDocument(),
+    );
+    expect(screen.getByDisplayValue("POL-PRE-ERR")).toBeInTheDocument();
+    expect(screen.getByTestId("extraction-status")).toHaveTextContent(
+      "Processing",
+    );
+    expect(calls).toBe(1);
+
+    // Advance past the 3s refetchInterval — the next fetch errors.
+    await vi.advanceTimersByTimeAsync(3000);
+    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2));
+
+    // The stale-data banner appears with the server message — co-pin
+    // role=status + headline + body so a regression that drops any of
+    // the three fails here. role=status (NOT role=alert) so assistive
+    // tech announces politely rather than interrupting.
+    const banner = await waitFor(() => screen.getByRole("status"));
+    expect(banner).toHaveAttribute("aria-live", "polite");
+    expect(banner).toHaveTextContent(/couldn't refresh document/i);
+    expect(banner).toHaveTextContent(/brown-out/i);
+
+    // The cached detail STAYS visible — file name, the field input,
+    // and the extraction badge are all still rendered.
+    expect(screen.getByText("coi.pdf")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("POL-PRE-ERR")).toBeInTheDocument();
+    expect(screen.getByTestId("extraction-status")).toHaveTextContent(
+      "Processing",
+    );
+    // The "Document not found" copy is the unloaded-data branch, NOT
+    // the poll-failure branch — must NOT appear when cached data
+    // exists.
+    expect(screen.queryByText(/document not found/i)).toBeNull();
+
+    // Polling short-circuits on error — advancing 15s of fake time
+    // must NOT trigger any more fetches. Mirrors the same invariant
+    // useDocuments.test.tsx pins for the list-level polling.
+    const afterFirstError = calls;
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(calls).toBe(afterFirstError);
+  });
+
+  it("detail stale-banner dismisses after a successful Try-again refetch (#97)", async () => {
+    // Recovery path on the detail page: clicking Try again on the
+    // banner, with a 200 response, must drop the banner AND swap the
+    // displayed payload to the fresh response. Mirrors the
+    // list-page Try-again recovery test.
+    let calls = 0;
+    server.use(
+      http.get(url("/api/documents/:id"), () => {
+        calls++;
+        if (calls === 1) {
+          return jsonOk(
+            makeDocumentDetail({
+              extractionStatus: "Processing",
+              complianceStatus: "Pending",
+            }),
+          );
+        }
+        if (calls === 2) {
+          // Second call (the polling refetch): 5xx → banner shows.
+          return jsonError("server.error", "Brown-out", { status: 502 });
+        }
+        // Third call (Try-again click): 200 with Completed status →
+        // banner dismisses, badge advances.
+        return jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Completed",
+            extractionConfidence: 0.93,
+            complianceStatus: "Compliant",
+          }),
+        );
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_x_98" },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText("coi.pdf")).toBeInTheDocument(),
+    );
+
+    // Trigger the polling failure.
+    await vi.advanceTimersByTimeAsync(3000);
+    const banner = await waitFor(() => screen.getByRole("status"));
+    expect(banner).toHaveTextContent(/couldn't refresh document/i);
+
+    // Click Try again on the banner — its Retry affordance.
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+
+    // Banner dismisses + the badge reflects the new Completed status.
+    await waitFor(() =>
+      expect(screen.getByTestId("extraction-status")).toHaveTextContent(
+        "Completed",
+      ),
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByText(/couldn't refresh document/i)).toBeNull();
   });
 
   it("Processing → Failed: UI advances to the failed badge + processingError card", async () => {

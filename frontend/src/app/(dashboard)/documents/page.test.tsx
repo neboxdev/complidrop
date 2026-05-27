@@ -181,14 +181,16 @@ describe("DocumentsPage — state matrix (#36)", () => {
     expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
   });
 
-  it("populated-list polling-failure: keeps the rendered rows visible instead of clobbering them with the error card (#80 + #97)", async () => {
+  it("populated-list polling-failure: keeps the rendered rows visible, surfaces the stale-data banner, and stops polling (#80 + #97)", async () => {
     // The regression #97 was filed against: a poll failure on a
     // populated list flipped `isError=true` and the new error branch
     // hid the rows. Fix: gate the error branch on `items.length === 0`
-    // so the cached rows survive a transient poll failure. Pins the
-    // contract so a future refactor that re-removes the gate fails
-    // here loudly. Also verifies `refetchInterval` stops polling on
-    // error so the backend isn't hammered during the outage.
+    // so the cached rows survive a transient poll failure, AND render
+    // the StaleDataBanner so the user knows what they're seeing may
+    // be stale. Pins the full contract so a future refactor that
+    // re-removes the gate OR drops the banner fails here loudly.
+    // Also verifies `refetchInterval` stops polling on error so the
+    // backend isn't hammered during the outage.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       let calls = 0;
@@ -226,17 +228,108 @@ describe("DocumentsPage — state matrix (#36)", () => {
       await vi.advanceTimersByTimeAsync(5000);
       await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2));
 
-      // Critical: the populated row STAYS visible, and the error card
-      // does NOT replace it.
+      // The stale-data banner appears with the server's message — the
+      // discreet "couldn't refresh" signal the user needs to know
+      // their data may be stale. Co-pin role=status + headline text on
+      // the SAME element so a regression that drops either fails. The
+      // banner is role=status (NOT role=alert) because the cached
+      // data is still readable — assistive tech announces it politely
+      // rather than interrupting the user.
+      const banner = await waitFor(() => screen.getByRole("status"));
+      expect(banner).toHaveAttribute("aria-live", "polite");
+      expect(banner).toHaveTextContent(/couldn't refresh documents/i);
+      expect(banner).toHaveTextContent(/brown-out/i);
+
+      // Critical: the populated row STAYS visible, and the full-page
+      // error card does NOT replace it.
       expect(screen.getByText("coi-pending.pdf")).toBeInTheDocument();
       expect(screen.queryByText(/couldn't load documents/i)).toBeNull();
       expect(screen.queryByText(/no documents yet/i)).toBeNull();
+      // role=alert is reserved for the full-page error card — the
+      // populated+failed path uses role=status. Pin the absence so a
+      // regression that re-introduced role=alert (and the interruptive
+      // a11y announcement) is caught here.
+      expect(screen.queryByRole("alert")).toBeNull();
 
       // Polling short-circuits on error — advancing another 15s must
       // NOT trigger more fetches.
       const afterFirstError = calls;
       await vi.advanceTimersByTimeAsync(15_000);
       expect(calls).toBe(afterFirstError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stale-banner dismisses after a successful Try-again refetch (#97)", async () => {
+    // Pins the recovery path: when the user clicks Try again on the
+    // stale-data banner and the next response is a 200, the banner
+    // must disappear AND the list must show the updated rows. A
+    // regression that left the banner stuck visible (e.g. by reading
+    // a stale isError flag) would surface here. Mirrors the
+    // retry-on-5xx test for the full-page error card, but for the
+    // populated+stale path #97 introduced.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      server.use(
+        http.get(url("/api/documents"), () => {
+          calls++;
+          if (calls === 1) {
+            return jsonOk(
+              makeDocumentsResponse({
+                items: [
+                  {
+                    ...documentsAllStatuses[0], // Pending row
+                    vendorName: "Acme Sub",
+                  },
+                ],
+                total: 1,
+              }),
+            );
+          }
+          if (calls === 2) {
+            // Second call (the polling refetch): 5xx → banner appears.
+            return jsonError("server.error", "Brown-out", { status: 502 });
+          }
+          // Third call (the Try-again click): 200 with the updated
+          // row → banner dismisses, list reflects the new state.
+          return jsonOk(
+            makeDocumentsResponse({
+              items: [
+                {
+                  ...documentsAllStatuses[2], // Completed row
+                  vendorName: "Acme Sub",
+                },
+              ],
+              total: 1,
+            }),
+          );
+        }),
+      );
+
+      renderWithProviders(<DocumentsPage />, { auth: authedMe });
+
+      // First render: populated.
+      await waitFor(() =>
+        expect(screen.getByText("coi-pending.pdf")).toBeInTheDocument(),
+      );
+
+      // Tick past 5s refetch interval → poll errors → banner appears.
+      await vi.advanceTimersByTimeAsync(5000);
+      const banner = await waitFor(() => screen.getByRole("status"));
+      expect(banner).toHaveTextContent(/couldn't refresh documents/i);
+
+      // Click Try again — the banner's Retry affordance.
+      fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+
+      // The banner disappears once isError flips back to false on the
+      // 200 response, AND the list reflects the new payload.
+      await waitFor(() =>
+        expect(screen.getByText("coi-completed.pdf")).toBeInTheDocument(),
+      );
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.queryByText(/couldn't refresh documents/i)).toBeNull();
     } finally {
       vi.useRealTimers();
     }
