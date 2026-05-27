@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import RegisterForm from "./register-form";
 import {
   renderWithProviders,
@@ -24,7 +24,6 @@ import {
   authedMe,
   toastSuccess,
   toastError,
-  fillInputByName,
   submitFormIn,
 } from "@/test";
 import { ME_KEY } from "@/hooks/useAuth";
@@ -32,21 +31,23 @@ import { ME_KEY } from "@/hooks/useAuth";
 // sonner mock + spies are provided by the harness; afterEach in the
 // setup file resets all toast spies between tests (#74).
 
-// Container captured per-test from renderWithProviders. The shared
-// fillInputByName / submitFormIn helpers from @/test enforce container
-// scoping so two simultaneous forms can't collide (#75).
+// Fill inputs by their accessible label, not by `name` attribute (#132).
+// #76 wired the htmlFor/id pairs that unblock getByLabelText; the
+// label-based lookup exercises the same a11y wiring screen readers
+// depend on. Container is still captured per-test for submitFormIn,
+// which retains the multi-form guard from #75.
 let container: HTMLElement;
-function fillField(name: string, value: string) {
-  fillInputByName(container, name, value);
+function fillField(label: RegExp, value: string) {
+  fireEvent.input(screen.getByLabelText(label), { target: { value } });
 }
 function submitForm() {
   submitFormIn(container);
 }
 function fillFullForm() {
-  fillField("fullName", "Owner Name");
-  fillField("companyName", "Acme Inc");
-  fillField("email", "owner@acme.test");
-  fillField("password", "verystrongpass1");
+  fillField(/^full name$/i, "Owner Name");
+  fillField(/^company$/i, "Acme Inc");
+  fillField(/^work email$/i, "owner@acme.test");
+  fillField(/^password$/i, "verystrongpass1");
 }
 
 // Validation copy lives in zod schema (`register-form.tsx`). Test the
@@ -54,10 +55,10 @@ function fillFullForm() {
 describe("RegisterForm — validation (#35)", () => {
   it("flags a short password with the user-facing copy", async () => {
     ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
-    fillField("fullName", "Owner Name");
-    fillField("companyName", "Acme Inc");
-    fillField("email", "owner@acme.test");
-    fillField("password", "short1");
+    fillField(/^full name$/i, "Owner Name");
+    fillField(/^company$/i, "Acme Inc");
+    fillField(/^work email$/i, "owner@acme.test");
+    fillField(/^password$/i, "short1");
     submitForm();
 
     await waitFor(() =>
@@ -70,10 +71,10 @@ describe("RegisterForm — validation (#35)", () => {
 
   it("flags a missing letter in the password", async () => {
     ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
-    fillField("fullName", "Owner Name");
-    fillField("companyName", "Acme Inc");
-    fillField("email", "owner@acme.test");
-    fillField("password", "123456789012");
+    fillField(/^full name$/i, "Owner Name");
+    fillField(/^company$/i, "Acme Inc");
+    fillField(/^work email$/i, "owner@acme.test");
+    fillField(/^password$/i, "123456789012");
     submitForm();
 
     await waitFor(() =>
@@ -85,10 +86,10 @@ describe("RegisterForm — validation (#35)", () => {
 
   it("flags a missing digit in the password", async () => {
     ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
-    fillField("fullName", "Owner Name");
-    fillField("companyName", "Acme Inc");
-    fillField("email", "owner@acme.test");
-    fillField("password", "abcdefghijklm");
+    fillField(/^full name$/i, "Owner Name");
+    fillField(/^company$/i, "Acme Inc");
+    fillField(/^work email$/i, "owner@acme.test");
+    fillField(/^password$/i, "abcdefghijklm");
     submitForm();
 
     await waitFor(() =>
@@ -100,9 +101,9 @@ describe("RegisterForm — validation (#35)", () => {
 
   it("flags a missing full name with the user-facing copy", async () => {
     ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
-    fillField("companyName", "Acme Inc");
-    fillField("email", "owner@acme.test");
-    fillField("password", "verystrongpass1");
+    fillField(/^company$/i, "Acme Inc");
+    fillField(/^work email$/i, "owner@acme.test");
+    fillField(/^password$/i, "verystrongpass1");
     submitForm();
 
     await waitFor(() =>

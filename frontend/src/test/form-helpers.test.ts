@@ -1,6 +1,11 @@
 /**
- * Pins the form-helper contracts added in #75 and hardened in the
- * #75 followup (defensive guards + multi-form rejection).
+ * Pins the form-helper contract added in #75 and hardened in the #75
+ * followup (defensive guards + multi-form rejection).
+ *
+ * Originally exercised `fillInputByName` too, but #132 deleted that
+ * helper after every caller migrated to `screen.getByLabelText` — see
+ * `forms.ts` for the rationale. `submitFormIn` stayed because the
+ * multi-form guard is orthogonal to label-based input lookup.
  *
  * The companion test mirrors the Wave 3 pattern established by
  * `sonner.test.ts`, `polling.test.ts`, `dropzone.test.ts`, and
@@ -9,19 +14,11 @@
  * "simplification" can't silently regress the foot-gun protections
  * downstream callers depend on.
  *
- * Six invariants matter for downstream tests:
- *   1. `fillInputByName` throws a HELPFUL error when container is
- *      undefined — mirrors `dropFilesIn`'s container guard. Names the
- *      actual root cause (missing destructure) rather than blaming
- *      `querySelector`.
- *   2. `fillInputByName` throws a HELPFUL error when no input with
- *      the requested name exists. Echoes the name for fast diagnosis.
- *   3. `fillInputByName` is container-scoped — an input in
- *      `document.body` outside the container is invisible to the
- *      helper. This is the load-bearing rationale for the lift.
- *   4. `submitFormIn` mirrors guard 1 (undefined container).
- *   5. `submitFormIn` throws when no `<form>` exists in the container.
- *   6. `submitFormIn` throws when MULTIPLE forms exist — silently
+ * Three invariants matter for downstream tests:
+ *   1. `submitFormIn` throws a HELPFUL "did you forget to
+ *      destructure?" message when container is undefined.
+ *   2. `submitFormIn` throws when no `<form>` exists in the container.
+ *   3. `submitFormIn` throws when MULTIPLE forms exist — silently
  *      submitting the first would re-introduce the same collision
  *      hazard the lift was meant to eliminate.
  *
@@ -30,68 +27,7 @@
  * test — a different concern with the same root noun.
  */
 import { describe, it, expect, vi } from "vitest";
-import { fillInputByName, submitFormIn } from "./forms";
-
-describe("fillInputByName — container guard contract (#75 followup)", () => {
-  it("throws with a helpful 'did you forget to destructure?' message when container is undefined", () => {
-    expect(() =>
-      fillInputByName(undefined as unknown as HTMLElement, "email", "x"),
-    ).toThrow(/container was undefined/i);
-    expect(() =>
-      fillInputByName(undefined as unknown as HTMLElement, "email", "x"),
-    ).toThrow(/renderWithProviders/);
-  });
-
-  it("throws with a helpful 'no input named' message when container has no matching input", () => {
-    const container = document.createElement("div");
-    expect(() => fillInputByName(container, "email", "x")).toThrow(
-      /no input named "email"/i,
-    );
-  });
-
-  it("is container-scoped — an input outside the container is invisible to the helper", () => {
-    // Build a container with NO matching input, and inject a sibling
-    // `<input name="email">` directly into document.body. The pre-lift
-    // global `document.querySelector` would have picked up the body-
-    // level input; the container-scoped helper must NOT.
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const sibling = document.createElement("input");
-    sibling.name = "email";
-    document.body.appendChild(sibling);
-
-    try {
-      expect(() => fillInputByName(container, "email", "x")).toThrow(
-        /no input named "email"/i,
-      );
-    } finally {
-      document.body.removeChild(container);
-      document.body.removeChild(sibling);
-    }
-  });
-
-  it("fires an input event with the supplied value when the input is found", () => {
-    // Pin that the helper uses `fireEvent.input` with `{ target: { value }}`
-    // rather than e.g. `change` — RHF's auth forms wire `onInput` mode
-    // and would not see a `change` event, which is why the original
-    // tests deliberately use `input`.
-    const container = document.createElement("div");
-    const input = document.createElement("input");
-    input.name = "email";
-    container.appendChild(input);
-    document.body.appendChild(container);
-
-    try {
-      const onInput = vi.fn();
-      input.addEventListener("input", onInput);
-      fillInputByName(container, "email", "owner@acme.test");
-      expect(input.value).toBe("owner@acme.test");
-      expect(onInput).toHaveBeenCalledTimes(1);
-    } finally {
-      document.body.removeChild(container);
-    }
-  });
-});
+import { submitFormIn } from "./forms";
 
 describe("submitFormIn — container + ambiguity guard contract (#75 followup)", () => {
   it("throws with a helpful 'did you forget to destructure?' message when container is undefined", () => {
@@ -111,10 +47,11 @@ describe("submitFormIn — container + ambiguity guard contract (#75 followup)",
   });
 
   it("is container-scoped — a form outside the container is invisible to the helper", () => {
-    // Same scope check as fillInputByName, applied to <form>. The
-    // pre-lift global `document.querySelector("form")` would have
-    // picked up the body-level form; the container-scoped helper must
-    // NOT.
+    // The whole point of moving from `document.querySelector("form")`
+    // to `container.querySelector("form")` is to defend against a
+    // future composite test rendering two forms. Same scope check as
+    // dropzone.ts: a body-level form must NOT be picked up by a
+    // helper scoped to a sibling container.
     const container = document.createElement("div");
     document.body.appendChild(container);
     const sibling = document.createElement("form");

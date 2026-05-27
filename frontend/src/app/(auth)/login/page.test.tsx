@@ -17,7 +17,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import LoginPage from "./page";
 import {
   renderWithProviders,
@@ -28,7 +28,6 @@ import {
   authedMe,
   toastSuccess,
   toastError,
-  fillInputByName,
   submitFormIn,
 } from "@/test";
 import { ME_KEY } from "@/hooks/useAuth";
@@ -38,13 +37,15 @@ import { ME_KEY } from "@/hooks/useAuth";
 // sonner mock + spies are provided by the harness; afterEach in the
 // setup file resets all toast spies between tests (#74).
 
-// Container captured per-test from renderWithProviders so a future
-// composite test rendering two forms can't collide on the global
-// document.querySelector. The shared fillInputByName / submitFormIn
-// helpers from @/test enforce the container-scoped contract (#75).
+// Fill inputs by their accessible label, not by `name` attribute (#132).
+// #76 wired every <label htmlFor=...> against its input's id, so RTL's
+// `getByLabelText` resolves the same DOM node the user reaches via the
+// label — the test now exercises the same a11y wiring screen readers
+// depend on. Container is still captured per-test for submitFormIn,
+// which retains the multi-form guard from #75.
 let container: HTMLElement;
-function fillField(name: string, value: string) {
-  fillInputByName(container, name, value);
+function fillField(label: RegExp, value: string) {
+  fireEvent.input(screen.getByLabelText(label), { target: { value } });
 }
 function submitForm() {
   submitFormIn(container);
@@ -56,15 +57,15 @@ describe("LoginPage — validation (#35)", () => {
     expect(
       screen.getByRole("heading", { name: /welcome back/i }),
     ).toBeInTheDocument();
-    expect(document.querySelector('input[type="email"]')).toBeTruthy();
-    expect(document.querySelector('input[type="password"]')).toBeTruthy();
+    expect(screen.getByLabelText(/^email$/i)).toHaveAttribute("type", "email");
+    expect(screen.getByLabelText(/^password$/i)).toHaveAttribute("type", "password");
     expect(screen.getByRole("button", { name: /sign in/i })).toBeInTheDocument();
   });
 
   it("flags an invalid email format with the user-facing copy", async () => {
     ({ container } = renderWithProviders(<LoginPage />, { auth: null }));
-    fillField("email", "not-an-email");
-    fillField("password", "anything");
+    fillField(/^email$/i, "not-an-email");
+    fillField(/^password$/i, "anything");
     submitForm();
 
     await waitFor(() =>
@@ -77,7 +78,7 @@ describe("LoginPage — validation (#35)", () => {
 
   it("flags an empty password with the user-facing copy", async () => {
     ({ container } = renderWithProviders(<LoginPage />, { auth: null }));
-    fillField("email", "owner@acme.test");
+    fillField(/^email$/i, "owner@acme.test");
     submitForm();
 
     await waitFor(() =>
@@ -98,8 +99,8 @@ describe("LoginPage — happy path (#35)", () => {
     container = rendered.container;
     const { queryClient } = rendered;
 
-    fillField("email", "owner@acme.test");
-    fillField("password", "verystrongpass1");
+    fillField(/^email$/i, "owner@acme.test");
+    fillField(/^password$/i, "verystrongpass1");
     submitForm();
 
     await waitFor(() =>
@@ -169,8 +170,8 @@ describe("LoginPage — server-side error copy (#35)", () => {
         router: { push: pushSpy },
       }));
 
-      fillField("email", "owner@acme.test");
-      fillField("password", "anything");
+      fillField(/^email$/i, "owner@acme.test");
+      fillField(/^password$/i, "anything");
       submitForm();
 
       await waitFor(() =>
@@ -206,8 +207,8 @@ describe("LoginPage — loading state (#35)", () => {
     );
 
     ({ container } = renderWithProviders(<LoginPage />, { auth: null }));
-    fillField("email", "owner@acme.test");
-    fillField("password", "verystrongpass1");
+    fillField(/^email$/i, "owner@acme.test");
+    fillField(/^password$/i, "verystrongpass1");
     submitForm();
 
     // try/finally so release() runs even if the disabled-button assertion
