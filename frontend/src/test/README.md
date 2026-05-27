@@ -13,7 +13,7 @@ Reusable test scaffolding for the Next.js frontend. Pairs with [ADR 0003](../../
 | `fixtures.ts`          | Named typed fixtures — `authedMe`, `documentsAllStatuses{Response}`, `portalInfo`, `expiredPortalLinkHandler`, `expiredLink404`. |
 | `navigation.ts`        | Mutable container behind the global `vi.mock("next/navigation", ...)`.                 |
 | `sonner.ts`            | Mutable `toast.*` spies behind the global `vi.mock("sonner", ...)`. Import `toastSuccess`/`toastError` from `@/test` and assert on them.   |
-| `polling.ts`           | `sequencedJsonOk(...responses)` returns an MSW handler that yields responses in order, then repeats the last (terminal state). |
+| `polling.ts`           | `sequencedJsonOk(...payloads)` and `sequencedResponses(...factories)` return MSW handlers that yield in order then repeat the last (terminal state). Use `sequencedJsonOk` for all-success sequences; reach for `sequencedResponses` when the sequence mixes `jsonOk` / `jsonError`. |
 | `dropzone.ts`          | `dropFilesIn(container, files)` + `makeFile(name, type?, size?)` — container-scoped helpers for driving `react-dropzone` in tests. |
 | `security.ts`          | `assertNotInDom(value, root?)` — assert a sensitive value is NOT rendered into the DOM (scans both `textContent` and `innerHTML`). |
 | `forms.ts`             | `fillInputByName(container, name, value)` + `submitFormIn(container)` — container-scoped form-driving helpers with undefined-container + multi-form guards. Prefer `getByLabelText` after #76. |
@@ -113,7 +113,27 @@ expect(calls).toBeGreaterThanOrEqual(3);
 
 The handler clamps to the LAST response after the list is exhausted — matches the "terminal state stays terminal" contract of `refetchInterval` predicates that return `false` once the response reaches a terminal status.
 
-**Limitation:** `sequencedJsonOk` wraps every element in `jsonOk` — sequences are success-only. Mixed jsonOk/jsonError sequences (e.g. first call 200, second call 5xx, third call 200) keep the hand-rolled `let calls = 0; if (calls === 1) jsonError(...); return jsonOk(...)` shape; see the retry-on-5xx tests in `documents/page.test.tsx` for the canonical mixed-response form.
+### Mixed jsonOk/jsonError sequences — `sequencedResponses`
+
+`sequencedJsonOk` wraps every element in `jsonOk` — sequences are success-only. For mixed-code sequences (e.g. first call 500, second call 200), reach for `sequencedResponses`, which takes Response **factories** (composable with the existing `jsonOk` / `jsonError` helpers via arrow-function wrappers) instead of raw payloads:
+
+```ts
+import { sequencedResponses, jsonOk, jsonError } from "@/test";
+
+let calls = 0;
+const seq = sequencedResponses(
+  () => jsonError("server.error", "DB blip.", { status: 500 }),
+  () => jsonOk(makeDocumentsResponse({ items: [...], total: 1 })),
+);
+server.use(
+  http.get(url("/api/documents"), () => {
+    calls++;
+    return seq();
+  }),
+);
+```
+
+Same terminal-clamp + RangeError + per-invocation-counter semantics as `sequencedJsonOk`. Factories — not pre-built Responses — are required because Response body streams are single-use; a refetch-interval test that does one extra advance on the terminal step needs each call to produce a fresh Response. See the migrated `retry-on-5xx` test in `documents/page.test.tsx` for the canonical migration shape (#124).
 
 **Gotchas** (the helper does NOT solve these for you):
 

@@ -25,6 +25,7 @@ import {
   documentsAllStatuses,
   makeDocumentsResponse,
   sequencedJsonOk,
+  sequencedResponses,
 } from "@/test";
 
 afterEach(() => {
@@ -139,19 +140,27 @@ describe("DocumentsPage — state matrix (#36)", () => {
     // re-issue the documents fetch. Without this test, swapping
     // `onClick={() => docs.refetch()}` for a no-op or a wrong query
     // would slip past every other test in this file.
+    //
+    // Migrated to `sequencedResponses` in #124 — the helper covers
+    // exactly this mixed 500→200 shape the success-only
+    // `sequencedJsonOk` couldn't express. The external `calls`
+    // counter stays because the helper's internal counter is
+    // intentionally not exposed (see polling.ts module docstring).
     let calls = 0;
-    server.use(
-      http.get(url("/api/documents"), () => {
-        calls++;
-        if (calls === 1) {
-          return jsonError("server.error", "DB blip.", { status: 500 });
-        }
-        return jsonOk(
+    const seq = sequencedResponses(
+      () => jsonError("server.error", "DB blip.", { status: 500 }),
+      () =>
+        jsonOk(
           makeDocumentsResponse({
             items: [{ ...documentsAllStatuses[2] }],
             total: 1,
           }),
-        );
+        ),
+    );
+    server.use(
+      http.get(url("/api/documents"), () => {
+        calls++;
+        return seq();
       }),
     );
 
