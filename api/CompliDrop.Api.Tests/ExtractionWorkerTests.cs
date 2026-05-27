@@ -320,13 +320,23 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     public async Task Stale_processing_document_is_reclaimed_after_the_zombie_timeout()
     {
         // Boundary-tight: ProcessingStartedAt is 30 seconds PAST the 5-min
-        // zombie threshold (-5m30s). Wide enough to absorb sub-millisecond
-        // jitter between SeedDocAsync's clock read and the worker's
-        // `now() - interval '5 minutes'` comparison, narrow enough that a
-        // regression changing the threshold to 6 minutes would fail this
-        // assertion (the seeded value would no longer cross the larger
-        // threshold). Pins the threshold against drift in either direction
-        // — see also the fresh-boundary pair below. (#62)
+        // zombie threshold (-5m30s). The 30 s envelope absorbs the elapsed
+        // time between SeedDocAsync's `DateTime.UtcNow` read on the test
+        // host and the worker's `now()` read in the Testcontainers Postgres
+        // process (loopback Npgsql round-trip + the SaveChangesAsync write
+        // + BuildWorker resolution — single to low-double-digit ms in
+        // steady state; the kernel clock is shared so there is no host-vs-
+        // container skew). The envelope is narrow enough that a regression
+        // changing the threshold to 6 minutes would fail this assertion
+        // (the seeded value would no longer cross the larger threshold).
+        // Pins the threshold against drift in either direction — see also
+        // the fresh-boundary pair below.
+        //
+        // The literal "5m" duplicated here mirrors `interval '5 minutes'`
+        // in ExtractionWorker.ClaimSql by design: the test's job is to
+        // PIN the threshold value so a regression there must fail here.
+        // Hoisting to a shared constant — as MaxAttempts does — would
+        // collapse the regression discriminator. (#62)
         var (_, docId) = await SeedDocAsync(
             status: ExtractionStatus.Processing,
             attempts: 1,
@@ -335,7 +345,10 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
 
         var claimed = await worker.ClaimNextAsync(CancellationToken.None);
 
-        claimed.Should().Be(docId);
+        claimed.Should().Be(
+            docId,
+            "ProcessingStartedAt=-5m30s is past the 5-min zombie threshold and must be reclaimed; " +
+            "if this fires with null, the threshold has been widened beyond 5m30s");
         (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(2, "the reclaim increments the attempt counter");
     }
 
@@ -343,13 +356,23 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     public async Task Recently_claimed_processing_document_is_not_reclaimed()
     {
         // Boundary-tight: ProcessingStartedAt is 30 seconds BEFORE the 5-min
-        // zombie threshold (-4m30s). Wide enough to absorb sub-millisecond
-        // jitter, narrow enough that a regression changing the threshold to
-        // 4 minutes would fail this assertion (the seeded value would now
-        // cross the smaller threshold and the doc would be wrongly
-        // reclaimed). Combined with the stale-boundary pair above, the two
-        // tests bracket the 5-min threshold and would catch a ±1-min drift
-        // in either direction. (#62)
+        // zombie threshold (-4m30s). See the stale-boundary docstring above
+        // for the jitter sources the 30 s envelope absorbs. Narrow enough
+        // that a regression changing the threshold to 4 minutes would fail
+        // this assertion (the seeded value would now cross the smaller
+        // threshold and the doc would be wrongly reclaimed). Combined with
+        // the stale-boundary pair above, the two tests bracket the 5-min
+        // threshold and would catch a ±1-min drift in either direction.
+        //
+        // The literal "5m" duplicated here mirrors `interval '5 minutes'`
+        // in ExtractionWorker.ClaimSql by design — see the stale-boundary
+        // docstring for the rationale.
+        //
+        // The companion TZ-Theory tests below deliberately stay at the
+        // looser -10m / -1m offsets: their failure mode is HOURS of drift
+        // via session TimeZone bridging (#26), not MINUTES of threshold
+        // drift, so a 30 s envelope adds no discriminating power there.
+        // (#62)
         var (_, docId) = await SeedDocAsync(
             status: ExtractionStatus.Processing,
             attempts: 1,
@@ -358,7 +381,10 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
 
         var claimed = await worker.ClaimNextAsync(CancellationToken.None);
 
-        claimed.Should().BeNull("a freshly-claimed doc must not be stolen before the zombie timeout");
+        claimed.Should().BeNull(
+            "ProcessingStartedAt=-4m30s is inside the 5-min zombie window; a freshly-claimed doc " +
+            "must not be stolen before the timeout. If this fires with a non-null Guid, the " +
+            "threshold has been narrowed below 4m30s");
         (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(1, "the doc is untouched");
     }
 
@@ -430,6 +456,11 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         // into the PAST, so a 10-min-old doc fails `< (real_now - 9h5m)` and is NEVER reclaimed
         // (zombies stuck forever). Under New_York the RHS drifts into the future and this test
         // still passes under the broken SQL; the Tokyo branch is what catches that side of the bug.
+        //
+        // The -10m / -1m offsets are deliberately LOOSER than the boundary-tight #62 pair above:
+        // the failure mode here is HOURS of TZ drift, not MINUTES of threshold drift, so a 30 s
+        // envelope adds no discriminating power. Keeping the envelope loose isolates this test to
+        // the single TZ-independence claim it's meant to pin.
         var (_, docId) = await SeedDocAsync(
             status: ExtractionStatus.Processing,
             attempts: 1,
