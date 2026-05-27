@@ -17,14 +17,22 @@
  * downstream callers depend on.
  *
  * Invariants:
- *   1. `fillByLabel` resolves an input by label and fires an `input`
- *      event (RHF's auth forms wire `onInput` mode).
- *   2. `fillByLabel` propagates RTL's "unable to find a label" error
+ *   1. `fillByLabel` resolves an input by label and fires the DOM
+ *      `input` event — the event React synthesizes `onChange` from
+ *      and RHF's `register(...)` subscribes to.
+ *   2. `fillByLabel` does NOT fire the DOM `change` event — pins the
+ *      `fireEvent.input` primitive choice so a refactor to
+ *      `fireEvent.change` (or a hand-rolled dispatchEvent) is caught.
+ *   3. `fillByLabel` accepts a plain string label too.
+ *   4. `fillByLabel` propagates RTL's "unable to find a label" error
  *      when the label is missing — no swallowed signal.
- *   3. `submitFormIn` throws a HELPFUL "did you forget to
+ *   5. `fillByLabel(label, value, container)` scopes to that container
+ *      so a future composite test rendering two forms with identical
+ *      labels can disambiguate. (#134's shape.)
+ *   6. `submitFormIn` throws a HELPFUL "did you forget to
  *      destructure?" message when container is undefined.
- *   4. `submitFormIn` throws when no `<form>` exists in the container.
- *   5. `submitFormIn` throws when MULTIPLE forms exist — silently
+ *   7. `submitFormIn` throws when no `<form>` exists in the container.
+ *   8. `submitFormIn` throws when MULTIPLE forms exist — silently
  *      submitting the first would re-introduce the same collision
  *      hazard the lift was meant to eliminate.
  *
@@ -70,7 +78,12 @@ describe("fillByLabel — label-based input driver contract (#135)", () => {
     cleanups = [];
   });
 
-  it("resolves an input by label text (regex) and fires an `input` event", () => {
+  it("resolves an input by label text (regex) and fires the DOM `input` event (NOT `change`)", () => {
+    // Pins both halves of the primitive choice: `fireEvent.input` MUST
+    // fire `input`, MUST NOT fire `change`. A refactor to
+    // `fireEvent.change` (which fires both) would still pass an
+    // input-only assertion via RTL's cross-dispatching; the negative
+    // `change` assertion is what catches the regression cleanly.
     const { input, cleanup } = mountLabeledInput({
       labelText: "Email",
       inputId: "f-email",
@@ -79,12 +92,15 @@ describe("fillByLabel — label-based input driver contract (#135)", () => {
     cleanups.push(cleanup);
 
     const onInput = vi.fn();
+    const onChange = vi.fn();
     input.addEventListener("input", onInput);
+    input.addEventListener("change", onChange);
 
     fillByLabel(/^email$/i, "owner@acme.test");
 
     expect(input.value).toBe("owner@acme.test");
     expect(onInput).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("accepts a plain string label too (passes through to getByLabelText)", () => {
@@ -109,6 +125,46 @@ describe("fillByLabel — label-based input driver contract (#135)", () => {
     expect(() => fillByLabel(/nonexistent/i, "x")).toThrow(
       /unable to find a label/i,
     );
+  });
+
+  it("scopes to the supplied container — sibling form's matching label is invisible", () => {
+    // Pins the #134 escape hatch: when two forms in one document share
+    // a label (e.g. composite "vendor invite + portal token" test),
+    // passing the per-form container scopes the lookup so neither
+    // form picks up the other's input. Build two forms, drive only
+    // one via container-scoped fillByLabel, assert the other untouched.
+    const containerA = document.createElement("div");
+    const formA = document.createElement("form");
+    const labelA = document.createElement("label");
+    labelA.setAttribute("for", "form-a-email");
+    labelA.textContent = "Email";
+    const inputA = document.createElement("input");
+    inputA.id = "form-a-email";
+    formA.appendChild(labelA);
+    formA.appendChild(inputA);
+    containerA.appendChild(formA);
+
+    const containerB = document.createElement("div");
+    const formB = document.createElement("form");
+    const labelB = document.createElement("label");
+    labelB.setAttribute("for", "form-b-email");
+    labelB.textContent = "Email";
+    const inputB = document.createElement("input");
+    inputB.id = "form-b-email";
+    formB.appendChild(labelB);
+    formB.appendChild(inputB);
+    containerB.appendChild(formB);
+
+    document.body.appendChild(containerA);
+    document.body.appendChild(containerB);
+    cleanups.push(() => {
+      document.body.removeChild(containerA);
+      document.body.removeChild(containerB);
+    });
+
+    fillByLabel(/^email$/i, "a@example.test", containerA);
+    expect(inputA.value).toBe("a@example.test");
+    expect(inputB.value).toBe("");
   });
 });
 

@@ -24,28 +24,36 @@
  *   simultaneous forms, so silently submitting only the first would
  *   re-introduce the very hazard the lift was meant to eliminate.
  */
-import { fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen, within } from "@testing-library/react";
 
 /**
  * Fill the input associated with the given accessible label by firing
  * an `input` event. Throws via RTL's own `getByLabelText` if no
  * matching label exists.
  *
- * RHF's auth forms wire `onInput` mode and would NOT see a `change`
- * event — `fireEvent.input` is deliberate.
+ * Why `fireEvent.input` (not `fireEvent.change`): RHF's `register(...)`
+ * attaches React's synthetic `onChange`, which React triggers from the
+ * DOM `input` event (NOT the DOM `change` event). `fireEvent.input` is
+ * the canonical RTL primitive for that flow. `fireEvent.change` happens
+ * to also work today because RTL fires both `input` and `change` DOM
+ * events under the hood, but the `input` primitive is the one that
+ * directly maps to React's listener — pinning it explicitly prevents a
+ * future RTL behavior tweak from silently breaking the form tests.
  *
- * Resolves globally via `screen` (not container-scoped). Today every
- * auth test renders one form, so the global lookup is unambiguous. If
- * a future composite test renders two forms in the same document and
- * both expose the same label, scope the lookup with
- * `within(container).getByLabelText(...)` at the call site instead of
- * importing this helper. (#134 will introduce that pattern.)
+ * Scoping: resolves via the global `screen` by default. Today every
+ * auth test renders one form, so the global lookup is unambiguous. For
+ * a future composite test rendering two forms with the same labels in
+ * the same document, pass a `container` and the lookup scopes to
+ * `within(container).getByLabelText(...)` — this is the shape #134's
+ * composite two-form test will use.
  */
 export function fillByLabel(
   label: RegExp | string,
   value: string,
+  container?: HTMLElement,
 ): void {
-  const input = screen.getByLabelText(label);
+  const root = container ? within(container) : screen;
+  const input = root.getByLabelText(label);
   fireEvent.input(input, { target: { value } });
 }
 
