@@ -116,11 +116,8 @@ export function useRevokePortalLink(vendorId: string) {
     mutationFn: (linkId: string) => api.delete<void>(`/api/vendors/${vendorId}/portal-link/${linkId}`),
     // Symmetric with useGeneratePortalLink above — one prefix
     // invalidate refreshes BOTH the list-summary activePortalLinks
-    // count and the detail-page portal-link list (#113). The
-    // vendorId param is kept on the hook signature for the URL
-    // construction in the mutationFn; the invalidate doesn't need
-    // it because the prefix match covers every vendor's detail
-    // observer too.
+    // count and the detail-page portal-link list (#113). See
+    // useUpdateVendor above for the TQ prefix-match mechanics.
     onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
   });
 }
