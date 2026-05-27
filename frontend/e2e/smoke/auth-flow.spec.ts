@@ -76,12 +76,15 @@ test.describe("Flow 1 — sign-up → dashboard (#39)", () => {
       status: 200,
     });
 
-    await page.locator('input[name="fullName"]').fill("Smoke Owner");
-    await page.locator('input[name="companyName"]').fill("Smoke Test Inc");
-    await page.locator('input[name="email"]').fill("owner@smoke.test");
-    await page
-      .locator('input[name="password"]')
-      .fill("verystrongsmokepass1");
+    // Fill by accessible label (#137). #76 wired every <label htmlFor=…>
+    // ↔ <input id=…> on this form, so Playwright's getByLabel resolves
+    // the same DOM node the user reaches via the label. Anchored regexes
+    // prevent the "Work email" label from collisions with a future
+    // "Email" sibling. Companion Vitest migration: #132.
+    await page.getByLabel(/^full name$/i).fill("Smoke Owner");
+    await page.getByLabel(/^company$/i).fill("Smoke Test Inc");
+    await page.getByLabel(/^work email$/i).fill("owner@smoke.test");
+    await page.getByLabel(/^password$/i).fill("verystrongsmokepass1");
 
     await page.getByRole("button", { name: /create my account/i }).click();
     await registerResponse;

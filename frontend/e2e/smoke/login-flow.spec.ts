@@ -89,8 +89,12 @@ test.describe("Flow 1b — log-in → dashboard (#90)", () => {
       status: 200,
     });
 
-    await page.locator('input[name="email"]').fill("owner@smoke.test");
-    await page.locator('input[name="password"]').fill("verystrongsmokepass1");
+    // Fill by accessible label (#137). #76 wired every <label htmlFor=…>
+    // ↔ <input id=…> on this form, so Playwright's getByLabel resolves
+    // the same DOM node the user reaches via the label. Companion
+    // Vitest migration: #132.
+    await page.getByLabel(/^email$/i).fill("owner@smoke.test");
+    await page.getByLabel(/^password$/i).fill("verystrongsmokepass1");
 
     await page.getByRole("button", { name: /sign in/i }).click();
     await loginResponse;
