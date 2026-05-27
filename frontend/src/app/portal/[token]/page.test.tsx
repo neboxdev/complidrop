@@ -515,6 +515,227 @@ describe("PortalPage — security: no token leakage into DOM (#37)", () => {
   });
 });
 
+describe("PortalPage — 429 discriminator branching (#145)", () => {
+  /*
+   * The proper #45 review pinned that the backend now emits TWO
+   * distinct 429 envelopes on the upload route:
+   *   - `rate_limit.exceeded` — transient (throttled per-token/per-ip)
+   *   - `vendor.portal_quota_exceeded` — permanent (link burned its
+   *     MaxUploads)
+   *
+   * Before #145 the page rendered the same plain message for both, so
+   * the vendor had no actionable next step on either branch. These
+   * tests pin that the page now offers a RETRY button on the transient
+   * branch and ESCALATION COPY on the permanent branch — and only the
+   * right one.
+   *
+   * Driving the discriminator via `error.code` (not by sniffing the
+   * message text) keeps the contract pinned: if the backend ever
+   * rewords either message, these tests still verify the branching
+   * holds, and the wire format documented in Program.cs +
+   * VendorPortalEndpoints.cs stays the single source of truth.
+   */
+  const renderAndDrop = async (file: File) => {
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(
+        screen.getByText(/drag a file here or click to select/i),
+      ).toBeInTheDocument(),
+    );
+    dropFiles([file]);
+  };
+
+  it("rate_limit.exceeded: renders the transient-error copy + a retry button (no escalation copy)", async () => {
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () =>
+        jsonError(
+          "rate_limit.exceeded",
+          "Too many requests. Please try again later.",
+          { status: 429 },
+        ),
+      ),
+    );
+
+    await renderAndDrop(makeFile("coi.pdf"));
+
+    // The server's curated message renders.
+    await waitFor(() =>
+      expect(
+        screen.getByText(/too many requests\. please try again later/i),
+      ).toBeInTheDocument(),
+    );
+    // Transient-error guidance — the discriminator-specific copy.
+    expect(
+      screen.getByText(/try again in about an hour, or retry now/i),
+    ).toBeInTheDocument();
+    // Retry affordance is present and reachable as a real button.
+    expect(
+      screen.getByRole("button", { name: /retry upload/i }),
+    ).toBeInTheDocument();
+    // Escalation copy (the OTHER branch) must NOT render. Pinning
+    // strict mutual exclusivity catches a future refactor that, e.g.,
+    // hoists both blocks into the same JSX path.
+    expect(
+      screen.queryByText(/this link is exhausted/i),
+    ).toBeNull();
+    expect(
+      screen.queryByText(/ask your customer to send you a new upload link/i),
+    ).toBeNull();
+    // The error block is keyed by the discriminator — pin the testid
+    // so a future copy tweak can't silently flip the branch.
+    expect(
+      screen.getByTestId("portal-error-rate_limit"),
+    ).toBeInTheDocument();
+    // The raw code must not leak into the rendered DOM.
+    expect(document.body.textContent ?? "").not.toContain(
+      "rate_limit.exceeded",
+    );
+  });
+
+  it("vendor.portal_quota_exceeded: renders the escalation copy (no retry button)", async () => {
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () =>
+        // uploadCount: 4 / max: 5 keeps the dropzone enabled so the
+        // POST actually fires. Simulates the race where the server
+        // already accepted the customer's 5th upload between this
+        // page's GET and the vendor's drop — the server returns 429
+        // with the permanent discriminator.
+        jsonOk(makePortalInfo({ uploadCount: 4, maxUploads: 5 })),
+      ),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () =>
+        jsonError(
+          "vendor.portal_quota_exceeded",
+          "Upload quota reached for this link.",
+          { status: 429 },
+        ),
+      ),
+    );
+
+    await renderAndDrop(makeFile("coi.pdf"));
+
+    // The server's curated message renders.
+    await waitFor(() =>
+      expect(
+        screen.getByText(/upload quota reached for this link/i),
+      ).toBeInTheDocument(),
+    );
+    // Permanent-state guidance — the discriminator-specific copy.
+    expect(
+      screen.getByText(/this link is exhausted/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/ask your customer to send you a new upload link/i),
+    ).toBeInTheDocument();
+    // No retry button — retrying a dead link is hostile UX.
+    expect(
+      screen.queryByRole("button", { name: /retry upload/i }),
+    ).toBeNull();
+    // Transient-branch copy must NOT render.
+    expect(
+      screen.queryByText(/try again in about an hour/i),
+    ).toBeNull();
+    // The error block is keyed by the discriminator.
+    expect(
+      screen.getByTestId("portal-error-quota_exhausted"),
+    ).toBeInTheDocument();
+    // The raw code must not leak into the rendered DOM.
+    expect(document.body.textContent ?? "").not.toContain(
+      "vendor.portal_quota_exceeded",
+    );
+  });
+
+  it("rate_limit retry: clicking 'Retry upload' replays the SAME file once and clears the error on success", async () => {
+    // Pins the retry-affordance contract: the retry button doesn't
+    // ask the vendor to drag the file in again — it replays the
+    // captured file from the previous failure. After a successful
+    // retry, the file lands in Received and the error block is gone.
+    let attempt = 0;
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () => {
+        attempt++;
+        if (attempt === 1) {
+          return jsonError(
+            "rate_limit.exceeded",
+            "Too many requests. Please try again later.",
+            { status: 429 },
+          );
+        }
+        return jsonOk({
+          uploadId: "u_retried",
+          extractionStatus: "Pending",
+          message: "Received",
+        });
+      }),
+    );
+
+    await renderAndDrop(makeFile("retry-me.pdf"));
+
+    // First attempt fails: rate-limit branch surfaces.
+    const retryBtn = await screen.findByRole("button", { name: /retry upload/i });
+
+    // Click the retry button — captured file replays via the SAME
+    // upload endpoint; no fresh drop needed.
+    retryBtn.click();
+
+    // Second attempt succeeds: Received row appears, error block
+    // disappears, exactly TWO POSTs total.
+    await waitFor(() => {
+      expect(screen.getByText(/^received$/i)).toBeInTheDocument();
+      expect(screen.getByText("retry-me.pdf")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /retry upload/i })).toBeNull();
+    });
+    expect(attempt).toBe(2);
+  });
+
+  it("rate_limit then quota: a follow-up retry that 429s as quota_exhausted flips the branch (no retry button)", async () => {
+    // Real-world degenerate case: a transient throttle clears, the
+    // vendor retries, and meanwhile the link burned its quota via
+    // another upload path. The first error renders the retry button;
+    // after the retry POSTs and comes back as the permanent
+    // discriminator, the page must SWAP affordances — retry button
+    // gone, escalation copy in.
+    let attempt = 0;
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () => {
+        attempt++;
+        if (attempt === 1) {
+          return jsonError(
+            "rate_limit.exceeded",
+            "Too many requests. Please try again later.",
+            { status: 429 },
+          );
+        }
+        return jsonError(
+          "vendor.portal_quota_exceeded",
+          "Upload quota reached for this link.",
+          { status: 429 },
+        );
+      }),
+    );
+
+    await renderAndDrop(makeFile("doomed.pdf"));
+
+    const retryBtn = await screen.findByRole("button", { name: /retry upload/i });
+    retryBtn.click();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/this link is exhausted/i),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("button", { name: /retry upload/i }),
+    ).toBeNull();
+    expect(
+      screen.getByTestId("portal-error-quota_exhausted"),
+    ).toBeInTheDocument();
+    expect(attempt).toBe(2);
+  });
+});
+
 describe("PortalPage — uploading-in-flight state (#37)", () => {
   beforeEach(() => {
     // No tests in this file currently use fake timers, but the

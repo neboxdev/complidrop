@@ -3,7 +3,7 @@
 import { useParams } from "next/navigation";
 import { useState, useCallback, useEffect } from "react";
 import { useDropzone, type FileRejection } from "react-dropzone";
-import { UploadCloud, CheckCircle2, ShieldCheck } from "lucide-react";
+import { UploadCloud, CheckCircle2, ShieldCheck, RefreshCw } from "lucide-react";
 import { ApiEnvelope } from "@/lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5292";
@@ -21,6 +21,40 @@ type UploadResponse = {
   uploadId: string;
   extractionStatus: string;
   message: string;
+};
+
+// Discriminator codes the upload endpoint can emit that the page treats
+// specially. Both surface as HTTP 429 today (see Program.cs rate-limit
+// hook + VendorPortalEndpoints.cs quota path) but they want very
+// different recovery affordances:
+//
+//   - rate_limit.exceeded → transient. The vendor hit the per-token or
+//     per-ip throttle (10/hr per token, 30/hr per ip). The link itself
+//     is healthy; the right next step is "wait an hour and retry".
+//   - vendor.portal_quota_exceeded → permanent. The link burned its
+//     MaxUploads. No amount of waiting recovers it; the vendor has to
+//     ask the org owner for a fresh link.
+//
+// The whole point of the #45 discriminator-pair is that the client can
+// tell these apart instead of guessing from body-shape. See
+// [#145](https://github.com/neboxdev/complidrop/issues/145) for the
+// follow-up that wired the branching here.
+type UploadErrorKind = "rate_limit" | "quota_exhausted" | "other";
+
+function classifyUploadError(code: string | undefined): UploadErrorKind {
+  if (code === "rate_limit.exceeded") return "rate_limit";
+  if (code === "vendor.portal_quota_exceeded") return "quota_exhausted";
+  return "other";
+}
+
+type UploadError = {
+  kind: UploadErrorKind;
+  message: string;
+  // The file that triggered the error, captured so the retry button on
+  // the rate-limit branch can resubmit the SAME file instead of asking
+  // the vendor to drag it again. Null for non-upload errors (e.g.
+  // file-rejection copy from react-dropzone) where retry doesn't apply.
+  retryFile: File | null;
 };
 
 // Map react-dropzone's machine-readable rejection codes to vendor-facing
@@ -49,7 +83,10 @@ export default function PortalPage() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploaded, setUploaded] = useState<{ name: string; id: string }[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  // Discriminated upload-error state. `null` = no error; otherwise carries
+  // the kind (rate-limit vs quota-exhausted vs other) so the UI can pick
+  // the right recovery affordance instead of relying on string sniffing.
+  const [error, setError] = useState<UploadError | null>(null);
 
   const fetchInfo = useCallback(async () => {
     try {
@@ -59,8 +96,14 @@ export default function PortalPage() {
       if (body.error) {
         // Server-curated error message — explicitly vendor-facing copy
         // the backend chose to render. Safe to surface as the detail
-        // line below the static recovery copy.
-        setError(body.error.message);
+        // line below the static recovery copy. Tagged "other" since
+        // the GET-info path never returns the 429 discriminator pair —
+        // those only fire on the POST /upload route.
+        setError({
+          kind: classifyUploadError(body.error.code),
+          message: body.error.message,
+          retryFile: null,
+        });
         return;
       }
       setInfo(body.data);
@@ -75,6 +118,47 @@ export default function PortalPage() {
     }
   }, [params.token]);
 
+  // uploadFile is hoisted out of onDrop so the rate-limit retry button
+  // can replay the failing file without recomputing the file-rejection
+  // and client-quota guards (already cleared by the time we know the
+  // server returned 429). Returns the discriminated UploadError on
+  // failure, or null on success.
+  const uploadFile = useCallback(
+    async (file: File): Promise<UploadError | null> => {
+      const form = new FormData();
+      form.append("file", file);
+      try {
+        const res = await fetch(`${API_BASE}/api/portal/${params.token}/upload`, {
+          method: "POST",
+          body: form,
+        });
+        const body = (await res.json()) as ApiEnvelope<UploadResponse>;
+        if (body.error) {
+          return {
+            kind: classifyUploadError(body.error.code),
+            message: body.error.message,
+            retryFile: file,
+          };
+        }
+        if (body.data) {
+          setUploaded((prev) => [...prev, { name: file.name, id: body.data!.uploadId }]);
+        }
+        return null;
+      } catch {
+        // Network/parse failure — `err.message` would leak browser
+        // internals ("Failed to fetch", "TypeError", etc.). Tag as
+        // "other" with a jargon-free static copy. No retry-file so
+        // the rate-limit retry button stays hidden.
+        return {
+          kind: "other",
+          message: "Upload failed. Please try again.",
+          retryFile: file,
+        };
+      }
+    },
+    [params.token],
+  );
+
   const onDrop = useCallback(
     async (accepted: File[], rejected: FileRejection[]) => {
       // react-dropzone returns rejected files separately from accepted
@@ -83,18 +167,23 @@ export default function PortalPage() {
       // one-shot upload surface.
       const rejectionMessage = rejectionCopy(rejected);
       if (rejectionMessage) {
-        setError(rejectionMessage);
+        setError({ kind: "other", message: rejectionMessage, retryFile: null });
         // Don't return: still process any ACCEPTED files alongside.
       }
       if (accepted.length === 0) return;
 
       // Client-side quota guard: the backend will also enforce this via
       // a 409 on /upload, but blocking it here saves the vendor the
-      // wasted POST and gives a clearer error.
+      // wasted POST and gives a clearer error. Tag as quota_exhausted
+      // so the escalation UI branch lights up consistently with the
+      // server-side 429 path.
       if (info && info.uploadCount + uploaded.length >= info.maxUploads) {
-        setError(
-          "You've used every upload on this link. Ask your customer for a fresh link if you need to send more.",
-        );
+        setError({
+          kind: "quota_exhausted",
+          message:
+            "You've used every upload on this link. Ask your customer for a fresh link if you need to send more.",
+          retryFile: null,
+        });
         return;
       }
 
@@ -102,24 +191,39 @@ export default function PortalPage() {
       if (!rejectionMessage) setError(null);
       try {
         for (const file of accepted) {
-          const form = new FormData();
-          form.append("file", file);
-          const res = await fetch(`${API_BASE}/api/portal/${params.token}/upload`, {
-            method: "POST",
-            body: form,
-          });
-          const body = (await res.json()) as ApiEnvelope<UploadResponse>;
-          if (body.error) throw new Error(body.error.message);
-          if (body.data) setUploaded((prev) => [...prev, { name: file.name, id: body.data!.uploadId }]);
+          const err = await uploadFile(file);
+          if (err) {
+            setError(err);
+            // Match the previous for-loop semantics: stop the batch on
+            // the first failure so a partial-batch failure test stays
+            // green and the vendor isn't bombarded with N copies of the
+            // same rate-limit toast on a 3-file drop.
+            return;
+          }
         }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Upload failed.");
       } finally {
         setUploading(false);
       }
     },
-    [params.token, info, uploaded.length],
+    [info, uploaded.length, uploadFile],
   );
+
+  // Rate-limit retry handler. Replays the captured file once, surfacing
+  // any fresh error via the same UploadError discriminator. Bound onto
+  // the retry button on the rate-limit branch only — the quota branch
+  // never renders it (retrying a dead link is hostile UX).
+  const onRetry = useCallback(async () => {
+    if (!error?.retryFile) return;
+    const file = error.retryFile;
+    setUploading(true);
+    setError(null);
+    try {
+      const err = await uploadFile(file);
+      if (err) setError(err);
+    } finally {
+      setUploading(false);
+    }
+  }, [error, uploadFile]);
 
   // Quota-exhausted disables the dropzone client-side. The backend
   // still enforces via 409 — this is a UX guard, not a security one.
@@ -166,8 +270,8 @@ export default function PortalPage() {
           <p className="text-sm text-slate-500 mt-2">
             Ask your customer for a fresh upload link.
           </p>
-          {error && error !== "This link is no longer available." && (
-            <p className="text-xs text-slate-400 mt-3">{error}</p>
+          {error && error.message !== "This link is no longer available." && (
+            <p className="text-xs text-slate-400 mt-3">{error.message}</p>
           )}
         </div>
       </main>
@@ -217,7 +321,54 @@ export default function PortalPage() {
         </div>
 
         {error && (
-          <p className="text-sm text-rose-600 text-center">{error}</p>
+          <div
+            role="alert"
+            aria-live="polite"
+            data-testid={`portal-error-${error.kind}`}
+            className="text-center space-y-2"
+          >
+            <p className="text-sm text-rose-600">{error.message}</p>
+            {/*
+             * Branched recovery affordance — driven by error.code, not
+             * by sniffing message text. The #45 discriminator-pair
+             * (rate_limit.exceeded vs vendor.portal_quota_exceeded)
+             * exists precisely so the client can offer the right next
+             * step here without parsing copy.
+             *
+             *   - rate_limit → transient. Surface a retry button bound
+             *     to the same file. Vendors with one shot don't need
+             *     to drag the file in again just because the throttle
+             *     fired; the file is still selected and the link is
+             *     still healthy.
+             *   - quota_exhausted → permanent. No retry button —
+             *     retrying a dead link is hostile UX. Instead, point
+             *     the vendor at the only recovery path (a new link
+             *     from the org owner).
+             *   - other → fall through to the bare message; no extra
+             *     affordance, since we don't know if retrying helps.
+             */}
+            {error.kind === "rate_limit" && (
+              <div className="text-xs text-slate-500 space-y-2">
+                <p>Try again in about an hour, or retry now.</p>
+                {error.retryFile && (
+                  <button
+                    type="button"
+                    onClick={onRetry}
+                    disabled={uploading}
+                    className="inline-flex items-center gap-1 rounded-md border border-sky-300 bg-white px-3 py-1.5 text-sky-700 hover:bg-sky-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" /> Retry upload
+                  </button>
+                )}
+              </div>
+            )}
+            {error.kind === "quota_exhausted" && (
+              <p className="text-xs text-slate-500">
+                This link is exhausted. Please ask your customer to send
+                you a new upload link.
+              </p>
+            )}
+          </div>
         )}
 
         {uploaded.length > 0 && (
