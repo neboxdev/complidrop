@@ -205,6 +205,17 @@ export default function RulesPage() {
                             <Button
                               size="sm"
                               variant="ghost"
+                              // Icon-only button — `aria-label` carries the
+                              // accessible name for both screen-reader users
+                              // and the page-level test (`getByRole('button',
+                              // { name: /delete rule/i })`). Without the
+                              // label, the test was reaching the button via
+                              // `closest('tr') → querySelector('button')`,
+                              // which silently picks the FIRST button in
+                              // the row and breaks the moment a sibling
+                              // button is added. (#93 review — test-quality
+                              // reviewer.)
+                              aria-label="Delete rule"
                               onClick={() => deleteRule.mutate({ templateId: selectedId!, ruleId: r.id })}
                             >
                               <Trash2 className="w-4 h-4 text-slate-400 hover:text-rose-600" />
