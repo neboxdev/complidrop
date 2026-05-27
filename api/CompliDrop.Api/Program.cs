@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Threading.RateLimiting;
 using CompliDrop.Api;
 using CompliDrop.Api.Auth;
@@ -133,25 +134,66 @@ builder.Services.AddRateLimiter(opts =>
 {
     opts.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 
-    // Write an explicit ApiEnvelope on a rate-limit rejection so the
-    // response is distinguishable from a quota-exceeded 429 (which the
-    // endpoint itself returns with `vendor.portal_quota_exceeded` and
-    // a `Upload quota reached for this link.` message). Without this
-    // hook ASP.NET emits an empty 429 body — clients have to guess by
-    // body-shape whether to retry-next-hour (transient rate limit) or
-    // never-retry (link permanently exhausted). See #45 and ADR 0004.
+    // Shared serializer options for the OnRejected envelope — matches
+    // ExceptionHandlingMiddleware's camelCase contract (see comment
+    // block below for the rationale).
+    var rateLimitEnvelopeJsonOptions = new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
+    // Write an explicit error envelope on a rate-limit rejection so
+    // the response is distinguishable from a quota-exceeded 429 (which
+    // the endpoint itself returns with `vendor.portal_quota_exceeded`
+    // and a `Upload quota reached for this link.` message). Without
+    // this hook ASP.NET emits an empty 429 body — clients have to
+    // guess by body-shape whether to retry-next-hour (transient rate
+    // limit) or never-retry (link permanently exhausted). See #45 and
+    // ADR 0004.
     //
-    // `rate_limit.exceeded` is the only code emitted here; the
-    // portal-token vs portal-ip distinction is internal accounting and
-    // not actionable for the client (both reset hourly).
+    // The envelope is built via JsonSerializer + an anonymous object
+    // matching ExceptionHandlingMiddleware's exact shape (#45 followup
+    // review): same `data: null`, same `error: { code, message,
+    // correlationId }`, same camelCase JsonNamingPolicy. A hand-rolled
+    // JSON literal would diverge silently if a future contributor
+    // added a field to the canonical envelope (the frontend ApiEnvelope
+    // type at frontend/src/lib/api.ts already expects `correlationId`
+    // on errors). HasStarted guard mirrors ExceptionHandlingMiddleware
+    // so a future pipeline change that started the response early
+    // surfaces as a clean no-op rather than an InvalidOperationException
+    // inside the limiter.
+    //
+    // `rate_limit.exceeded` is the only code emitted here for ALL
+    // policies (portal-token, portal-ip, auth-strict, waitlist,
+    // default-authed). The policy distinction is internal accounting
+    // and not actionable for the client; the universal code is the
+    // contract every limited endpoint surface presents — pinned by
+    // the discriminator + cross-policy tests in
+    // VendorPortalEndpointsTests + AuthEndpointsTests.
     opts.OnRejected = async (ctx, ct) =>
     {
+        if (ctx.HttpContext.Response.HasStarted) return;
+
+        var correlationId = ctx.HttpContext.Items["CorrelationId"] as string;
         ctx.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
         ctx.HttpContext.Response.ContentType = "application/json";
-        var envelope = """
-            {"data":null,"error":{"code":"rate_limit.exceeded","message":"Too many requests. Please try again later."}}
-            """;
-        await ctx.HttpContext.Response.WriteAsync(envelope, ct);
+
+        var payload = new
+        {
+            data = (object?)null,
+            error = new
+            {
+                code = "rate_limit.exceeded",
+                message = "Too many requests. Please try again later.",
+                correlationId
+            }
+        };
+
+        await JsonSerializer.SerializeAsync(
+            ctx.HttpContext.Response.Body,
+            payload,
+            rateLimitEnvelopeJsonOptions,
+            ct);
     };
 
     opts.AddPolicy("auth-strict", ctx => RateLimitPartition.GetFixedWindowLimiter(

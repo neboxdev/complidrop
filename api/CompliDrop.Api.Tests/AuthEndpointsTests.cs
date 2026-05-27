@@ -109,4 +109,59 @@ public sealed class AuthEndpointsTests(IntegrationTestFixture fixture) : Integra
 
         (await RawClient().SendAsync(req)).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
+
+    [Fact]
+    public async Task Exceeding_the_auth_strict_rate_limit_returns_the_rate_limit_envelope()
+    {
+        // #45 followup — the OnRejected hook fires GLOBALLY for every
+        // rate-limiter policy (portal-token, portal-ip, auth-strict,
+        // waitlist, default-authed). Pre-followup, only the portal
+        // paths had tests pinning the envelope shape — `auth-strict`'s
+        // 429 behavior was silently changed from empty-body to
+        // enveloped without any test coverage. This test closes that
+        // gap: the auth-strict 5/min limiter on POST /api/auth/login
+        // (and /register, /refresh) MUST emit the same
+        // `rate_limit.exceeded` envelope so a future refactor that
+        // skipped or per-policy-overrode the hook fails here.
+        //
+        // The limiter partitions on Connection.RemoteIpAddress, falling
+        // back to "unknown" under TestServer. All 6 requests share that
+        // single "unknown" partition. Each login attempt against a
+        // fresh random email returns 401 (auth.invalid_credentials) and
+        // burns one permit; the 6th trips the limiter and surfaces
+        // `rate_limit.exceeded` from the OnRejected hook.
+        await using var factory = new CustomWebApplicationFactory(
+            Fixture.ConnectionString,
+            new Dictionary<string, string?> { ["RateLimiting:Enabled"] = "true" });
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = false });
+
+        for (var i = 0; i < 5; i++)
+        {
+            var bogus = await client.PostAsJsonAsync(
+                "/api/auth/login",
+                new { email = $"missing-{Guid.NewGuid():N}@x.com", password = "Password1234" });
+            bogus.StatusCode.Should().Be(
+                HttpStatusCode.Unauthorized,
+                $"login attempt {i + 1}/5 with no matching user must return 401 before the limiter trips");
+        }
+
+        var throttled = await client.PostAsJsonAsync(
+            "/api/auth/login",
+            new { email = $"missing-{Guid.NewGuid():N}@x.com", password = "Password1234" });
+
+        throttled.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        var body = await throttled.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString()
+            .Should().Be(
+                "rate_limit.exceeded",
+                "the OnRejected hook in Program.cs is global to every policy; auth-strict " +
+                "must surface the same envelope code as the portal limiters so clients have " +
+                "ONE retry rule across every limited endpoint.");
+
+        // The envelope must NOT leak the internal policy name —
+        // mirrors the same negative assertion in
+        // VendorPortalEndpointsTests's full-shape test.
+        var raw = await throttled.Content.ReadAsStringAsync();
+        raw.Should().NotContain("auth-strict");
+    }
 }

@@ -521,6 +521,130 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     }
 
     [Fact]
+    public async Task Rate_limit_and_quota_429_codes_are_distinguishable_to_clients()
+    {
+        // #45 followup — pin the discriminator contract the AC asks for: a
+        // client receiving a 429 from /api/portal/{token}/upload must be
+        // able to tell "retry next hour" (rate limit) from "never retry,
+        // link permanently exhausted" (quota) by inspecting `error.code`.
+        // The two existing tests assert the two codes separately; this
+        // test pins them as a CONTRASTING PAIR so a future rename of
+        // either code (e.g. namespace-collapse to vendor.* on both sides)
+        // can't silently dissolve the discriminator. The whole reason #45
+        // exists is the pre-PR ambiguity between an empty 429 (limiter)
+        // and an enveloped 429 (handler); this test makes regression of
+        // that disambiguation a build break.
+
+        // Quota path — runs under the SHARED fixture (rate limiter
+        // disabled by default), so only the handler's quota check fires.
+        var quotaSeeded = await SeedLinkAsync(maxUploads: 1, uploadCount: 1);
+        var quotaClient = CreateClient();
+        var quotaResp = await UploadAsync(
+            quotaClient, quotaSeeded.Token, PdfBytes(), "q.pdf", "application/pdf");
+        quotaResp.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        var quotaCode = await ErrorCode(quotaResp);
+        quotaCode.Should().Be("vendor.portal_quota_exceeded");
+
+        // Rate-limit path — runs under RateLimitedFactory so the limiter
+        // can actually reject. MaxUploads is high so the quota stays
+        // under-budget; only the 10/hr token limiter trips on request 11.
+        var rateSeeded = await SeedLinkAsync(maxUploads: 100);
+        await using var rateFactory = RateLimitedFactory();
+        var rateClient = rateFactory.CreateClient();
+        for (var i = 0; i < 10; i++)
+        {
+            (await UploadAsync(
+                rateClient, rateSeeded.Token, PdfBytes(), $"{i}.pdf", "application/pdf"))
+                .StatusCode.Should().Be(HttpStatusCode.OK);
+        }
+        var rateResp = await UploadAsync(
+            rateClient, rateSeeded.Token, PdfBytes(), "11.pdf", "application/pdf");
+        rateResp.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        var rateCode = await ErrorCode(rateResp);
+        rateCode.Should().Be("rate_limit.exceeded");
+
+        // The load-bearing assertion: the two 429 paths emit DIFFERENT
+        // codes. A future refactor that aliased the codes (or renamed
+        // one without the other) would fail here even if the per-test
+        // assertions above continued passing under partial updates.
+        rateCode.Should().NotBe(quotaCode,
+            "the two 429 paths must remain distinguishable by error.code; #45 exists to " +
+            "prevent the pre-PR ambiguity between an empty limiter-429 and an enveloped " +
+            "handler-429 from re-emerging through code-aliasing.");
+    }
+
+    [Fact]
+    public async Task Rate_limit_envelope_carries_the_full_documented_shape()
+    {
+        // #45 followup — pin every promised field of the rate-limit
+        // envelope so a future regression that drops `data`, changes
+        // `error.message`, or strips `correlationId` surfaces as a
+        // build break instead of a silent client-contract change.
+        //
+        // The frontend's ApiEnvelope<T> type already expects:
+        //   { data: T | null, error: { code, message, correlationId? } | null }
+        // and the canonical 500-path (ExceptionHandlingMiddleware) emits
+        // exactly that shape. Pre-#45 followup this hook emitted only
+        // `data + error.{code, message}` with no correlationId — silently
+        // diverging from the only other middleware-level error envelope
+        // in the codebase. The followup added correlationId + switched
+        // from a hand-rolled string literal to JsonSerializer to keep
+        // the envelope in lockstep with the canonical shape.
+        var seeded = await SeedLinkAsync(maxUploads: 100);
+        await using var factory = RateLimitedFactory();
+        var client = factory.CreateClient();
+        for (var i = 0; i < 10; i++)
+        {
+            (await UploadAsync(
+                client, seeded.Token, PdfBytes(), $"{i}.pdf", "application/pdf"))
+                .StatusCode.Should().Be(HttpStatusCode.OK);
+        }
+
+        var throttled = await UploadAsync(
+            client, seeded.Token, PdfBytes(), "11.pdf", "application/pdf");
+
+        throttled.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        throttled.Content.Headers.ContentType?.MediaType.Should().Be(
+            "application/json",
+            "Content-Type must match the rest of the API so clients can `await res.json()` " +
+            "without sniffing.");
+
+        var body = await throttled.Content.ReadFromJsonAsync<JsonElement>();
+
+        // data: null (envelope contract — never `undefined` or missing).
+        body.TryGetProperty("data", out var data).Should().BeTrue(
+            "the envelope must always carry a `data` field — never omit it.");
+        data.ValueKind.Should().Be(JsonValueKind.Null,
+            "on the error path `data` is always JSON null, never an object.");
+
+        // error.{code,message,correlationId} — the three documented fields.
+        body.TryGetProperty("error", out var error).Should().BeTrue();
+        error.GetProperty("code").GetString().Should().Be("rate_limit.exceeded");
+        error.GetProperty("message").GetString().Should().Be(
+            "Too many requests. Please try again later.",
+            "the message string is part of the documented response contract; if it " +
+            "changes (e.g. for localization), update this assertion + ADR 0004 in " +
+            "the same PR.");
+        // correlationId may be null when no CorrelationIdMiddleware ran, but the
+        // field itself must always be PRESENT on the error envelope to match
+        // ExceptionHandlingMiddleware's 500-path shape.
+        error.TryGetProperty("correlationId", out var corr).Should().BeTrue(
+            "every error envelope (this hook + ExceptionHandlingMiddleware) must expose " +
+            "a `correlationId` field. The frontend ApiEnvelope<T> type at " +
+            "frontend/src/lib/api.ts reads it for log correlation.");
+
+        // The envelope MUST NOT leak the internal policy name. The
+        // partition (`portal-token` vs `portal-ip` vs `auth-strict`) is
+        // implementation detail and irrelevant to the client; a future
+        // refactor that surfaced it would defeat the universal-code
+        // contract.
+        var raw = await throttled.Content.ReadAsStringAsync();
+        raw.Should().NotContain("portal-token");
+        raw.Should().NotContain("portal-ip");
+        raw.Should().NotContain("auth-strict");
+    }
+
+    [Fact]
     public async Task Portal_GET_endpoints_are_not_rate_limited()
     {
         // The IsPortalUpload gate intentionally excludes GETs (info + status). If a regression
