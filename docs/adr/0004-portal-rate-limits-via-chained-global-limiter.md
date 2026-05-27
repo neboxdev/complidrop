@@ -81,10 +81,27 @@ Rejected: more code, duplicates what `PartitionedRateLimiter.CreateChained` does
 ### Option D — keep named policies and apply them via `[EnableRateLimiting(...)]` attributes
 Rejected: the attribute mechanism has the same last-wins metadata semantics. Multiple attributes on the same endpoint produce the same silent drop.
 
+## Rejection envelope (addendum, [#45](https://github.com/neboxdev/complidrop/issues/45))
+
+A `RateLimiterOptions.OnRejected` hook in [`Program.cs`](../../api/CompliDrop.Api/Program.cs) writes an explicit error envelope on every rate-limit rejection — global limiter (portal-token + portal-ip), `auth-strict`, `waitlist`, and `default-authed`:
+
+```json
+{ "data": null, "error": { "code": "rate_limit.exceeded",
+  "message": "Too many requests. Please try again later.", "correlationId": "..." } }
+```
+
+Shape matches [`ExceptionHandlingMiddleware`](../../api/CompliDrop.Api/Middleware/ExceptionHandlingMiddleware.cs)'s 500-path envelope byte-for-byte: same `data: null`, same `error.{code, message, correlationId}`, same camelCase `PropertyNamingPolicy`. The serializer is invoked against the strongly-typed anonymous payload (not a hand-rolled JSON literal) so a future field addition to the canonical envelope propagates automatically.
+
+The code `rate_limit.exceeded` is universal across every policy by design — the policy distinction (which partition rejected) is internal accounting and not actionable for the client. The envelope's correlationId (from `HttpContext.Items["CorrelationId"]`) is the field a client uses to correlate the 429 with server logs. The envelope deliberately does NOT leak the policy name in any field — pinned by the negative assertions in [`Rate_limit_envelope_carries_the_full_documented_shape`](../../api/CompliDrop.Api.Tests/VendorPortalEndpointsTests.cs) and [`Exceeding_the_auth_strict_rate_limit_returns_the_rate_limit_envelope`](../../api/CompliDrop.Api.Tests/AuthEndpointsTests.cs).
+
+The discriminator-pair invariant — `rate_limit.exceeded` (transient, retry-next-hour) ≠ `vendor.portal_quota_exceeded` (permanent, never-retry) — is pinned by [`Rate_limit_and_quota_429_codes_are_distinguishable_to_clients`](../../api/CompliDrop.Api.Tests/VendorPortalEndpointsTests.cs). A future refactor that aliased the two codes (e.g. via namespace-collapse) would fail there.
+
+The hook checks `Response.HasStarted` before writing — defensive parity with `ExceptionHandlingMiddleware`. A pipeline change that started the response earlier than the limiter trips would now no-op rather than throw `InvalidOperationException` inside the limiter middleware.
+
 ## References
 
-- Tickets: [#10](https://github.com/neboxdev/complidrop/issues/10) (surfaced during AC2 test writing)
+- Tickets: [#10](https://github.com/neboxdev/complidrop/issues/10) (surfaced during AC2 test writing), [#45](https://github.com/neboxdev/complidrop/issues/45) (envelope-disambiguation followup)
 - Endpoint: `api/CompliDrop.Api/Endpoints/VendorPortalEndpoints.cs`
-- Composition: `api/CompliDrop.Api/Program.cs` (rate-limiting section)
-- Tests: `api/CompliDrop.Api.Tests/VendorPortalEndpointsTests.cs` (`Exceeding_the_portal_token_rate_limit_returns_429`, `Exceeding_the_portal_ip_rate_limit_returns_429`)
+- Composition: `api/CompliDrop.Api/Program.cs` (rate-limiting section + `OnRejected` hook)
+- Tests: `api/CompliDrop.Api.Tests/VendorPortalEndpointsTests.cs` (`Exceeding_the_portal_token_rate_limit_returns_429`, `Exceeding_the_portal_ip_rate_limit_returns_429`, `Rate_limit_and_quota_429_codes_are_distinguishable_to_clients`, `Rate_limit_envelope_carries_the_full_documented_shape`), `api/CompliDrop.Api.Tests/AuthEndpointsTests.cs` (`Exceeding_the_auth_strict_rate_limit_returns_the_rate_limit_envelope`)
 - Framework: [`RateLimitingMiddleware`](https://github.com/dotnet/aspnetcore/blob/main/src/Middleware/RateLimiting/src/RateLimitingMiddleware.cs), [`PartitionedRateLimiter.CreateChained`](https://learn.microsoft.com/dotnet/api/system.threading.ratelimiting.partitionedratelimiter.createchained)
