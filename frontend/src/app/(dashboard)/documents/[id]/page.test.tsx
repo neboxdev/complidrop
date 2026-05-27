@@ -609,6 +609,15 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
         screen.getByRole("button", { name: /try again/i }),
       ).not.toBeDisabled(),
     );
+
+    // Pin that the short-circuit-on-error contract stays sticky
+    // across the failed manual retry: after the second 502, polling
+    // must NOT resume for the original 3s interval. Symmetric with
+    // the list-page test's same pin. (#97 second-pass review —
+    // test-quality reviewer)
+    const afterRetry = calls;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(calls).toBe(afterRetry);
   });
 
   it("Processing → Failed: UI advances to the failed badge + processingError card", async () => {

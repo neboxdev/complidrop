@@ -411,6 +411,18 @@ describe("DocumentsPage — state matrix (#36)", () => {
           screen.getByRole("button", { name: /try again/i }),
         ).not.toBeDisabled(),
       );
+
+      // Pin that the short-circuit-on-error contract stays sticky
+      // across the failed manual retry: after the second 502,
+      // polling must NOT resume for the original 5s interval. A
+      // regression that reset the short-circuit on Try-again
+      // (e.g. by inadvertently flipping isError → false → true
+      // through the refetch lifecycle) would re-arm the 5s interval
+      // and hammer the backend during the outage. (#97 second-pass
+      // review — test-quality reviewer)
+      const afterRetry = calls;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(calls).toBe(afterRetry);
     } finally {
       vi.useRealTimers();
     }
@@ -475,20 +487,31 @@ describe("DocumentsPage — state matrix (#36)", () => {
         expect(screen.getByText(/couldn't refresh documents/i)).toBeInTheDocument(),
       );
 
+      // Snapshot the call count BEFORE the click so the delta assertion
+      // covers both bumps (one from the Try-again click → call 3, one
+      // from the resumed polling → call 4). Snapshotting AFTER the
+      // banner-dismiss waitFor would leave a tiny race window: under
+      // `shouldAdvanceTime: true`, virtual time advances with real
+      // wall-clock, so a slow CI runner could in principle fire the
+      // resumed-polling refetch before the snapshot. Snapshot-then-act
+      // is the canonical pattern across this file. (#97 second-pass
+      // review — test-quality reviewer)
+      const beforeRecovery = calls;
+
       // Click Try again → 200 with still-Pending → banner dismisses +
       // polling resumes.
       fireEvent.click(screen.getByRole("button", { name: /try again/i }));
       await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
-      const beforeResume = calls;
 
       // The polling-resumed assertion: after the success refetch,
       // refetchInterval re-evaluates against the Pending row and
       // schedules the next 5s tick. Advance past it — a new fetch
       // must fire. A regression that left polling off would leave
-      // `calls` unchanged here.
+      // `calls` unchanged. Delta is `+2`: one from the Try-again
+      // click (call 3), one from the resumed polling (call 4).
       await vi.advanceTimersByTimeAsync(5000);
       await waitFor(() =>
-        expect(calls).toBeGreaterThanOrEqual(beforeResume + 1),
+        expect(calls).toBeGreaterThanOrEqual(beforeRecovery + 2),
       );
 
       // The 4th call lands the Completed payload → list shows the
