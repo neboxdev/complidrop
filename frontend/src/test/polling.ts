@@ -25,6 +25,17 @@
  * the no-more-polling contract), `sequencedJsonOk` returns the LAST
  * response again instead of throwing "ran out of responses".
  *
+ * ## Known limitation
+ *
+ * `sequencedJsonOk` wraps EVERY element in `jsonOk` — the entire
+ * sequence is success-only. Mixed sequences (e.g. first call 200,
+ * second call 5xx, third call 200) cannot use this helper and have
+ * to keep the hand-rolled `let calls = 0; if (calls === 1) jsonError
+ * (...); return jsonOk(...)` shape (see e.g. the retry-on-5xx tests
+ * in `documents/page.test.tsx`). A future `sequencedResponses(
+ * ...Response[])` variant taking pre-wrapped Responses would cover
+ * the mixed case.
+ *
  * ## Polling-test gotchas (not handled here)
  *
  * - `vi.useFakeTimers({ shouldAdvanceTime: true })` is REQUIRED for
@@ -33,9 +44,12 @@
  * - Fake timers must be activated BEFORE the component mounts so the
  *   `refetchInterval` is scheduled on the fake queue. Activate them in
  *   a `beforeEach`, not inside the test body.
- * - Call counts asserted via the `assertedCallCount` variable rather
- *   than re-reading a closure — pass a counter ref if you need to pin
- *   the exact number of fetches.
+ * - Call counts: the helper's internal counter is deliberately NOT
+ *   exposed (keeps the signature simple). Tests that need to assert on
+ *   the number of fetches keep an external `let calls = 0; calls++`
+ *   inside the handler wrapper — see the migrated sites in
+ *   `useDocuments.test.tsx` / `documents/page.test.tsx` for the
+ *   canonical shape.
  */
 import { jsonOk } from "./helpers";
 
@@ -45,14 +59,24 @@ import { jsonOk } from "./helpers";
  * indefinitely (matches the "terminal state stays terminal" contract
  * of refetchInterval-driven polling).
  *
- * Usage:
- *   server.use(
- *     http.get(url("/api/documents/:id"), sequencedJsonOk(
- *       makeDocumentDetail({ extractionStatus: "Pending" }),
- *       makeDocumentDetail({ extractionStatus: "Processing" }),
- *       makeDocumentDetail({ extractionStatus: "Completed" }),
- *     )),
+ * Usage (canonical — wrap to keep an external `calls` counter for
+ * call-count assertions, since the helper's internal counter is
+ * intentionally not exposed):
+ *
+ *   let calls = 0;
+ *   const seq = sequencedJsonOk(
+ *     makeDocumentDetail({ extractionStatus: "Pending" }),
+ *     makeDocumentDetail({ extractionStatus: "Processing" }),
+ *     makeDocumentDetail({ extractionStatus: "Completed" }),
  *   );
+ *   server.use(
+ *     http.get(url("/api/documents/:id"), () => {
+ *       calls++;
+ *       return seq();
+ *     }),
+ *   );
+ *   // ... drive timers ...
+ *   expect(calls).toBeGreaterThanOrEqual(3);
  *
  * @throws RangeError on construction if `responses` is empty — a
  *   handler with zero responses is always a programming error.
