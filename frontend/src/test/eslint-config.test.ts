@@ -16,7 +16,6 @@
  * value matters.
  */
 import { describe, it, expect } from "vitest";
-// @ts-expect-error - .mjs config has no .d.ts; we only read the rules array.
 import eslintConfig from "../../eslint.config.mjs";
 
 type FlatConfigBlock = {
