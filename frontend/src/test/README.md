@@ -16,7 +16,7 @@ Reusable test scaffolding for the Next.js frontend. Pairs with [ADR 0003](../../
 | `polling.ts`           | `sequencedJsonOk(...payloads)` and `sequencedResponses(...factories)` return MSW handlers that yield in order then repeat the last (terminal state). Use `sequencedJsonOk` for all-success sequences; reach for `sequencedResponses` when the sequence mixes `jsonOk` / `jsonError`. |
 | `dropzone.ts`          | `dropFilesIn(container, files)` + `makeFile(name, type?, size?)` — container-scoped helpers for driving `react-dropzone` in tests. |
 | `security.ts`          | `assertNotInDom(value, root?)` — assert a sensitive value is NOT rendered into the DOM (scans both `textContent` and `innerHTML`). |
-| `forms.ts`             | `fillByLabel(label, value)` + `submitFormIn(container)` — label-based input driver + container-scoped submit helper (multi-form guard). Standard auth-form test idiom after #132 / #135. |
+| `forms.ts`             | `fillByLabel(label, value, container?)` + `submitFormIn(container)` — label-based input driver + container-scoped submit helper (multi-form guard). Pass the third `container` arg when two forms in the same document share a label (see `form-helpers.integration.test.tsx`, #134). Standard auth-form test idiom after #132 / #135. |
 | `example.test.tsx`     | Template test — **copy this as the starting point for new suites.**                    |
 
 `src/test/index.ts` re-exports the common surface, so most test files only need:

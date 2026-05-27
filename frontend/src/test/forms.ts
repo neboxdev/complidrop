@@ -41,11 +41,12 @@ import { fireEvent, screen, within } from "@testing-library/react";
  * future RTL behavior tweak from silently breaking the form tests.
  *
  * Scoping: resolves via the global `screen` by default. Today every
- * auth test renders one form, so the global lookup is unambiguous. For
- * a future composite test rendering two forms with the same labels in
- * the same document, pass a `container` and the lookup scopes to
- * `within(container).getByLabelText(...)` — this is the shape #134's
- * composite two-form test will use.
+ * single-form auth test renders one form, so the global lookup is
+ * unambiguous. For a composite test rendering two forms with the same
+ * labels in the same document (#134), pass a `container` and the
+ * lookup scopes to `within(container).getByLabelText(...)`. The
+ * paired integration test (`form-helpers.integration.test.tsx`)
+ * exercises this shape end-to-end with two real `<LoginPage />` trees.
  */
 export function fillByLabel(
   label: RegExp | string,
