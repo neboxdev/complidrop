@@ -181,14 +181,16 @@ describe("DocumentsPage — state matrix (#36)", () => {
     expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
   });
 
-  it("populated-list polling-failure: keeps the rendered rows visible instead of clobbering them with the error card (#80 + #97)", async () => {
+  it("populated-list polling-failure: keeps the rendered rows visible, surfaces the stale-data banner, and stops polling (#80 + #97)", async () => {
     // The regression #97 was filed against: a poll failure on a
     // populated list flipped `isError=true` and the new error branch
     // hid the rows. Fix: gate the error branch on `items.length === 0`
-    // so the cached rows survive a transient poll failure. Pins the
-    // contract so a future refactor that re-removes the gate fails
-    // here loudly. Also verifies `refetchInterval` stops polling on
-    // error so the backend isn't hammered during the outage.
+    // so the cached rows survive a transient poll failure, AND render
+    // the StaleDataBanner so the user knows what they're seeing may
+    // be stale. Pins the full contract so a future refactor that
+    // re-removes the gate OR drops the banner fails here loudly.
+    // Also verifies `refetchInterval` stops polling on error so the
+    // backend isn't hammered during the outage.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       let calls = 0;
@@ -226,17 +228,298 @@ describe("DocumentsPage — state matrix (#36)", () => {
       await vi.advanceTimersByTimeAsync(5000);
       await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2));
 
-      // Critical: the populated row STAYS visible, and the error card
-      // does NOT replace it.
+      // The stale-data banner appears with the server's message — the
+      // discreet "couldn't refresh" signal the user needs to know
+      // their data may be stale. Co-pin role=status + headline text on
+      // the SAME element so a regression that drops either fails. The
+      // banner is role=status (NOT role=alert) because the cached
+      // data is still readable — assistive tech announces it politely
+      // rather than interrupting the user.
+      const banner = await waitFor(() => screen.getByRole("status"));
+      expect(banner).toHaveAttribute("aria-live", "polite");
+      expect(banner).toHaveTextContent(/couldn't refresh documents/i);
+      expect(banner).toHaveTextContent(/brown-out/i);
+
+      // Critical: the populated row STAYS visible, and the full-page
+      // error card does NOT replace it.
       expect(screen.getByText("coi-pending.pdf")).toBeInTheDocument();
       expect(screen.queryByText(/couldn't load documents/i)).toBeNull();
       expect(screen.queryByText(/no documents yet/i)).toBeNull();
+      // role=alert is reserved for the full-page error card — the
+      // populated+failed path uses role=status. Pin the absence so a
+      // regression that re-introduced role=alert (and the interruptive
+      // a11y announcement) is caught here.
+      expect(screen.queryByRole("alert")).toBeNull();
 
-      // Polling short-circuits on error — advancing another 15s must
-      // NOT trigger more fetches.
+      // Polling short-circuits on error — advancing 60s of fake time
+      // (12 polling windows at the 5s interval, plus enough headroom
+      // for a hypothetical back-off-with-cap implementation up to
+      // ~30s) must NOT trigger any more fetches. Tighter than 15s so a
+      // future variant that backs off rather than strict short-circuits
+      // would still be caught by this test if its retry interval ever
+      // fired within a minute. (#97 review — test-quality reviewer)
       const afterFirstError = calls;
-      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(calls).toBe(afterFirstError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stale-banner dismisses after a successful Try-again refetch (#97)", async () => {
+    // Pins the recovery path: when the user clicks Try again on the
+    // stale-data banner and the next response is a 200, the banner
+    // must disappear AND the list must show the updated rows. A
+    // regression that left the banner stuck visible (e.g. by reading
+    // a stale isError flag) would surface here. Mirrors the
+    // retry-on-5xx test for the full-page error card, but for the
+    // populated+stale path #97 introduced.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      server.use(
+        http.get(url("/api/documents"), () => {
+          calls++;
+          if (calls === 1) {
+            return jsonOk(
+              makeDocumentsResponse({
+                items: [
+                  {
+                    ...documentsAllStatuses[0], // Pending row
+                    vendorName: "Acme Sub",
+                  },
+                ],
+                total: 1,
+              }),
+            );
+          }
+          if (calls === 2) {
+            // Second call (the polling refetch): 5xx → banner appears.
+            return jsonError("server.error", "Brown-out", { status: 502 });
+          }
+          // Third call (the Try-again click): 200 with the updated
+          // row → banner dismisses, list reflects the new state.
+          return jsonOk(
+            makeDocumentsResponse({
+              items: [
+                {
+                  ...documentsAllStatuses[2], // Completed row
+                  vendorName: "Acme Sub",
+                },
+              ],
+              total: 1,
+            }),
+          );
+        }),
+      );
+
+      renderWithProviders(<DocumentsPage />, { auth: authedMe });
+
+      // First render: populated.
+      await waitFor(() =>
+        expect(screen.getByText("coi-pending.pdf")).toBeInTheDocument(),
+      );
+
+      // Tick past 5s refetch interval → poll errors → banner appears.
+      await vi.advanceTimersByTimeAsync(5000);
+      const banner = await waitFor(() => screen.getByRole("status"));
+      expect(banner).toHaveTextContent(/couldn't refresh documents/i);
+
+      // Click Try again — the banner's Retry affordance.
+      fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+
+      // The banner disappears once isError flips back to false on the
+      // 200 response, AND the list reflects the new payload — co-pin
+      // positive (new row present) AND negative (old row gone) so a
+      // regression that spread the new items alongside the old (e.g.
+      // a future refactor to an append-style cache update) would
+      // surface here. (#97 review — test-quality reviewer)
+      await waitFor(() =>
+        expect(screen.getByText("coi-completed.pdf")).toBeInTheDocument(),
+      );
+      expect(screen.queryByText("coi-pending.pdf")).toBeNull();
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.queryByText(/couldn't refresh documents/i)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Try-again that fails too: banner stays visible, button re-enables once isFetching settles (#97)", async () => {
+    // Pins the negative-recovery path the existing tests don't cover:
+    // a regression that incorrectly cleared isError on click (or that
+    // left the disabled state pinned after a failed retry) would slip
+    // past every previous assertion. The banner must STAY visible
+    // after the second failure, and the Try-again button must re-enable
+    // so the user can keep retrying. (#97 review — correctness +
+    // test-quality reviewers)
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      server.use(
+        http.get(url("/api/documents"), () => {
+          calls++;
+          if (calls === 1) {
+            return jsonOk(
+              makeDocumentsResponse({
+                items: [
+                  {
+                    ...documentsAllStatuses[0], // Pending row
+                    vendorName: "Acme Sub",
+                  },
+                ],
+                total: 1,
+              }),
+            );
+          }
+          // Every subsequent call (polling + Try-again click) fails.
+          return jsonError("server.error", "Still down", { status: 502 });
+        }),
+      );
+
+      renderWithProviders(<DocumentsPage />, { auth: authedMe });
+
+      await waitFor(() =>
+        expect(screen.getByText("coi-pending.pdf")).toBeInTheDocument(),
+      );
+
+      // First polling refetch fails → banner appears.
+      await vi.advanceTimersByTimeAsync(5000);
+      await waitFor(() =>
+        expect(screen.getByText(/couldn't refresh documents/i)).toBeInTheDocument(),
+      );
+
+      // Click Try again → second failure → banner stays.
+      fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+      // Wait for the in-flight retry to settle (isFetching → false).
+      await waitFor(() => expect(calls).toBeGreaterThanOrEqual(3));
+
+      // Banner remains visible with the latest server message.
+      const banner = screen.getByRole("status");
+      expect(banner).toHaveTextContent(/couldn't refresh documents/i);
+      expect(banner).toHaveTextContent(/still down/i);
+      // Stale row stays rendered — full-page error card MUST NOT
+      // replace it.
+      expect(screen.getByText("coi-pending.pdf")).toBeInTheDocument();
+      expect(screen.queryByText(/couldn't load documents/i)).toBeNull();
+
+      // The Try-again button is re-enabled — user can keep retrying.
+      // A regression that pinned the disabled state across failures
+      // would lock the user out of the only recovery affordance.
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: /try again/i }),
+        ).not.toBeDisabled(),
+      );
+
+      // Pin that the short-circuit-on-error contract stays sticky
+      // across the failed manual retry: after the second 502,
+      // polling must NOT resume for the original 5s interval. A
+      // regression that reset the short-circuit on Try-again
+      // (e.g. by inadvertently flipping isError → false → true
+      // through the refetch lifecycle) would re-arm the 5s interval
+      // and hammer the backend during the outage. (#97 second-pass
+      // review — test-quality reviewer)
+      const afterRetry = calls;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(calls).toBe(afterRetry);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("polling resumes after recovery when items still have Pending/Processing rows (#97)", async () => {
+    // Pins that the short-circuit-on-error contract is NOT sticky —
+    // once isError flips back to success, refetchInterval re-evaluates
+    // the predicate and resumes polling at 5s for any remaining
+    // Pending/Processing rows. A regression that hard-pinned polling
+    // off after the first error (e.g. by reading a sticky local flag
+    // instead of `q.state.status`) would silently leave the dashboard
+    // unable to update Pending → Completed transitions after any
+    // transient brown-out. (#97 review — correctness reviewer)
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      const pending = makeDocumentsResponse({
+        items: [
+          {
+            ...documentsAllStatuses[0], // Pending row
+            vendorName: "Acme Sub",
+          },
+        ],
+        total: 1,
+      });
+      const completed = makeDocumentsResponse({
+        items: [
+          {
+            ...documentsAllStatuses[2], // Completed row
+            vendorName: "Acme Sub",
+          },
+        ],
+        total: 1,
+      });
+      server.use(
+        http.get(url("/api/documents"), () => {
+          calls++;
+          // Call 1: Pending. Call 2: 5xx (banner appears, polling
+          // stops). Call 3: Try-again succeeds with STILL-Pending
+          // payload (the document hasn't finished extracting yet).
+          // After call 3, polling MUST resume — confirmed by call 4
+          // landing within a 5s tick after the Pending recovery.
+          if (calls === 1 || calls === 3) return jsonOk(pending);
+          if (calls === 2) {
+            return jsonError("server.error", "Brown-out", { status: 502 });
+          }
+          // Call 4: terminal Completed → polling stops naturally.
+          return jsonOk(completed);
+        }),
+      );
+
+      renderWithProviders(<DocumentsPage />, { auth: authedMe });
+
+      await waitFor(() =>
+        expect(screen.getByText("coi-pending.pdf")).toBeInTheDocument(),
+      );
+
+      // Tick into the poll-failure window.
+      await vi.advanceTimersByTimeAsync(5000);
+      await waitFor(() =>
+        expect(screen.getByText(/couldn't refresh documents/i)).toBeInTheDocument(),
+      );
+
+      // Snapshot the call count BEFORE the click so the delta assertion
+      // covers both bumps (one from the Try-again click → call 3, one
+      // from the resumed polling → call 4). Snapshotting AFTER the
+      // banner-dismiss waitFor would leave a tiny race window: under
+      // `shouldAdvanceTime: true`, virtual time advances with real
+      // wall-clock, so a slow CI runner could in principle fire the
+      // resumed-polling refetch before the snapshot. Snapshot-then-act
+      // is the canonical pattern across this file. (#97 second-pass
+      // review — test-quality reviewer)
+      const beforeRecovery = calls;
+
+      // Click Try again → 200 with still-Pending → banner dismisses +
+      // polling resumes.
+      fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+      await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+
+      // The polling-resumed assertion: after the success refetch,
+      // refetchInterval re-evaluates against the Pending row and
+      // schedules the next 5s tick. Advance past it — a new fetch
+      // must fire. A regression that left polling off would leave
+      // `calls` unchanged. Delta is `+2`: one from the Try-again
+      // click (call 3), one from the resumed polling (call 4).
+      await vi.advanceTimersByTimeAsync(5000);
+      await waitFor(() =>
+        expect(calls).toBeGreaterThanOrEqual(beforeRecovery + 2),
+      );
+
+      // The 4th call lands the Completed payload → list shows the
+      // new row, banner stays absent, polling stops naturally.
+      await waitFor(() =>
+        expect(screen.getByText("coi-completed.pdf")).toBeInTheDocument(),
+      );
+      expect(screen.queryByRole("status")).toBeNull();
     } finally {
       vi.useRealTimers();
     }

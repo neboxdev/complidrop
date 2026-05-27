@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { track } from "@/lib/analytics";
 
 export type DocumentListItem = {
@@ -31,7 +31,15 @@ export type DocumentListResponse = {
 };
 
 export function useDocuments() {
-  return useQuery<DocumentListResponse>({
+  // Tightened TError to ApiError so consumers (page error UIs, the
+  // StaleDataBanner) can access `.status` / `.code` / `.correlationId`
+  // off the error object without an `instanceof ApiError` guard. The
+  // api.ts request() funnel ALWAYS throws ApiError on a non-ok response
+  // (envelope-parsed or generic-fallback), so the runtime type matches.
+  // `Error | null` is the TanStack default; the narrower type catches a
+  // future regression that swapped a request through a path that throws
+  // a bare Error. (#97 review — correctness reviewer)
+  return useQuery<DocumentListResponse, ApiError>({
     queryKey: ["documents", "list"],
     queryFn: () => api.get<DocumentListResponse>("/api/documents"),
     refetchInterval: (q) => {

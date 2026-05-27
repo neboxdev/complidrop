@@ -8,6 +8,7 @@ import { UploadCloud, FileText, Trash2, AlertTriangle, RotateCw } from "lucide-r
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { StaleDataBanner } from "@/components/StaleDataBanner";
 import { useDocuments, useUploadDocument, useDeleteDocument } from "@/hooks/useDocuments";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
@@ -94,6 +95,25 @@ export default function DocumentsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {docs.isError && items.length > 0 && (
+        // Discreet "couldn't refresh" indicator when the polling
+        // refetch failed but the cached list is still rendered below.
+        // Gated on `items.length > 0` (symmetric with the full-page
+        // error card's `length === 0` gate) — a populated list keeps
+        // the user reading the stale data; the banner signals it may
+        // not reflect the latest state. `useDocuments`'s
+        // refetchInterval short-circuits on error so the backend isn't
+        // hammered while the banner is visible — once the user clicks
+        // Try again (or any subsequent refetch lands a 200), isError
+        // flips back to false and the banner disappears. (#97)
+        <StaleDataBanner
+          message={docs.error?.message}
+          onRetry={() => docs.refetch()}
+          isRetrying={docs.isFetching}
+          noun="documents"
+        />
+      )}
 
       <Card>
         <CardContent className="p-0 overflow-hidden">

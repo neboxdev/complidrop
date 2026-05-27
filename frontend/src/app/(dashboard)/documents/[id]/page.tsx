@@ -4,12 +4,13 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowLeft, RefreshCw, ShieldCheck } from "lucide-react";
-import { api } from "@/lib/api";
+import { AlertTriangle, ArrowLeft, RefreshCw, RotateCw, ShieldCheck } from "lucide-react";
+import { api, ApiError, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { StaleDataBanner } from "@/components/StaleDataBanner";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
 
@@ -58,10 +59,20 @@ export default function DocumentDetailPage() {
   const qc = useQueryClient();
   const [edits, setEdits] = useState<Record<string, string>>({});
 
-  const detail = useQuery<DocDetail>({
+  const detail = useQuery<DocDetail, ApiError>({
     queryKey: ["documents", params.id],
     queryFn: () => api.get<DocDetail>(`/api/documents/${params.id}`),
     refetchInterval: (q) => {
+      // Short-circuit polling when the query is in an error state, even
+      // if `state.data?.extractionStatus` is still Pending/Processing on
+      // the LAST successful payload. A brown-out where the document
+      // endpoint is failing should NOT keep firing every 3 s — the
+      // Try-again button on the StaleDataBanner (rendered below) is the
+      // manual recovery affordance, and a successful refetch flips
+      // status back to 'success' so polling resumes naturally.
+      // Symmetric with `useDocuments`'s refetchInterval (#80 followup);
+      // pinned by the "stops polling on error" test below. (#97)
+      if (q.state.status === "error") return false;
       const s = q.state.data?.extractionStatus;
       return s === "Pending" || s === "Processing" ? 3000 : false;
     },
@@ -89,9 +100,66 @@ export default function DocumentDetailPage() {
     return <div className="p-8 text-sm text-slate-400">Loading document…</div>;
   }
   if (!detail.data) {
+    // Initial-load failed with no cached data. Split 404 (the document
+    // really doesn't exist for this org) from 5xx / network failure so
+    // a backend outage doesn't render the same "Document not found"
+    // copy as a genuinely missing record — symmetric with the list
+    // page's no-data error card pattern from #80. Without this split,
+    // a brown-out makes every doc detail look like it was deleted,
+    // hostile to users trying to diagnose a transient problem. (#97
+    // review — test-quality reviewer flagged the gap during review.)
+    const isNotFound =
+      detail.error instanceof ApiError && detail.error.status === 404;
+    if (isNotFound || !detail.isError) {
+      // Either an explicit 404 from the server, OR the unreachable
+      // success-with-no-data branch (api.ts always throws on a non-ok
+      // response, so this latter case can only happen on a future
+      // refactor that introduced an undefined-data path). Default
+      // copy is unchanged from before #97 — keeps the regression
+      // surface for the 404 path identical.
+      return (
+        <div className="p-8 text-sm text-slate-500">
+          Document not found. <Link href="/documents" className="text-sky-700">Back to documents</Link>
+        </div>
+      );
+    }
+    // 5xx / 0 (network unreachable) / non-404 ApiError: surface the
+    // server message + Retry affordance, role=alert so assistive tech
+    // announces the failure (mirrors the list-page full-page error
+    // card pattern at documents/page.tsx:140-165).
+    const message = detail.error?.message?.trim() || GENERIC_FALLBACK_MESSAGE;
     return (
-      <div className="p-8 text-sm text-slate-500">
-        Document not found. <Link href="/documents" className="text-sky-700">Back to documents</Link>
+      <div className="max-w-5xl mx-auto px-6 py-8">
+        <Link
+          href="/documents"
+          className="inline-flex items-center gap-1 text-sm text-sky-700 hover:text-sky-800 mb-6"
+        >
+          <ArrowLeft className="w-4 h-4" /> All documents
+        </Link>
+        <Card>
+          <CardContent className="p-12 text-center" role="alert">
+            <AlertTriangle className="w-8 h-8 mx-auto text-rose-500" />
+            <p className="mt-2 text-sm font-medium text-slate-800">
+              Couldn&apos;t load document.
+            </p>
+            <p className="text-xs text-slate-500">{message}</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-3"
+              onClick={() => detail.refetch()}
+              disabled={detail.isFetching}
+            >
+              <RotateCw
+                className={cn(
+                  "w-3.5 h-3.5 mr-1",
+                  detail.isFetching && "animate-spin",
+                )}
+              />
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }
@@ -126,6 +194,23 @@ export default function DocumentDetailPage() {
           )}
         </div>
       </header>
+
+      {detail.isError && (
+        // Polling failed while cached detail is still rendered (we're
+        // past the `!detail.data` early-return above, so data is
+        // present). Surface the failure as a discreet banner so the
+        // user knows the field values / status badges below may not
+        // reflect the latest extraction state — the polling
+        // short-circuits on error above so the backend isn't
+        // hammered while the banner is visible. Symmetric with the
+        // documents-list treatment. (#97)
+        <StaleDataBanner
+          message={detail.error?.message}
+          onRetry={() => detail.refetch()}
+          isRetrying={detail.isFetching}
+          noun="document"
+        />
+      )}
 
       <section className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
         <SummaryCell label="Extraction" value={
