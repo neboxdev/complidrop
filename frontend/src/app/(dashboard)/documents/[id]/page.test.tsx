@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { http } from "msw";
-import { screen, waitFor, within } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import DocumentDetailPage from "./page";
 import {
   renderWithProviders,
@@ -109,9 +109,12 @@ describe("DocumentDetailPage — basic states (#36)", () => {
     await waitFor(() =>
       expect(screen.getByText("coi.pdf")).toBeInTheDocument(),
     );
-    // Extraction + compliance badges visible.
-    expect(screen.getByText("Completed")).toBeInTheDocument();
-    expect(screen.getByText("Compliant")).toBeInTheDocument();
+    // Extraction + compliance badges visible — pinned via #92 testids
+    // (fast-tier coverage of the testid contract; the E2E spec depends
+    // on these attributes existing, and a regression that removed them
+    // would otherwise surface only at the slow Playwright tier).
+    expect(screen.getByTestId("extraction-status")).toHaveTextContent("Completed");
+    expect(screen.getByTestId("compliance-status")).toHaveTextContent("Compliant");
     // Field row rendered.
     expect(screen.getByText("PolicyNumber")).toBeInTheDocument();
     // RTL idiom for "input is rendered with this value" — better than
@@ -233,12 +236,19 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
       expect(screen.getByText("Completed")).toBeInTheDocument(),
     );
     expect(calls).toBeGreaterThanOrEqual(beforeAdvance + 1);
-    // Scope the negative assertion to the Extraction summary cell, not
-    // the whole document, so a future page restructure that surfaces
-    // "Pending" elsewhere (e.g. a compliance-stub badge in a tooltip)
-    // doesn't trip it.
-    const extractionCell = screen.getByText("Extraction").closest("div")!;
-    expect(within(extractionCell).queryByText("Pending")).toBeNull();
+    // Pin the negative assertion via the #92 testid rather than the
+    // older `within(extractionCell)` + `closest('div')` scope-pattern,
+    // which was structurally coupled to the SummaryCell DOM tree
+    // (`<p>Extraction</p>` + sibling `<div>{badge}</div>` both inside
+    // CardContent). Asserting on the testid is stable regardless of
+    // future DOM reshuffles and is the canonical "ambiguous-by-design
+    // surface" rule from CLAUDE.md.
+    expect(screen.getByTestId("extraction-status")).not.toHaveTextContent(
+      "Pending",
+    );
+    expect(screen.getByTestId("extraction-status")).toHaveTextContent(
+      "Completed",
+    );
 
     // Completed is terminal — refetchInterval returns false, no more
     // polls. Snapshot the post-completed count then advance another 10s
