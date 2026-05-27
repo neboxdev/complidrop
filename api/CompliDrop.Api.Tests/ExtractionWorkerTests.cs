@@ -388,6 +388,150 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(1, "the doc is untouched");
     }
 
+    /// <summary>
+    /// Drift-coverage offsets for the stale-reclaim Theory. Every row
+    /// is a value (in seconds) that ProcessingStartedAt is in the PAST
+    /// — all should cross the 5-min zombie threshold and be reclaimed.
+    /// The rows are diverse exemplars across the stale region, not
+    /// each-row-catches-a-distinct-regression discriminators (the
+    /// canonical 5-min threshold pin lives on the Fact above).
+    /// <list type="bullet">
+    /// <item><c>-330</c> (5m30s past) — boundary echo of the canonical
+    ///   Fact above; included so the Theory's coverage is a strict
+    ///   superset, not a parallel set. If the Fact is ever removed,
+    ///   this row preserves the just-past-boundary pin.</item>
+    /// <item><c>-360</c> (6m past) — deeper-stale exemplar one minute
+    ///   past the threshold; strengthens confidence that the SQL
+    ///   handles offsets across the stale region uniformly (the Fact
+    ///   above already catches a `5→6 widening` because under that
+    ///   regression `-330 &lt; -360` is false → Fact's `Be(docId)`
+    ///   fails — so this row's value is breadth, not a unique
+    ///   regression discriminator).</item>
+    /// <item><c>-3600</c> (1h past) — far-stale exemplar; strengthens
+    ///   confidence the SQL handles the entire stale region uniformly,
+    ///   not just near-boundary docs. Also catches dramatic widening
+    ///   regressions (e.g. an `interval '50 minutes'` typo would
+    ///   leave -3600 still reclaimed, but a `'1 hour'` typo would
+    ///   leave -3600 stuck — neither -330 nor -360 distinguish those
+    ///   cases from -3600).</item>
+    /// </list>
+    /// </summary>
+    public static TheoryData<int> StaleZombieDriftOffsetsSeconds() => new()
+    {
+        -330,   // 5m30s past — boundary echo
+        -360,   // 6m past — deeper-stale exemplar
+        -3600,  // 1h past — far-stale exemplar
+    };
+
+    /// <summary>
+    /// Drift-coverage offsets for the fresh-not-reclaim Theory. Every
+    /// row is a value (in seconds) that ProcessingStartedAt is in the
+    /// PAST — none should cross the 5-min zombie threshold. Like the
+    /// stale-row set, these are diverse exemplars across the fresh
+    /// region rather than each-row-catches-a-distinct-regression
+    /// discriminators.
+    /// <list type="bullet">
+    /// <item><c>-270</c> (4m30s past) — boundary echo of the canonical
+    ///   Fact above; this row carries the regression-discriminator
+    ///   weight (under a `5→4 narrowing`, `-270 &lt; -240` becomes
+    ///   true → wrongly reclaimed → Theory's `BeNull()` fails). If
+    ///   the Fact is ever removed, this row preserves the
+    ///   just-inside-boundary pin.</item>
+    /// <item><c>-240</c> (4m past) — mid-fresh-region exemplar.
+    ///   Under strict `&lt;`, this row does NOT catch a `5→4 narrowing`
+    ///   (`-240 &lt; -240` is false), but it DOES catch broader
+    ///   regressions: e.g. `5min → ≤3min` narrowing (`-240 &lt; -180`
+    ///   is true → wrongly reclaimed), or `&lt;` → `&lt;=` boundary
+    ///   flip combined with a 5→4 narrowing. Its main contribution is
+    ///   diversity coverage — proving the SQL doesn't wrongly reclaim
+    ///   arbitrary fresh docs in the middle of the window.</item>
+    /// <item><c>-30</c> (30s past) — recently-claimed exemplar near
+    ///   the just-claimed end of the fresh region. Catches dramatic
+    ///   regressions where the SQL reclaims every Processing row
+    ///   regardless of ProcessingStartedAt — the -270 boundary echo
+    ///   catches that too, but -30 makes the failure mode visible
+    ///   far from the boundary so a maintainer sees the regression
+    ///   isn't a "1 second past 5 minutes" precision issue.</item>
+    /// </list>
+    /// </summary>
+    public static TheoryData<int> FreshZombieDriftOffsetsSeconds() => new()
+    {
+        -270,  // 4m30s past — boundary echo, regression-discriminator
+        -240,  // 4m past — mid-fresh-region exemplar
+        -30,   // 30s past — recently-claimed exemplar
+    };
+
+    [Theory]
+    [MemberData(nameof(StaleZombieDriftOffsetsSeconds))]
+    public async Task Stale_processing_document_past_the_zombie_threshold_is_reclaimed_under_various_drift_offsets(
+        int driftSeconds)
+    {
+        // Broader drift-coverage Theory complementing the canonical
+        // boundary-tight Fact above (#62). The Fact pins ONE point
+        // (-5m30s) against ±1-min drift; this Theory adds diversity
+        // exemplars across the stale region so the SQL is verified
+        // against multiple offsets, not just the boundary.
+        //
+        // The -330 row (5m30s past) is a deliberate boundary echo of
+        // the canonical Fact above — so a contributor running ONLY the
+        // Theory still has the boundary-tight coverage if they
+        // accidentally delete the Fact. The -360 / -3600 rows extend
+        // coverage further into the stale region. See the MemberData
+        // docstring above for the per-row regression-mode discussion
+        // (and the caveat that -360/-3600 add BREADTH, not unique
+        // regression discriminators over the Fact's -330 boundary).
+        //
+        // Offsets parameterized in seconds (not minutes) so the
+        // Theory data can express minute- and sub-minute precision
+        // uniformly via a single `TheoryData<int>` shape — see the
+        // sibling `NonUtcSessionZones` Theory below for the same
+        // pattern. (#140)
+        var (_, docId) = await SeedDocAsync(
+            status: ExtractionStatus.Processing,
+            attempts: 1,
+            processingStartedAt: DateTime.UtcNow.AddSeconds(driftSeconds));
+        var worker = BuildWorker();
+
+        var claimed = await worker.ClaimNextAsync(CancellationToken.None);
+
+        claimed.Should().Be(
+            docId,
+            $"ProcessingStartedAt={driftSeconds}s is past the 5-min zombie threshold and must be " +
+            "reclaimed; if this fires with null, the threshold has drifted past " +
+            $"{Math.Abs(driftSeconds)}s — i.e. it widened beyond the seeded offset.");
+        (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(2, "the reclaim increments the attempt counter");
+    }
+
+    [Theory]
+    [MemberData(nameof(FreshZombieDriftOffsetsSeconds))]
+    public async Task Fresh_processing_document_inside_the_zombie_threshold_is_not_reclaimed_under_various_drift_offsets(
+        int driftSeconds)
+    {
+        // Broader drift-coverage Theory complementing the canonical
+        // boundary-tight Fact above (#62). The Fact pins ONE point
+        // (-4m30s) against ±1-min drift; this Theory adds diversity
+        // exemplars across the fresh region. The -270 boundary echo
+        // carries the regression-discriminator weight for a `5→4
+        // narrowing` (under strict `<`, only a value > 240s past gets
+        // wrongly reclaimed under a 4m threshold — see the MemberData
+        // docstring above for the per-row regression-mode discussion).
+        // The -240 / -30 rows add breadth across the middle and
+        // recently-claimed ends of the fresh region. (#140)
+        var (_, docId) = await SeedDocAsync(
+            status: ExtractionStatus.Processing,
+            attempts: 1,
+            processingStartedAt: DateTime.UtcNow.AddSeconds(driftSeconds));
+        var worker = BuildWorker();
+
+        var claimed = await worker.ClaimNextAsync(CancellationToken.None);
+
+        claimed.Should().BeNull(
+            $"ProcessingStartedAt={driftSeconds}s is inside the 5-min zombie window; a fresh doc " +
+            "must not be stolen before the timeout. If this fires with a non-null Guid, the " +
+            $"threshold has narrowed below {Math.Abs(driftSeconds)}s.");
+        (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(1, "the doc is untouched");
+    }
+
     // ----- Session-TZ independence (the #26 fix) ----------------------------------------------
 
     /// <summary>
