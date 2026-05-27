@@ -1,3 +1,39 @@
+"use client";
+
+// `import "client-only"` (and the `"use client"` directive above it)
+// together prevent ANY Server Component, Route Handler, or middleware
+// from successfully importing this module. The directive alone marks
+// the file as a client boundary so its top-level code runs in the
+// client bundle on import (sufficient for the SSR-contamination
+// concern below). The `client-only` import upgrades that to a HARD
+// build-time error: Next.js's `client-only` package re-exports a
+// stub that throws when bundled in a server context, so a stray RSC
+// import surfaces as a build break rather than a silent boundary
+// crossing. Belt-and-suspenders for a tier-1 auth path.
+//
+// Why this matters: the refresh-coalescing singleton (`refreshing` /
+// `refreshConsumers` declared below) is module-level state. Under
+// Node's per-process module cache, that state would be SHARED across
+// concurrent SSR requests if the module ever loaded server-side —
+// letting one user's refresh promise serve another user's 401 and
+// silently contaminating sessions. (#120 — latent fragility surfaced
+// by the #68 post-merge correctness review.)
+//
+// Audit at the time of #120 confirmed every existing importer (every
+// `(dashboard)/**/page.tsx`, every `hooks/use*.ts`, `portal/[token]/
+// page.tsx`, `components/StaleDataBanner.tsx`) already carried
+// `"use client"`, so no importer regresses on this change. Pinned by
+// `api.use-client.test.ts` so a future refactor that removes the
+// directive — OR a future Server Component importer — fails at the
+// test layer before it can ship.
+//
+// `client-only` ships as a transitive dependency through `next` (see
+// node_modules/next/dist/docs/01-app/01-getting-started/05-server-and-
+// client-components.md → "Preventing environment poisoning"); the
+// docs explicitly note the explicit install is optional unless a
+// lint rule flags extraneous deps.
+import "client-only";
+
 export type ApiEnvelope<T> = {
   data: T | null;
   error: { code: string; message: string; correlationId?: string } | null;
