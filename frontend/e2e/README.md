@@ -101,7 +101,13 @@ The CI workflow gates the artifact upload on `steps.playwright.outcome == 'failu
 - **Red E2E blocks merge.** No skip-without-ticket; flaky tests are quarantined behind the `@quarantine` tag (Playwright `test.fixme` with a TODO referencing the ticket).
 - **Quarantining a test → two actions:**
   1. File a `bug`-labelled ticket capturing the flake symptom + suspected root cause; that ticket auto-joins rolling epic [#48](https://github.com/neboxdev/complidrop/issues/48) via [`bugfix-epic-sync.yml`](../../.github/workflows/bugfix-epic-sync.yml).
-  2. Append a one-line row to the **[#87 E2E quarantine tracker](https://github.com/neboxdev/complidrop/issues/87)** body under "Quarantine registry" so the parking lot stays visible — `- [ ] #<ticket> — `<test-file>`:`<test-name>` — quarantined <YYYY-MM-DD>`. Check the row off when the test is fixed or deleted.
+  2. Append a one-line row to the **[#87 E2E quarantine tracker](https://github.com/neboxdev/complidrop/issues/87)** body under "Quarantine registry" so the parking lot stays visible. Row format (fenced so the nested backticks render literally):
+
+     ```
+     - [ ] #<ticket> — `<test-file>`:`<test-name>` — quarantined <YYYY-MM-DD>
+     ```
+
+     Check the row off when the test is fixed or deleted.
 
 ## Updating the fixture set
 
