@@ -78,8 +78,16 @@ export default function RulesPage() {
   const upsertRule = useMutation({
     mutationFn: (vars: { templateId: string; rule: Partial<TemplateRule> }) =>
       api.post<{ id: string }>(`/api/compliance/templates/${vars.templateId}/rules`, vars.rule),
+    // invalidateQueries(['templates']) prefix-matches BOTH the list
+    // query (['templates']) AND the detail observer (['templates',
+    // selectedId]) — TanStack Query's default filter uses prefix
+    // matching (exact: false), so a single invalidate fans out to
+    // every key starting with ['templates']. Adding an explicit
+    // invalidateQueries(['templates', selectedId]) on top would
+    // double-fire the detail refetch per save. (#81 / #93 — same
+    // anti-pattern, same fix shape; see useUpdateVendor in
+    // useVendors.ts for the canonical inline comment.)
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["templates", selectedId] });
       qc.invalidateQueries({ queryKey: ["templates"] });
       toast.success("Rule saved");
     },
@@ -88,8 +96,10 @@ export default function RulesPage() {
   const deleteRule = useMutation({
     mutationFn: (vars: { templateId: string; ruleId: string }) =>
       api.delete<void>(`/api/compliance/templates/${vars.templateId}/rules/${vars.ruleId}`),
+    // Symmetric with upsertRule above — one prefix invalidate
+    // refreshes both the templates list (rule counts) and the
+    // selected-template detail observer with one call. (#93)
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["templates", selectedId] });
       qc.invalidateQueries({ queryKey: ["templates"] });
     },
   });
@@ -195,6 +205,17 @@ export default function RulesPage() {
                             <Button
                               size="sm"
                               variant="ghost"
+                              // Icon-only button — `aria-label` carries the
+                              // accessible name for both screen-reader users
+                              // and the page-level test (`getByRole('button',
+                              // { name: /delete rule/i })`). Without the
+                              // label, the test was reaching the button via
+                              // `closest('tr') → querySelector('button')`,
+                              // which silently picks the FIRST button in
+                              // the row and breaks the moment a sibling
+                              // button is added. (#93 review — test-quality
+                              // reviewer.)
+                              aria-label="Delete rule"
                               onClick={() => deleteRule.mutate({ templateId: selectedId!, ruleId: r.id })}
                             >
                               <Trash2 className="w-4 h-4 text-slate-400 hover:text-rose-600" />
