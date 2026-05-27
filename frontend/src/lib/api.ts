@@ -81,7 +81,11 @@ type RequestInitEx = RequestInit & { skipRefresh?: boolean; idempotencyKey?: str
 // fetch") — so api.ts converts both to this string before the page
 // layer forwards it to toast.error / a list-error-card. See #77 for the
 // decision and the rejected option (b) of exempting opaque proxy errors.
-const GENERIC_FALLBACK_MESSAGE = "Something went wrong. Try again.";
+//
+// Exported so the list-page error UIs (#80) can reuse the same copy for
+// the unreachable `err.message`-empty fallback branch — single source of
+// truth for the jargon-free string.
+export const GENERIC_FALLBACK_MESSAGE = "Something went wrong. Try again.";
 
 async function fetchOrFriendlyThrow(
   url: string,

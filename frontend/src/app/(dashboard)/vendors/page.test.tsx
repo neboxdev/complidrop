@@ -58,7 +58,7 @@ describe("VendorsPage — state matrix (#36)", () => {
     );
   });
 
-  it("error: a 5xx surfaces an error card with the server message and a Retry affordance, NOT the empty fallback (#80)", async () => {
+  it("error: a 5xx surfaces an error card with role=alert, the server message, and a Retry affordance, NOT the empty fallback (#80)", async () => {
     server.use(
       http.get(url("/api/vendors"), () =>
         jsonError("server.error", "vendor index down", { status: 500 }),
@@ -67,25 +67,43 @@ describe("VendorsPage — state matrix (#36)", () => {
 
     renderWithProviders(<VendorsPage />, { auth: authedMe });
 
-    // Wait for the query to settle (the Loading row disappears) before
-    // asserting the error state. After #80, the page branches into a
-    // distinct error row instead of falling through to "No vendors yet"
-    // — a backend outage must NOT read like a brand-new org.
-    await waitFor(() =>
-      expect(screen.queryByText(/^loading…$/i)).toBeNull(),
-    );
+    // Co-pin role=alert + headline text on the SAME element so a
+    // regression that drops either property fails loudly (#80 followup
+    // review). Wrap in waitFor for React-19 work-loop safety.
+    const alert = await waitFor(() => screen.getByRole("alert"));
+    expect(alert).toHaveTextContent(/couldn't load vendors/i);
+    expect(alert).toHaveTextContent("vendor index down");
+
     expect(
       screen.getByRole("heading", { name: /^vendors$/i }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/couldn't load vendors/i),
-    ).toBeInTheDocument();
-    expect(screen.getByText("vendor index down")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /retry/i }),
     ).toBeInTheDocument();
     // Negative: the empty-state copy must NOT appear on error.
     expect(screen.queryByText(/no vendors yet/i)).toBeNull();
+  });
+
+  it("error: non-JSON 5xx renders the jargon-free fallback, NOT a raw status-text leak (#80 + #77)", async () => {
+    server.use(
+      http.get(url("/api/vendors"), () =>
+        Promise.resolve(
+          new Response("<html>502</html>", {
+            status: 502,
+            statusText: "Bad Gateway",
+            headers: { "Content-Type": "text/html" },
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+
+    const alert = await waitFor(() => screen.getByRole("alert"));
+    expect(alert).toHaveTextContent(/couldn't load vendors/i);
+    expect(alert).toHaveTextContent("Something went wrong. Try again.");
+    expect(alert).not.toHaveTextContent(/bad gateway/i);
+    expect(alert).not.toHaveTextContent(/<html>/i);
   });
 
   it("retry-on-5xx: clicking Retry fires a second fetch; a subsequent 200 swaps the error card for the populated list (#80)", async () => {
@@ -121,7 +139,10 @@ describe("VendorsPage — state matrix (#36)", () => {
         screen.getByRole("link", { name: /acme subcontractor/i }),
       ).toBeInTheDocument(),
     );
+    // Full state swap, not just the headline gone (#80 followup).
     expect(screen.queryByText(/couldn't load vendors/i)).toBeNull();
+    expect(screen.queryByText("DB blip.")).toBeNull();
+    expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
   });
 
   it("populated: every vendor renders with their template + counts + portal-link badge", async () => {

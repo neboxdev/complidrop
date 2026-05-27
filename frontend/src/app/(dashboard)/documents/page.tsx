@@ -10,6 +10,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useDocuments, useUploadDocument, useDeleteDocument } from "@/hooks/useDocuments";
 import { cn } from "@/lib/utils";
+import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 
 const STATUS_HUE: Record<string, string> = {
   Pending: "bg-slate-100 text-slate-700",
@@ -115,16 +116,27 @@ export default function DocumentsPage() {
                     Loading documents…
                   </td>
                 </tr>
-              ) : docs.isError ? (
-                // Error state distinct from empty so a backend outage is not
-                // mistaken for a brand-new org with zero documents (#80).
-                // `err.message` is the human server message from the
-                // ApiError envelope, or lib/api.ts's jargon-free fallback
-                // when the body is non-JSON or fetch itself rejected (#77).
+              ) : docs.isError && items.length === 0 ? (
+                // Error state distinct from empty so a backend outage is
+                // not mistaken for a brand-new org with zero documents
+                // (#80). Gate on `items.length === 0` so a polling
+                // failure on a populated list does NOT clobber the
+                // rows the user is reading — the cached data stays
+                // visible and `useDocuments.refetchInterval` short-
+                // circuits on error so the backend isn't hammered.
+                // The polling-failure-UX-banner is deferred to #97;
+                // this gate is the minimum that prevents the
+                // regression from shipping per the #80 followup review.
                 //
-                // role="alert" gets the error announced by assistive tech
-                // the moment isError flips true, matching the convention
-                // in frontend/src/test/example.test.tsx.
+                // `err.message` is the human server message from the
+                // ApiError envelope; api.ts's GENERIC_FALLBACK_MESSAGE
+                // kicks in when the body is non-JSON or fetch rejected
+                // (#77), so `?? GENERIC_FALLBACK_MESSAGE` here only
+                // covers the unreachable `error: null` defensive path.
+                //
+                // role="alert" gets the error announced by assistive
+                // tech the moment isError flips true, matching the
+                // convention in frontend/src/test/example.test.tsx.
                 <tr>
                   <td colSpan={7} className="px-4 py-12 text-center" role="alert">
                     <AlertTriangle className="w-8 h-8 mx-auto text-rose-500" />
@@ -132,9 +144,7 @@ export default function DocumentsPage() {
                       Couldn&apos;t load documents.
                     </p>
                     <p className="text-xs text-slate-500">
-                      {docs.error instanceof Error && docs.error.message.trim()
-                        ? docs.error.message
-                        : "Something went wrong. Try again."}
+                      {docs.error?.message?.trim() || GENERIC_FALLBACK_MESSAGE}
                     </p>
                     <Button
                       variant="outline"
