@@ -388,6 +388,116 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(1, "the doc is untouched");
     }
 
+    /// <summary>
+    /// Drift-coverage offsets for the stale-reclaim Theory. Every row
+    /// is a value (in seconds) that ProcessingStartedAt is in the PAST
+    /// — all should cross the 5-min zombie threshold and be reclaimed.
+    /// <list type="bullet">
+    /// <item><c>-330</c> (5m30s past) — boundary echo of the canonical
+    ///   Fact above; included so the Theory's coverage is a strict
+    ///   superset, not a parallel set.</item>
+    /// <item><c>-360</c> (6m past) — one minute past the threshold;
+    ///   catches a `5min → 6min` widening regression while sitting
+    ///   close enough to the boundary that a `seconds → minutes` unit
+    ///   confusion would also surface here.</item>
+    /// <item><c>-3600</c> (1h past) — far-stale exemplar; catches a
+    ///   broken-SQL regression that returns nothing (any reasonable
+    ///   stale doc should still reclaim, not just edge cases).</item>
+    /// </list>
+    /// </summary>
+    public static TheoryData<int> StaleZombieDriftOffsetsSeconds() => new()
+    {
+        -330,   // 5m30s past — boundary echo
+        -360,   // 6m past
+        -3600,  // 1h past
+    };
+
+    /// <summary>
+    /// Drift-coverage offsets for the fresh-not-reclaim Theory. Every
+    /// row is a value (in seconds) that ProcessingStartedAt is in the
+    /// PAST — none should cross the 5-min zombie threshold.
+    /// <list type="bullet">
+    /// <item><c>-270</c> (4m30s past) — boundary echo of the canonical
+    ///   Fact above.</item>
+    /// <item><c>-240</c> (4m past) — one minute inside the threshold;
+    ///   catches a `5min → 4min` narrowing regression.</item>
+    /// <item><c>-30</c> (30s past) — recently-claimed exemplar; catches
+    ///   a broken-SQL regression that reclaims every Processing row
+    ///   regardless of ProcessingStartedAt.</item>
+    /// </list>
+    /// </summary>
+    public static TheoryData<int> FreshZombieDriftOffsetsSeconds() => new()
+    {
+        -270,  // 4m30s past — boundary echo
+        -240,  // 4m past
+        -30,   // 30s past
+    };
+
+    [Theory]
+    [MemberData(nameof(StaleZombieDriftOffsetsSeconds))]
+    public async Task Stale_processing_document_past_the_zombie_threshold_is_reclaimed_under_various_drift_offsets(
+        int driftSeconds)
+    {
+        // Broader drift-coverage Theory complementing the canonical
+        // boundary-tight Fact above (#62). The Fact pins ONE point
+        // (-5m30s) against ±1-min drift; this Theory broadens that
+        // coverage to catch e.g. a `5min → 6min` widening regression
+        // (the Fact's -5m30s row wouldn't notice — -5m30s stays past a
+        // widened 4m threshold and inside a widened 6m threshold; only
+        // the new -360/-3600 rows here distinguish).
+        //
+        // The -330 row (5m30s past) is a deliberate boundary echo of
+        // the canonical Fact above — so a contributor running ONLY the
+        // Theory still has the boundary-tight coverage if they
+        // accidentally delete the Fact. The -360 / -3600 rows extend
+        // coverage further into the stale region.
+        //
+        // Offsets in seconds (not minutes) so the inline-data shape can
+        // express both minute- and sub-minute precision uniformly via a
+        // single `[InlineData(int)]` signature. See the MemberData
+        // docstring above for the per-row rationale. (#140)
+        var (_, docId) = await SeedDocAsync(
+            status: ExtractionStatus.Processing,
+            attempts: 1,
+            processingStartedAt: DateTime.UtcNow.AddSeconds(driftSeconds));
+        var worker = BuildWorker();
+
+        var claimed = await worker.ClaimNextAsync(CancellationToken.None);
+
+        claimed.Should().Be(
+            docId,
+            $"ProcessingStartedAt={driftSeconds}s is past the 5-min zombie threshold and must be " +
+            "reclaimed; if this fires with null, the threshold has drifted past " +
+            $"{Math.Abs(driftSeconds)}s — i.e. it widened beyond the seeded offset.");
+        (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(2, "the reclaim increments the attempt counter");
+    }
+
+    [Theory]
+    [MemberData(nameof(FreshZombieDriftOffsetsSeconds))]
+    public async Task Fresh_processing_document_inside_the_zombie_threshold_is_not_reclaimed_under_various_drift_offsets(
+        int driftSeconds)
+    {
+        // Broader drift-coverage Theory complementing the canonical
+        // boundary-tight Fact above (#62). The Fact pins ONE point
+        // (-4m30s) against ±1-min drift; this Theory broadens that
+        // coverage so e.g. a `5min → 4min` narrowing regression that
+        // would steal the -4m row here surfaces loudly. The -270 row
+        // is a deliberate boundary echo of the Fact above. (#140)
+        var (_, docId) = await SeedDocAsync(
+            status: ExtractionStatus.Processing,
+            attempts: 1,
+            processingStartedAt: DateTime.UtcNow.AddSeconds(driftSeconds));
+        var worker = BuildWorker();
+
+        var claimed = await worker.ClaimNextAsync(CancellationToken.None);
+
+        claimed.Should().BeNull(
+            $"ProcessingStartedAt={driftSeconds}s is inside the 5-min zombie window; a fresh doc " +
+            "must not be stolen before the timeout. If this fires with a non-null Guid, the " +
+            $"threshold has narrowed below {Math.Abs(driftSeconds)}s.");
+        (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(1, "the doc is untouched");
+    }
+
     // ----- Session-TZ independence (the #26 fix) ----------------------------------------------
 
     /// <summary>
