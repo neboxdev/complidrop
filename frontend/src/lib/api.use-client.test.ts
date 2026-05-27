@@ -1,106 +1,185 @@
 /**
- * Pins the `"use client"` directive at the top of `api.ts` (#120).
+ * Pins the client-boundary protections at the top of `api.ts` (#120).
  *
- * The directive forces Next.js to fail-loud at build time if a future
- * Server Component, Route Handler, or middleware tries to import the
- * api client. The reasoning is in `api.ts`'s own header comment — short
- * version: the refresh-coalescing singleton's module-level state is
- * per-process under SSR, which would cross-contaminate user sessions.
+ * Two layers guard the refresh-coalescing singleton against accidental
+ * SSR cross-request state-sharing:
  *
- * Why test the directive instead of trusting the file's contents?
- * Because:
- *   1. A directive is just a string literal at the top of the file —
- *      a careless refactor (mass `prettier` re-format, an import-sort
- *      lint rule, a "clean up unused comments" sweep) could shuffle or
- *      drop it without TypeScript or ESLint flagging the change.
- *   2. The protection it provides is purely structural — once removed,
- *      every existing test would still pass while the latent SSR
- *      contamination risk silently re-opens.
- *   3. Without an explicit pin, there is no automated regression
- *      surface for "the directive must still be at the top". This test
- *      IS that pin.
+ *   1. The `"use client"` directive on the first line — Next.js
+ *      treats the module as a client boundary, so its top-level code
+ *      runs in the client bundle once imported.
+ *   2. `import "client-only"` immediately after — provides a HARD
+ *      build-time error if a Server Component / Route Handler /
+ *      middleware ever imports the module transitively. `client-only`
+ *      re-exports a stub that throws when bundled server-side.
  *
- * Read the file via `fs.readFileSync` rather than importing it,
- * because the imported module's runtime exports don't carry the
- * directive — directives are erased after the parsing pass. Reading
- * the source is the only way to observe them from a test.
+ * Why test these structural invariants instead of trusting the file
+ * contents? Because they are protections only as long as they remain
+ * in place:
+ *   - A careless refactor (prettier reformat, import sorter, comment
+ *     sweep) could drop or shuffle the directive without TypeScript /
+ *     ESLint flagging it.
+ *   - A future contributor adding a new caller from a Server
+ *     Component would (with `client-only`) get a clear build error,
+ *     but only if the import stays. Without an automated importer
+ *     audit, a careless removal silently re-opens the SSR
+ *     contamination risk.
+ *   - The protections are structural — once removed, every existing
+ *     runtime test still passes while the latent risk reopens.
+ *
+ * This file IS the regression pin for all three properties:
+ *   - directive present and first
+ *   - directive appears exactly once
+ *   - `client-only` import present
+ * Plus the AC #3 invariant from the ticket: every importer of
+ * `@/lib/api` (the existing 14 audited at #120 time, and every
+ * future addition) must itself be `"use client"`.
+ *
+ * Read the api.ts source via `fs.readFileSync` rather than importing
+ * it, because directives are erased after parsing — they're only
+ * observable from raw source.
  */
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { resolve, join, relative } from "node:path";
 import { describe, it, expect } from "vitest";
 
-describe("api.ts — 'use client' directive (#120)", () => {
-  // Resolve relative to the test file's dirname so the path is
-  // independent of vitest's cwd / monorepo nesting. `__dirname`-style
-  // resolution via `import.meta.url` would also work but
-  // `__filename`/`__dirname` aren't available in ESM and the
-  // `import.meta` shape varies across runtimes — `resolve` from the
-  // test file's known relative position is the most portable.
-  const apiPath = resolve(__dirname, "api.ts");
+const useClientDirective = /^["']use client["']\s*;?\s*$/;
 
+const repoFrontendSrc = resolve(__dirname, "..");
+const apiPath = resolve(__dirname, "api.ts");
+
+describe("api.ts — 'use client' directive + client-only guard (#120)", () => {
   it("'use client' is the literal first non-blank source line", () => {
-    // Strip a BOM if one is present (Windows editors occasionally
-    // prepend one) so the test isn't tripped by encoding artifacts.
-    // Then split on either Unix or Windows line endings — the repo's
-    // .gitattributes lets either coexist locally — and find the first
-    // line with any non-whitespace content.
+    // Strip a UTF-8 BOM if present (some Windows editors prepend one)
+    // so the test isn't tripped by encoding artifacts. The `﻿`
+    // escape form is preferred over a literal BOM glyph because the
+    // escape survives any source-file transform (Prettier reformat,
+    // editor encoding re-save) that might invisibly normalize a
+    // literal BOM character.
     const source = readFileSync(apiPath, "utf8").replace(/^﻿/, "");
+    // Split on either LF or CRLF — Windows checkouts via
+    // `core.autocrlf=true` land CRLF on disk while macOS/Linux land
+    // LF, so the test must tolerate both regardless of the
+    // contributor's git config.
     const firstSourceLine = source
       .split(/\r?\n/)
       .find((line) => line.trim().length > 0);
 
-    // Accept both single- and double-quoted forms with optional
-    // trailing semicolon — the directive prologue is recognized
-    // regardless. Anchored so a regression that buries the directive
-    // mid-line (e.g. `const x = 1; "use client";`) is also caught.
-    expect(firstSourceLine).toMatch(/^["']use client["']\s*;?\s*$/);
+    expect(firstSourceLine).toMatch(useClientDirective);
   });
 
-  it("the directive appears BEFORE any import, export, or other code statement", () => {
-    // The Next.js spec requires the directive to be a "directive
-    // prologue" — i.e. it must precede every non-comment statement in
-    // the file. Comments above the directive are syntactically
-    // allowed by JavaScript but the project's convention (matches
-    // every other client module: `useDocuments.ts`, every `page.tsx`)
-    // is directive-first, then explanatory comments, then code. Pin
-    // that convention so a refactor that moves the directive below a
-    // freshly-added `import` is caught at the test layer rather than
-    // at production-build time (the latter is where Next.js's own
-    // diagnostic surfaces; we want the SHORTER feedback loop).
+  it("the 'use client' directive appears exactly once (no duplicate-on-merge)", () => {
+    // `findIndex` (used in Test 1) only sees the FIRST match — a
+    // duplicate directive introduced by a merge conflict resolution
+    // would slip past every other assertion in this file. Pin
+    // uniqueness here so the duplicate-paste regression is caught
+    // structurally. Next.js tolerates duplicates today but the
+    // unused string literal would be dead code on every consumer.
     const source = readFileSync(apiPath, "utf8");
-    const lines = source.split(/\r?\n/);
-
-    // Find the first index of an import/export/code statement,
-    // then the first index of the directive. The directive's index
-    // must be smaller.
-    const isCodeLine = (line: string) => {
-      const trimmed = line.trim();
-      // Skip blank lines and line comments. Block comments could span
-      // multiple lines; rather than build a full comment-state
-      // machine, accept lines that start with `*` (continuation of
-      // a `/** ... */` block) as comment-continuations. This is
-      // sufficient for the convention the file uses.
-      if (trimmed.length === 0) return false;
-      if (trimmed.startsWith("//")) return false;
-      if (trimmed.startsWith("/*")) return false;
-      if (trimmed.startsWith("*")) return false;
-      // Treat the directive itself as not-a-code-statement so it
-      // doesn't satisfy the predicate before its own index is found.
-      if (/^["']use client["']\s*;?\s*$/.test(trimmed)) return false;
-      return true;
-    };
-
-    const directiveIndex = lines.findIndex((line) =>
-      /^["']use client["']\s*;?\s*$/.test(line.trim()),
-    );
-    const firstCodeIndex = lines.findIndex(isCodeLine);
-
-    expect(directiveIndex).toBeGreaterThanOrEqual(0);
-    expect(firstCodeIndex).toBeGreaterThanOrEqual(0);
-    // Strict less-than: directive must come BEFORE the first code
-    // line. Equal would mean the same line, which can't happen
-    // because the directive-recognizer filter would have rejected
-    // that line in `isCodeLine`.
-    expect(directiveIndex).toBeLessThan(firstCodeIndex);
+    const directiveLines = source
+      .split(/\r?\n/)
+      .filter((line) => useClientDirective.test(line.trim()));
+    expect(directiveLines).toHaveLength(1);
   });
+
+  it("imports the 'client-only' package as a hard build-time SSR guard", () => {
+    // `client-only` (shipped transitively via `next`) re-exports a
+    // stub that throws when bundled in a server context. Pairing it
+    // with the `"use client"` directive upgrades the protection from
+    // soft (the module simply runs on the client when imported) to
+    // hard (a Server Component import surfaces as a build break).
+    // Pin the import so a future refactor that drops it leaves only
+    // the soft layer in place and loses the build-time fail-loud.
+    const source = readFileSync(apiPath, "utf8");
+    // Tolerate single- or double-quoted form, with or without
+    // trailing semicolon — the bundler accepts any.
+    expect(source).toMatch(/^\s*import\s+["']client-only["']\s*;?\s*$/m);
+  });
+});
+
+describe("api.ts — every importer must itself be 'use client' (#120 AC #3)", () => {
+  // Walk the entire `frontend/src/` tree, find every file that
+  // imports from `@/lib/api` (or a relative-path variant), and
+  // assert each one starts with the `"use client"` directive. This
+  // turns the ticket's human-time-bound audit into an automated
+  // invariant: when a future PR adds a new Server Component importer
+  // of api.ts, this test fails with the offending file path before
+  // the latent SSR-contamination risk can reach production.
+  //
+  // Test files are excluded because (a) vitest tests run in node
+  // and don't need the directive to function, and (b) test files
+  // never end up in the Next.js client bundle.
+  function walk(dir: string, out: string[] = []): string[] {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      const st = statSync(full);
+      if (st.isDirectory()) {
+        // Skip vendored / build directories. These directories
+        // shouldn't exist under src/ in practice, but defending
+        // against an accidental commit is cheap.
+        if (entry === "node_modules" || entry === ".next") continue;
+        walk(full, out);
+      } else if (
+        st.isFile() &&
+        (full.endsWith(".ts") || full.endsWith(".tsx"))
+      ) {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  const allFiles = walk(repoFrontendSrc);
+
+  // `@/lib/api` and explicit relative variants (../lib/api, ../../
+  // lib/api, etc.). The relative forms cover the case where a future
+  // file outside `src/app` or `src/hooks` imports the api by
+  // relative path.
+  const importMatcher =
+    /from\s+["'](?:@\/lib\/api|(?:\.\.\/)+lib\/api)["']/;
+
+  const importers = allFiles.filter((file) => {
+    // Exclude tests so we don't recurse on this very file or
+    // re-check api.test.ts (both call `from "@/lib/api"` but are
+    // themselves vitest tests, not client modules).
+    if (file.endsWith(".test.ts") || file.endsWith(".test.tsx")) {
+      return false;
+    }
+    // Exclude api.ts itself.
+    if (file === apiPath) return false;
+    const source = readFileSync(file, "utf8");
+    return importMatcher.test(source);
+  });
+
+  it("the importer audit picks up the known set (regression guard against the walk going dark)", () => {
+    // Sanity-check the walk: a refactor that broke the path
+    // resolution or the import regex would cause `importers` to be
+    // empty, which would make every subsequent assertion vacuously
+    // pass. Pin a floor on the importer count so the test fails
+    // loudly if the walk goes dark. The floor is generous (today's
+    // count is 14 client modules, audited at #120 time); a count
+    // below 10 means something is structurally wrong with the walk.
+    expect(importers.length).toBeGreaterThanOrEqual(10);
+  });
+
+  it.each(
+    // Use `it.each` so a failure surfaces ONE bad importer at a time
+    // rather than collapsing every importer into a single failed
+    // expectation. Each file gets its own test case named with its
+    // path relative to frontend/src so the diagnostic message
+    // points directly at the offending file. Static fallback
+    // tuple keeps `it.each` happy even on the unreachable empty
+    // case (the floor assertion above would have already failed).
+    importers.length > 0
+      ? importers.map((file) => [relative(repoFrontendSrc, file), file] as const)
+      : [["<no importers found — see floor assertion above>", apiPath] as const],
+  )(
+    "importer %s starts with the 'use client' directive",
+    (_relPath, file) => {
+      const source = readFileSync(file, "utf8").replace(/^﻿/, "");
+      const firstSourceLine = source
+        .split(/\r?\n/)
+        .find((line) => line.trim().length > 0);
+      expect(firstSourceLine).toMatch(useClientDirective);
+    },
+  );
 });
