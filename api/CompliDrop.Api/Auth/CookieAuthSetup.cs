@@ -95,8 +95,13 @@ public static class CookieAuthSetup
     // Hint-cookie options: deliberately !HttpOnly so the SPA can read it
     // via `document.cookie` (#69). Path "/" matches the landing page (the
     // exact surface that needs to short-circuit the probe). Secure +
-    // SameSite mirror the session cookie so a future change to the
-    // session's transport-security knob propagates here automatically.
+    // SameSite mirror the SESSION cookie (Lax in prod) rather than the
+    // refresh cookie's Strict — Strict would suppress the cookie's
+    // send-back on cross-site link clicks (e.g. email → /), which doesn't
+    // affect `document.cookie` READABILITY today but would matter if a
+    // server-side hint reader is added later (#69 followup). Mirroring
+    // the session cookie also means a future change to the session's
+    // transport-security knob propagates here automatically.
     // TTL matches the refresh cookie: the hint is correlated with "this
     // browser still might resurrect a session via /api/auth/refresh", and
     // Refresh() in AuthEndpoints calls IssueCookies, which re-issues the

@@ -20,7 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { SESSION_HINT_COOKIE, useMe, type Me } from "./useAuth";
+import { hasSessionHint, SESSION_HINT_COOKIE, useMe, type Me } from "./useAuth";
 import { ApiError } from "@/lib/api";
 
 /**
@@ -85,6 +85,86 @@ const ME: Me = {
   timeZone: "UTC",
 };
 
+describe("hasSessionHint() — gate primitive (#69)", () => {
+  afterEach(() => {
+    clearHintCookie();
+    // Sibling cookies used by the prefix/suffix collision tests +
+    // the positive control's noise cookie. Clearing all three keeps
+    // tests in this block (and any subsequent block in this file)
+    // strictly isolated — a leaked `other_cookie=value` from the
+    // positive control would not break the gate tests today (they
+    // assert on the hint cookie's presence/absence, not on
+    // absence-of-other-cookies), but the hygiene principle that one
+    // test's writes are invisible to the next is worth preserving.
+    document.cookie = `prefix_${SESSION_HINT_COOKIE}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+    document.cookie = `${SESSION_HINT_COOKIE}_suffix=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+    document.cookie = `other_cookie=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+  });
+
+  // Cross-process contract pin: the cookie NAME literal lives in two
+  // codebases (C# `CookieAuthSetup.HintCookie` and TS `SESSION_HINT_COOKIE`).
+  // A unilateral rename on either side compiles and ships green — backend
+  // tests use the C# constant, frontend tests use the TS one, neither
+  // catches a drift. A single-line equality check here makes the wire
+  // literal load-bearing: a TS-side rename HAS to update this assertion,
+  // and the backend AuthEndpointsTests still hard-code "cd_session_hint="
+  // on the C# side, so both halves are forced to agree on the same string.
+  it("SESSION_HINT_COOKIE matches the backend's CookieAuthSetup.HintCookie literal", () => {
+    expect(SESSION_HINT_COOKIE).toBe("cd_session_hint");
+  });
+
+  // SSR-safety pin (useAuth.ts:hasSessionHint docstring). The hook is
+  // called from a `"use client"` component (page.tsx), but the FIRST
+  // render is a server render in Next 16's App Router — `document` is
+  // undefined there. The guard must return `false` so the query stays
+  // disabled on the server (no auth round-trip during SSR) and the
+  // SSR HTML matches the post-hydration first client paint (no
+  // hydration mismatch — both render the logged-out CTAs).
+  it("returns false when document is undefined (SSR / first server render)", () => {
+    const orig = globalThis.document;
+    // jsdom installs `document` on globalThis; deleting it simulates the
+    // Node.js server-render environment where the typeof guard fires.
+    (globalThis as unknown as { document?: unknown }).document = undefined;
+    try {
+      expect(hasSessionHint()).toBe(false);
+    } finally {
+      (globalThis as unknown as { document?: unknown }).document = orig;
+    }
+  });
+
+  // Substring-collision pin (useAuth.ts:hasSessionHint docstring).
+  // A future refactor that simplified the matcher to
+  // `document.cookie.includes("cd_session_hint=")` would silently
+  // regress on the PREFIX side: a sibling cookie like
+  // `bad_cd_session_hint=1` would flip the gate to always-on. The
+  // `; <name>=` token-boundary matching MUST reject the prefix side.
+  it("rejects sibling cookies whose NAME ends in cd_session_hint (prefix-boundary token)", () => {
+    clearHintCookie();
+    document.cookie = `prefix_${SESSION_HINT_COOKIE}=1; path=/`;
+    expect(hasSessionHint()).toBe(false);
+  });
+
+  // The mirror-boundary test. The trailing `=` anchor in the search
+  // literal `"; cd_session_hint="` rejects suffix collisions today
+  // (a sibling `cd_session_hint_suffix=1` has `_` instead of `=`
+  // after the name). A future refactor that dropped both anchors —
+  // `document.cookie.includes("cd_session_hint")` — would silently
+  // regress on the suffix side. This test catches that regression
+  // that the prefix-only test alone would not. The afterEach already
+  // clears `cd_session_hint_suffix=` so isolation is preserved.
+  it("rejects sibling cookies whose NAME starts with cd_session_hint (suffix-boundary token)", () => {
+    clearHintCookie();
+    document.cookie = `${SESSION_HINT_COOKIE}_suffix=1; path=/`;
+    expect(hasSessionHint()).toBe(false);
+  });
+
+  it("accepts the canonical cookie even when other cookies are present (positive control)", () => {
+    document.cookie = `other_cookie=value; path=/`;
+    setHintCookie();
+    expect(hasSessionHint()).toBe(true);
+  });
+});
+
 describe("useMe({ skipRefresh: true }) — landing-page probe (#69)", () => {
   const calls: FetchCall[] = [];
   let fetchMock: ReturnType<typeof vi.fn>;
@@ -118,11 +198,14 @@ describe("useMe({ skipRefresh: true }) — landing-page probe (#69)", () => {
     const { result } = renderHook(() => useMe({ skipRefresh: true }), { wrapper: Wrapper });
 
     // The gate (`enabled: hasSessionHint()`) flips the query to disabled
-    // synchronously on mount. There's no "loading then idle" interim
-    // because the queryFn never runs: status goes idle → idle. Wait a
-    // tick to let any scheduled microtask resolve, then assert zero
-    // network activity.
-    await new Promise((r) => setTimeout(r, 10));
+    // synchronously on mount. With `enabled: false` TanStack Query never
+    // runs the queryFn at all — `fetchStatus` is `'idle'` immediately and
+    // there is no scheduled work to flush. Two awaited resolved promises
+    // drain the microtask queue deterministically (catching anything a
+    // future TQ version might schedule via microtask) without a
+    // wall-clock delay that could flake under CI CPU pressure.
+    await Promise.resolve();
+    await Promise.resolve();
     expect(calls).toHaveLength(0);
     // `enabled: false` on TanStack Query => `isLoading: false` and
     // `data: undefined`. The landing page's `!!me` derives `authed:

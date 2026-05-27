@@ -74,6 +74,17 @@ export const SESSION_HINT_COOKIE = "cd_session_hint";
  * than as a substring — a hypothetical sibling cookie named
  * `bad_cd_session_hint` cannot trigger a false positive.
  *
+ * Gate re-evaluation is RENDER-DRIVEN — the returned value only flips
+ * when a consumer re-renders. In practice this is fine because
+ * login/register/logout mutations write/clear the Me cache (via
+ * `setMeCache` / `qc.clear()`) which triggers consumer re-renders,
+ * and the cache write also feeds `useQuery` its data directly so the
+ * gate-flip-then-fetch race is moot. An EXTERNAL cookie write
+ * (DevTools tampering, a future non-mutation route that sets the
+ * hint server-side) would not re-evaluate the gate until something
+ * else triggered a render; that's deliberate — we don't subscribe to
+ * cookie events.
+ *
  * Exported for use in tests; the production caller is `useMe()` below.
  */
 export function hasSessionHint(): boolean {

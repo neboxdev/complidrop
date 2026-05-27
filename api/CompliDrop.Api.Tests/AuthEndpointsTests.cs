@@ -39,6 +39,29 @@ public sealed class AuthEndpointsTests(IntegrationTestFixture fixture) : Integra
         return null;
     }
 
+    /// <summary>
+    /// Returns the value of a Set-Cookie attribute by name (e.g. "path",
+    /// "domain", "samesite"). Returns null when the attribute is absent.
+    /// Used instead of a `Contains("path=/")` substring check because
+    /// substring matching is ambiguous between `path=/` and a regressed
+    /// `path=/api/auth` (both contain the literal `path=/`). Parsing the
+    /// attribute and comparing its value EXACTLY catches the regression
+    /// the assertion docstring names (review #69 followup).
+    /// </summary>
+    private static string? CookieAttribute(string setCookieLine, string name)
+    {
+        foreach (var part in setCookieLine.Split(';'))
+        {
+            var trimmed = part.Trim();
+            var eq = trimmed.IndexOf('=');
+            if (eq < 0) continue; // boolean attribute like `secure` / `httponly`
+            var key = trimmed[..eq];
+            if (key.Equals(name, StringComparison.OrdinalIgnoreCase))
+                return trimmed[(eq + 1)..];
+        }
+        return null;
+    }
+
     [Fact]
     public async Task Register_sets_httponly_session_and_refresh_cookies()
     {
@@ -58,26 +81,65 @@ public sealed class AuthEndpointsTests(IntegrationTestFixture fixture) : Integra
     // the session-cookie options (with HttpOnly=true) onto the hint by
     // accident, anonymous visitors would silently pay the auth round-trip
     // again. The tests below pin the shape so that regression is loud.
+    /// <summary>
+    /// Case-insensitive "contains httponly" check on a Set-Cookie line.
+    /// ASP.NET Core's SetCookieHeaderValue emits the flag as lowercase
+    /// `httponly` today, so a case-sensitive `Should().NotContain("httponly")`
+    /// would catch a `HttpOnly = true` regression today — but FluentAssertions'
+    /// string `NotContain` overload IS case-sensitive (the second arg is a
+    /// 'because' reason, not a StringComparison). The existing positive
+    /// assertions for cd_session / cd_refresh on lines 49–50 already
+    /// defensively pass `OrdinalIgnoreCase`. Routing every hint-cookie
+    /// assertion through this helper makes the framework's emission casing
+    /// a non-load-bearing detail and brings the new hint tests in line
+    /// with the pre-existing case-insensitive convention (review #69
+    /// followup — pattern symmetry, not a fix for a silently-passing bug).
+    /// </summary>
+    private static bool HasHttpOnlyFlag(string setCookieLine) =>
+        setCookieLine.Contains("httponly", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Asserts the four load-bearing properties of an ACTIVE
+    /// `cd_session_hint` Set-Cookie (issued by Register / Login /
+    /// Refresh): the cookie exists, value is the literal "1", is NOT
+    /// HttpOnly, and is scoped to `path=/`. Symmetric coverage across
+    /// every auth-issuing endpoint catches a refactor that flips one
+    /// property in one path only (review #69 — Refresh and Login tests
+    /// previously skipped the path-pin that Register had).
+    /// </summary>
+    private static void AssertActiveHintCookie(IEnumerable<string> setCookies)
+    {
+        var cookies = setCookies.ToList();
+        var hint = cookies.FirstOrDefault(c => c.StartsWith("cd_session_hint="));
+        hint.Should().NotBeNull("the SPA needs cd_session_hint to skip the landing-page probe (#69)");
+        // CRITICAL invariant: NO HttpOnly flag. The SPA reads this cookie
+        // via document.cookie; an HttpOnly cookie cannot be read from JS,
+        // making the gate always-false and the optimization invisible.
+        HasHttpOnlyFlag(hint!).Should().BeFalse(
+            "cd_session_hint MUST be readable from document.cookie — adding HttpOnly silently breaks the #69 optimization");
+        // Path EXACTLY "/" so the landing page (and every other public
+        // page) can read the hint regardless of where the user lands
+        // first. Parsing the attribute and comparing for equality —
+        // rather than `Contains("path=/")` substring matching — catches
+        // a regression to `path=/api/auth` (mirroring cd_refresh by
+        // accident), which the substring form happily accepts because
+        // `/` is a prefix of `/api/auth`.
+        CookieAttribute(hint!, "path").Should().Be(
+            "/",
+            "a hint cookie at any path other than `/` is invisible to document.cookie on the landing page");
+        // The value is the literal "1" — no PII, no credential, no
+        // identifier. The hint signals presence-of-session-at-some-point
+        // only; the real session/refresh tokens remain httpOnly.
+        CookieValue(cookies, "cd_session_hint").Should().Be("1");
+    }
+
     [Fact]
     public async Task Register_sets_non_httponly_session_hint_cookie_at_root_path()
     {
         var resp = await RawClient().PostAsJsonAsync("/api/auth/register", NewRegistration($"h-{Guid.NewGuid():N}@x.com"));
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var cookies = SetCookies(resp);
-        var hint = cookies.FirstOrDefault(c => c.StartsWith("cd_session_hint="));
-        hint.Should().NotBeNull("the SPA needs cd_session_hint to skip the landing-page probe (#69)");
-        // CRITICAL invariant: NO HttpOnly flag. The SPA reads this cookie
-        // via document.cookie; an HttpOnly cookie cannot be read from JS,
-        // making the gate always-false and the optimization invisible.
-        hint!.Should().NotContain("httponly", "cd_session_hint MUST be readable from document.cookie — adding HttpOnly silently breaks the #69 optimization");
-        // Path=/ so the landing page (and every other public page) can
-        // read the hint regardless of where the user lands first.
-        hint.Should().Contain("path=/", "the hint must be readable on the landing page surface");
-        // The value is the literal "1" — no PII, no credential, no
-        // identifier. The hint signals presence-of-session-at-some-point
-        // only; the real session/refresh tokens remain httpOnly.
-        CookieValue(cookies, "cd_session_hint").Should().Be("1");
+        AssertActiveHintCookie(SetCookies(resp));
     }
 
     [Fact]
@@ -93,11 +155,7 @@ public sealed class AuthEndpointsTests(IntegrationTestFixture fixture) : Integra
             new { email, password = "Password1234" });
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var cookies = SetCookies(resp);
-        var hint = cookies.FirstOrDefault(c => c.StartsWith("cd_session_hint="));
-        hint.Should().NotBeNull();
-        hint!.Should().NotContain("httponly");
-        CookieValue(cookies, "cd_session_hint").Should().Be("1");
+        AssertActiveHintCookie(SetCookies(resp));
     }
 
     [Fact]
@@ -117,8 +175,7 @@ public sealed class AuthEndpointsTests(IntegrationTestFixture fixture) : Integra
         var resp = await RawClient().SendAsync(req);
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var cookies = SetCookies(resp);
-        cookies.Should().Contain(c => c.StartsWith("cd_session_hint=1") && !c.Contains("httponly", StringComparison.OrdinalIgnoreCase));
+        AssertActiveHintCookie(SetCookies(resp));
     }
 
     [Fact]
@@ -145,6 +202,18 @@ public sealed class AuthEndpointsTests(IntegrationTestFixture fixture) : Integra
         CookieValue(cookies, "cd_session_hint").Should().BeEmpty();
         hint!.Should().Contain("expires=", "the logout Set-Cookie must carry an explicit past expiry");
         hint.Should().Contain("1970");
+        // The cleared cookie's Path MUST match the live cookie's Path
+        // EXACTLY (RFC 6265 §5.3) or the browser will not actually
+        // overwrite — a future drift to `path=/api/auth` (mirroring
+        // the refresh cookie by accident) would emit a Set-Cookie that
+        // the browser happily ignores, leaving the live `path=/` hint
+        // in place and re-opening the gate after sign-out (#69 AC #4
+        // regression). Equality check on the parsed attribute, not a
+        // `Contains("path=/")` substring check that would silently
+        // accept the regressed `/api/auth` value.
+        CookieAttribute(hint, "path").Should().Be(
+            "/",
+            "the cleared cookie's Path must match the live cookie's Path or the browser won't delete it (RFC 6265 §5.3)");
     }
 
     [Fact]
