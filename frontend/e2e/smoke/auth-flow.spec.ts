@@ -18,9 +18,9 @@
  * round-trip would also set the cookies via Set-Cookie; the test
  * asserts the SPA chrome regardless.
  *
- * Login-flow smoke is deliberately NOT included here — useLogin's
- * cache-seeding contract has comprehensive Vitest coverage in
- * `src/app/(auth)/login/page.test.tsx`. See PR body for the trade-off.
+ * Companion log-in coverage lives in `login-flow.spec.ts` (#90) and
+ * pins the useLogin.onSuccess cache-seeding contract with an explicit
+ * `meHits === 0` assertion on `/api/auth/me`.
  */
 import { test, expect } from "@playwright/test";
 import { mockApi, jsonOk, waitForApi } from "../support/mock-api";

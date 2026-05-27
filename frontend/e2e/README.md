@@ -21,7 +21,7 @@ The Playwright config (`playwright.config.ts`) boots the Next dev server on `htt
 
 ```
 frontend/e2e/
-  smoke/                  Tier-1 launch flows (see #39). Today: harness.spec.ts only.
+  smoke/                  Tier-1 launch flows. Today: harness, auth-flow (#39), login-flow (#90), portal-upload + upload-to-extraction (#39 remaining flows).
   support/
     mock-api.ts           page.route('**/api/**', …) interceptor + jsonOk/jsonError.
     fixtures.ts           E2E-side typed shapes (authedMe, portalInfo, …).
