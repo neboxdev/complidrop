@@ -1,33 +1,61 @@
 /**
- * Form-test helper — container-scoped submitFormIn.
+ * Form-test helpers — fillByLabel + submitFormIn.
  *
- * Originally exported `fillInputByName` too, but #132 migrated every
- * caller to `screen.getByLabelText(/.../i)` after #76 wired the
- * htmlFor/id pairs that unblocked label-based lookups. The
- * label-based query exercises the same a11y wiring screen readers
- * depend on, so the by-`name` shortcut was dropped along with its
- * contract tests. `submitFormIn` stays because the multi-form guard
- * (below) is orthogonal — it defends against an entirely different
- * hazard that no RTL query handles for us.
+ * The label-based input helper (`fillByLabel`) is the canonical
+ * input-driving shape after #76 wired every `<label htmlFor=…>` ↔
+ * `<input id=…>` and #131 added the lint rule that enforces it. Each
+ * auth form test used to define its own one-line `fillField` shim
+ * around `screen.getByLabelText`; #135 lifted it here so a fourth
+ * form-test file can pick up the same idiom without copy-paste.
  *
- * ## Defensive guards (#75 followup)
+ * `submitFormIn` stays orthogonal — its multi-form guard defends
+ * against a future composite test (#134) rendering two forms in the
+ * same container, which no RTL query handles for us.
  *
- * `submitFormIn` explicitly throws a helpful "did you forget to
- * destructure?" message when `container` is undefined — the exact
- * foot-gun #84 fixed in `dropzone.ts`. The callers in this repo all
- * capture `container` via a module-level `let container: HTMLElement`
- * that's reassigned per-`it` from `renderWithProviders(...)`. A
- * missing reassignment would otherwise surface as
- * `TypeError: Cannot read properties of undefined (reading
- * 'querySelector')` pointing at THIS file rather than the missing
- * destructure in the test.
+ * ## Defensive guards
  *
- * The helper additionally rejects an ambiguous multi-form container —
- * #75's stated rationale was to defend against simultaneous forms, so
- * silently submitting only the first would re-introduce the very
- * hazard the lift was meant to eliminate.
+ * - `fillByLabel` delegates to RTL's `screen.getByLabelText`, which
+ *   throws a useful "unable to find a label" error when the label is
+ *   missing — no custom guard needed.
+ * - `submitFormIn` throws helpful "did you forget to destructure?"
+ *   when container is undefined (mirrors the `dropFilesIn` guard from
+ *   #84), throws on missing form, and REJECTS ambiguous multi-form
+ *   containers. #75's stated rationale was to defend against
+ *   simultaneous forms, so silently submitting only the first would
+ *   re-introduce the very hazard the lift was meant to eliminate.
  */
-import { fireEvent } from "@testing-library/react";
+import { fireEvent, screen, within } from "@testing-library/react";
+
+/**
+ * Fill the input associated with the given accessible label by firing
+ * an `input` event. Throws via RTL's own `getByLabelText` if no
+ * matching label exists.
+ *
+ * Why `fireEvent.input` (not `fireEvent.change`): RHF's `register(...)`
+ * attaches React's synthetic `onChange`, which React triggers from the
+ * DOM `input` event (NOT the DOM `change` event). `fireEvent.input` is
+ * the canonical RTL primitive for that flow. `fireEvent.change` happens
+ * to also work today because RTL fires both `input` and `change` DOM
+ * events under the hood, but the `input` primitive is the one that
+ * directly maps to React's listener — pinning it explicitly prevents a
+ * future RTL behavior tweak from silently breaking the form tests.
+ *
+ * Scoping: resolves via the global `screen` by default. Today every
+ * auth test renders one form, so the global lookup is unambiguous. For
+ * a future composite test rendering two forms with the same labels in
+ * the same document, pass a `container` and the lookup scopes to
+ * `within(container).getByLabelText(...)` — this is the shape #134's
+ * composite two-form test will use.
+ */
+export function fillByLabel(
+  label: RegExp | string,
+  value: string,
+  container?: HTMLElement,
+): void {
+  const root = container ? within(container) : screen;
+  const input = root.getByLabelText(label);
+  fireEvent.input(input, { target: { value } });
+}
 
 /**
  * Fire a `submit` event on the `<form>` inside `container`. Throws on

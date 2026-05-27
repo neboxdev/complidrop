@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import RegisterForm from "./register-form";
 import {
   renderWithProviders,
@@ -24,6 +24,7 @@ import {
   authedMe,
   toastSuccess,
   toastError,
+  fillByLabel,
   submitFormIn,
 } from "@/test";
 import { ME_KEY } from "@/hooks/useAuth";
@@ -31,35 +32,31 @@ import { ME_KEY } from "@/hooks/useAuth";
 // sonner mock + spies are provided by the harness; afterEach in the
 // setup file resets all toast spies between tests (#74).
 
-// Fill inputs by their accessible label, not by `name` attribute (#132).
-// #76 wired the htmlFor/id pairs that unblock getByLabelText; the
-// label-based lookup exercises the same a11y wiring screen readers
-// depend on. Container is still captured per-test for submitFormIn,
-// which retains the multi-form guard from #75.
-let container: HTMLElement;
-function fillField(label: RegExp, value: string) {
-  fireEvent.input(screen.getByLabelText(label), { target: { value } });
-}
-function submitForm() {
-  submitFormIn(container);
-}
+// Inputs are filled via the shared `fillByLabel(label, value)` helper
+// (label-based after #132; lifted from per-file shims in #135). Each
+// `it` captures container locally via `const { container, ... } =
+// renderWithProviders(...)` so module-level `let container` no longer
+// exists — single destructure shape across the file. `submitFormIn`
+// keeps the multi-form guard (#75); `queryClient` is destructured at
+// the call site when an `it` reads the cache.
+
 function fillFullForm() {
-  fillField(/^full name$/i, "Owner Name");
-  fillField(/^company$/i, "Acme Inc");
-  fillField(/^work email$/i, "owner@acme.test");
-  fillField(/^password$/i, "verystrongpass1");
+  fillByLabel(/^full name$/i, "Owner Name");
+  fillByLabel(/^company$/i, "Acme Inc");
+  fillByLabel(/^work email$/i, "owner@acme.test");
+  fillByLabel(/^password$/i, "verystrongpass1");
 }
 
 // Validation copy lives in zod schema (`register-form.tsx`). Test the
 // client-side branches before we exercise the server-side ones.
 describe("RegisterForm — validation (#35)", () => {
   it("flags a short password with the user-facing copy", async () => {
-    ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
-    fillField(/^full name$/i, "Owner Name");
-    fillField(/^company$/i, "Acme Inc");
-    fillField(/^work email$/i, "owner@acme.test");
-    fillField(/^password$/i, "short1");
-    submitForm();
+    const { container } = renderWithProviders(<RegisterForm />, { auth: null });
+    fillByLabel(/^full name$/i, "Owner Name");
+    fillByLabel(/^company$/i, "Acme Inc");
+    fillByLabel(/^work email$/i, "owner@acme.test");
+    fillByLabel(/^password$/i, "short1");
+    submitFormIn(container);
 
     await waitFor(() =>
       expect(
@@ -70,12 +67,12 @@ describe("RegisterForm — validation (#35)", () => {
   });
 
   it("flags a missing letter in the password", async () => {
-    ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
-    fillField(/^full name$/i, "Owner Name");
-    fillField(/^company$/i, "Acme Inc");
-    fillField(/^work email$/i, "owner@acme.test");
-    fillField(/^password$/i, "123456789012");
-    submitForm();
+    const { container } = renderWithProviders(<RegisterForm />, { auth: null });
+    fillByLabel(/^full name$/i, "Owner Name");
+    fillByLabel(/^company$/i, "Acme Inc");
+    fillByLabel(/^work email$/i, "owner@acme.test");
+    fillByLabel(/^password$/i, "123456789012");
+    submitFormIn(container);
 
     await waitFor(() =>
       expect(
@@ -85,12 +82,12 @@ describe("RegisterForm — validation (#35)", () => {
   });
 
   it("flags a missing digit in the password", async () => {
-    ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
-    fillField(/^full name$/i, "Owner Name");
-    fillField(/^company$/i, "Acme Inc");
-    fillField(/^work email$/i, "owner@acme.test");
-    fillField(/^password$/i, "abcdefghijklm");
-    submitForm();
+    const { container } = renderWithProviders(<RegisterForm />, { auth: null });
+    fillByLabel(/^full name$/i, "Owner Name");
+    fillByLabel(/^company$/i, "Acme Inc");
+    fillByLabel(/^work email$/i, "owner@acme.test");
+    fillByLabel(/^password$/i, "abcdefghijklm");
+    submitFormIn(container);
 
     await waitFor(() =>
       expect(
@@ -100,11 +97,11 @@ describe("RegisterForm — validation (#35)", () => {
   });
 
   it("flags a missing full name with the user-facing copy", async () => {
-    ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
-    fillField(/^company$/i, "Acme Inc");
-    fillField(/^work email$/i, "owner@acme.test");
-    fillField(/^password$/i, "verystrongpass1");
-    submitForm();
+    const { container } = renderWithProviders(<RegisterForm />, { auth: null });
+    fillByLabel(/^company$/i, "Acme Inc");
+    fillByLabel(/^work email$/i, "owner@acme.test");
+    fillByLabel(/^password$/i, "verystrongpass1");
+    submitFormIn(container);
 
     await waitFor(() =>
       expect(
@@ -125,14 +122,12 @@ describe("RegisterForm — happy path (#35)", () => {
     );
 
     const pushSpy = vi.fn();
-    const rendered = renderWithProviders(<RegisterForm />, {
+    const { container, queryClient } = renderWithProviders(<RegisterForm />, {
       auth: null,
       router: { push: pushSpy },
     });
-    container = rendered.container;
-    const { queryClient } = rendered;
     fillFullForm();
-    submitForm();
+    submitFormIn(container);
 
     await waitFor(() =>
       expect(toastSuccess).toHaveBeenCalledWith("Account created. Welcome!"),
@@ -170,11 +165,11 @@ describe("RegisterForm — happy path (#35)", () => {
       }),
     );
 
-    ({ container } = renderWithProviders(<RegisterForm />, {
+    const { container } = renderWithProviders(<RegisterForm />, {
       auth: null,
       router: { push: vi.fn() },
       searchParams: { plan: "annual" },
-    }));
+    });
 
     // UI side: heading + upsell banner reflect annual.
     expect(
@@ -183,7 +178,7 @@ describe("RegisterForm — happy path (#35)", () => {
     expect(screen.getByText(/you selected the annual plan/i)).toBeInTheDocument();
 
     fillFullForm();
-    submitForm();
+    submitFormIn(container);
     await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
 
     // Wire side: plan absent from the POST body, even though useSearchParams
@@ -236,12 +231,12 @@ describe("RegisterForm — server-side error copy (#35)", () => {
       );
 
       const pushSpy = vi.fn();
-      ({ container } = renderWithProviders(<RegisterForm />, {
+      const { container } = renderWithProviders(<RegisterForm />, {
         auth: null,
         router: { push: pushSpy },
-      }));
+      });
       fillFullForm();
-      submitForm();
+      submitFormIn(container);
 
       await waitFor(() =>
         expect(toastError).toHaveBeenCalledWith(message),
@@ -273,9 +268,9 @@ describe("RegisterForm — loading state (#35)", () => {
       }),
     );
 
-    ({ container } = renderWithProviders(<RegisterForm />, { auth: null }));
+    const { container } = renderWithProviders(<RegisterForm />, { auth: null });
     fillFullForm();
-    submitForm();
+    submitFormIn(container);
 
     // try/finally so release() runs even if the disabled-button assertion
     // throws — otherwise the MSW handler stays awaiting `settled` forever

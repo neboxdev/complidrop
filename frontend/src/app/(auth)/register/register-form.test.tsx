@@ -25,10 +25,10 @@
  * has its own smoke test in register/page.test.tsx.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import RegisterForm from "./register-form";
-import { submitFormIn } from "@/test";
+import { fillByLabel, submitFormIn } from "@/test";
 
 vi.mock("next/link", () => ({
   __esModule: true,
@@ -147,23 +147,20 @@ describe("RegisterForm — submission payload (#31 Non-goals: no billing)", () =
     mockMutateAsync.mockResolvedValue({});
   });
 
-  // Migrated from fillInputByName(container, "name", ...) to
-  // screen.getByLabelText after #76 wired the htmlFor/id pairs (#132).
-  // The label-based lookup exercises the same a11y wiring screen
-  // readers depend on; the container capture is still used by
-  // submitFormIn, which retains the multi-form guard from #75.
-  function fillField(label: RegExp, value: string) {
-    fireEvent.input(screen.getByLabelText(label), { target: { value } });
-  }
+  // Inputs filled via shared `fillByLabel` helper from `@/test` (#135
+  // lifted the previously per-file shim, label-based after #132). The
+  // container capture stays local because `submitFormIn` retains the
+  // multi-form guard from #75. Single destructure shape across the
+  // file — no module-level `let container`.
 
   it("does not forward the selected plan to /api/auth/register", async () => {
     setPlanParam("annual");
     const { container } = render(<RegisterForm />);
 
-    fillField(/^full name$/i, "Owner Name");
-    fillField(/^company$/i, "Acme Inc");
-    fillField(/^work email$/i, "owner@example.com");
-    fillField(/^password$/i, "verystrong1pass");
+    fillByLabel(/^full name$/i, "Owner Name");
+    fillByLabel(/^company$/i, "Acme Inc");
+    fillByLabel(/^work email$/i, "owner@example.com");
+    fillByLabel(/^password$/i, "verystrong1pass");
 
     submitFormIn(container);
 
