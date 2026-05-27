@@ -50,6 +50,16 @@ function releaseRefresh(): void {
 }
 
 async function doRefresh(): Promise<boolean> {
+  // Bare fetch + bare try/catch — deliberately NOT routed through
+  // fetchOrFriendlyThrow. A network failure here must collapse to
+  // `false` (returned to the caller) so request() then proceeds with
+  // the ORIGINAL 401 response in `res` and throws ApiError via its
+  // existing !res.ok branch (which carries the friendly fallback +
+  // the original 401 status). Routing through fetchOrFriendlyThrow
+  // would instead throw a network.unreachable ApiError that MASKS
+  // the underlying 401 — a regression. The asymmetry has zero
+  // observable effect for callers because the !res.ok path already
+  // surfaces the GENERIC_FALLBACK_MESSAGE.
   try {
     const res = await fetch(`${API_BASE}/api/auth/refresh`, {
       method: "POST",

@@ -686,19 +686,59 @@ describe("api.* — error-envelope → ApiError message mapping (#35)", () => {
       .catch((e) => e as ApiError);
 
     expect(err).toBeInstanceOf(ApiError);
+    // Documented Error-compatibility contract from api.ts: ApiError
+    // extends Error. A future refactor that switched ApiError to a
+    // non-Error class (e.g. POJO) would silently break try/catch sites
+    // and Sentry's auto error-capturer that rely on Error-shape duck
+    // typing. Pin both classes explicitly.
+    expect(err).toBeInstanceOf(Error);
     expect((err as ApiError).message).toBe("Something went wrong. Try again.");
     expect((err as ApiError).code).toBe("network.unreachable");
     // status=0 signals "no HTTP response was received" so callers /
     // Sentry can distinguish a network failure from a 5xx.
     expect((err as ApiError).status).toBe(0);
-    // No raw browser-jargon must leak.
-    expect((err as ApiError).message).not.toMatch(/failed to fetch/i);
-    expect((err as ApiError).message).not.toMatch(/\btypeerror\b/i);
     // Pin the no-retry contract: a network failure must NOT trigger
     // the 401-refresh retry loop. A future refactor that added bare
     // retries on the first fetch would silently regress this without
     // the explicit call-count assertion.
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retry-after-401 + retry network-fails: surfaces friendly network.unreachable, NOT the stale 401 (#77 followup)", async () => {
+    // Combined path #77's review surfaced as untested: initial 401 →
+    // refresh succeeds → retry fetch rejects with TypeError. The
+    // documented behavior is that the proximate (network) failure
+    // wins — surfacing a stale 401 ("Invalid credentials") after a
+    // SUCCESSFUL refresh would mislead the user.
+    //
+    // Also pins the refcount-drain-on-throw contract: even though the
+    // retry threw, the try/finally in request() must still call
+    // releaseRefresh so the next 401 can refresh.
+    let meCalls = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/api/auth/refresh")) {
+        return new Response(null, { status: 204 });
+      }
+      meCalls++;
+      if (meCalls === 1) {
+        // Initial fetch: 401, triggers refresh.
+        return jsonResponse(401, errorEnvelope("auth.unauthorized", "expired"));
+      }
+      // Retry fetch (post-refresh): network-fails.
+      throw new TypeError("Failed to fetch");
+    });
+
+    const err = await api
+      .get("/api/auth/me")
+      .catch((e) => e as ApiError);
+
+    expect(err).toBeInstanceOf(ApiError);
+    // The proximate failure (network, post-refresh) wins, not the
+    // original 401 — surfacing the stale 401 would mislead the user.
+    expect((err as ApiError).code).toBe("network.unreachable");
+    expect((err as ApiError).status).toBe(0);
+    expect((err as ApiError).message).toBe("Something went wrong. Try again.");
   });
 
   it("AbortError (DOMException) is re-thrown unchanged, NOT wrapped as a network failure (#77)", async () => {
