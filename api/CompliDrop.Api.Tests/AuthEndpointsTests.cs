@@ -50,6 +50,103 @@ public sealed class AuthEndpointsTests(IntegrationTestFixture fixture) : Integra
         cookies.Should().Contain(c => c.StartsWith("cd_refresh=") && c.Contains("httponly", StringComparison.OrdinalIgnoreCase));
     }
 
+    // ── #69: the non-httpOnly hint cookie. Every successful auth handshake
+    // (register / login / refresh) MUST set `cd_session_hint=1; Path=/`
+    // WITHOUT the HttpOnly flag — that's the whole point of the cookie:
+    // the SPA reads it via `document.cookie` to gate the landing-page
+    // probe behind `useQuery({ enabled })`. If a future refactor copied
+    // the session-cookie options (with HttpOnly=true) onto the hint by
+    // accident, anonymous visitors would silently pay the auth round-trip
+    // again. The tests below pin the shape so that regression is loud.
+    [Fact]
+    public async Task Register_sets_non_httponly_session_hint_cookie_at_root_path()
+    {
+        var resp = await RawClient().PostAsJsonAsync("/api/auth/register", NewRegistration($"h-{Guid.NewGuid():N}@x.com"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var cookies = SetCookies(resp);
+        var hint = cookies.FirstOrDefault(c => c.StartsWith("cd_session_hint="));
+        hint.Should().NotBeNull("the SPA needs cd_session_hint to skip the landing-page probe (#69)");
+        // CRITICAL invariant: NO HttpOnly flag. The SPA reads this cookie
+        // via document.cookie; an HttpOnly cookie cannot be read from JS,
+        // making the gate always-false and the optimization invisible.
+        hint!.Should().NotContain("httponly", "cd_session_hint MUST be readable from document.cookie — adding HttpOnly silently breaks the #69 optimization");
+        // Path=/ so the landing page (and every other public page) can
+        // read the hint regardless of where the user lands first.
+        hint.Should().Contain("path=/", "the hint must be readable on the landing page surface");
+        // The value is the literal "1" — no PII, no credential, no
+        // identifier. The hint signals presence-of-session-at-some-point
+        // only; the real session/refresh tokens remain httpOnly.
+        CookieValue(cookies, "cd_session_hint").Should().Be("1");
+    }
+
+    [Fact]
+    public async Task Login_sets_non_httponly_session_hint_cookie()
+    {
+        var email = $"login-hint-{Guid.NewGuid():N}@x.com";
+        // Register first to create the account, then login (login is the
+        // surface the ticket calls out explicitly).
+        (await RawClient().PostAsJsonAsync("/api/auth/register", NewRegistration(email))).EnsureSuccessStatusCode();
+
+        var resp = await RawClient().PostAsJsonAsync(
+            "/api/auth/login",
+            new { email, password = "Password1234" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var cookies = SetCookies(resp);
+        var hint = cookies.FirstOrDefault(c => c.StartsWith("cd_session_hint="));
+        hint.Should().NotBeNull();
+        hint!.Should().NotContain("httponly");
+        CookieValue(cookies, "cd_session_hint").Should().Be("1");
+    }
+
+    [Fact]
+    public async Task Refresh_re_issues_the_session_hint_cookie()
+    {
+        // The hint TTL tracks the refresh window: as long as the browser
+        // can still resurrect a session via /api/auth/refresh, the hint
+        // must keep sliding forward. Refresh() calls IssueCookies, which
+        // writes all three; this test pins that the hint comes back with
+        // each refresh so the cookie doesn't expire mid-session-lifecycle.
+        var reg = await RawClient().PostAsJsonAsync("/api/auth/register", NewRegistration($"refresh-hint-{Guid.NewGuid():N}@x.com"));
+        var refreshToken = CookieValue(SetCookies(reg), "cd_refresh");
+        refreshToken.Should().NotBeNullOrEmpty();
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/auth/refresh");
+        req.Headers.TryAddWithoutValidation("Cookie", $"cd_refresh={refreshToken}");
+        var resp = await RawClient().SendAsync(req);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var cookies = SetCookies(resp);
+        cookies.Should().Contain(c => c.StartsWith("cd_session_hint=1") && !c.Contains("httponly", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Logout_clears_the_session_hint_cookie_alongside_session_and_refresh()
+    {
+        // AC #4 from the ticket: logout MUST clear cd_session_hint so a
+        // logged-out user landing back on `/` doesn't fire a stale-hint
+        // probe (re-opening the round-trip #69 was meant to close).
+        // Same shape as cd_session/cd_refresh clearing: Set-Cookie with
+        // empty value + Expires=epoch.
+        var auth = await RegisterAndLoginAsync();
+
+        var resp = await auth.Client.PostAsync("/api/auth/logout", null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var cookies = SetCookies(resp);
+        var hint = cookies.FirstOrDefault(c => c.StartsWith("cd_session_hint="));
+        hint.Should().NotBeNull("logout must overwrite cd_session_hint or the SPA gate stays open after sign-out (#69 AC #4)");
+        // Cleared cookie shape: empty value + Expires header in the past.
+        // The exact format is `expires=Thu, 01 Jan 1970 00:00:00 GMT` in
+        // .NET, but matching just the year keeps the assertion robust to
+        // any future framework-level reformatting while still proving the
+        // expiry is in the deep past.
+        CookieValue(cookies, "cd_session_hint").Should().BeEmpty();
+        hint!.Should().Contain("expires=", "the logout Set-Cookie must carry an explicit past expiry");
+        hint.Should().Contain("1970");
+    }
+
     [Fact]
     public async Task Me_returns_the_authenticated_user()
     {
