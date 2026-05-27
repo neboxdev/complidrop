@@ -16,11 +16,21 @@
  * useful message identifying the form + label.
  */
 import { describe, it, expect } from "vitest";
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import LoginPage from "@/app/(auth)/login/page";
 import RegisterForm from "@/app/(auth)/register/register-form";
 import VendorsPage from "@/app/(dashboard)/vendors/page";
-import { renderWithProviders, authedMe, server, url, jsonOk } from "@/test";
+import VendorDetailPage from "@/app/(dashboard)/vendors/[id]/page";
+import DocumentDetailPage from "@/app/(dashboard)/documents/[id]/page";
+import ExportPage from "@/app/(dashboard)/export/page";
+import {
+  renderWithProviders,
+  authedMe,
+  server,
+  url,
+  jsonOk,
+  makeDocumentDetail,
+} from "@/test";
 import { http } from "msw";
 
 describe("form labels wired via htmlFor + id (#76)", () => {
@@ -55,16 +65,143 @@ describe("form labels wired via htmlFor + id (#76)", () => {
   });
 
   it("VendorsPage create form: every visible label resolves an input via getByLabelText", async () => {
-    // VendorsPage fires GET /api/vendors on mount; default 401 handler
-    // would surface as the error card and the add-vendor form would
-    // still render alongside it. Seed an empty list so the page lands
-    // on its happy path.
+    // VendorsPage fires GET /api/vendors on mount. Seed an empty list
+    // so the page lands on its happy path and `await` the loading row
+    // disappearing — a regression where the create-form moved INSIDE
+    // the loading branch (or behind an error card) would otherwise
+    // false-pass here because the form renders unconditionally today.
     server.use(http.get(url("/api/vendors"), () => jsonOk([])));
     renderWithProviders(<VendorsPage />, { auth: authedMe });
 
+    await waitFor(() =>
+      expect(screen.queryByText(/^loading…$/i)).toBeNull(),
+    );
     expect(screen.getByLabelText(/^name$/i)).toBeInstanceOf(HTMLInputElement);
     expect(screen.getByLabelText(/^contact email$/i)).toBeInstanceOf(
       HTMLInputElement,
     );
+  });
+
+  it("VendorDetailPage: LabeledInput helpers AND the compliance-template select are wired (#76 followup)", async () => {
+    // Pin the per-LabeledInput useId pattern (4 instances on this
+    // page) AND the inline-on-parent useId for the <select> (the
+    // only non-Input form control wired in #76). A regression where
+    // someone re-inlined the label without useId, or dropped the
+    // select's htmlFor, would now fail this test instead of slipping
+    // through unnoticed.
+    server.use(
+      http.get(url("/api/vendors/:id"), () =>
+        jsonOk({
+          id: "v_acme_01",
+          name: "Acme",
+          contactEmail: "ops@acme.test",
+          contactPhone: "+1-555-0100",
+          category: "electrical",
+          complianceTemplateId: null,
+          complianceTemplateName: null,
+          portalLinks: [],
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-05-26T00:00:00Z",
+        }),
+      ),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+    );
+    renderWithProviders(<VendorDetailPage />, {
+      auth: authedMe,
+      params: { id: "v_acme_01" },
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: /acme/i }),
+      ).toBeInTheDocument(),
+    );
+
+    // Four LabeledInput sites.
+    expect(screen.getByLabelText(/^name$/i)).toBeInstanceOf(HTMLInputElement);
+    expect(screen.getByLabelText(/^contact email$/i)).toBeInstanceOf(
+      HTMLInputElement,
+    );
+    expect(screen.getByLabelText(/^contact phone$/i)).toBeInstanceOf(
+      HTMLInputElement,
+    );
+    expect(screen.getByLabelText(/^category$/i)).toBeInstanceOf(
+      HTMLInputElement,
+    );
+    // The one non-Input control: a native <select>. Type-checked
+    // explicitly so a regression that swapped it for an Input (or
+    // vice versa) fails here.
+    expect(screen.getByLabelText(/^compliance template$/i)).toBeInstanceOf(
+      HTMLSelectElement,
+    );
+  });
+
+  it("DocumentDetailPage: dynamic field labels (`docfield-${id}`) are wired per row (#76 followup)", async () => {
+    // The only string-interpolation id pattern in #76. Pins that two
+    // distinct field rows produce non-colliding ids (the contract
+    // that justifies `docfield-${f.id}` over a single useId() that
+    // can't disambiguate per row).
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Completed",
+            fields: [
+              {
+                id: "f-policy-1",
+                fieldName: "PolicyNumber",
+                fieldValue: "POL-12345",
+                fieldType: "string",
+                confidence: 0.95,
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+              {
+                id: "f-exp-1",
+                fieldName: "ExpirationDate",
+                fieldValue: "2026-12-31",
+                fieldType: "string",
+                confidence: 0.92,
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_doc_01" },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText("coi.pdf")).toBeInTheDocument(),
+    );
+    const policy = screen.getByLabelText(/^PolicyNumber$/);
+    const expiration = screen.getByLabelText(/^ExpirationDate$/);
+    expect(policy).toBeInstanceOf(HTMLInputElement);
+    expect(expiration).toBeInstanceOf(HTMLInputElement);
+    // Per-row id uniqueness: the two field inputs must resolve to
+    // DIFFERENT elements. A regression where someone used a single
+    // useId() outside the .map() would collide here.
+    expect(policy).not.toBe(expiration);
+    expect((policy as HTMLInputElement).id).not.toBe(
+      (expiration as HTMLInputElement).id,
+    );
+  });
+
+  it("ExportPage: From/To date labels resolve to date inputs via getByLabelText (#76 followup)", () => {
+    // Missed by the original #76 sweep — the export-page From/To
+    // labels were the only dashboard form-control labels not touched.
+    // Now wired.
+    renderWithProviders(<ExportPage />, { auth: authedMe });
+
+    const from = screen.getByLabelText(/^from$/i);
+    const to = screen.getByLabelText(/^to$/i);
+    expect(from).toBeInstanceOf(HTMLInputElement);
+    expect((from as HTMLInputElement).type).toBe("date");
+    expect(to).toBeInstanceOf(HTMLInputElement);
+    expect((to as HTMLInputElement).type).toBe("date");
   });
 });
