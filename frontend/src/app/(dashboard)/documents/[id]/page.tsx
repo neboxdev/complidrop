@@ -10,6 +10,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { StaleDataBanner } from "@/components/StaleDataBanner";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
 
@@ -62,6 +63,16 @@ export default function DocumentDetailPage() {
     queryKey: ["documents", params.id],
     queryFn: () => api.get<DocDetail>(`/api/documents/${params.id}`),
     refetchInterval: (q) => {
+      // Short-circuit polling when the query is in an error state, even
+      // if `state.data?.extractionStatus` is still Pending/Processing on
+      // the LAST successful payload. A brown-out where the document
+      // endpoint is failing should NOT keep firing every 3 s — the
+      // Try-again button on the StaleDataBanner (rendered below) is the
+      // manual recovery affordance, and a successful refetch flips
+      // status back to 'success' so polling resumes naturally.
+      // Symmetric with `useDocuments`'s refetchInterval (#80 followup);
+      // pinned by the "stops polling on error" test below. (#97)
+      if (q.state.status === "error") return false;
       const s = q.state.data?.extractionStatus;
       return s === "Pending" || s === "Processing" ? 3000 : false;
     },
@@ -126,6 +137,23 @@ export default function DocumentDetailPage() {
           )}
         </div>
       </header>
+
+      {detail.isError && (
+        // Polling failed while cached detail is still rendered (we're
+        // past the `!detail.data` early-return above, so data is
+        // present). Surface the failure as a discreet banner so the
+        // user knows the field values / status badges below may not
+        // reflect the latest extraction state — the polling
+        // short-circuits on error above so the backend isn't
+        // hammered while the banner is visible. Symmetric with the
+        // documents-list treatment. (#97)
+        <StaleDataBanner
+          message={detail.error?.message}
+          onRetry={() => detail.refetch()}
+          isRetrying={detail.isFetching}
+          noun="document"
+        />
+      )}
 
       <section className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
         <SummaryCell label="Extraction" value={
