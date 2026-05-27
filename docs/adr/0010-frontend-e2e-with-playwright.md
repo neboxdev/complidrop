@@ -69,7 +69,7 @@ The backend test tree at [`api/CompliDrop.Api.Tests/ExtractionFixtures/`](../../
 - Cross-page flows have a real safety net — the layer Vitest cannot prove now has one.
 - Network-mocked-by-default + pinned-unreachable backend means the suite cannot be the source of an accidental Stripe charge, a real-tenant data leak, or a Resend test email to a real address.
 - The secret-scan gate is mechanical — engineers do not need to remember not to leak cookie values; the build fails if they do.
-- Smoke-only set (3 flows in #39) is bounded; the suite stays fast (target < 90s on CI Chromium-only).
+- Smoke-only set (3 flows in #39, +1 from #90 = 4 authed flows under `frontend/e2e/smoke/`) is bounded; the suite stays fast (target < 90s on CI Chromium-only).
 - A single retry policy is conservative enough that a red E2E means SOMETHING is genuinely broken; we don't normalize flakes.
 
 ### Negative
