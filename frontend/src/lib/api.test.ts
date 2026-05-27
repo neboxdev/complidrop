@@ -12,7 +12,7 @@
  *   - regresses the default-refresh behavior used by every other GET.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError } from "./api";
+import { api, ApiError, GENERIC_FALLBACK_MESSAGE } from "./api";
 
 type FetchCall = { url: string; method: string };
 
@@ -812,21 +812,85 @@ describe("api.* — error-envelope → ApiError message mapping (#35)", () => {
     expect((err as ApiError).message).toBe("Something went wrong. Try again.");
   });
 
-  it("AbortError (DOMException) is re-thrown unchanged, NOT wrapped as a network failure (#77)", async () => {
-    // A future caller passing an AbortSignal (e.g. TanStack Query's
-    // built-in queryFn cancellation on unmount) needs the abort to
-    // surface as cancellation, NOT as a real-looking network error
-    // toast. api.ts deliberately re-throws DOMException("AbortError")
-    // instead of wrapping it in ApiError("network.unreachable").
-    fetchMock.mockRejectedValueOnce(new DOMException("aborted", "AbortError"));
+  // AbortError pass-through — parametrized across BOTH the
+  // DOMException variant (default `controller.abort()`) AND the
+  // custom-reason variant (`controller.abort(errorWithAbortErrorName)`)
+  // per #118. The predicate in fetchOrFriendlyThrow widened from
+  // `instanceof DOMException` to `instanceof Error` to cover both
+  // — a single it.each block keeps the two cases co-located so a
+  // regression that narrowed the check back to DOMException-only
+  // fails the second case loudly.
+  it.each([
+    {
+      name: "DOMException (default controller.abort())",
+      rejection: new DOMException("aborted", "AbortError"),
+    },
+    {
+      // Modern AbortSignal spec lets callers pass a custom reason
+      // via `controller.abort(reason)`; fetch rejects with that
+      // reason directly. Convention is an Error with
+      // `.name === "AbortError"` so consumers can detect it
+      // uniformly. The previous `instanceof DOMException` check
+      // mis-converted this into a network-failure toast.
+      // (#118 — surfaced by the #77 post-merge review.)
+      name: "plain Error with name === 'AbortError' (custom controller.abort(reason))",
+      rejection: Object.assign(new Error("user-cancelled"), {
+        name: "AbortError",
+      }),
+    },
+  ])(
+    "AbortError pass-through: $name is re-thrown unchanged, NOT wrapped as a network failure (#77 / #118)",
+    async ({ rejection }) => {
+      // A future caller passing an AbortSignal (e.g. TanStack Query's
+      // built-in queryFn cancellation on unmount) needs the abort to
+      // surface as cancellation, NOT as a real-looking network error
+      // toast. api.ts deliberately re-throws the original error
+      // instead of wrapping it in ApiError("network.unreachable").
+      fetchMock.mockRejectedValueOnce(rejection);
+
+      const err = await api
+        .post("/api/auth/login", {})
+        .catch((e) => e as Error);
+
+      // Came back as the original rejection (DOMException OR plain
+      // Error), NOT an ApiError. The assertion uses the SAME
+      // (Error || DOMException) union shape as the production
+      // predicate in fetchOrFriendlyThrow — because jsdom's
+      // DOMException polyfill doesn't extend Error, a bare
+      // `instanceof Error` here would false-fail on the
+      // DOMException case in this test environment even though
+      // the production runtime treats DOMException as Error.
+      const isErrorLike =
+        err instanceof Error || err instanceof DOMException;
+      expect(isErrorLike).toBe(true);
+      expect((err as Error | DOMException).name).toBe("AbortError");
+      expect(err).not.toBeInstanceOf(ApiError);
+      // Identity check: the SAME object the caller passed to
+      // `controller.abort(reason)` must reach the caller's catch
+      // handler unchanged — a regression that wrapped + re-threw
+      // (instead of bare re-throw) would lose reference equality.
+      expect(err).toBe(rejection);
+    },
+  );
+
+  it("non-AbortError Error (e.g. plain new Error('boom')) is wrapped as network.unreachable, NOT passed through (#118 negative)", async () => {
+    // Pin the negative half of the #118 widening: now that the
+    // predicate is `instanceof Error` (not `instanceof DOMException`),
+    // a future regression could over-broaden it by dropping the
+    // `name === "AbortError"` clause and silently letting ANY Error
+    // through. This test catches that regression by feeding a plain
+    // Error with the default name "Error" — it MUST still convert
+    // to the friendly ApiError("network.unreachable"), not bubble up
+    // raw. Symmetric guard with the positive cases above.
+    fetchMock.mockRejectedValueOnce(new Error("boom"));
 
     const err = await api
       .post("/api/auth/login", {})
       .catch((e) => e as Error);
 
-    // Came back as the original DOMException, NOT an ApiError.
-    expect(err).toBeInstanceOf(DOMException);
-    expect((err as DOMException).name).toBe("AbortError");
-    expect(err).not.toBeInstanceOf(ApiError);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).code).toBe("network.unreachable");
+    expect((err as ApiError).status).toBe(0);
+    expect((err as ApiError).message).toBe(GENERIC_FALLBACK_MESSAGE);
   });
 });
