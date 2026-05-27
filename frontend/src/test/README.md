@@ -113,6 +113,8 @@ expect(calls).toBeGreaterThanOrEqual(3);
 
 The handler clamps to the LAST response after the list is exhausted — matches the "terminal state stays terminal" contract of `refetchInterval` predicates that return `false` once the response reaches a terminal status.
 
+**Limitation:** `sequencedJsonOk` wraps every element in `jsonOk` — sequences are success-only. Mixed jsonOk/jsonError sequences (e.g. first call 200, second call 5xx, third call 200) keep the hand-rolled `let calls = 0; if (calls === 1) jsonError(...); return jsonOk(...)` shape; see the retry-on-5xx tests in `documents/page.test.tsx` for the canonical mixed-response form.
+
 **Gotchas** (the helper does NOT solve these for you):
 
 - `vi.useFakeTimers({ shouldAdvanceTime: true })` is REQUIRED for RTL's `waitFor` to work — without it the `waitFor` polling loop blocks on the fake-timer queue.
