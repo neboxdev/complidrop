@@ -2,7 +2,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import Home from "./page";
-import { KNOWN_PLANS } from "./(auth)/register/register-form";
+// Direct import from the source-of-truth module (#71 followup) —
+// the previous test imported from `(auth)/register/register-form`
+// via a re-export shim, which crossed route boundaries unnecessarily.
+import { KNOWN_PLAN_IDS } from "@/lib/plans";
 
 // next/link needs a router context in a real app; in unit tests render it as a plain anchor
 // so we can assert exactly which routes the landing-page CTAs point at.
@@ -35,7 +38,7 @@ describe("Landing page CTAs", () => {
     // pricing CTA on the landing page — otherwise the round-trip (#31) is
     // broken on one side: either a CTA emits a plan register-form falls back
     // to free for, or a plan register-form supports has no CTA pointing at it.
-    for (const plan of KNOWN_PLANS) {
+    for (const plan of KNOWN_PLAN_IDS) {
       expect(hrefs).toContain(`/register?plan=${plan}`);
     }
     // the waitlist gate is gone, in links and in copy

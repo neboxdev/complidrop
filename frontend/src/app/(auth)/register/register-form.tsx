@@ -37,10 +37,9 @@ type RegisterForm = z.infer<typeof schema>;
 //
 // Plan ids + display copy live in src/lib/plans.ts — the single source of truth
 // across the landing page, this form, the opengraph image, and the settings
-// page (#71). KNOWN_PLANS is re-exported so the landing-page test can iterate
-// the same set to assert every plan has a corresponding /register?plan=X CTA.
-import { KNOWN_PLAN_IDS, parsePlanId, PLANS, type PlanId } from "@/lib/plans";
-export const KNOWN_PLANS = KNOWN_PLAN_IDS;
+// page (#71). The landing-page test imports `KNOWN_PLAN_IDS` directly from
+// `@/lib/plans` (#71 followup — the cross-route re-export shim was removed).
+import { parsePlanId, PLANS, type PlanId } from "@/lib/plans";
 
 // Per-plan banner heading/subtitle stays here; the banner BODY copy
 // (with the dollar values) lives in PLANS so it can't drift from the

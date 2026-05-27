@@ -16,6 +16,7 @@ import { ImageResponse } from "next/og";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { BRAND_COLORS, CHECK_PATH, DROPLET_PATH } from "@/lib/brand";
+import { PLANS } from "@/lib/plans";
 
 export const alt = "CompliDrop — Stop Chasing Paper. Start Dropping Docs.";
 export const size = { width: 1200, height: 630 };
@@ -117,7 +118,7 @@ export default async function OpenGraphImage() {
             display: "flex",
           }}
         >
-          AI compliance tracking for COIs, licenses &amp; permits — $49 / mo
+          AI compliance tracking for COIs, licenses &amp; permits — {PLANS.pro.monthlyPriceLabel} / mo
         </div>
       </div>
     ),
