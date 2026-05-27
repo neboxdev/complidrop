@@ -152,11 +152,35 @@ async function fetchOrFriendlyThrow(
   // jargon-free and `err.status === 0` signals "never reached the
   // server" without leaking the browser's raw TypeError string.
   //
-  // AbortError (DOMException) is deliberately re-thrown unchanged. A
-  // future caller that passes an AbortSignal (e.g. via TanStack
-  // Query's `queryFn({ signal })`) needs the cancellation to surface
-  // as a cancellation, NOT as a network error — otherwise an unmount
-  // / route-change mid-fetch would trigger a real-looking toast.
+  // AbortError is deliberately re-thrown unchanged. A future caller
+  // that passes an AbortSignal (e.g. via TanStack Query's `queryFn
+  // ({ signal })`) needs the cancellation to surface as a
+  // cancellation, NOT as a network error — otherwise an unmount /
+  // route-change mid-fetch would trigger a real-looking toast.
+  //
+  // The check matches both abort variants the modern AbortSignal
+  // spec emits:
+  //   - Default `controller.abort()` → fetch rejects with a
+  //     DOMException whose `.name === "AbortError"`.
+  //   - Custom `controller.abort(reason)` where the reason is an
+  //     Error subclass with `.name === "AbortError"` (the
+  //     convention for cancellation Errors) → fetch rejects with
+  //     that Error directly, NOT a DOMException.
+  //
+  // The `(Error || DOMException)` union check is deliberate even
+  // though modern production runtimes (Node 18+, current browsers)
+  // make `DOMException extends Error` — so a bare `instanceof
+  // Error` would cover both. The redundancy guards the JEST/JSDOM
+  // test environment, where `new DOMException("...", "AbortError")
+  // instanceof Error` returns FALSE because jsdom's polyfill
+  // doesn't extend Error. Verified empirically by the parametrized
+  // AbortError pass-through test in api.test.ts (the
+  // `isErrorLike` assertion mirrors this predicate by design); a
+  // future "simplification" to bare `instanceof Error` would fail
+  // that test in the DOMException row. The belt-and-suspenders
+  // pattern keeps production and test parity without forcing
+  // jsdom-specific test rigging. (#118 — latent fragility
+  // surfaced by the #77 review.)
   //
   // doRefresh() at the top of this module keeps its own bare-fetch
   // try/catch returning false; only request()'s body calls funnel
@@ -164,7 +188,12 @@ async function fetchOrFriendlyThrow(
   try {
     return await fetch(url, init);
   } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    if (
+      (err instanceof Error || err instanceof DOMException) &&
+      err.name === "AbortError"
+    ) {
+      throw err;
+    }
     throw new ApiError("network.unreachable", GENERIC_FALLBACK_MESSAGE, 0);
   }
 }
