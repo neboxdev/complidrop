@@ -25,10 +25,10 @@
  * has its own smoke test in register/page.test.tsx.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import RegisterForm from "./register-form";
-import { fillInputByName } from "@/test";
+import { fillInputByName, submitFormIn } from "@/test";
 
 vi.mock("next/link", () => ({
   __esModule: true,
@@ -163,7 +163,7 @@ describe("RegisterForm — submission payload (#31 Non-goals: no billing)", () =
     setField(container, "email", "owner@example.com");
     setField(container, "password", "verystrong1pass");
 
-    fireEvent.submit(container.querySelector("form")!);
+    submitFormIn(container);
 
     await waitFor(() => expect(mockMutateAsync).toHaveBeenCalled());
     const payload = mockMutateAsync.mock.calls[0][0] as Record<string, unknown>;
