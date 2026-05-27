@@ -110,8 +110,11 @@ export function jsonError(code: string, message: string, status = 400) {
  *     await page.locator('input[type="file"]').setInputFiles(file);
  *     await response;
  *
- * `status`: defaults to "any 2xx-5xx" — pass an exact number (e.g.
- *   200, 429) to pin the success or error path.
+ * `status`: defaults to "any HTTP status" (the predicate applies no
+ *   status filter when `status` is undefined). Pass an exact number
+ *   (e.g. 200, 429) to pin the success or error path. In practice
+ *   Playwright's `waitForResponse` surfaces only non-1xx, non-
+ *   intermediate-3xx responses, but the helper does not enforce that.
  * `timeout`: defaults to 15s, matches the project's existing inline
  *   `waitForResponse` calls.
  */
@@ -144,6 +147,13 @@ export function waitForApi(
  * Exported so `waitForApi` can use the same matcher the `mockApi`
  * route table uses — the route declaration and its wait must agree on
  * what a `:token` matches.
+ *
+ * Contract for `actual`: must be a URL PATHNAME — no scheme, no host,
+ * no query string, no hash fragment. Both current callers extract
+ * `new URL(res.url()).pathname` before invoking this function; a
+ * future caller passing a full URL would silently fail to match
+ * (segment counts diverge once `https://` and the host split on `/`)
+ * and the test would just hit its timeout.
  */
 export function pathMatches(template: string, actual: string): boolean {
   if (template.includes("//")) {

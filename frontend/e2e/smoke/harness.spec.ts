@@ -12,7 +12,7 @@
  * downstream E2E ticket is paused until it's green again.
  */
 import { test, expect } from "@playwright/test";
-import { mockApi, jsonError } from "../support/mock-api";
+import { mockApi, jsonError, waitForApi } from "../support/mock-api";
 
 test.describe("E2E harness sanity (#38)", () => {
   test("the mock interceptor fires AND the landing-page logged-out CTA renders", async ({ page }) => {
@@ -30,10 +30,9 @@ test.describe("E2E harness sanity (#38)", () => {
     // Pin that the mock REALLY fires — without this, the test would
     // pass even if the interceptor was misconfigured (the landing
     // page's static SSR shell renders fine before any /api call). The
-    // waitForResponse must come BEFORE goto so the listener is armed.
-    const meResponse = page.waitForResponse(
-      (res) => res.url().includes("/api/auth/me") && res.status() === 401,
-    );
+    // waitForApi must come BEFORE goto so the listener is armed.
+    // (Migrated from inline url.includes — #91 followup.)
+    const meResponse = waitForApi(page, "GET", "/api/auth/me", { status: 401 });
 
     await page.goto("/");
     await meResponse;
