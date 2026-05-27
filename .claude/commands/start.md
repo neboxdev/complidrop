@@ -104,11 +104,14 @@ Severity orders the fixing (blockers first), but does NOT decide whether to fix.
 3. **Fix every `kind: bug` finding**, regardless of severity. Blockers first, then majors, then minors.
 4. Re-run tests after fixes. They must still pass.
 5. After all bugs fixed, re-run the affected reviewers once more to verify nothing new surfaced from the fixes.
-6. **Triage every `kind: suggestion` finding three ways** — "listed in the PR body but not fixed" is NOT a valid outcome:
-   - **Implement in this PR** (default). Polish, missing test edges, small refactors, ADRs. Commit them as a `fix(scope): address review findings (#N)` commit alongside the bug fixes.
-   - **Defer to a follow-up ticket** — only when the suggestion expands scope, changes data semantics, or contradicts the reviewer's own caveat (e.g. "MVP no-op", "don't introduce prophylactically"). Use `mcp__ccd_session__spawn_task` (or `gh issue create`) with the reviewer's reasoning copied verbatim. List the new ticket id(s) in the PR body. **If the deferred finding is a bug or latent issue** (defect, race, TZ/multi-instance assumption, contract ambiguity producing wrong client behavior), apply the `bug` label — the rolling bug-fix epic [#48](https://github.com/neboxdev/complidrop/issues/48) auto-syncs from that label via `.github/workflows/bugfix-epic-sync.yml`.
+6. **Triage every `kind: suggestion` finding — strong default is implement in this PR.** Target: **≥99% of suggestions land in the same session.** "Listed in the PR body but not fixed" is NOT a valid outcome:
+   - **Implement in this PR** (overwhelming default). Polish, missing test edges, small refactors, ADRs, mid-sized cleanups — all of it. Even when the change is non-trivial, absorb it here unless one of the two exceptions below applies. Commit as `fix(scope): address review findings (#N)` alongside the bug fixes.
+   - **Defer to a follow-up ticket** — **rare; permitted only when ONE of these holds:**
+     1. **Strictly necessary.** The suggestion changes data semantics or a public API contract, needs its own ADR / spec conversation, or the reviewer explicitly flagged it as deferred-to-later (e.g. "MVP no-op", "don't introduce prophylactically"). "It's a bigger refactor" alone is NOT sufficient — absorb it.
+     2. **5-hour Claude session budget is approaching its cap** with the bug-fix queue and core suggestions not yet drained. In that case defer the smallest still-pending suggestions last; **never defer a `bug`-kind finding** on this exception — always finish the bugs.
+     File a real GitHub issue via `gh issue create --title "[task|bug] …" --label "task,…" --body-file .claude/ticket-*.md`. **Never `mcp__ccd_session__spawn_task`** — chips bypass the bug-fix epic and the team backlog. Copy the reviewer's reasoning verbatim. List the new ticket id(s) AND the deferral reason (necessity vs. budget) in the PR body. **If the deferred finding is a bug or latent issue** (defect, race, TZ/multi-instance assumption, contract ambiguity producing wrong client behavior), apply the `bug` label — the rolling bug-fix epic [#48](https://github.com/neboxdev/complidrop/issues/48) auto-syncs from that label via `.github/workflows/bugfix-epic-sync.yml`.
    - **Discard** — only when the suggestion contradicts a project rule (CLAUDE.md, an existing ADR, the ticket's Non-goals). List discards in the PR body with the rule cited.
-   When unsure between implement and defer, default to implement if the change is <30 lines.
+   When unsure between implement and defer, **implement**.
 7. If any bug fix requires a design change contradicting the ticket, stop and ask the user — do not silently diverge.
 
 ## Phase 6: PR
