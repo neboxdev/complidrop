@@ -137,6 +137,13 @@ public class Adr0009EnforcementTests
     /// the count of files actually scanned (so callers can guard
     /// against a silent zero-file no-op).
     ///
+    /// Reports <em>ALL</em> violations per file — not just the first.
+    /// A multi-violation file (rare today since production is at
+    /// zero-violations) lists every hit so the contributor can fix
+    /// them in a single pass instead of running the gate N times for
+    /// N violations in the same file. (<see href="https://github.com/neboxdev/complidrop/issues/142">#142</see>,
+    /// <see href="https://github.com/neboxdev/complidrop/issues/64">#64</see> followup.)
+    ///
     /// Pure relative to its inputs — takes the root + allow-list,
     /// reads from disk, returns the result. Internal so hermetic
     /// fixture tests can drive it against a synthetic <c>%TEMP%</c>
@@ -187,14 +194,20 @@ public class Adr0009EnforcementTests
 
                 if (allowList.ContainsKey(relative))
                 {
-                    // Allow-listed — clause 3 legitimate.
+                    // Allow-listed — clause 3 legitimate. The entire
+                    // file is exempt, so the rest of its lines can be
+                    // skipped (no further matches in this file can
+                    // produce a violation).
                     break;
                 }
 
                 violations.Add($"  {relative}:{i + 1}: {lines[i].Trim()}");
-                // First hit per file is enough; the message lists the
-                // file so the contributor can grep the rest themselves.
-                break;
+                // No `break` here — continue scanning the file to
+                // report ALL violations, not just the first. (#142)
+                // A future migration squash that consolidates several
+                // backfills could land multiple `AT TIME ZONE` sites
+                // in one file; reporting all of them at once spares
+                // the contributor N rebuild cycles where 1 would do.
             }
         }
         return (violations, scanned);
@@ -365,6 +378,54 @@ public class Adr0009EnforcementTests
             violations.Should().BeEmpty(
                 "every `AT TIME ZONE` occurrence in the fixture lives inside a " +
                 "comment line; the scanner must skip all four shapes.");
+        }
+        finally
+        {
+            Directory.Delete(temp, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Scanner_reports_all_violations_in_a_single_file_under_a_temp_root()
+    {
+        // Pins the #142 behavior: when a single file contains MULTIPLE
+        // non-comment `AT TIME ZONE` sites, the scanner surfaces every
+        // one in a single test-failure message — not just the first.
+        // A `break;` regression that re-truncated to first-hit-per-file
+        // would fail this test loudly. Without this fixture the new
+        // behavior is only verified by the production tree's all-clean
+        // state (which can't disambiguate "0 matched" from "1 matched
+        // and break-ed out after the first").
+        var temp = Directory.CreateTempSubdirectory("adr0009-multi-").FullName;
+        try
+        {
+            var fixture = Path.Combine(temp, "Worker.cs");
+            // Three distinct non-comment `AT TIME ZONE` sites, each on
+            // its own line number so the formatted violation strings
+            // are unambiguous. Mix of `AT TIME ZONE` casings to keep
+            // the case-insensitive contract honest.
+            File.WriteAllText(
+                fixture,
+                "var a = \"SELECT now() AT TIME ZONE 'utc'\";\n" +
+                "var b = \"UPDATE t SET ts = now() at time zone 'America/Denver'\";\n" +
+                "var c = \"DELETE FROM t WHERE ts < (now() At Time Zone 'utc')\";\n");
+
+            var (violations, scanned) = FindViolations(
+                temp,
+                new Dictionary<string, string>());
+
+            scanned.Should().Be(1, "the temp tree contains exactly one .cs file");
+            violations.Should().HaveCount(3,
+                "all three non-comment `AT TIME ZONE` sites in the single fixture " +
+                "file must surface — a `break;` regression that truncated to the " +
+                "first hit per file would fail this assertion (#142).");
+
+            // Pin that each line number is reported individually — a
+            // future refactor that collapsed multi-hits into a single
+            // "violations: 3" summary would also fail loudly.
+            violations.Should().Contain(v => v.Contains("Worker.cs:1:"));
+            violations.Should().Contain(v => v.Contains("Worker.cs:2:"));
+            violations.Should().Contain(v => v.Contains("Worker.cs:3:"));
         }
         finally
         {
