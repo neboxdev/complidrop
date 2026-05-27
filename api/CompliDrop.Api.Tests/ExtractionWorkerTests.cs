@@ -317,7 +317,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     // ----- Zombie reclaim (the "claimed-but-never-processed hang" half of the fix) ------------
 
     [Fact]
-    public async Task Stale_processing_document_is_reclaimed_after_the_zombie_timeout()
+    public async Task Stale_processing_document_just_past_the_zombie_threshold_is_reclaimed()
     {
         // Boundary-tight: ProcessingStartedAt is 30 seconds PAST the 5-min
         // zombie threshold (-5m30s). The 30 s envelope absorbs the elapsed
@@ -353,7 +353,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     }
 
     [Fact]
-    public async Task Recently_claimed_processing_document_is_not_reclaimed()
+    public async Task Recently_claimed_processing_document_just_before_the_zombie_threshold_is_not_reclaimed()
     {
         // Boundary-tight: ProcessingStartedAt is 30 seconds BEFORE the 5-min
         // zombie threshold (-4m30s). See the stale-boundary docstring above
