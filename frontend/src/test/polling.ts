@@ -83,20 +83,22 @@ import { jsonOk } from "./helpers";
  *   handler with zero responses is always a programming error.
  */
 export function sequencedJsonOk<T>(...responses: T[]): () => Response {
+  // Empty-check is duplicated here (not delegated to sequencedResponses)
+  // so the call-site RangeError message reads naturally — "at least one
+  // response is required" matches what a sequencedJsonOk caller meant
+  // to say, even though the runtime behavior delegates to
+  // sequencedResponses below. (#124 review)
   if (responses.length === 0) {
     throw new RangeError(
       "sequencedJsonOk: at least one response is required",
     );
   }
-  let calls = 0;
-  return () => {
-    // Index clamps to the last response after it's exhausted so a
-    // terminal-state poll-stop test that does one extra advance to
-    // confirm "no further polls" gets the same terminal payload again.
-    const index = Math.min(calls, responses.length - 1);
-    calls++;
-    return jsonOk(responses[index]);
-  };
+  // Delegate to sequencedResponses so the terminal-clamp + counter +
+  // closure-scoping invariants live in ONE place. A bug in those
+  // invariants now surfaces in BOTH helpers' contract tests, removing
+  // the "the two helpers silently drift in subtle ways" failure mode
+  // the parallel-bodies pattern would have invited. (#124 review)
+  return sequencedResponses(...responses.map((r) => () => jsonOk(r)));
 }
 
 /**

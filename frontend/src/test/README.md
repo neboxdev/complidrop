@@ -123,7 +123,7 @@ import { sequencedResponses, jsonOk, jsonError } from "@/test";
 let calls = 0;
 const seq = sequencedResponses(
   () => jsonError("server.error", "DB blip.", { status: 500 }),
-  () => jsonOk(makeDocumentsResponse({ items: [...], total: 1 })),
+  () => jsonOk(makeDocumentsResponse({ items: [], total: 0 })),
 );
 server.use(
   http.get(url("/api/documents"), () => {
