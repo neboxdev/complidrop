@@ -26,13 +26,15 @@ import {
   authedMe,
   makeDocumentDetail,
   sequencedJsonOk,
+  toastSuccess,
+  toastError,
 } from "@/test";
 
 // sonner mock is provided by the harness (vitest.setup.ts +
-// src/test/sonner.ts). This file doesn't assert on toast calls — the
-// reextract / saveFields mutation paths that fire toasts are not
-// driven by any test here. If a future test needs to assert on a
-// toast, add `toastSuccess` / `toastError` to the @/test import. (#74)
+// src/test/sonner.ts). The toastSuccess / toastError spy references
+// imported above pin the reextract + saveFields mutation toast paths
+// (#122) — `resetSonner()` runs in the harness `afterEach` so call
+// counts never leak between tests.
 
 describe("DocumentDetailPage — basic states (#36)", () => {
   it("isLoading: renders the loading copy", () => {
@@ -669,5 +671,216 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
     const afterFailed = calls;
     await vi.advanceTimersByTimeAsync(10_000);
     expect(calls).toBe(afterFailed);
+  });
+});
+
+describe("DocumentDetailPage — reextract mutation toasts (#122 / #74 followup)", () => {
+  it("reextract success: toast.success fires with the documented queued copy", async () => {
+    // The detail page renders a Re-extract button in the header; clicking it
+    // POSTs /api/documents/:id/reextract. On 200 the mutation's onSuccess
+    // fires `toast.success("Re-extraction queued")` — copy that the support
+    // team has been trained to spot in screenshots when triaging COI/permit
+    // extraction failures. Pin the EXACT copy so a future contributor who
+    // "tones down" the message ("Queued.") breaks this test deliberately
+    // rather than silently changing the support runbook.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Failed",
+            processingError: "OCR confidence below threshold.",
+          }),
+        ),
+      ),
+      http.post(url("/api/documents/:id/reextract"), () =>
+        jsonOk<void>(undefined),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_reextract_ok_01" },
+    });
+
+    // Wait for the detail to land — Re-extract button is only rendered
+    // alongside the loaded header (the loading / 404 / 5xx branches all
+    // return early above the header).
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: /re-extract/i }),
+    );
+    fireEvent.click(button);
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
+    expect(toastSuccess).toHaveBeenCalledWith("Re-extraction queued");
+    // Negative — the error toast spy stays untouched on the success path.
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("reextract 5xx: toast.error fires with the server message (#77 jargon-free contract)", async () => {
+    // The server message arrives via the api.ts ApiError envelope and is
+    // already jargon-free per #77's `fetchOrFriendlyThrow` contract (no
+    // raw `statusText`, no browser TypeError). The mutation's onError
+    // pulls it off the ApiError and forwards to `toast.error(message)`;
+    // a regression that hardcoded a "Re-extract failed" fallback string
+    // would lose the diagnostic value of the server's actual message
+    // ("Extraction queue is at capacity, please retry in a few minutes.").
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Failed",
+            processingError: "OCR confidence below threshold.",
+          }),
+        ),
+      ),
+      http.post(url("/api/documents/:id/reextract"), () =>
+        jsonError(
+          "extraction.queue_at_capacity",
+          "Extraction queue is at capacity, please retry in a few minutes.",
+          { status: 503 },
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_reextract_err_01" },
+    });
+
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: /re-extract/i }),
+    );
+    fireEvent.click(button);
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    expect(toastError).toHaveBeenCalledWith(
+      "Extraction queue is at capacity, please retry in a few minutes.",
+    );
+    // Pin the negatives the #77 jargon-free contract demands — even
+    // though the test message above doesn't contain these strings,
+    // a regression that swapped `err.message` for `res.statusText` or
+    // interpolated the status code would surface here on the error
+    // toast spy's recorded arguments.
+    const args = toastError.mock.calls[0]?.[0];
+    expect(typeof args).toBe("string");
+    expect(args).not.toMatch(/service unavailable/i);
+    expect(args).not.toMatch(/\b503\b/);
+    expect(toastSuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe("DocumentDetailPage — saveFields mutation toasts (#122 / #74 followup)", () => {
+  it("saveFields success: toast.success fires with the save-confirmation copy", async () => {
+    // To reach the saveFields path the test must (a) load a doc with at
+    // least one field rendered, (b) edit that field's input to populate
+    // the `edits` state and enable the Save changes button, then (c)
+    // click the button. The PUT lands a 200 → onSuccess clears `edits`,
+    // invalidates the query, and fires `toast.success("Fields updated")`.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Completed",
+            fields: [
+              {
+                id: "f1",
+                fieldName: "PolicyNumber",
+                fieldValue: "POL-OLD-001",
+                fieldType: "string",
+                confidence: 0.91,
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+            ],
+          }),
+        ),
+      ),
+      http.put(url("/api/documents/:id/fields"), () =>
+        jsonOk<void>(undefined),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_save_ok_01" },
+    });
+
+    const input = await waitFor(() =>
+      screen.getByDisplayValue("POL-OLD-001"),
+    );
+    // Edit the input → populates edits → enables Save changes.
+    fireEvent.change(input, { target: { value: "POL-NEW-002" } });
+
+    const save = screen.getByRole("button", { name: /save changes/i });
+    await waitFor(() => expect(save).not.toBeDisabled());
+    fireEvent.click(save);
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
+    expect(toastSuccess).toHaveBeenCalledWith("Fields updated");
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("saveFields 409 conflict: toast.error fires with the server conflict message", async () => {
+    // A 409 conflict from /api/documents/:id/fields is the realistic
+    // failure shape — e.g. the document was reextracted between when
+    // the user opened the page and when they clicked save, invalidating
+    // the field row ids the PUT was targeting. The server message
+    // ("Document has been reextracted; reload to see the latest fields.")
+    // is what the user needs to recover. Pin that toast.error fires
+    // with that EXACT server message, not a hardcoded "Save failed"
+    // fallback.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Completed",
+            fields: [
+              {
+                id: "f1",
+                fieldName: "PolicyNumber",
+                fieldValue: "POL-OLD-001",
+                fieldType: "string",
+                confidence: 0.91,
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+            ],
+          }),
+        ),
+      ),
+      http.put(url("/api/documents/:id/fields"), () =>
+        jsonError(
+          "documents.stale_fields",
+          "Document has been reextracted; reload to see the latest fields.",
+          { status: 409 },
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_save_err_01" },
+    });
+
+    const input = await waitFor(() =>
+      screen.getByDisplayValue("POL-OLD-001"),
+    );
+    fireEvent.change(input, { target: { value: "POL-NEW-002" } });
+
+    const save = screen.getByRole("button", { name: /save changes/i });
+    await waitFor(() => expect(save).not.toBeDisabled());
+    fireEvent.click(save);
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    expect(toastError).toHaveBeenCalledWith(
+      "Document has been reextracted; reload to see the latest fields.",
+    );
+    // #77 jargon-free invariant — no raw status text or interpolated
+    // HTTP code leaked.
+    const args = toastError.mock.calls[0]?.[0];
+    expect(typeof args).toBe("string");
+    expect(args).not.toMatch(/conflict/i);
+    expect(args).not.toMatch(/\b409\b/);
+    expect(toastSuccess).not.toHaveBeenCalled();
   });
 });
