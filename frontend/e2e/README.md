@@ -29,17 +29,21 @@ frontend/e2e/
     security.ts           expectTokenNotInHead — E2E-tier counterpart to src/test/security.ts's assertNotInDom (#127).
     security.test.ts      Vitest contract test for expectTokenNotInHead (#127).
   scripts/
-    scan-secrets.mjs      Secret-scan gate (Node, no deps). Runs in CI after Playwright.
-    lint-imports.mjs      Forbids backend / ExtractionFixtures imports under e2e/ (#38 AC #6).
+    scan-secrets.mjs                  Secret-scan gate (Node, no deps). Runs in CI after Playwright.
+    lint-imports.mjs                  Forbids backend / ExtractionFixtures imports under e2e/ (#38 AC #6).
+    check-quarantine-registry.mjs     Quarantine-drift gate — fails CI when #87's registry diverges from @quarantine/test.fixme markers (#115).
+    check-quarantine-registry.test.mjs Vitest contract test for the drift gate's pure helpers (#115).
   README.md               This file.
 ```
 
-`*.test.ts` files in `support/` are Vitest contract tests for the
-helpers they sit next to — fast-tier pins of the public surface so a
-regression surfaces before Playwright runs. See
+`*.test.ts` files in `support/` and `*.test.mjs` files in `scripts/`
+are Vitest contract tests for the helpers / scripts they sit next to
+— fast-tier pins of the public surface so a regression surfaces
+before Playwright (or the workflow itself) runs. See
 [`vitest.config.mts`](../vitest.config.mts)'s `include` block for the
 namespace-disjointness rationale (Playwright owns `.spec.ts` under
-`e2e/`; Vitest owns `.test.ts` under `e2e/support/`).
+`e2e/`; Vitest owns `.test.ts` under `e2e/support/` and `.test.mjs`
+under `e2e/scripts/`).
 
 ## Network policy (zero live calls)
 
@@ -119,6 +123,8 @@ The CI workflow gates the artifact upload on `steps.playwright.outcome == 'failu
      ```
 
      Check the row off when the test is fixed or deleted.
+
+  **Mechanical gate ([#115](https://github.com/neboxdev/complidrop/issues/115)):** the `quarantine-drift` CI step fails the build when (a) a `@quarantine` / `test.fixme` marker has no matching `- [ ]` row in #87, or (b) an unticked row references a ticket whose marker is no longer in the source. Run `npm run test:e2e:quarantine-drift` locally if you suspect drift after editing markers — same exit-1 behavior as CI. Source at [`e2e/scripts/check-quarantine-registry.mjs`](scripts/check-quarantine-registry.mjs); contract test alongside.
 
 ## Updating the fixture set
 
