@@ -99,12 +99,14 @@ describe("pathMatches — `:param` wildcard contract (#91, #129)", () => {
     // Token-shaped (16-char hex) variant deliberately uses a NON-
     // portal path: `frontend/e2e/scripts/scan-secrets.mjs` flags any
     // `/api/portal/[A-Za-z0-9_-]{16,}` substring as a leaked vendor
-    // portal token, and Playwright's `results.json` reporter output
-    // surfaces source snippets from `e2e/**/*.ts` files (even ones
-    // filtered out by `testMatch`) during the discovery pass — a
-    // 16-char hex segment under `/api/portal/` in this file would
-    // trip the gate on CI. Keep token-shaped fixtures off the
-    // portal path so the scan stays useful against real artifacts.
+    // portal token. Empirically (run #167 against commit 7ccb6c3) the
+    // CI E2E artifact directory captures this fixture's source even
+    // though `playwright.config.ts`'s `testMatch: /.*\.spec\.ts$/`
+    // filters `.test.ts` files out of the test run — the exact
+    // mechanism wasn't reproducible locally with `CI=1 npm run
+    // test:e2e`, so the safest defense is to keep token-shaped
+    // fixtures off the canonical portal path. The scan stays useful
+    // against real artifacts that way.
     expect(pathMatches("/api/users/:id", "/api/users/9f3d2c1a7b6e5d4c")).toBe(true);
   });
 
