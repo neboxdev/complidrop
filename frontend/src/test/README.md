@@ -230,7 +230,7 @@ await waitFor(() => expect(screen.getByRole("heading", { name: /hi /i })).toBeIn
 assertNotInDom(sensitiveToken);
 ```
 
-Scans BOTH `root.textContent` (visible copy) AND `root.innerHTML` (attribute values, hidden nodes). Skipping either scan leaves a hole — a leak via `aria-label`, `data-*`, `title`, or a hidden `<input>` value would slip past a `textContent`-only check. Defaults to `document.body`; pass an explicit `root` to narrow further. `<head>` injection paths are out of scope for component tests — chase those in the Playwright E2E layer.
+Scans BOTH `root.textContent` (visible copy) AND `root.innerHTML` (attribute values, hidden nodes). Skipping either scan leaves a hole — a leak via `aria-label`, `data-*`, `title`, or a hidden `<input>` value would slip past a `textContent`-only check. Defaults to `document.body`; pass an explicit `root` to narrow further. `<head>` injection paths are out of scope for component tests — import `expectTokenNotInHead` from `frontend/e2e/support/security.ts` (#127) into the relevant Playwright smoke spec for head coverage.
 
 ## When NOT to use this harness
 

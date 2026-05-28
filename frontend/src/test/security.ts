@@ -17,7 +17,13 @@
  *
  * - `<head>` injection (analytics meta tags, page titles set via
  *   `next/head`, etc.). Component tests render into `document.body`;
- *   chase head leaks in the Playwright E2E layer.
+ *   head-injection leaks are caught in the Playwright E2E layer —
+ *   import `expectTokenNotInHead` from
+ *   `frontend/e2e/support/security.ts` (#127) into the relevant
+ *   smoke spec. Same import-don't-mirror posture as every other
+ *   harness-lift helper (sonner, polling, dropzone, security,
+ *   form-helpers) — re-implementing inline would drift in error-
+ *   message sanitization or scan coverage.
  * - `localStorage` / `sessionStorage` / `window.*`. The name says
  *   `InDom` — non-DOM channels are explicitly out of scope.
  * - HTML-special character escape mismatch: if `value` contains
@@ -38,7 +44,9 @@
  *
  * Defaults to `document.body` — appropriate for component tests where
  * RTL renders into the body. The `<head>` is deliberately out of
- * scope; chase head-injection leaks in the E2E layer.
+ * scope; import `expectTokenNotInHead` from
+ * `frontend/e2e/support/security.ts` (#127) into a Playwright smoke
+ * spec for head coverage.
  *
  * On failure, the error message identifies WHICH scan caught the leak
  * but reports only a length + 4-char prefix + 4-char suffix sentinel

@@ -17,6 +17,7 @@
 import { test, expect } from "@playwright/test";
 import { mockApi, jsonOk, waitForApi } from "../support/mock-api";
 import { makeFakePdf, portalInfo } from "../support/fixtures";
+import { expectTokenNotInHead } from "../support/security";
 
 const TOKEN = "smoke-tok-12";
 
@@ -57,6 +58,12 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
       }),
     ).toBeVisible({ timeout: 10_000 });
 
+    // Head-injection token-absence assertion (#127 / #85 followup).
+    // `expectTokenNotInHead` is the E2E-tier companion to the Vitest
+    // component helper `assertNotInDom` (frontend/src/test/security
+    // .ts); the body-scoped one redirects head coverage here.
+    await expectTokenNotInHead(page, TOKEN);
+
     // Arm the upload POST wait BEFORE setInputFiles so the response
     // is observable before assertions.
     const uploadResponse = waitForApi(
@@ -79,5 +86,13 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
     const row = page.locator("li").filter({ hasText: "vendor-coi.pdf" });
     await expect(row).toBeVisible();
     await expect(row.getByText(/processing/i)).toBeVisible();
+
+    // Re-assert the head is still clean after the upload mutation
+    // settles. Some leak paths surface only after a state change —
+    // e.g. a future "show last-uploaded file metadata in a meta tag"
+    // feature inadvertently emitting `<meta name="last-upload-token"
+    // content="…">` would pass the pre-upload check above but fail
+    // here, catching the regression in the same spec.
+    await expectTokenNotInHead(page, TOKEN);
   });
 });
