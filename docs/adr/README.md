@@ -17,3 +17,5 @@ Use `/adr <title>` to scaffold a new one.
 - [0007](0007-reminder-log-send-date-is-org-local.md) — `ReminderLog.SendDate` stores the org-local calendar day (supersedes 0002 Neutral)
 - [0008](0008-reminder-multi-instance-coordination-via-advisory-lock.md) — Reminder worker uses a per-(org, sendDate) Postgres advisory lock to coordinate across replicas (supersedes 0002 Negative)
 - [0009](0009-no-at-time-zone-on-timestamptz-in-raw-sql.md) — Raw SQL against `timestamptz` columns uses bare `now()` / `DateTime.UtcNow`, never `AT TIME ZONE`
+- [0010](0010-frontend-e2e-with-playwright.md) — Frontend E2E with Playwright (network-mocked, scrubbed artifacts, conservative flake policy)
+- [0011](0011-plan-vocab-unified-with-founding-as-authenticated-only-promo.md) — Plan vocab unified as `free | pro | annual | founding`; `founding` is an authenticated-only promo tier
