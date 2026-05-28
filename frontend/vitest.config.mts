@@ -48,6 +48,14 @@ export default defineConfig({
     include: [
       "src/**/*.{test,spec}.{ts,tsx}",
       "e2e/support/**/*.test.ts",
+      // `e2e/scripts/**/*.test.mjs` covers contract tests for E2E
+      // CI scripts (see `check-quarantine-registry.test.mjs` from
+      // #115). Scripts are `.mjs` (run via `node`); their companion
+      // tests reuse the same extension so module-graph + import
+      // resolution stay native and tsc never has to compile a
+      // throwaway .ts wrapper. Same namespace-disjointness rule
+      // applies — Playwright doesn't claim `.test.mjs`.
+      "e2e/scripts/**/*.test.mjs",
     ],
     env: {
       NEXT_PUBLIC_API_URL: "http://localhost:5292",

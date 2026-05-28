@@ -79,6 +79,20 @@ jobs:
       - name: Lint E2E imports (AC #6 — no backend imports)
         run: npm run test:e2e:lint-imports
 
+      # Quarantine-registry drift gate (#115). Closes the (a) ↔ (c)
+      # half of ADR 0010 §Flake policy: every @quarantine /
+      # test.fixme marker in frontend/e2e/**/*.spec.ts must have a
+      # matching `- [ ]` row in issue #87's body, and every unticked
+      # row must point at a marker that still exists. Sibling shape
+      # to lint-imports above. Needs GH_TOKEN to read #87 via `gh`.
+      # QUARANTINE_REGISTRY_NUMBER lets a fork override the issue
+      # number via repo variable; defaults to 87 in-script.
+      - name: Check quarantine-registry drift (#115)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QUARANTINE_REGISTRY_NUMBER: ${{ vars.QUARANTINE_REGISTRY_NUMBER }}
+        run: npm run test:e2e:quarantine-drift
+
       # Cache the Playwright browser binaries. Key on the
       # @playwright/test version from package-lock so a Playwright
       # upgrade busts the cache cleanly.
