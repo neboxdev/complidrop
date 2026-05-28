@@ -23,7 +23,19 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
-    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    // `src/**` covers component + lib tests. `e2e/support/**` covers
+    // contract tests for E2E test infrastructure helpers (e.g.
+    // `mock-api.ts`'s `pathMatches` — the actual Playwright specs in
+    // `e2e/smoke/**` are NOT picked up; they run under `npm run
+    // test:e2e` via Playwright, not Vitest). Add a helper file's
+    // companion `*.test.ts` next to it in `e2e/support/` to pin its
+    // contract at the fast Vitest tier — see [#129] for the pattern
+    // and [`mock-api.test.ts`](e2e/support/mock-api.test.ts) for the
+    // canonical example.
+    include: [
+      "src/**/*.{test,spec}.{ts,tsx}",
+      "e2e/support/**/*.{test,spec}.ts",
+    ],
     env: {
       NEXT_PUBLIC_API_URL: "http://localhost:5292",
     },
