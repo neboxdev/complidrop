@@ -52,6 +52,17 @@ jobs:
     defaults:
       run:
         working-directory: frontend
+    # The default GITHUB_TOKEN permissions on a repo that uses the
+    # restricted default (Settings → Actions → Workflow permissions
+    # → "Read repository contents and packages permissions") do NOT
+    # include `issues: read`. The quarantine-drift step (#115) needs
+    # to call `gh issue view 87`, which requires that scope.
+    # `contents: read` is needed for `actions/checkout@v4`. Setting
+    # permissions explicitly at job level overrides the default and
+    # makes the requirement self-documenting.
+    permissions:
+      contents: read
+      issues: read
     env:
       CI: "true"
     steps:
