@@ -129,7 +129,7 @@ public class StripeService(
         if (sub is null) return;
         sub.StripeCustomerId = session.CustomerId ?? sub.StripeCustomerId;
         sub.StripeSubscriptionId = session.SubscriptionId ?? sub.StripeSubscriptionId;
-        sub.Plan = ResolvePlanFromPriceId(await FetchPriceIdFromSubscription(session.SubscriptionId, ct));
+        sub.Plan = ResolvePlanFromPriceId(await FetchPriceIdFromSubscription(session.SubscriptionId, ct), _cfg);
         sub.Status = "active";
         sub.DocumentLimit = null;
         sub.HasVendorPortal = true;
@@ -150,7 +150,7 @@ public class StripeService(
         var sub = await db.Subscriptions.FirstOrDefaultAsync(x => x.StripeSubscriptionId == s.Id, ct);
         if (sub is null) return;
         sub.Status = s.Status;
-        sub.Plan = ResolvePlanFromPriceId(s.Items?.Data?.FirstOrDefault()?.Price?.Id);
+        sub.Plan = ResolvePlanFromPriceId(s.Items?.Data?.FirstOrDefault()?.Price?.Id, _cfg);
         sub.CurrentPeriodEnd = s.CurrentPeriodEnd == default(DateTime) ? null : s.CurrentPeriodEnd;
         sub.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -168,46 +168,25 @@ public class StripeService(
         await db.SaveChangesAsync(ct);
     }
 
-    // Instance shim — delegates to the static helper so production code stays unchanged
-    // while tests can call ResolvePlanFromPriceId(priceId, cfg) directly without
-    // standing up a full StripeService (DB + IOptions + ILogger).
-    private string ResolvePlanFromPriceId(string? priceId) => ResolvePlanFromPriceId(priceId, _cfg);
-
-    /// <summary>
-    /// Maps Stripe-side price ids (config-keyed <c>MonthlyPriceId</c> /
-    /// <c>AnnualPriceId</c> / <c>FoundingPriceId</c>) to app-side plan ids
-    /// (<c>pro | annual | founding</c>) per ADR 0011. The config-key names
-    /// stay Stripe-billing-cadence words; the return values stay
-    /// customer-facing product-tier words. This boundary is the only
-    /// place the two namespaces meet.
-    ///
-    /// Hardening (#172):
-    ///   - <b>Null / empty / whitespace <c>priceId</c></b> short-circuits
-    ///     to the <c>"pro"</c> fallback. Without this guard, an empty
-    ///     incoming priceId would compare-equal to an unset
-    ///     <c>_cfg.AnnualPriceId</c> (default <c>string.Empty</c>) and
-    ///     resolve to <c>"annual"</c> — wrong plan, wrong document
-    ///     limit, wrong portal flag for the affected Subscription.
-    ///   - <b>Per-key skip on empty config</b>: each comparison is
-    ///     gated on the config value being non-empty, so a partial
-    ///     Stripe deploy (e.g. <c>AnnualPriceId</c> missing) doesn't
-    ///     turn the empty config string into a wildcard that matches
-    ///     any priceId that happens to also be empty.
-    ///
-    /// Unrecognised but non-empty price ids default to <c>"pro"</c> —
-    /// a misconfigured Stripe row doesn't escalate into a webhook NRE;
-    /// the Subscription stays on the paid plan it was already on, and
-    /// the operator notices via Sentry logs.
-    ///
-    /// <c>internal</c> for direct unit testing (see
-    /// <see cref="CompliDrop.Api.Tests"/> via
-    /// <c>InternalsVisibleTo</c>). The caller-facing instance method
-    /// stays <c>private</c> so production code only sees one entry point.
-    /// </summary>
+    // Maps Stripe-side price ids to app-side plan ids per ADR 0011. The empty-string-
+    // collision hardening rationale (why both guards below exist + why StripeSettings
+    // stays empty-string-as-sentinel rather than nullable) lives in ADR 0011's Hardening
+    // addendum (#172). Returns "pro" on null/empty/whitespace input or any unknown price
+    // id. Internal-static + tested directly via InternalsVisibleTo CompliDrop.Api.Tests —
+    // same precedent as ComplianceCheckService.EvaluateRule.
+    //
+    // Duplicate-config priority: if the operator configures the same price id under
+    // multiple keys, resolution is first-match-wins in declaration order:
+    // Annual > Founding > Monthly. Pinned by
+    // StripePriceIdResolverTests.Duplicate_priceId_configured_for_multiple_plans_resolves_to_annual_first.
     internal static string ResolvePlanFromPriceId(string? priceId, StripeSettings cfg)
     {
         if (string.IsNullOrWhiteSpace(priceId)) return "pro";
 
+        // Per-key guard: priceId is already non-whitespace by the line above, so this
+        // protects the CONFIG side only — an unset cfg.XPriceId (default string.Empty)
+        // must not become a wildcard. Both guards are kept as defense-in-depth so a
+        // future refactor that drops one still keeps the other layer of protection.
         if (!string.IsNullOrWhiteSpace(cfg.AnnualPriceId) && priceId == cfg.AnnualPriceId) return "annual";
         if (!string.IsNullOrWhiteSpace(cfg.FoundingPriceId) && priceId == cfg.FoundingPriceId) return "founding";
         if (!string.IsNullOrWhiteSpace(cfg.MonthlyPriceId) && priceId == cfg.MonthlyPriceId) return "pro";

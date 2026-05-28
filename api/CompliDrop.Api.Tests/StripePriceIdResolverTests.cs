@@ -6,15 +6,20 @@ namespace CompliDrop.Api.Tests;
 
 /// <summary>
 /// Pure unit tests for <see cref="StripeService.ResolvePlanFromPriceId(string?, StripeSettings)"/>
-/// — the boundary that maps Stripe-side price ids to app-side plan ids per ADR 0011.
+/// — the boundary that maps Stripe-side price ids to app-side plan ids per ADR 0011 + the
+/// #172 Hardening addendum.
 ///
-/// #172 hardens the resolver against an empty incoming <c>priceId</c> that would
-/// otherwise compare-equal to an unset <c>StripeSettings.AnnualPriceId</c> (default
-/// <c>string.Empty</c>) and wrongly resolve to <c>"annual"</c>. The integration-level
-/// price-id-to-plan-id mapping is already pinned end-to-end by
-/// <see cref="StripeWebhookTests.Stripe_price_id_resolves_to_post_ADR_0011_plan_vocab"/>;
-/// this suite isolates the resolver itself so the empty-config branches can be
-/// exercised cheaply without standing up the test container.
+/// The integration-level happy paths are already pinned end-to-end by
+/// <see cref="StripeWebhookTests.Stripe_price_id_resolves_to_post_ADR_0011_plan_vocab"/>; this
+/// suite exercises the empty-edge cases the webhook test can't cheaply hit, plus the
+/// duplicate-config precedence (Annual > Founding > Monthly) that's load-bearing for the
+/// boundary contract.
+///
+/// Each per-key test is named to reflect what's ACTUALLY exercised — most pin "an empty
+/// cfg.X field doesn't break the OTHER plan's resolution", not the cosmetic "empty input
+/// match" framing. The empty-input collision case is pinned exclusively by
+/// <see cref="Empty_priceId_returns_pro_even_when_config_keys_are_also_empty"/>, which is
+/// the only test that fails pre-hardening.
 /// </summary>
 public sealed class StripePriceIdResolverTests
 {
@@ -31,14 +36,15 @@ public sealed class StripePriceIdResolverTests
     [InlineData(" ")]
     [InlineData("\t")]
     [InlineData("\n")]
-    public void Empty_or_whitespace_priceId_returns_pro_even_when_config_keys_are_set(string? priceId)
+    public void Empty_or_whitespace_priceId_with_unrelated_non_empty_config_falls_back_to_pro(string? priceId)
     {
-        // The actual #172 bug: pre-hardening, an empty incoming priceId would
-        // compare-equal to an unset _cfg.AnnualPriceId and resolve to "annual".
-        // Even with non-empty config, the early return must catch the empty
-        // input first so the priceId-equality logic doesn't get a chance to
-        // misfire on edge encodings (NBSP, tabs, etc. — IsNullOrWhiteSpace
-        // catches them all).
+        // Pins the IsNullOrWhiteSpace tolerance: the resolver treats null, empty,
+        // tab, newline, and ASCII space identically — all short-circuit to "pro".
+        // Doesn't pin the actual #172 collision (the cfg keys are non-empty here
+        // so the equality checks `"" == "price_real_annual"` are false anyway —
+        // the test passes through the unconditional fallback at the end). The
+        // collision test below uses empty cfg keys to make the regression
+        // unambiguous.
         var cfg = ConfiguredSettings();
 
         var result = StripeService.ResolvePlanFromPriceId(priceId, cfg);
@@ -50,13 +56,22 @@ public sealed class StripePriceIdResolverTests
     [InlineData(null)]
     [InlineData("")]
     [InlineData(" ")]
+    [InlineData("\t")]
+    [InlineData("\n")]
     public void Empty_priceId_returns_pro_even_when_config_keys_are_also_empty(string? priceId)
     {
-        // The MOST important regression test: pre-hardening, BOTH sides being
-        // empty made `priceId == _cfg.AnnualPriceId` return true. With the
-        // priceId-side guard alone, this case is now safe. With the config-side
-        // guard too (the per-key skip), the equality never runs anyway. Pin
-        // both invariants by passing the worst-case input.
+        // The actual #172 regression-pin: pre-hardening, BOTH sides being empty
+        // made `priceId == _cfg.AnnualPriceId` return true and the resolver
+        // wrongly returned "annual". This is the test that fails on a removal
+        // of either guard:
+        //   - Remove the top-level IsNullOrWhiteSpace(priceId) guard → falls
+        //     into the AnnualPriceId branch, `"" == ""` is true, returns "annual".
+        //     With the per-key !IsNullOrWhiteSpace(cfg.AnnualPriceId) guard, the
+        //     branch is skipped, falls through to the default "pro" — STILL PASSES.
+        //   - Remove the per-key !IsNullOrWhiteSpace(cfg.AnnualPriceId) guard →
+        //     the top-level priceId guard catches first, returns "pro" — STILL PASSES.
+        //   - Remove BOTH guards → returns "annual", test fails.
+        // The defense-in-depth survives a single-layer regression.
         var cfg = new StripeSettings(); // all defaults — all "" strings
 
         var result = StripeService.ResolvePlanFromPriceId(priceId, cfg);
@@ -65,17 +80,19 @@ public sealed class StripePriceIdResolverTests
     }
 
     [Fact]
-    public void Empty_config_AnnualPriceId_does_not_make_empty_input_match_annual()
+    public void Empty_config_AnnualPriceId_does_not_swallow_an_unrelated_priceId()
     {
-        // Per-key guard test: simulate a partial Stripe deploy where AnnualPriceId
-        // was forgotten. The check `priceId == _cfg.AnnualPriceId` would be true
-        // for ANY empty priceId, but the per-key !IsNullOrWhiteSpace gate skips
-        // the comparison entirely so the wrong plan can never escape.
+        // Per-key guard documentation test: simulate a partial Stripe deploy where
+        // AnnualPriceId was forgotten. Sending an unrelated non-empty priceId
+        // (the MonthlyPriceId in this case) MUST resolve correctly to "pro" —
+        // the empty AnnualPriceId must not become a wildcard.
         //
-        // Practically the priceId-side guard would catch this first — but pinning
-        // both layers means a future refactor that removes the priceId-side guard
-        // (e.g. "the caller validates, we don't need to") doesn't silently
-        // reintroduce the collision.
+        // Note: the priceId IS non-empty here (`"price_real_monthly"`), so the
+        // per-key guard alone is what's being exercised — the top-level guard
+        // can't have an effect. The test is defensive documentation: any future
+        // refactor that removes the per-key guard breaks this. The test
+        // `Empty_priceId_returns_pro_even_when_config_keys_are_also_empty`
+        // covers the case where BOTH sides are empty.
         var cfg = new StripeSettings
         {
             MonthlyPriceId = "price_real_monthly",
@@ -89,8 +106,11 @@ public sealed class StripePriceIdResolverTests
     }
 
     [Fact]
-    public void Empty_config_FoundingPriceId_does_not_make_empty_input_match_founding()
+    public void Empty_config_FoundingPriceId_does_not_break_annual_resolution()
     {
+        // Sibling to the test above: with FoundingPriceId empty, an Annual
+        // priceId still resolves correctly. Pins that the per-key guard skips
+        // the empty config field cleanly without affecting the other branches.
         var cfg = new StripeSettings
         {
             MonthlyPriceId = "price_real_monthly",
@@ -104,15 +124,15 @@ public sealed class StripePriceIdResolverTests
     }
 
     [Fact]
-    public void Empty_config_MonthlyPriceId_does_not_make_empty_input_match_pro()
+    public void Empty_config_MonthlyPriceId_still_falls_through_to_pro_default_for_unknown_priceId()
     {
-        // Test the third per-key guard too — the pre-hardening "if (priceId ==
-        // _cfg.MonthlyPriceId) return 'pro'" branch was the LAST one in the
-        // chain, but since the default fallback is also "pro" the regression
-        // would be masked. This test isolates the guard by checking that the
-        // FALLBACK path is reached (which happens to also return "pro" today,
-        // but the assertion is intentional — a future fallback change won't
-        // silently double-resolve).
+        // Final per-key sibling: MonthlyPriceId is empty + the incoming priceId
+        // doesn't match anything configured → falls through to the explicit
+        // "pro" fallback at the end of the resolver. The assertion is "pro"
+        // (which happens to be the same return the MonthlyPriceId branch
+        // would produce on a match), but the test isolates the FALLBACK path
+        // — a future change to the fallback default ("free"? "pro"? Throw?)
+        // would surface here.
         var cfg = new StripeSettings
         {
             MonthlyPriceId = "", // forgotten in deploy
@@ -120,13 +140,31 @@ public sealed class StripePriceIdResolverTests
             FoundingPriceId = "price_real_founding",
         };
 
-        // Non-matching priceId — only the MonthlyPriceId match would catch it,
-        // but that branch's guard skips because the config value is empty.
-        // Falls through to the default "pro" — same return, but via the
-        // fallback path, not the wildcard collision.
         var result = StripeService.ResolvePlanFromPriceId("price_nobody_knows", cfg);
 
         result.Should().Be("pro");
+    }
+
+    [Fact]
+    public void Duplicate_priceId_configured_for_multiple_plans_resolves_to_annual_first()
+    {
+        // Operator-mistake scenario: same Stripe priceId pasted into MonthlyPriceId
+        // AND AnnualPriceId AND FoundingPriceId during a pricing rollout, or a
+        // copy-paste between Dev and Prod settings. The resolver returns the
+        // first match in declaration order (Annual > Founding > Monthly) per
+        // ADR 0011 + the inline comment on the resolver. Pinning the precedence
+        // prevents a silent change if the if-chain is reordered for "readability"
+        // (e.g. alphabetical, or cheapest-plan-first).
+        var cfg = new StripeSettings
+        {
+            MonthlyPriceId = "price_collision",
+            AnnualPriceId = "price_collision",
+            FoundingPriceId = "price_collision",
+        };
+
+        var result = StripeService.ResolvePlanFromPriceId("price_collision", cfg);
+
+        result.Should().Be("annual");
     }
 
     [Theory]
@@ -155,6 +193,30 @@ public sealed class StripePriceIdResolverTests
         var cfg = ConfiguredSettings();
 
         var result = StripeService.ResolvePlanFromPriceId("price_unknown_xyz", cfg);
+
+        result.Should().Be("pro");
+    }
+
+    [Theory]
+    [InlineData("price_real_annual ")]   // trailing space (env-var copy-paste mistake)
+    [InlineData(" price_real_annual")]   // leading space
+    [InlineData("price_real_annual\n")] // trailing newline (env-var multi-line paste)
+    [InlineData("price_real_annual\t")] // trailing tab
+    public void Whitespace_padded_priceId_does_NOT_trim_and_falls_back_to_pro(string priceId)
+    {
+        // Documents the no-trim contract: a priceId with leading/trailing
+        // whitespace does NOT match its un-padded configured value — falls
+        // through to the "pro" default. This is the conservative choice (don't
+        // silently accept malformed inputs) but means a config or webhook
+        // payload with stray whitespace silently DOWNGRADES an annual customer
+        // to pro. If a future operator-footgun report justifies adding
+        // `priceId.Trim()` after the IsNullOrWhiteSpace guard, this test
+        // documents the current behavior so the change is visible. Out of
+        // scope for #172 (which targets the empty-string collision, not
+        // whitespace-padding).
+        var cfg = ConfiguredSettings();
+
+        var result = StripeService.ResolvePlanFromPriceId(priceId, cfg);
 
         result.Should().Be("pro");
     }

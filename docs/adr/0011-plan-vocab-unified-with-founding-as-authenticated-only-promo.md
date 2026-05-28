@@ -133,8 +133,26 @@ Rejected because:
 - The user has a configured Stripe price for it (`connection string.txt:26`) and it is documented in the Phase 2 architecture doc as a deliberate early-customer promo.
 - This ADR is about vocab reconciliation, not product strategy.
 
+## Hardening (addendum, [#172](https://github.com/neboxdev/complidrop/issues/172))
+
+The `StripeService.ResolvePlanFromPriceId` boundary identified above (the only place Stripe-side and app-side vocab meet) has a latent collision when `StripeSettings.*PriceId` config values default to `string.Empty`:
+
+- Pre-hardening: `priceId == _cfg.AnnualPriceId` evaluates to `"" == ""` → true if the incoming priceId is empty AND `AnnualPriceId` is unset, wrongly resolving an empty input to `"annual"`. Same for `FoundingPriceId` / `MonthlyPriceId` depending on order.
+- Realistic triggers: partial Stripe deploy (e.g. `AnnualPriceId` forgotten); a Stripe subscription whose price was deleted between webhook emission and our handling (priceId nulled / emptied by the SDK on a fallback path).
+
+Two-layer defense in [`StripeService.ResolvePlanFromPriceId`](../../api/CompliDrop.Api/Services/StripeService.cs):
+
+1. **Top-level guard**: `string.IsNullOrWhiteSpace(priceId)` short-circuits to the `"pro"` fallback before any equality check runs. Catches the input-side of the collision.
+2. **Per-key guard**: each comparison is gated on `!string.IsNullOrWhiteSpace(cfg.XPriceId)` so an unset config string can never act as a wildcard. Catches the config-side. Today this branch is unreachable while (1) exists, but is retained so a future refactor that drops (1) still keeps the protection.
+
+Why not switch `StripeSettings.*PriceId` from `string = string.Empty` to `string?` (nullable) so "unset" means null, not empty? The codebase convention reserves `string?` for genuinely-optional config (`CookieSettings.Domain`, `ExtractionSettings.CredentialsPath`) and `string = string.Empty` for fields the app expects configured in prod (Stripe price ids fit the latter — an empty value at runtime is a misconfiguration, not an intentional absence). The defensive guard in the resolver is the right layer.
+
+The resolver is `internal static` to enable direct unit testing without the DB / IOptions / ILogger triad — same precedent as [`ComplianceCheckService.EvaluateRule`](../../api/CompliDrop.Api/Services/ComplianceCheckService.cs). Tests in [`StripePriceIdResolverTests`](../../api/CompliDrop.Api.Tests/StripePriceIdResolverTests.cs) pin: null/empty/whitespace input under both configured-and-unconfigured cfg; per-key skip on each empty config field; happy-path Stripe-id → app-plan mappings; duplicate-config priority (Annual > Founding > Monthly).
+
+Pattern follows ADR 0009's `## Enforcement (addendum, #64)` precedent — ticket-specific hardening that preserves the parent ADR's invariant lives alongside the original decision rather than as a freestanding ADR.
+
 ## References
 
-- Tickets: [#71](https://github.com/neboxdev/complidrop/issues/71) (single source of truth for plan pricing — the prior PR that left this divergence open), [#112](https://github.com/neboxdev/complidrop/pull/112) (the PR that documented the deferral), [#147](https://github.com/neboxdev/complidrop/issues/147) (this ticket).
-- ADRs: none directly superseded.
+- Tickets: [#71](https://github.com/neboxdev/complidrop/issues/71) (single source of truth for plan pricing — the prior PR that left this divergence open), [#112](https://github.com/neboxdev/complidrop/pull/112) (the PR that documented the deferral), [#147](https://github.com/neboxdev/complidrop/issues/147) (this ticket), [#172](https://github.com/neboxdev/complidrop/issues/172) (resolver hardening addendum).
+- ADRs: none directly superseded. [0009](0009-no-at-time-zone-on-timestamptz-in-raw-sql.md) is the structural precedent for the `#172` hardening addendum pattern (ticket-specific defense alongside the parent invariant).
 - External: `C:\NewStart\Company documents\complidrop-phase2-architecture.md` §15 (the Founding tier marketing positioning), `C:\NewStart\Company documents\complidrop-technical-architecture.md` §5.1 (the original `Plan ∈ {free, monthly, annual, founding}` data model that this ADR supersedes for the application code).
