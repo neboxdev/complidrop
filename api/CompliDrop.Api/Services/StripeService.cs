@@ -177,8 +177,11 @@ public class StripeService(
     //
     // Duplicate-config priority: if the operator configures the same price id under
     // multiple keys, resolution is first-match-wins in declaration order:
-    // Annual > Founding > Monthly. Pinned by
-    // StripePriceIdResolverTests.Duplicate_priceId_configured_for_multiple_plans_resolves_to_annual_first.
+    // Annual > Founding > Monthly. Pinned by the pair
+    // StripePriceIdResolverTests.Duplicate_priceId_three_way_collision_resolves_to_annual_first
+    // (Annual beats both) +
+    // StripePriceIdResolverTests.Duplicate_priceId_for_founding_and_monthly_resolves_to_founding_first
+    // (Founding beats Monthly when Annual is unique).
     internal static string ResolvePlanFromPriceId(string? priceId, StripeSettings cfg)
     {
         if (string.IsNullOrWhiteSpace(priceId)) return "pro";

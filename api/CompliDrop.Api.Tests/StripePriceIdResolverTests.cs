@@ -30,27 +30,13 @@ public sealed class StripePriceIdResolverTests
         FoundingPriceId = "price_real_founding",
     };
 
-    [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    [InlineData(" ")]
-    [InlineData("\t")]
-    [InlineData("\n")]
-    public void Empty_or_whitespace_priceId_with_unrelated_non_empty_config_falls_back_to_pro(string? priceId)
-    {
-        // Pins the IsNullOrWhiteSpace tolerance: the resolver treats null, empty,
-        // tab, newline, and ASCII space identically — all short-circuit to "pro".
-        // Doesn't pin the actual #172 collision (the cfg keys are non-empty here
-        // so the equality checks `"" == "price_real_annual"` are false anyway —
-        // the test passes through the unconditional fallback at the end). The
-        // collision test below uses empty cfg keys to make the regression
-        // unambiguous.
-        var cfg = ConfiguredSettings();
-
-        var result = StripeService.ResolvePlanFromPriceId(priceId, cfg);
-
-        result.Should().Be("pro");
-    }
+    // The "empty priceId with NON-empty cfg" Theory that previously lived here was
+    // strictly dominated by the empty-cfg Theory below (mutation analysis: there's
+    // no single regression mode where the non-empty-cfg case fails and the empty-
+    // cfg case passes — both short-circuit at the top-level IsNullOrWhiteSpace
+    // guard, so the cfg state is irrelevant to the execution path). Removed to
+    // keep the test surface lean. The remaining Theory pins the actual #172
+    // collision: BOTH sides empty.
 
     [Theory]
     [InlineData(null)]
@@ -146,15 +132,14 @@ public sealed class StripePriceIdResolverTests
     }
 
     [Fact]
-    public void Duplicate_priceId_configured_for_multiple_plans_resolves_to_annual_first()
+    public void Duplicate_priceId_three_way_collision_resolves_to_annual_first()
     {
-        // Operator-mistake scenario: same Stripe priceId pasted into MonthlyPriceId
-        // AND AnnualPriceId AND FoundingPriceId during a pricing rollout, or a
-        // copy-paste between Dev and Prod settings. The resolver returns the
-        // first match in declaration order (Annual > Founding > Monthly) per
-        // ADR 0011 + the inline comment on the resolver. Pinning the precedence
-        // prevents a silent change if the if-chain is reordered for "readability"
-        // (e.g. alphabetical, or cheapest-plan-first).
+        // Operator-mistake scenario: same Stripe priceId pasted into all three
+        // config keys (copy-paste between Dev and Prod settings, or a typo
+        // during a pricing rollout). The resolver returns the first match in
+        // declaration order. This test only pins "Annual wins when all three
+        // collide" — the sibling test below pins Founding > Monthly to cover
+        // the rest of the Annual > Founding > Monthly precedence chain.
         var cfg = new StripeSettings
         {
             MonthlyPriceId = "price_collision",
@@ -165,6 +150,26 @@ public sealed class StripePriceIdResolverTests
         var result = StripeService.ResolvePlanFromPriceId("price_collision", cfg);
 
         result.Should().Be("annual");
+    }
+
+    [Fact]
+    public void Duplicate_priceId_for_founding_and_monthly_resolves_to_founding_first()
+    {
+        // Sibling to the three-way test above: pins Founding > Monthly when
+        // those two collide but Annual is unique. Without this, swapping the
+        // Founding and Monthly branches in StripeService.ResolvePlanFromPriceId
+        // would still pass the three-way test (Annual is always first) — the
+        // silent reorder would only surface here.
+        var cfg = new StripeSettings
+        {
+            MonthlyPriceId = "price_shared",
+            AnnualPriceId = "price_annual_unique",
+            FoundingPriceId = "price_shared",
+        };
+
+        var result = StripeService.ResolvePlanFromPriceId("price_shared", cfg);
+
+        result.Should().Be("founding");
     }
 
     [Theory]
