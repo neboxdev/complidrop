@@ -96,7 +96,16 @@ describe("pathMatches — exact-segment-count contract (#91, #129)", () => {
 describe("pathMatches — `:param` wildcard contract (#91, #129)", () => {
   it("matches `:token` against any one segment", () => {
     expect(pathMatches("/api/portal/:token", "/api/portal/abc-123")).toBe(true);
-    expect(pathMatches("/api/portal/:token", "/api/portal/9f3d2c1a7b6e5d4c")).toBe(true);
+    // Token-shaped (16-char hex) variant deliberately uses a NON-
+    // portal path: `frontend/e2e/scripts/scan-secrets.mjs` flags any
+    // `/api/portal/[A-Za-z0-9_-]{16,}` substring as a leaked vendor
+    // portal token, and Playwright's `results.json` reporter output
+    // surfaces source snippets from `e2e/**/*.ts` files (even ones
+    // filtered out by `testMatch`) during the discovery pass — a
+    // 16-char hex segment under `/api/portal/` in this file would
+    // trip the gate on CI. Keep token-shaped fixtures off the
+    // portal path so the scan stays useful against real artifacts.
+    expect(pathMatches("/api/users/:id", "/api/users/9f3d2c1a7b6e5d4c")).toBe(true);
   });
 
   it("does NOT let `:token` span multiple segments", () => {
