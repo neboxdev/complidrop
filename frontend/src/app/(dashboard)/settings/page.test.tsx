@@ -8,12 +8,16 @@
  * The #147 additions pin the post-ADR-0011 contract:
  *   - The three billing tiles render the dollar values from
  *     `PLANS[id].monthlyPriceLabel`, NOT hardcoded literals.
- *   - All three tile labels (Pro / Annual / Founding) appear.
+ *   - Each tile labels itself with `role="group" aria-label="X plan"`
+ *     for screen-reader navigation + stable test scoping.
+ *   - Clicking an Upgrade button sends `{ plan: id }` on the wire
+ *     (the cross-component round-trip the bare-component tests can
+ *     verify without spinning up the backend).
  *   - The legacy "Monthly" tile label is gone.
  */
 import { describe, it, expect } from "vitest";
 import { http } from "msw";
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import SettingsPage from "./page";
 import { KNOWN_CHECKOUT_PLAN_IDS, PLANS } from "@/lib/plans";
 import {
@@ -59,13 +63,13 @@ describe("SettingsPage — smoke (#36)", () => {
 });
 
 describe("SettingsPage — billing tile vocab (#147, ADR 0011)", () => {
-  it("renders one tile per KNOWN_CHECKOUT_PLAN_IDS with the price from PLANS", async () => {
+  it("renders one tile per KNOWN_CHECKOUT_PLAN_IDS with the price + label from PLANS", async () => {
     mockFreePlanSubscription();
     renderWithProviders(<SettingsPage />, { auth: authedMe });
 
     // Wait for the tiles to mount — the upgrade-button label is the
     // most specific anchor ("Upgrade to Pro" appears only inside the
-    // tile, not anywhere else on the page).
+    // Pro tile, not anywhere else on the page).
     await waitFor(() =>
       expect(
         screen.getByRole("button", { name: /Upgrade to Pro/i }),
@@ -75,15 +79,12 @@ describe("SettingsPage — billing tile vocab (#147, ADR 0011)", () => {
     for (const id of KNOWN_CHECKOUT_PLAN_IDS) {
       const label = PLANS[id].label;
       const price = PLANS[id].monthlyPriceLabel;
-      // Each tile renders `<Upgrade to {label}>` once; use that to
-      // locate the right tile and assert the displayed price comes
-      // from PLANS, not a stale hardcoded literal.
-      const upgradeButton = screen.getByRole("button", {
-        name: new RegExp(`Upgrade to ${label}`, "i"),
+      // Locate the tile via its role="group" + aria-label landmark —
+      // stable across className refactors and matches CLAUDE.md's
+      // "prefer accessible-text selectors" guidance.
+      const tile = screen.getByRole("group", {
+        name: new RegExp(`${label} plan`, "i"),
       });
-      // Walk up to the tile container (the button's nearest .rounded-md ancestor).
-      const tile = upgradeButton.closest("div.rounded-md") as HTMLElement;
-      expect(tile).not.toBeNull();
       expect(within(tile).getByText(price)).toBeInTheDocument();
       expect(within(tile).getByText(label)).toBeInTheDocument();
     }
@@ -102,12 +103,53 @@ describe("SettingsPage — billing tile vocab (#147, ADR 0011)", () => {
       ).toBeInTheDocument(),
     );
 
-    // The "Monthly" label nowhere on the billing-tile section.
-    // `queryAllByText` over the whole page returns []. (The word
-    // "monthly" appears nowhere else on the page in the free-plan
-    // state — only as a billing-cadence in the Pro tile if rendered.)
     expect(
       screen.queryByRole("button", { name: /Upgrade to Monthly/i }),
     ).toBeNull();
   });
+
+  it.each(KNOWN_CHECKOUT_PLAN_IDS.map((id) => [id]))(
+    "POSTs { plan: '%s' } to /api/billing/checkout when the corresponding Upgrade button is clicked (#147 round-trip)",
+    async (id) => {
+      // The single highest-value coverage gap pointed out by the #147
+      // test-quality review: AC #5 asks for round-trip vocabulary
+      // coverage from settings → checkout endpoint. This binds the
+      // tile (rendered via PLANS[id].label) to the wire body sent on
+      // the request — a regression where the mutationFn hardcoded
+      // `plan: "monthly"` (the pre-#147 bug) would fail every
+      // iteration of this `it.each` block.
+      mockFreePlanSubscription();
+      let captured: { plan?: string } | null = null;
+      server.use(
+        http.post(url("/api/billing/checkout"), async ({ request }) => {
+          captured = (await request.json()) as { plan?: string };
+          return jsonOk({ sessionUrl: "https://stub.test/cs_stub" });
+        }),
+      );
+      // Stub window.location.href so the onSuccess redirect doesn't
+      // actually navigate in jsdom (which would throw).
+      const originalLocation = window.location;
+      Object.defineProperty(window, "location", {
+        writable: true,
+        value: { ...originalLocation, href: "" },
+      });
+
+      renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+      const label = PLANS[id].label;
+      const upgradeButton = await screen.findByRole("button", {
+        name: new RegExp(`Upgrade to ${label}`, "i"),
+      });
+      fireEvent.click(upgradeButton);
+
+      await waitFor(() => expect(captured).not.toBeNull());
+      expect(captured!.plan).toBe(id);
+
+      // Restore window.location for downstream tests.
+      Object.defineProperty(window, "location", {
+        writable: true,
+        value: originalLocation,
+      });
+    },
+  );
 });

@@ -70,6 +70,21 @@ A one-shot EF Core migration converts existing `Subscriptions.Plan = 'monthly'` 
 
 This is safe at MVP scale (no production traffic, no API consumers other than the first-party frontend). For a post-launch vocab change of comparable scope, ADR a deprecation window.
 
+### 5. Plan validation runs BEFORE the idempotency lookup
+
+`BillingEndpoints.Checkout` validates the request body BEFORE the `IsEnabled` gate and BEFORE the idempotency lookup. A request with an invalid plan therefore returns `400 billing.plan_unknown` immediately, even if the caller supplied an `Idempotency-Key` matching a prior 2xx response. The rule is: **input validation precedes side effects, including cached-response replays**.
+
+This diverges from `DocumentEndpoints.UploadDocument`, which runs the idempotency lookup BEFORE file-content validation. The divergence is justified — different idempotency semantics:
+
+- **`Checkout` body is a tiny typed enum** (`pro | annual | founding`). Sending `"monthly"` is a client bug worth flagging on every retry, not silently re-serving a 200 from a different prior request that happened to share an `Idempotency-Key`. The cost of validation is a string switch — cheap to run on every request.
+- **`UploadDocument` body is a multi-MB multipart file**. The idempotency contract is keyed off the upload-content hash (de-facto), so a retry with the same key is by construction a retry with the same content. Re-validating the file before checking the cache wastes the file-parse cost; the cache-hit path returns the prior response cheaply.
+
+Both endpoints are correct; the rule is "validate inputs that can be wrong before the cache; skip validation when the cache key already implies the input is the same".
+
+A future endpoint adopting idempotency picks its ordering by the same test: is the request body a typed enum (validate first) or a content-keyed payload (cache first)?
+
+The reorder is pinned by `BillingCheckoutVocabTests.Plan_validation_pre_empts_a_stale_idempotency_hit`, which seeds a cached 200 under key K then re-POSTs with `plan="monthly"` + same key, asserting the new request gets 400 (not the cached 200).
+
 ## Consequences
 
 ### Positive

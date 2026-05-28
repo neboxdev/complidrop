@@ -106,6 +106,16 @@ public sealed class CustomWebApplicationFactory(
             var fakeExtraction = new FakeExtractionClient();
             services.AddSingleton(fakeExtraction);
             services.AddSingleton<IExtractionClient>(fakeExtraction);
+
+            // Replace IStripeService with FakeStripeService so checkout / portal endpoints
+            // can be exercised end-to-end (200 + sessionUrl + captured priceId) without
+            // a live Stripe call (#147, ADR 0011). The fake DELEGATES HandleWebhookEventAsync
+            // to the real StripeService — so StripeWebhookTests still exercises the genuine
+            // signature-verification → ResolvePlanFromPriceId path. The real StripeService is
+            // re-registered as the concrete type so the fake can resolve it via DI.
+            services.RemoveAll<IStripeService>();
+            services.AddScoped<StripeService>();
+            services.AddSingleton<IStripeService, FakeStripeService>();
         });
     }
 }

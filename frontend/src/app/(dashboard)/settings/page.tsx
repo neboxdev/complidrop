@@ -170,7 +170,14 @@ function PlanCard({
   pending: boolean;
 }) {
   return (
+    // role="group" + aria-label give screen-reader users a "Pro plan",
+    // "Annual plan", "Founding plan" landmark to navigate to, and let
+    // tests scope assertions with `screen.getByRole('group', { name:
+    // /Pro plan/i })` — a stable a11y-anchored selector rather than the
+    // brittle `closest("div.rounded-md")` pattern (#147 review).
     <div
+      role="group"
+      aria-label={`${name} plan`}
       className={`p-4 rounded-md border ${featured ? "border-sky-500 bg-sky-50" : "border-slate-200"}`}
     >
       <p className="text-sm font-medium text-slate-700">{name}</p>

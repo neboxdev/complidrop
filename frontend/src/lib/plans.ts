@@ -77,6 +77,14 @@ export const KNOWN_CHECKOUT_PLAN_IDS = ["pro", "annual", "founding"] as const;
 export type CheckoutPlanId = (typeof KNOWN_CHECKOUT_PLAN_IDS)[number];
 
 /**
+ * Every id that can possibly appear as a key in `PLANS` — the union
+ * of `KNOWN_PLAN_IDS ∪ KNOWN_CHECKOUT_PLAN_IDS`. Named so the
+ * `PLANS` registry's key constraint can refer to one named alias
+ * rather than spelling the union out at every use site (#147 review).
+ */
+export type AnyPlanId = PlanId | CheckoutPlanId;
+
+/**
  * Per-plan display copy. Keep all dollar-amounts here so the landing
  * page, register banners, opengraph headline, and settings tiles
  * agree by construction.
@@ -116,9 +124,9 @@ export type CheckoutPlanId = (typeof KNOWN_CHECKOUT_PLAN_IDS)[number];
  * directly with explicit Title-cased phrasing.
  */
 export const PLANS: Record<
-  PlanId | CheckoutPlanId,
+  AnyPlanId,
   {
-    id: PlanId | CheckoutPlanId;
+    id: AnyPlanId;
     label: string;
     monthlyPriceLabel: string;
     annualBilledLabel: string | null;
