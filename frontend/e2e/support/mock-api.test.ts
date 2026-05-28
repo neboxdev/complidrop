@@ -75,6 +75,22 @@ describe("pathMatches — exact-segment-count contract (#91, #129)", () => {
     expect(pathMatches("/api/portal", "/api/portal/")).toBe(true);
     expect(pathMatches("/api/portal/", "/api/portal")).toBe(true);
   });
+
+  it("treats the root path `/` as a zero-segment match against itself, and rejects any deeper actual", () => {
+    // Edge case: both template and actual split-and-filter to []
+    // when they're just "/". Length check passes trivially (0===0)
+    // and the loop body never runs, so the function returns true.
+    // Pinned so a future 'optimization' that early-returned false
+    // when `tParts.length === 0` (mistaking it for a degenerate
+    // input) wouldn't silently break a mock that registered a root
+    // route. Symmetric: any deeper actual must still mismatch on
+    // segment count.
+    expect(pathMatches("/", "/")).toBe(true);
+    expect(pathMatches("/", "")).toBe(true);
+    expect(pathMatches("", "/")).toBe(true);
+    expect(pathMatches("/", "/api")).toBe(false);
+    expect(pathMatches("/", "/api/portal")).toBe(false);
+  });
 });
 
 describe("pathMatches — `:param` wildcard contract (#91, #129)", () => {
@@ -106,6 +122,18 @@ describe("pathMatches — `:param` wildcard contract (#91, #129)", () => {
     // started enforcing parameter-name agreement would surface here.
     expect(pathMatches("/api/portal/:token", "/api/portal/xyz")).toBe(true);
     expect(pathMatches("/api/portal/:id", "/api/portal/xyz")).toBe(true);
+  });
+
+  it("treats a bare `:` and repeated wildcard names as valid wildcards", () => {
+    // The matcher's "is wildcard" check is `startsWith(':')`, which
+    // accepts a single-char `:` segment AND duplicate parameter
+    // names (`:x` / `:x` in the same template). Pinning the loose
+    // grammar so a future contributor who tightened the rule (e.g.
+    // started requiring `/^:[a-z][a-z0-9]*$/`) would have to update
+    // this test deliberately rather than silently breaking a caller
+    // that relied on the loose shape.
+    expect(pathMatches("/api/:", "/api/anything")).toBe(true);
+    expect(pathMatches("/api/:x/:x", "/api/foo/bar")).toBe(true);
   });
 });
 
@@ -163,6 +191,31 @@ describe("pathMatches — pathname-only input contract (#91, #129)", () => {
       pathMatches("/api/portal", "http://localhost:3000/api/portal"),
     ).toBe(false);
   });
+
+  it("returns false when `actual` ends in a query string or hash fragment on a literal segment", () => {
+    // The JSDoc on `pathMatches` enumerates "no query string, no hash
+    // fragment" as part of the pathname-only contract; this test pins
+    // the half of the contract the matcher NATURALLY enforces — when
+    // the trailing segment is LITERAL, segment-equality rejects a
+    // `?…` / `#…` suffix because `"portal" !== "portal?foo=bar"`. A
+    // naive 'be lenient' refactor that pre-stripped `?` from `actual`
+    // would silently start matching the wrong literal route under
+    // `waitForApi` whenever a future caller forgot the
+    // `new URL(res.url()).pathname` extraction — this test would
+    // surface that regression.
+    //
+    // The OTHER half of the contract — `:param`-terminal segments
+    // would let `abc?retry=1` through because the wildcard accepts
+    // any non-empty single segment — is held by callers (both
+    // current call sites extract `.pathname`), not by the matcher.
+    // No defensive check here, intentionally: this matcher exists
+    // to support two test files, and adding prophylactic validation
+    // would expand scope past #129. Pinning the literal-terminal
+    // case is the half the implementation owns; the `:param` case
+    // stays a call-site contract documented in the JSDoc.
+    expect(pathMatches("/api/portal", "/api/portal?foo=bar")).toBe(false);
+    expect(pathMatches("/api/portal", "/api/portal#section")).toBe(false);
+  });
 });
 
 /**
@@ -187,10 +240,23 @@ function makeFakePage(): { page: Page; captured: CapturedCall[] } {
       predicate: ResponsePredicate,
       opts: { timeout?: number } | undefined,
     ) => {
+      // Eagerly invoke the predicate with a benign stub so any
+      // construction-time throw inside `waitForApi` (e.g. if a
+      // future refactor moved validation into the predicate
+      // factory) surfaces as a synchronous test failure rather
+      // than a captured-but-never-exercised state.
+      predicate(fakeResponse("GET", "http://x/"));
       captured.push({ predicate, opts });
       // The real return type is `Promise<Response>`; tests in this
-      // file never await it, so an empty promise is sufficient.
-      return Promise.resolve({}) as unknown as ReturnType<Page["waitForResponse"]>;
+      // file never await it. The resolved (never-rejecting) promise
+      // returned here keeps Node's unhandled-rejection surface
+      // quiet today, and the eager `predicate(...)` invocation
+      // above turns any future construction-time throw into a
+      // synchronous failure that surfaces immediately rather than
+      // through a floating rejection.
+      return Promise.resolve({}) as unknown as ReturnType<
+        Page["waitForResponse"]
+      >;
     },
   };
   return { page: fake as unknown as Page, captured };
@@ -244,11 +310,12 @@ describe("waitForApi — predicate contract (#91, #129)", () => {
   it("filters by exact status when `status` is provided", () => {
     // A future caller that wanted to assert the 429-throttle path
     // would pass `status: 429`. A different status (200, 500) on
-    // the same URL must NOT satisfy the predicate.
+    // the same URL must NOT satisfy the predicate. (Timeout default
+    // is exercised by the dedicated test below — kept out of here
+    // to keep one invariant per test.)
     const { page, captured } = makeFakePage();
     waitForApi(page, "GET", "/api/portal/:token", { status: 429 });
-    const { predicate, opts } = captured[0];
-    expect(opts).toMatchObject({ timeout: 15_000 });
+    const { predicate } = captured[0];
     expect(predicate(fakeResponse("GET", "http://x/api/portal/abc", 429))).toBe(true);
     expect(predicate(fakeResponse("GET", "http://x/api/portal/abc", 200))).toBe(false);
     expect(predicate(fakeResponse("GET", "http://x/api/portal/abc", 500))).toBe(false);
