@@ -17,7 +17,12 @@
  *
  * - `<head>` injection (analytics meta tags, page titles set via
  *   `next/head`, etc.). Component tests render into `document.body`;
- *   chase head leaks in the Playwright E2E layer.
+ *   head-injection leaks are caught in the Playwright E2E layer —
+ *   see `frontend/e2e/smoke/portal-upload.spec.ts`'s
+ *   `expectTokenNotInHead` helper (#127). When adding a new flow
+ *   that surfaces a sensitive value (vendor portal token, session
+ *   token, etc.), mirror that helper in the flow's smoke spec
+ *   rather than extending this body-scoped helper to chase head.
  * - `localStorage` / `sessionStorage` / `window.*`. The name says
  *   `InDom` — non-DOM channels are explicitly out of scope.
  * - HTML-special character escape mismatch: if `value` contains
@@ -38,7 +43,9 @@
  *
  * Defaults to `document.body` — appropriate for component tests where
  * RTL renders into the body. The `<head>` is deliberately out of
- * scope; chase head-injection leaks in the E2E layer.
+ * scope; head-injection leaks are caught at the E2E layer via
+ * `expectTokenNotInHead` in
+ * `frontend/e2e/smoke/portal-upload.spec.ts` (#127).
  *
  * On failure, the error message identifies WHICH scan caught the leak
  * but reports only a length + 4-char prefix + 4-char suffix sentinel
