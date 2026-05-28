@@ -21,7 +21,10 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
     // Must match CustomWebApplicationFactory's Stripe:WebhookSecret.
     private const string WebhookSecret = "whsec_test_secret_for_integration_tests";
 
-    private async Task<string> SeedSubscriptionAsync(string plan = "monthly", string status = "active", bool hasPortal = true)
+    // Default `plan: "pro"` matches the post-ADR-0011 vocab. The
+    // Stripe-side `MonthlyPriceId` config key is unchanged; the
+    // application-side plan id is now "pro".
+    private async Task<string> SeedSubscriptionAsync(string plan = "pro", string status = "active", bool hasPortal = true)
     {
         var orgId = Guid.NewGuid();
         var subId = $"sub_{Guid.NewGuid():N}";
@@ -103,7 +106,7 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
     [Fact]
     public async Task Valid_signed_subscription_deleted_cancels_the_subscription()
     {
-        var subId = await SeedSubscriptionAsync(plan: "monthly", status: "active", hasPortal: true);
+        var subId = await SeedSubscriptionAsync(plan: "pro", status: "active", hasPortal: true);
         var payload = DeletedEvent($"evt_{Guid.NewGuid():N}", subId);
 
         var resp = await PostWebhook(payload, SignatureFor(payload));
@@ -121,7 +124,7 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
     [InlineData("customer.subscription.created")]
     public async Task Valid_signed_subscription_state_event_applies_status_and_plan(string eventType)
     {
-        // Seed "free" and send the ANNUAL price (which maps to "annual", NOT the "monthly" fallback)
+        // Seed "free" and send the ANNUAL price (which maps to "annual", NOT the "pro" fallback)
         // so the assertion genuinely proves price->plan re-derivation, not the seeded value or fallback.
         var subId = await SeedSubscriptionAsync(plan: "free", status: "active");
         var payload = SubscriptionStateEvent($"evt_{Guid.NewGuid():N}", eventType, subId, "past_due", "price_annual_test");
@@ -134,10 +137,32 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         sub.Plan.Should().Be("annual");
     }
 
+    [Theory]
+    [InlineData("price_monthly_test", "pro")]
+    [InlineData("price_annual_test", "annual")]
+    [InlineData("price_founding_test", "founding")]
+    public async Task Stripe_price_id_resolves_to_post_ADR_0011_plan_vocab(string priceId, string expectedPlan)
+    {
+        // Pins the boundary in StripeService.ResolvePlanFromPriceId (ADR 0011): the
+        // Stripe-side `MonthlyPriceId` config key resolves to the app-side `"pro"` plan id
+        // (the application vocab is `free | pro | annual | founding`; Stripe-side config
+        // names stay billing-cadence words). A regression would either resurrect the
+        // legacy `"monthly"` literal (which the migration scrubbed) or break the
+        // founding/annual mappings.
+        var subId = await SeedSubscriptionAsync(plan: "free", status: "active");
+        var payload = SubscriptionStateEvent($"evt_{Guid.NewGuid():N}", "customer.subscription.updated", subId, "active", priceId);
+
+        var resp = await PostWebhook(payload, SignatureFor(payload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var sub = await ReloadAsync(subId);
+        sub.Plan.Should().Be(expectedPlan);
+    }
+
     [Fact]
     public async Task Unknown_event_type_is_accepted_as_a_noop()
     {
-        var subId = await SeedSubscriptionAsync(plan: "monthly", status: "active");
+        var subId = await SeedSubscriptionAsync(plan: "pro", status: "active");
         var payload = JsonSerializer.Serialize(Envelope(
             $"evt_{Guid.NewGuid():N}", "customer.subscription.trial_will_end",
             new { id = subId, @object = "subscription", status = "trialing" }));
@@ -180,7 +205,7 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
     [Fact]
     public async Task Duplicate_event_id_is_processed_only_once()
     {
-        var subId = await SeedSubscriptionAsync(plan: "monthly", status: "active");
+        var subId = await SeedSubscriptionAsync(plan: "pro", status: "active");
         var eventId = $"evt_{Guid.NewGuid():N}";
         var payload = SubscriptionStateEvent(eventId, "customer.subscription.updated", subId, "past_due", "price_monthly_test");
 

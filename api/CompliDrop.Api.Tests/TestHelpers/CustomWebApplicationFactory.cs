@@ -44,8 +44,14 @@ public sealed class CustomWebApplicationFactory(
                 ["Cookies:Secure"] = "false",
                 ["Cookies:SameSite"] = "Lax",
                 ["RateLimiting:Enabled"] = "false",
-                // Stripe webhook signature verification + plan resolution (SecretKey left unset,
-                // so checkout/portal stay disabled — only the webhook path is exercised).
+                // Stripe webhook signature verification + plan resolution. SecretKey is
+                // explicitly emptied — without this, a developer with `Stripe:SecretKey` in
+                // user-secrets would have it leak into the test host (configuration ordering:
+                // appsettings → user-secrets → env → in-memory, so we have to set it here
+                // to win). The intent is for checkout/portal to be DISABLED in tests so
+                // BillingCheckoutVocabTests can pin the IsEnabled gate behaviour without
+                // accidentally hitting the live Stripe API.
+                ["Stripe:SecretKey"] = "",
                 ["Stripe:WebhookSecret"] = "whsec_test_secret_for_integration_tests",
                 ["Stripe:MonthlyPriceId"] = "price_monthly_test",
                 ["Stripe:AnnualPriceId"] = "price_annual_test",
