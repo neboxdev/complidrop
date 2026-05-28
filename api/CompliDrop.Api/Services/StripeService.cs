@@ -168,12 +168,25 @@ public class StripeService(
         await db.SaveChangesAsync(ct);
     }
 
+    // Maps Stripe-side price ids (config-keyed `MonthlyPriceId` /
+    // `AnnualPriceId` / `FoundingPriceId`) to app-side plan ids
+    // (`pro | annual | founding`) per ADR 0011. The config-key names
+    // stay Stripe-billing-cadence words; the return values stay
+    // customer-facing product-tier words. This boundary is the only
+    // place the two namespaces meet.
+    //
+    // Empty / null / unrecognised price ids default to `"pro"` so a
+    // misconfigured Stripe row doesn't escalate into a webhook NRE —
+    // the Subscription stays on the paid plan it was already on, and
+    // the operator notices via Sentry logs. (A previous version
+    // defaulted to `"monthly"` — same behaviour, renamed to match
+    // the new vocab.)
     private string ResolvePlanFromPriceId(string? priceId)
     {
         if (priceId == _cfg.AnnualPriceId) return "annual";
         if (priceId == _cfg.FoundingPriceId) return "founding";
-        if (priceId == _cfg.MonthlyPriceId) return "monthly";
-        return "monthly";
+        if (priceId == _cfg.MonthlyPriceId) return "pro";
+        return "pro";
     }
 
     private void EnsureConfigured()
