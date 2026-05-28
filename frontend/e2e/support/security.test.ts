@@ -41,6 +41,21 @@ function makeFakePage(headHtml: string): Page {
   return fake as unknown as Page;
 }
 
+describe("expectTokenNotInHead — input validation (#127)", () => {
+  it("throws loudly when the token is the empty string", async () => {
+    // Foot-gun: `process.env.SOME_TOKEN ?? ""` produces "" when the
+    // env var is unset. `"".includes("")` is always true, so without
+    // a guard the helper would unconditionally throw "leak detected"
+    // with a length-0 sentinel — confusing the test author. Pin the
+    // explicit guard so a regression that removed it would surface
+    // here rather than as misleading failures in downstream specs.
+    const page = makeFakePage("<title>safe</title>");
+    await expect(expectTokenNotInHead(page, "")).rejects.toThrow(
+      /token must be non-empty/,
+    );
+  });
+});
+
 describe("expectTokenNotInHead — basic contract (#127)", () => {
   it("passes silently when the token is absent from <head>", async () => {
     const page = makeFakePage(

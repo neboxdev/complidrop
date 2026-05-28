@@ -77,6 +77,30 @@ export async function expectTokenNotInHead(
   page: Page,
   token: string,
 ): Promise<void> {
+  // Guard against the foot-gun where a caller passes
+  // `process.env.SOME_TOKEN ?? ""` (or any other path that produces
+  // an empty string). `"".includes("")` is always `true`, so an
+  // empty-token check would unconditionally throw "leak detected"
+  // with a length-0 sentinel — confusing the test author into
+  // chasing a regression that doesn't exist. Loud-fail at the call
+  // site instead.
+  if (token === "") {
+    throw new Error(
+      "expectTokenNotInHead: token must be non-empty. An empty string " +
+        "matches every <head> trivially via `\"\".includes(\"\")` — caller " +
+        "probably wanted to skip the assertion when the token is unset; " +
+        "guard the call site explicitly.",
+    );
+  }
+
+  // Real Playwright `page.locator("head").innerHTML()` returns the
+  // browser's serialized DOM, which may normalize attribute quoting,
+  // whitespace, or void-element shape vs. a hand-built string. The
+  // fast-tier contract test in `./security.test.ts` uses a fake Page
+  // that returns the literal string passed in — it pins the helper's
+  // public surface but NOT real-browser serialization. The Playwright
+  // smoke spec at `frontend/e2e/smoke/portal-upload.spec.ts` holds
+  // the real-browser end of the contract.
   const headHtml = await page.locator("head").innerHTML();
   const sentinel = summarize(token);
   const escaped = escapeHtml(token);
@@ -116,6 +140,13 @@ export async function expectTokenNotInHead(
  * disambiguate; for short values (≤ 8 chars, e.g. when a smoke spec
  * deliberately uses a short fixture), returns just the length to
  * avoid a near-full disclosure via the prefix + suffix.
+ *
+ * The 8-char boundary protects PRODUCTION-shaped tokens — vendor
+ * portal tokens, session tokens, etc. are all ≥ 16 chars, well above
+ * the threshold. Test fixtures in the 9-15 char range (e.g.
+ * `smoke-tok-12` in the portal-upload spec) accept a higher
+ * disclosure-ratio tradeoff on failure (67% for a 12-char value);
+ * tests use synthetic strings whose disclosure is harmless.
  *
  * Lifted-and-mirrored from `frontend/src/test/security.ts:summarize`
  * — same contract on both tiers so the failure message stays safe

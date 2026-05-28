@@ -23,12 +23,23 @@ The Playwright config (`playwright.config.ts`) boots the Next dev server on `htt
 frontend/e2e/
   smoke/                  Tier-1 launch flows. Today: harness, auth-flow (#39), login-flow (#90), portal-upload + upload-to-extraction (#39 remaining flows).
   support/
-    mock-api.ts           page.route('**/api/**', …) interceptor + jsonOk/jsonError.
+    mock-api.ts           page.route('**/api/**', …) interceptor + jsonOk/jsonError + waitForApi/pathMatches.
+    mock-api.test.ts      Vitest contract test for pathMatches + waitForApi (#129).
     fixtures.ts           E2E-side typed shapes (authedMe, portalInfo, …).
+    security.ts           expectTokenNotInHead — E2E-tier counterpart to src/test/security.ts's assertNotInDom (#127).
+    security.test.ts      Vitest contract test for expectTokenNotInHead (#127).
   scripts/
     scan-secrets.mjs      Secret-scan gate (Node, no deps). Runs in CI after Playwright.
+    lint-imports.mjs      Forbids backend / ExtractionFixtures imports under e2e/ (#38 AC #6).
   README.md               This file.
 ```
+
+`*.test.ts` files in `support/` are Vitest contract tests for the
+helpers they sit next to — fast-tier pins of the public surface so a
+regression surfaces before Playwright runs. See
+[`vitest.config.mts`](../vitest.config.mts)'s `include` block for the
+namespace-disjointness rationale (Playwright owns `.spec.ts` under
+`e2e/`; Vitest owns `.test.ts` under `e2e/support/`).
 
 ## Network policy (zero live calls)
 
