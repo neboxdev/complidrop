@@ -120,36 +120,50 @@ describe("SettingsPage — billing tile vocab (#147, ADR 0011)", () => {
       // iteration of this `it.each` block.
       mockFreePlanSubscription();
       let captured: { plan?: string } | null = null;
+      const stubSessionUrl = `https://stub.test/cs_stub_${id}`;
       server.use(
         http.post(url("/api/billing/checkout"), async ({ request }) => {
           captured = (await request.json()) as { plan?: string };
-          return jsonOk({ sessionUrl: "https://stub.test/cs_stub" });
+          return jsonOk({ sessionUrl: stubSessionUrl });
         }),
       );
       // Stub window.location.href so the onSuccess redirect doesn't
-      // actually navigate in jsdom (which would throw).
+      // actually navigate in jsdom (which would throw). The waitFor
+      // below blocks until the redirect side-effect has fired, so the
+      // restoration step is race-free.
       const originalLocation = window.location;
       Object.defineProperty(window, "location", {
         writable: true,
         value: { ...originalLocation, href: "" },
       });
 
-      renderWithProviders(<SettingsPage />, { auth: authedMe });
+      try {
+        renderWithProviders(<SettingsPage />, { auth: authedMe });
 
-      const label = PLANS[id].label;
-      const upgradeButton = await screen.findByRole("button", {
-        name: new RegExp(`Upgrade to ${label}`, "i"),
-      });
-      fireEvent.click(upgradeButton);
+        const label = PLANS[id].label;
+        const upgradeButton = await screen.findByRole("button", {
+          name: new RegExp(`Upgrade to ${label}`, "i"),
+        });
+        fireEvent.click(upgradeButton);
 
-      await waitFor(() => expect(captured).not.toBeNull());
-      expect(captured!.plan).toBe(id);
-
-      // Restore window.location for downstream tests.
-      Object.defineProperty(window, "location", {
-        writable: true,
-        value: originalLocation,
-      });
+        // Wait for the full success path to complete: request captured
+        // AND onSuccess's `window.location.href = res.sessionUrl`
+        // assignment has fired. The href assertion doubles as
+        // coverage that onSuccess routes the response sessionUrl
+        // through rather than the wire plan.
+        await waitFor(() => {
+          expect(captured).not.toBeNull();
+          expect(window.location.href).toBe(stubSessionUrl);
+        });
+        expect(captured!.plan).toBe(id);
+      } finally {
+        // Restore window.location for downstream tests, even if an
+        // assertion threw above.
+        Object.defineProperty(window, "location", {
+          writable: true,
+          value: originalLocation,
+        });
+      }
     },
   );
 });

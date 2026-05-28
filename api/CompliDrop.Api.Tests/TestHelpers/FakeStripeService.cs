@@ -37,28 +37,43 @@ namespace CompliDrop.Api.Tests.TestHelpers;
 ///     and captures every invocation in <see cref="Checkouts"/>.
 ///   - <see cref="CreatePortalSessionAsync"/> mirrors the shape.
 /// </summary>
-public sealed class FakeStripeService(IServiceProvider rootProvider) : IStripeService
+public sealed class FakeStripeService(IServiceScopeFactory scopeFactory) : IStripeService
 {
+    // Default price-id literals — shared between the property
+    // initializers and Reset() so the construction-time defaults stay
+    // in one place. Mirrors the test-config values installed by
+    // CustomWebApplicationFactory.
+    private const string DefaultMonthlyPriceId = "price_monthly_test";
+    private const string DefaultAnnualPriceId = "price_annual_test";
+    private const string DefaultFoundingPriceId = "price_founding_test";
+
     private readonly ConcurrentQueue<CheckoutCall> _checkouts = new();
     private readonly ConcurrentQueue<PortalCall> _portals = new();
     private int _counter;
 
     public bool IsEnabled { get; set; } = true;
-    public string MonthlyPriceId { get; set; } = "price_monthly_test";
-    public string AnnualPriceId { get; set; } = "price_annual_test";
-    public string FoundingPriceId { get; set; } = "price_founding_test";
+    public string MonthlyPriceId { get; set; } = DefaultMonthlyPriceId;
+    public string AnnualPriceId { get; set; } = DefaultAnnualPriceId;
+    public string FoundingPriceId { get; set; } = DefaultFoundingPriceId;
 
     public IReadOnlyList<CheckoutCall> Checkouts => _checkouts.ToArray();
     public IReadOnlyList<PortalCall> Portals => _portals.ToArray();
     public CheckoutCall? LastCheckout => _checkouts.LastOrDefault();
 
-    /// <summary>Clears captured sessions + restores defaults.</summary>
+    /// <summary>Clears captured sessions + restores defaults. A test
+    /// that mutated any public property — IsEnabled, MonthlyPriceId,
+    /// AnnualPriceId, FoundingPriceId — has its change reverted here
+    /// so the next test in the same fixture sees the construction-
+    /// time state.</summary>
     public void Reset()
     {
         _checkouts.Clear();
         _portals.Clear();
         Interlocked.Exchange(ref _counter, 0);
         IsEnabled = true;
+        MonthlyPriceId = DefaultMonthlyPriceId;
+        AnnualPriceId = DefaultAnnualPriceId;
+        FoundingPriceId = DefaultFoundingPriceId;
     }
 
     public Task<string> CreateCheckoutSessionAsync(
@@ -88,10 +103,16 @@ public sealed class FakeStripeService(IServiceProvider rootProvider) : IStripeSe
     /// exercised by the existing webhook test suite. Resolved per-call
     /// from a fresh scope because <c>StripeService</c> depends on the
     /// request-scoped <c>SystemDbContext</c> and we want a clean unit
-    /// of work for each delegated invocation.</summary>
+    /// of work for each delegated invocation.
+    ///
+    /// Injects <see cref="IServiceScopeFactory"/> rather than the raw
+    /// <c>IServiceProvider</c> — matches the codebase convention from
+    /// <c>ExtractionWorker</c> and <c>ReminderBackgroundService</c>
+    /// (the only other Singleton-scope creators) and makes the "I
+    /// create scopes" intent visible at the type level.</summary>
     public async Task HandleWebhookEventAsync(Event ev, CancellationToken ct)
     {
-        using var scope = rootProvider.CreateScope();
+        using var scope = scopeFactory.CreateScope();
         var real = scope.ServiceProvider.GetRequiredService<StripeService>();
         await real.HandleWebhookEventAsync(ev, ct);
     }
