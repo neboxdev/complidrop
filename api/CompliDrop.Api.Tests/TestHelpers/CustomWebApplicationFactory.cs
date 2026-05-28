@@ -44,8 +44,14 @@ public sealed class CustomWebApplicationFactory(
                 ["Cookies:Secure"] = "false",
                 ["Cookies:SameSite"] = "Lax",
                 ["RateLimiting:Enabled"] = "false",
-                // Stripe webhook signature verification + plan resolution (SecretKey left unset,
-                // so checkout/portal stay disabled — only the webhook path is exercised).
+                // Stripe webhook signature verification + plan resolution. SecretKey is
+                // explicitly emptied — without this, a developer with `Stripe:SecretKey` in
+                // user-secrets would have it leak into the test host (configuration ordering:
+                // appsettings → user-secrets → env → in-memory, so we have to set it here
+                // to win). The intent is for checkout/portal to be DISABLED in tests so
+                // BillingCheckoutVocabTests can pin the IsEnabled gate behaviour without
+                // accidentally hitting the live Stripe API.
+                ["Stripe:SecretKey"] = "",
                 ["Stripe:WebhookSecret"] = "whsec_test_secret_for_integration_tests",
                 ["Stripe:MonthlyPriceId"] = "price_monthly_test",
                 ["Stripe:AnnualPriceId"] = "price_annual_test",
@@ -100,6 +106,16 @@ public sealed class CustomWebApplicationFactory(
             var fakeExtraction = new FakeExtractionClient();
             services.AddSingleton(fakeExtraction);
             services.AddSingleton<IExtractionClient>(fakeExtraction);
+
+            // Replace IStripeService with FakeStripeService so checkout / portal endpoints
+            // can be exercised end-to-end (200 + sessionUrl + captured priceId) without
+            // a live Stripe call (#147, ADR 0011). The fake DELEGATES HandleWebhookEventAsync
+            // to the real StripeService — so StripeWebhookTests still exercises the genuine
+            // signature-verification → ResolvePlanFromPriceId path. The real StripeService is
+            // re-registered as the concrete type so the fake can resolve it via DI.
+            services.RemoveAll<IStripeService>();
+            services.AddScoped<StripeService>();
+            services.AddSingleton<IStripeService, FakeStripeService>();
         });
     }
 }

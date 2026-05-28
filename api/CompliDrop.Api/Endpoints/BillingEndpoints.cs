@@ -31,6 +31,28 @@ public static class BillingEndpoints
         CancellationToken ct)
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
+
+        // Validate the plan FIRST (#147, ADR 0011). The wire vocab is
+        // `pro | annual | founding`; the legacy `"monthly"` is rejected.
+        // Input validation runs ahead of `IsEnabled` and idempotency so
+        // a malformed client always gets a 400 plan_unknown — not a
+        // 503 (service unavailable) it can't act on, and not a cached
+        // 200 from a stale idempotency-key hit. Unknown plans get a
+        // distinct error code from "configured-but-empty" so a deploy
+        // missing a Stripe price ID is distinguishable from a
+        // malformed client.
+        var priceId = req.Plan?.ToLowerInvariant() switch
+        {
+            "pro" => stripe.MonthlyPriceId,
+            "annual" => stripe.AnnualPriceId,
+            "founding" => stripe.FoundingPriceId,
+            _ => null
+        };
+        if (priceId is null)
+            return Error(400, "billing.plan_unknown", "Unknown plan. Expected one of: pro, annual, founding.");
+        if (string.IsNullOrWhiteSpace(priceId))
+            return Error(400, "billing.price_missing", "Requested plan has no configured price.");
+
         if (!stripe.IsEnabled) return Error(503, "billing.unavailable", "Billing is not yet configured.");
 
         var orgId = currentUser.OrganizationId.Value;
@@ -43,15 +65,6 @@ public static class BillingEndpoints
                     hit.ResponseJson is null ? null : System.Text.Json.JsonSerializer.Deserialize<object>(hit.ResponseJson),
                     statusCode: hit.StatusCode);
         }
-
-        var priceId = req.Plan?.ToLowerInvariant() switch
-        {
-            "annual" => stripe.AnnualPriceId,
-            "founding" => stripe.FoundingPriceId,
-            _ => stripe.MonthlyPriceId
-        };
-        if (string.IsNullOrWhiteSpace(priceId))
-            return Error(400, "billing.price_missing", "Requested plan has no configured price.");
 
         var baseUrl = frontend.Value.BaseUrl.TrimEnd('/');
         var url = await stripe.CreateCheckoutSessionAsync(

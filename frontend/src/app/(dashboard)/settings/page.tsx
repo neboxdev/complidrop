@@ -7,6 +7,11 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useMe } from "@/hooks/useAuth";
 import { api } from "@/lib/api";
+import {
+  KNOWN_CHECKOUT_PLAN_IDS,
+  PLANS,
+  type CheckoutPlanId,
+} from "@/lib/plans";
 import { useSearchParams } from "next/navigation";
 import { useEffect } from "react";
 
@@ -29,7 +34,10 @@ export default function SettingsPage() {
   });
 
   const checkout = useMutation({
-    mutationFn: (plan: "monthly" | "annual" | "founding") =>
+    // The wire vocab matches `KNOWN_CHECKOUT_PLAN_IDS` (#147, ADR 0011).
+    // The backend `/api/billing/checkout` endpoint accepts exactly these
+    // three values; any other string returns 400 billing.plan_unknown.
+    mutationFn: (plan: CheckoutPlanId) =>
       api.post<{ sessionUrl: string }>(
         "/api/billing/checkout",
         { plan },
@@ -109,29 +117,29 @@ export default function SettingsPage() {
           )}
 
           {!isPaid ? (
+            // Tiles are driven off `KNOWN_CHECKOUT_PLAN_IDS` + `PLANS`
+            // (#147, ADR 0011). Each tile's price + tagline reads from
+            // the registry; a price change requires editing exactly one
+            // file (`@/lib/plans.ts`) and the tile, the landing card,
+            // and the opengraph headline all update together.
+            //
+            // `annual` is highlighted as the conversion default — see
+            // the landing-page pricing section which uses the same
+            // `featured` styling on Annual. A future redesign that
+            // moves the highlight to Founding would change only this
+            // condition.
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
-              <PlanCard
-                name="Monthly"
-                price="$49"
-                tagline="Unlimited docs, all features."
-                onClick={() => checkout.mutate("monthly")}
-                pending={checkout.isPending}
-              />
-              <PlanCard
-                name="Annual"
-                price="$39"
-                tagline="Same features, billed yearly."
-                featured
-                onClick={() => checkout.mutate("annual")}
-                pending={checkout.isPending}
-              />
-              <PlanCard
-                name="Founding"
-                price="$39"
-                tagline="Locked forever. First 50 only."
-                onClick={() => checkout.mutate("founding")}
-                pending={checkout.isPending}
-              />
+              {KNOWN_CHECKOUT_PLAN_IDS.map((id) => (
+                <PlanCard
+                  key={id}
+                  name={PLANS[id].label}
+                  price={PLANS[id].monthlyPriceLabel}
+                  tagline={PLANS[id].tagline ?? ""}
+                  featured={id === "annual"}
+                  onClick={() => checkout.mutate(id)}
+                  pending={checkout.isPending}
+                />
+              ))}
             </div>
           ) : (
             <div>
@@ -162,7 +170,14 @@ function PlanCard({
   pending: boolean;
 }) {
   return (
+    // role="group" + aria-label give screen-reader users a "Pro plan",
+    // "Annual plan", "Founding plan" landmark to navigate to, and let
+    // tests scope assertions with `screen.getByRole('group', { name:
+    // /Pro plan/i })` — a stable a11y-anchored selector rather than the
+    // brittle `closest("div.rounded-md")` pattern (#147 review).
     <div
+      role="group"
+      aria-label={`${name} plan`}
       className={`p-4 rounded-md border ${featured ? "border-sky-500 bg-sky-50" : "border-slate-200"}`}
     >
       <p className="text-sm font-medium text-slate-700">{name}</p>
