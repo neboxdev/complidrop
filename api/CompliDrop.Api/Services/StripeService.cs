@@ -168,24 +168,50 @@ public class StripeService(
         await db.SaveChangesAsync(ct);
     }
 
-    // Maps Stripe-side price ids (config-keyed `MonthlyPriceId` /
-    // `AnnualPriceId` / `FoundingPriceId`) to app-side plan ids
-    // (`pro | annual | founding`) per ADR 0011. The config-key names
-    // stay Stripe-billing-cadence words; the return values stay
-    // customer-facing product-tier words. This boundary is the only
-    // place the two namespaces meet.
-    //
-    // Empty / null / unrecognised price ids default to `"pro"` so a
-    // misconfigured Stripe row doesn't escalate into a webhook NRE —
-    // the Subscription stays on the paid plan it was already on, and
-    // the operator notices via Sentry logs. (A previous version
-    // defaulted to `"monthly"` — same behaviour, renamed to match
-    // the new vocab.)
-    private string ResolvePlanFromPriceId(string? priceId)
+    // Instance shim — delegates to the static helper so production code stays unchanged
+    // while tests can call ResolvePlanFromPriceId(priceId, cfg) directly without
+    // standing up a full StripeService (DB + IOptions + ILogger).
+    private string ResolvePlanFromPriceId(string? priceId) => ResolvePlanFromPriceId(priceId, _cfg);
+
+    /// <summary>
+    /// Maps Stripe-side price ids (config-keyed <c>MonthlyPriceId</c> /
+    /// <c>AnnualPriceId</c> / <c>FoundingPriceId</c>) to app-side plan ids
+    /// (<c>pro | annual | founding</c>) per ADR 0011. The config-key names
+    /// stay Stripe-billing-cadence words; the return values stay
+    /// customer-facing product-tier words. This boundary is the only
+    /// place the two namespaces meet.
+    ///
+    /// Hardening (#172):
+    ///   - <b>Null / empty / whitespace <c>priceId</c></b> short-circuits
+    ///     to the <c>"pro"</c> fallback. Without this guard, an empty
+    ///     incoming priceId would compare-equal to an unset
+    ///     <c>_cfg.AnnualPriceId</c> (default <c>string.Empty</c>) and
+    ///     resolve to <c>"annual"</c> — wrong plan, wrong document
+    ///     limit, wrong portal flag for the affected Subscription.
+    ///   - <b>Per-key skip on empty config</b>: each comparison is
+    ///     gated on the config value being non-empty, so a partial
+    ///     Stripe deploy (e.g. <c>AnnualPriceId</c> missing) doesn't
+    ///     turn the empty config string into a wildcard that matches
+    ///     any priceId that happens to also be empty.
+    ///
+    /// Unrecognised but non-empty price ids default to <c>"pro"</c> —
+    /// a misconfigured Stripe row doesn't escalate into a webhook NRE;
+    /// the Subscription stays on the paid plan it was already on, and
+    /// the operator notices via Sentry logs.
+    ///
+    /// <c>internal</c> for direct unit testing (see
+    /// <see cref="CompliDrop.Api.Tests"/> via
+    /// <c>InternalsVisibleTo</c>). The caller-facing instance method
+    /// stays <c>private</c> so production code only sees one entry point.
+    /// </summary>
+    internal static string ResolvePlanFromPriceId(string? priceId, StripeSettings cfg)
     {
-        if (priceId == _cfg.AnnualPriceId) return "annual";
-        if (priceId == _cfg.FoundingPriceId) return "founding";
-        if (priceId == _cfg.MonthlyPriceId) return "pro";
+        if (string.IsNullOrWhiteSpace(priceId)) return "pro";
+
+        if (!string.IsNullOrWhiteSpace(cfg.AnnualPriceId) && priceId == cfg.AnnualPriceId) return "annual";
+        if (!string.IsNullOrWhiteSpace(cfg.FoundingPriceId) && priceId == cfg.FoundingPriceId) return "founding";
+        if (!string.IsNullOrWhiteSpace(cfg.MonthlyPriceId) && priceId == cfg.MonthlyPriceId) return "pro";
+
         return "pro";
     }
 
