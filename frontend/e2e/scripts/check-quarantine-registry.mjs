@@ -33,17 +33,18 @@
  *   - Exit 0 + one-line "clean" summary when in sync.
  *   - Exit 1 + structured drift report when out of sync.
  *
- * The pure helpers (`scanMarkers`, `parseRegistry`, `compareRegistry`)
- * are exported for a Vitest companion test at
+ * The pure helpers (`parseMarkersFromSource`, `parseRegistry`,
+ * `compareRegistry`, `formatDriftReport`, `listSpecFiles`) are
+ * exported for a Vitest companion test at
  * `check-quarantine-registry.test.mjs` — the network-touching CLI
  * orchestration is the only part that needs gh and is exercised by
  * the workflow itself.
  */
 import { readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, relative, resolve, sep, extname } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 // ============================================================
 // Pure helpers (exported for testing)
@@ -107,12 +108,21 @@ export function parseMarkersFromSource(text, filePath) {
   const markers = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    // Skip lines that are obviously inside a doc/comment block
-    // mentioning the convention (the script itself does that — but
-    // we ONLY run it on `.spec.ts` files via listSpecFiles, so a
-    // mention in a markdown README is already filtered out at the
-    // file-listing layer).
-    const fixmeMatch = /\btest\.fixme\s*\(/.test(line);
+    // Match Playwright's two documented quarantine idioms:
+    //   - `test.fixme(...)` — per-test skip with a parking comment.
+    //   - `test.describe.fixme(...)` — whole-describe skip.
+    // Plus the `@quarantine` tag annotation that ADR 0010 names.
+    //
+    // Substring-only match: the script intentionally fires on a
+    // comment-line mention of the convention (e.g. a prose `//
+    // explains the test.fixme idiom`). False positives like that
+    // surface as `noTicket` rather than as a wrong-ticket match;
+    // the developer either suppresses by adding the matching row
+    // to #87 or rewords the prose. Tightening to skip
+    // comment-only lines was considered and rejected — it would
+    // require parsing TS comments out of the source, which is far
+    // more machinery than the false-positive risk justifies.
+    const fixmeMatch = /\btest\.(describe\.)?fixme\s*\(/.test(line);
     const tagMatch = /@quarantine\b/.test(line);
     if (!fixmeMatch && !tagMatch) continue;
 
@@ -121,9 +131,18 @@ export function parseMarkersFromSource(text, filePath) {
     // when the marker has no parenthesized name (e.g. a bare
     // `@quarantine` tag, or `test.fixme()` used as a runtime
     // skip inside another `test()` body — rare).
+    //
+    // Known limitation: the [^'"`] character class truncates the
+    // captured name at the first quote-of-other-kind inside the
+    // name (`"O'Reilly's flow"` → "O") and at the first escaped
+    // quote (`"he said \"hi\""` → "he said "). The ticket-from-
+    // TODO lookup is unaffected, so the gate still fires
+    // correctly; only the drift-report's displayed name is
+    // truncated. A full TS-AST-quality parse is far more
+    // machinery than the rare quote-in-name case justifies.
     let testName = null;
     const nameMatch = line.match(
-      /test\.fixme\s*\(\s*(?:async\s*\(.*?\)\s*=>|['"`]([^'"`]+)['"`])/,
+      /test\.(?:describe\.)?fixme\s*\(\s*(?:async\s*\(.*?\)\s*=>|['"`]([^'"`]+)['"`])/,
     );
     if (nameMatch?.[1]) testName = nameMatch[1];
 
@@ -155,10 +174,21 @@ export function parseMarkersFromSource(text, filePath) {
         break;
       }
     }
-    // Fallback: same-line `#<digits>` for the inline-TODO shape.
+    // Fallback: same-line `#<digits>` for the inline-TODO shape
+    // (`test.fixme("…", …); // TODO #N`). Scope the regex to the
+    // substring AFTER the first `//` on the line so a `#N` that
+    // lives inside the test-name string literal (e.g.
+    // `test.fixme("AC #3 …", …); // TODO #777`) cannot shadow the
+    // intended inline-TODO ticket. The preceding-line precedence
+    // above already handles the TODO-above-marker shape; this
+    // restriction makes the same-line fallback safe for the
+    // remaining inline shape.
     if (!ticket) {
-      const m = lines[i].match(/#(\d+)\b/);
-      if (m) ticket = m[1];
+      const commentStart = lines[i].indexOf("//");
+      if (commentStart >= 0) {
+        const m = lines[i].slice(commentStart).match(/#(\d+)\b/);
+        if (m) ticket = m[1];
+      }
     }
 
     markers.push({
@@ -189,9 +219,12 @@ export function parseRegistry(body) {
   // Row shape: `- [ ] #<ticket> — …` or `- [x] #<ticket> — …`.
   // The em-dash is the documented separator in #87's row template;
   // we also accept a hyphen ` - ` for tolerance against autocorrect
-  // / contributor typo. The ticket number is what we match on, so
-  // exact separator shape doesn't matter for the comparison.
-  const ROW = /^\s*-\s*\[([ x])\]\s*#(\d+)\b/;
+  // / contributor typo. GitHub Flavored Markdown renders both `[x]`
+  // and `[X]` as ticked, and contributors routinely use either; the
+  // regex accepts both and the toLowerCase() comparison below
+  // normalizes. The ticket number is what we match on, so the exact
+  // separator shape doesn't matter for the comparison.
+  const ROW = /^\s*-\s*\[([ xX])\]\s*#(\d+)\b/;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (/^##\s+Quarantine registry\b/i.test(line)) {
@@ -358,8 +391,27 @@ function fetchIssueBody(issueNumber) {
     "neboxdev/complidrop";
   let raw;
   try {
-    raw = execSync(
-      `gh issue view ${issueNumber} --repo ${repo} --json body --jq .body`,
+    // execFileSync (not execSync with a template string) so the
+    // gh argv is passed through node directly rather than via a
+    // shell. Avoids the entire shell-injection class: a future
+    // refactor (or a misconfigured repo variable) that put a
+    // semicolon in `repo` or `issueNumber` can't synthesize a
+    // second command. Defense-in-depth — both inputs come from
+    // trusted CI today, but the swap is mechanical and removes
+    // the fragility regardless.
+    raw = execFileSync(
+      "gh",
+      [
+        "issue",
+        "view",
+        String(issueNumber),
+        "--repo",
+        String(repo),
+        "--json",
+        "body",
+        "--jq",
+        ".body",
+      ],
       {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
@@ -434,8 +486,3 @@ if (isMain) {
     process.exit(1);
   });
 }
-
-// Re-export node:path/extname for the rare future caller; currently
-// unused but kept stable so a third-party importer can use the pure
-// helpers without dragging in node:path themselves.
-export const _internals = { extname };

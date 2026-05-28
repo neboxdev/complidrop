@@ -20,11 +20,15 @@
  *      empty drift report.
  */
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   parseMarkersFromSource,
   parseRegistry,
   compareRegistry,
   formatDriftReport,
+  listSpecFiles,
 } from "./check-quarantine-registry.mjs";
 
 describe("parseMarkersFromSource — marker extraction (#115)", () => {
@@ -158,6 +162,64 @@ describe("parseMarkersFromSource — marker extraction (#115)", () => {
     expect(markers[0].ticket).toBe("100");
     expect(markers[1].ticket).toBe("200");
   });
+
+  it("matches test.describe.fixme() — Playwright's whole-describe quarantine idiom", () => {
+    // ADR 0010 §Flake policy talks about `test.fixme`; Playwright
+    // exposes the same idiom at the suite level as
+    // `test.describe.fixme(name, callback)`. If a contributor uses
+    // the suite-level variant the gate MUST still catch it — a
+    // whole describe block parked in quarantine carries the same
+    // risk profile as a single fixme'd test. Without this match
+    // the gate would silently miss every suite-level parking and
+    // the registry would decay first for suite-level entries.
+    const src = [
+      "// TODO #555: whole-flow flake",
+      'test.describe.fixme("Flow X — entirely flaky", () => {',
+      '  test("inner", async () => {});',
+      "});",
+    ].join("\n");
+    const markers = parseMarkersFromSource(src, "e2e/smoke/d.spec.ts");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].testName).toBe("Flow X — entirely flaky");
+    expect(markers[0].ticket).toBe("555");
+  });
+
+  it("inline-TODO fallback restricts to // trailing comment — in-name `#N` cannot shadow", () => {
+    // Critical bug-fix pin (#115 review): a marker whose test name
+    // contains `#N` AND has no preceding TODO line. The same-line
+    // fallback used to match the in-name `#3` left-to-right and
+    // silently mis-route the marker to ticket #3. The fix scopes
+    // the same-line regex to the substring AFTER the first `//`.
+    // Pinning the post-fix shape so a future loosening (e.g.
+    // "find any #N on the marker line") would surface here, not
+    // silently in production.
+    const src = [
+      'test.fixme("AC #3 broken thing", async () => {}); // TODO #777',
+    ].join("\n");
+    const markers = parseMarkersFromSource(src, "e2e/smoke/n.spec.ts");
+    expect(markers).toHaveLength(1);
+    // The trailing-comment #777 wins, NOT the in-name #3.
+    expect(markers[0].ticket).toBe("777");
+  });
+
+  it("handles CRLF line endings in spec source", () => {
+    // Windows dev machines (with autocrlf=true on checkout) or
+    // copy-pasted source through CRLF-normalizing intermediaries
+    // produce `\r\n`-separated files. The split regex (`/\r?\n/`)
+    // already handles this; pin it so a future "simplify to
+    // `\n`" refactor is a deliberate, observable change.
+    const src = [
+      "// TODO #888: flake",
+      'test.fixme("crlf flake", async () => {});',
+    ].join("\r\n");
+    const markers = parseMarkersFromSource(src, "e2e/smoke/c.spec.ts");
+    expect(markers).toHaveLength(1);
+    expect(markers[0].ticket).toBe("888");
+    expect(markers[0].testName).toBe("crlf flake");
+    // Line count must stay correct under CRLF (no off-by-one from
+    // a stray `\r` survivor).
+    expect(markers[0].line).toBe(2);
+  });
 });
 
 describe("parseRegistry — issue-body parsing (#115)", () => {
@@ -225,6 +287,60 @@ describe("parseRegistry — issue-body parsing (#115)", () => {
       "## Related",
       "- [x] #999 — this is a Related-section row, NOT in registry",
     ].join("\n");
+    const rows = parseRegistry(body);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].ticket).toBe("100");
+  });
+
+  it("accepts both `[x]` and `[X]` as ticked (GFM is case-insensitive)", () => {
+    // GitHub Flavored Markdown renders both `- [x]` and `- [X]`
+    // as ticked. A contributor's autocorrect or typing-on-mobile
+    // can produce uppercase X; the parser must accept it. Without
+    // this, an `[X]` row would not be matched at all, the script
+    // would treat it as "no row for this ticket", and would
+    // emit a misleading "append a row to #87" drift message
+    // when the row IS in fact present.
+    const body = [
+      "## Quarantine registry",
+      "- [x] #100 — lowercase ticked",
+      "- [X] #200 — uppercase ticked",
+      "## Non-goals",
+    ].join("\n");
+    const rows = parseRegistry(body);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ ticket: "100", ticked: true });
+    expect(rows[1]).toMatchObject({ ticket: "200", ticked: true });
+  });
+
+  it("matches the heading case-insensitively (`## quarantine registry` works)", () => {
+    // The regex `/^##\s+Quarantine registry\b/i` is case-
+    // insensitive on the heading literal; pin it so a future
+    // "tighten the match" refactor that drops the `i` flag would
+    // surface here. A contributor who writes `## quarantine
+    // registry` (lowercase) without this would have every row
+    // silently skipped.
+    const body = [
+      "## quarantine registry",
+      "- [ ] #100 — row one",
+      "## Non-goals",
+    ].join("\n");
+    const rows = parseRegistry(body);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].ticket).toBe("100");
+  });
+
+  it("handles CRLF line endings in the issue body", () => {
+    // `gh issue view` output is LF on Linux/macOS, but webhook-
+    // forwarded bodies or Windows-edited bodies can carry CRLF.
+    // The split (`/\r?\n/`) handles this; pin it so the gate
+    // works regardless of where the body originated.
+    const body = [
+      "## Quarantine registry",
+      "",
+      "- [ ] #100 — crlf row",
+      "",
+      "## Non-goals",
+    ].join("\r\n");
     const rows = parseRegistry(body);
     expect(rows).toHaveLength(1);
     expect(rows[0].ticket).toBe("100");
@@ -305,6 +421,79 @@ describe("compareRegistry — drift classes (#115)", () => {
     expect(drift.noTicket[0].file).toBe("e2e/smoke/a.spec.ts");
     expect(drift.missing).toEqual([]);
   });
+
+  it("reports all three drift classes simultaneously without cross-pollution", () => {
+    // A realistic failed-CI shape: one marker missing its row, one
+    // unticked row whose marker was removed, and one marker missing
+    // its ticket reference. Pin that noTicket markers don't slip
+    // into `missing` (a regression that dropped the early
+    // `continue` in compareRegistry would re-route them) and that
+    // each class shows in isolation.
+    const markers = [
+      // valid marker with no row → missing
+      { file: "e2e/smoke/a.spec.ts", line: 5, testName: "A", ticket: "100" },
+      // marker without a ticket reference → noTicket (NOT missing)
+      { file: "e2e/smoke/c.spec.ts", line: 7, testName: "C", ticket: null },
+    ];
+    const rows = [
+      // unticked row, no matching marker → stale
+      { ticked: false, ticket: "200", text: "- [ ] #200", lineNo: 1 },
+    ];
+    const drift = compareRegistry(markers, rows, "87");
+    expect(drift.missing).toHaveLength(1);
+    expect(drift.missing[0].ticket).toBe("100");
+    expect(drift.stale).toHaveLength(1);
+    expect(drift.stale[0].ticket).toBe("200");
+    expect(drift.noTicket).toHaveLength(1);
+    expect(drift.noTicket[0].file).toBe("e2e/smoke/c.spec.ts");
+  });
+});
+
+describe("listSpecFiles — directory walk contract (#115)", () => {
+  it("returns *.spec.ts files only, skips node_modules and dotfiles, and uses POSIX separators", async () => {
+    // Smoke-pin the walker's three documented filters. Without
+    // these, the walker would surface `@quarantine` mentions in
+    // installed Playwright examples (node_modules) or in editor
+    // backup files (`.harness.spec.ts.swp`), each generating
+    // false-positive markers. POSIX separators matter for
+    // cross-platform consistency — Windows-discovered paths
+    // mismatch registry rows (which use forward slashes).
+    const root = mkdtempSync(join(tmpdir(), "quarantine-test-"));
+    mkdirSync(join(root, "smoke", "nested"), { recursive: true });
+    mkdirSync(join(root, "node_modules", "@playwright"), { recursive: true });
+    mkdirSync(join(root, "support"), { recursive: true });
+    writeFileSync(join(root, "smoke", "real.spec.ts"), "// real");
+    writeFileSync(join(root, "smoke", "nested", "deep.spec.ts"), "// deep");
+    writeFileSync(join(root, "smoke", ".hidden.spec.ts"), "// dotfile, must skip");
+    writeFileSync(join(root, "support", "helper.ts"), "// not a spec, must skip");
+    writeFileSync(
+      join(root, "node_modules", "@playwright", "noise.spec.ts"),
+      "// in node_modules, must skip",
+    );
+
+    const found = await listSpecFiles(root);
+    // Positives — both real specs surface.
+    expect(found).toEqual(
+      expect.arrayContaining(["smoke/real.spec.ts", "smoke/nested/deep.spec.ts"]),
+    );
+    // Negatives — dotfile, non-spec, and node_modules-entry are NOT included.
+    expect(found).not.toContain("smoke/.hidden.spec.ts");
+    expect(found).not.toContain("support/helper.ts");
+    expect(found).not.toContain("node_modules/@playwright/noise.spec.ts");
+    // POSIX separators on every entry — no backslashes even on Windows.
+    for (const p of found) {
+      expect(p).not.toContain("\\");
+    }
+  });
+
+  it("returns [] gracefully on a missing root directory (no throw)", async () => {
+    // The CLI entrypoint pre-checks existsSync, but the helper
+    // itself MUST not throw on ENOENT so a future caller that
+    // pre-walks before checking can still rely on the contract.
+    await expect(
+      listSpecFiles(join(tmpdir(), "quarantine-does-not-exist-" + Date.now())),
+    ).resolves.toEqual([]);
+  });
 });
 
 describe("formatDriftReport — error output (#115)", () => {
@@ -376,5 +565,10 @@ describe("formatDriftReport — error output (#115)", () => {
     expect(report).toContain("Markers in source with NO `#<ticket>`");
     expect(report).toContain("Markers in source with NO matching `- [ ]`");
     expect(report).toContain("Unticked rows in registry");
+    // The actionable per-marker Fix: line in the noTicket section
+    // is the recipe a contributor reads on failed-build output —
+    // pinning it so a refactor that drops it would surface here
+    // instead of leaving the error message hollow.
+    expect(report).toContain("Fix: add a TODO comment");
   });
 });
