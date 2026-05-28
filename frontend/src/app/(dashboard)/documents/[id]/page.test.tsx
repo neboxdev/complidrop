@@ -756,16 +756,111 @@ describe("DocumentDetailPage — reextract mutation toasts (#122 / #74 followup)
     expect(toastError).toHaveBeenCalledWith(
       "Extraction queue is at capacity, please retry in a few minutes.",
     );
-    // Pin the negatives the #77 jargon-free contract demands — even
-    // though the test message above doesn't contain these strings,
-    // a regression that swapped `err.message` for `res.statusText` or
-    // interpolated the status code would surface here on the error
-    // toast spy's recorded arguments.
+    // Pin the negatives the #77 jargon-free contract demands. The
+    // patterns are tight: `/^service unavailable$/i` matches ONLY
+    // the bare HTTP statusText (the realistic leak shape) — a
+    // future legitimate server message that contains the words
+    // "service unavailable" as part of a longer sentence would not
+    // false-positive. `/\b503\b/` matches the interpolated status-
+    // code leak shape (`Export failed (503)`, `HTTP 503`, …); a
+    // legitimate vendor-portal token or COI policy number that
+    // happens to contain "503" as part of a longer alphanumeric
+    // run is filtered out by the word-boundary anchors. The
+    // exact-string `.toHaveBeenCalledWith` above is the load-
+    // bearing pin; these negatives are belt-and-braces against
+    // regressions that swap the assertion target.
     const args = toastError.mock.calls[0]?.[0];
     expect(typeof args).toBe("string");
-    expect(args).not.toMatch(/service unavailable/i);
+    expect(args).not.toMatch(/^service unavailable$/i);
     expect(args).not.toMatch(/\b503\b/);
     expect(toastSuccess).not.toHaveBeenCalled();
+  });
+
+  it("reextract empty server message: toast.error falls back to GENERIC_FALLBACK_MESSAGE (#77 page-level fallback)", async () => {
+    // Pins the page-level fallback ternary in `onError` —
+    // `err instanceof Error && err.message?.trim() ? err.message :
+    // GENERIC_FALLBACK_MESSAGE`. The api.ts layer ALSO substitutes
+    // GENERIC_FALLBACK_MESSAGE when an envelope's `error.message` is
+    // empty/whitespace (api.ts:244-245), so the page's ternary is
+    // defense-in-depth. Without this test the page-level fallback
+    // is unreached coverage — a regression that swapped the ternary
+    // (e.g. `err.message ?? "Reextract failed"`) would slip past
+    // the populated-message tests above.
+    //
+    // The test uses a whitespace-only envelope message — that
+    // exercises the `.trim()` guard specifically; a bare empty
+    // string would short-circuit at the api.ts layer and not
+    // even reach the page's ternary, masking a regression there.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Failed",
+            processingError: "OCR confidence below threshold.",
+          }),
+        ),
+      ),
+      http.post(url("/api/documents/:id/reextract"), () =>
+        jsonError("server.error", "   ", { status: 500 }),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_reextract_fallback_01" },
+    });
+
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: /re-extract/i }),
+    );
+    fireEvent.click(button);
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    expect(toastError).toHaveBeenCalledWith("Something went wrong. Try again.");
+  });
+
+  it("reextract network-unreachable: toast.error fires GENERIC_FALLBACK_MESSAGE, no TypeError leak (#77)", async () => {
+    // The third leg of the #77 contract: a browser TypeError on
+    // fetch() failure (offline, DNS, CORS drop) must NOT surface
+    // as "Failed to fetch" or "TypeError: …" in the toast. The
+    // api.ts `fetchOrFriendlyThrow` (api.ts:197) catches that and
+    // synthesizes `new ApiError("network.unreachable",
+    // GENERIC_FALLBACK_MESSAGE, 0)`. The page's onError then
+    // forwards that message verbatim. Pin the round-trip end-to-end.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Failed",
+            processingError: "OCR confidence below threshold.",
+          }),
+        ),
+      ),
+      http.post(url("/api/documents/:id/reextract"), () => {
+        // MSW's HttpResponse.error() simulates fetch() rejection
+        // with a TypeError — the production path that
+        // fetchOrFriendlyThrow's catch block converts to ApiError.
+        return Response.error();
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_reextract_network_01" },
+    });
+
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: /re-extract/i }),
+    );
+    fireEvent.click(button);
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    expect(toastError).toHaveBeenCalledWith("Something went wrong. Try again.");
+    // #77 TypeError-leak negatives — these are the literal strings
+    // a regression that bypassed fetchOrFriendlyThrow would surface.
+    const args = toastError.mock.calls[0]?.[0];
+    expect(args).not.toMatch(/typeerror/i);
+    expect(args).not.toMatch(/failed to fetch/i);
   });
 });
 
@@ -875,12 +970,113 @@ describe("DocumentDetailPage — saveFields mutation toasts (#122 / #74 followup
     expect(toastError).toHaveBeenCalledWith(
       "Document has been reextracted; reload to see the latest fields.",
     );
-    // #77 jargon-free invariant — no raw status text or interpolated
-    // HTTP code leaked.
+    // #77 jargon-free invariants. The patterns are tight to the
+    // realistic leak SHAPE — `/^conflict$/i` matches ONLY the bare
+    // HTTP statusText (not a future legitimate server message that
+    // includes the word "conflict" as part of a longer sentence
+    // like "Field-edit conflict during save: reload and retry");
+    // `/\b409\b/` matches the interpolated status-code leak shape
+    // with word-boundary anchors so a vendor policy number that
+    // happens to contain "409" doesn't false-positive. The exact-
+    // string `.toHaveBeenCalledWith` above is the load-bearing pin.
     const args = toastError.mock.calls[0]?.[0];
     expect(typeof args).toBe("string");
-    expect(args).not.toMatch(/conflict/i);
+    expect(args).not.toMatch(/^conflict$/i);
     expect(args).not.toMatch(/\b409\b/);
     expect(toastSuccess).not.toHaveBeenCalled();
+  });
+
+  it("saveFields empty server message: toast.error falls back to GENERIC_FALLBACK_MESSAGE (#77 page-level fallback)", async () => {
+    // Mirror of the reextract empty-message test — pins the page-
+    // level `?.trim() ? err.message : GENERIC_FALLBACK_MESSAGE`
+    // ternary on the saveFields path. Whitespace-only envelope
+    // message specifically exercises the trim guard.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Completed",
+            fields: [
+              {
+                id: "f1",
+                fieldName: "PolicyNumber",
+                fieldValue: "POL-OLD-001",
+                fieldType: "string",
+                confidence: 0.91,
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+            ],
+          }),
+        ),
+      ),
+      http.put(url("/api/documents/:id/fields"), () =>
+        jsonError("server.error", "   ", { status: 500 }),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_save_fallback_01" },
+    });
+
+    const input = await waitFor(() =>
+      screen.getByDisplayValue("POL-OLD-001"),
+    );
+    fireEvent.change(input, { target: { value: "POL-NEW-002" } });
+
+    const save = screen.getByRole("button", { name: /save changes/i });
+    await waitFor(() => expect(save).not.toBeDisabled());
+    fireEvent.click(save);
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    expect(toastError).toHaveBeenCalledWith("Something went wrong. Try again.");
+  });
+
+  it("saveFields network-unreachable: toast.error fires GENERIC_FALLBACK_MESSAGE, no TypeError leak (#77)", async () => {
+    // Mirror of the reextract network-unreachable test — pins the
+    // fetchOrFriendlyThrow round-trip on the PUT path so a
+    // regression that bypassed it for /fields surfaces here.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Completed",
+            fields: [
+              {
+                id: "f1",
+                fieldName: "PolicyNumber",
+                fieldValue: "POL-OLD-001",
+                fieldType: "string",
+                confidence: 0.91,
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+            ],
+          }),
+        ),
+      ),
+      http.put(url("/api/documents/:id/fields"), () => Response.error()),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_save_network_01" },
+    });
+
+    const input = await waitFor(() =>
+      screen.getByDisplayValue("POL-OLD-001"),
+    );
+    fireEvent.change(input, { target: { value: "POL-NEW-002" } });
+
+    const save = screen.getByRole("button", { name: /save changes/i });
+    await waitFor(() => expect(save).not.toBeDisabled());
+    fireEvent.click(save);
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    expect(toastError).toHaveBeenCalledWith("Something went wrong. Try again.");
+    const args = toastError.mock.calls[0]?.[0];
+    expect(args).not.toMatch(/typeerror/i);
+    expect(args).not.toMatch(/failed to fetch/i);
   });
 });
