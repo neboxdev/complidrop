@@ -84,6 +84,23 @@ export default function DocumentDetailPage() {
       qc.invalidateQueries({ queryKey: ["documents", params.id] });
       toast.success("Re-extraction queued");
     },
+    onError: (err) => {
+      // Mirror the established mutation-error pattern across this
+      // app (documents/page.tsx remove, vendors/* updates, settings/*
+      // billing actions): pull the server message off the ApiError
+      // when present (every `api.*` reject is an ApiError per
+      // lib/api.ts's `throw new ApiError(...)`) and fall back to
+      // GENERIC_FALLBACK_MESSAGE for the unreachable
+      // not-an-Error branch. The CLAUDE.md error-message policy
+      // requires server-message-first, GENERIC_FALLBACK_MESSAGE
+      // second — and explicitly forbids raw `res.statusText` or
+      // browser TypeErrors here. (#122)
+      const message =
+        err instanceof Error && err.message?.trim()
+          ? err.message
+          : GENERIC_FALLBACK_MESSAGE;
+      toast.error(message);
+    },
   });
 
   const saveFields = useMutation({
@@ -93,6 +110,15 @@ export default function DocumentDetailPage() {
       setEdits({});
       qc.invalidateQueries({ queryKey: ["documents", params.id] });
       toast.success("Fields updated");
+    },
+    onError: (err) => {
+      // Same shape as reextract above — see that comment for the
+      // rationale. (#122)
+      const message =
+        err instanceof Error && err.message?.trim()
+          ? err.message
+          : GENERIC_FALLBACK_MESSAGE;
+      toast.error(message);
     },
   });
 
