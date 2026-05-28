@@ -17,6 +17,7 @@
 import { test, expect } from "@playwright/test";
 import { mockApi, jsonOk, waitForApi } from "../support/mock-api";
 import { makeFakePdf, portalInfo } from "../support/fixtures";
+import { expectTokenNotInHead } from "../support/security";
 
 const TOKEN = "smoke-tok-12";
 
@@ -58,22 +59,9 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
     ).toBeVisible({ timeout: 10_000 });
 
     // Head-injection token-absence assertion (#127 / #85 followup).
-    // The Vitest component helper `assertNotInDom` (frontend/src/test/
-    // security.ts) scans `document.body` only — `<head>` is documented
-    // as out of scope, with the explicit promise that head-injection
-    // leaks are caught in the E2E layer. This is that layer. A
-    // regression that injected the portal token into a `<meta name=
-    // "vendor-token" content="…">`, a `<title>`, or a `<script>` const
-    // inside `<head>` would slip past every component test (scoped
-    // to body) AND scan-secrets.mjs (its pattern table targets cookie
-    // names + URL paths, not raw token strings in meta tags). The
-    // innerHTML scan covers attribute values, hidden nodes, text
-    // content of `<title>`, and `<script>` body — every channel a
-    // future meta-injection regression would route through. Token
-    // has no HTML-special chars so the literal scan is sufficient (a
-    // production-shaped base64 token has none either; if a future
-    // caller passes a different shape, mirror security.ts's
-    // escaped-form scan here too).
+    // `expectTokenNotInHead` is the E2E-tier companion to the Vitest
+    // component helper `assertNotInDom` (frontend/src/test/security
+    // .ts); the body-scoped one redirects head coverage here.
     await expectTokenNotInHead(page, TOKEN);
 
     // Arm the upload POST wait BEFORE setInputFiles so the response
@@ -108,28 +96,3 @@ test.describe("Flow 2 — vendor portal upload (#39)", () => {
     await expectTokenNotInHead(page, TOKEN);
   });
 });
-
-/**
- * Asserts that the rendered `<head>` of the current page does NOT
- * contain `token` (literal substring scan of `head.innerHTML`). The
- * companion to the Vitest `assertNotInDom` helper at
- * frontend/src/test/security.ts — that one scans `document.body` by
- * contract and explicitly defers head coverage to here (#127).
- *
- * Scans innerHTML rather than textContent: a `<meta>` injection's
- * `content="…"` attribute leak contributes nothing to textContent
- * but is the most realistic head-injection vector.
- */
-async function expectTokenNotInHead(
-  page: import("@playwright/test").Page,
-  token: string,
-): Promise<void> {
-  const headHtml = await page.locator("head").innerHTML();
-  expect(
-    headHtml,
-    `portal token must not appear inside <head> (length ${token.length}, ` +
-      `prefix "${token.slice(0, 4)}" suffix "${token.slice(-4)}") — a ` +
-      `regression injected the token via a meta tag, <title>, or <script>; ` +
-      `chase the leak with a full-head dump locally.`,
-  ).not.toContain(token);
-}
