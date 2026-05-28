@@ -129,7 +129,7 @@ public class StripeService(
         if (sub is null) return;
         sub.StripeCustomerId = session.CustomerId ?? sub.StripeCustomerId;
         sub.StripeSubscriptionId = session.SubscriptionId ?? sub.StripeSubscriptionId;
-        sub.Plan = ResolvePlanFromPriceId(await FetchPriceIdFromSubscription(session.SubscriptionId, ct));
+        sub.Plan = ResolvePlanFromPriceId(await FetchPriceIdFromSubscription(session.SubscriptionId, ct), _cfg);
         sub.Status = "active";
         sub.DocumentLimit = null;
         sub.HasVendorPortal = true;
@@ -150,7 +150,7 @@ public class StripeService(
         var sub = await db.Subscriptions.FirstOrDefaultAsync(x => x.StripeSubscriptionId == s.Id, ct);
         if (sub is null) return;
         sub.Status = s.Status;
-        sub.Plan = ResolvePlanFromPriceId(s.Items?.Data?.FirstOrDefault()?.Price?.Id);
+        sub.Plan = ResolvePlanFromPriceId(s.Items?.Data?.FirstOrDefault()?.Price?.Id, _cfg);
         sub.CurrentPeriodEnd = s.CurrentPeriodEnd == default(DateTime) ? null : s.CurrentPeriodEnd;
         sub.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -168,24 +168,32 @@ public class StripeService(
         await db.SaveChangesAsync(ct);
     }
 
-    // Maps Stripe-side price ids (config-keyed `MonthlyPriceId` /
-    // `AnnualPriceId` / `FoundingPriceId`) to app-side plan ids
-    // (`pro | annual | founding`) per ADR 0011. The config-key names
-    // stay Stripe-billing-cadence words; the return values stay
-    // customer-facing product-tier words. This boundary is the only
-    // place the two namespaces meet.
+    // Maps Stripe-side price ids to app-side plan ids per ADR 0011. The empty-string-
+    // collision hardening rationale (why both guards below exist + why StripeSettings
+    // stays empty-string-as-sentinel rather than nullable) lives in ADR 0011's Hardening
+    // addendum (#172). Returns "pro" on null/empty/whitespace input or any unknown price
+    // id. Internal-static + tested directly via InternalsVisibleTo CompliDrop.Api.Tests —
+    // same precedent as ComplianceCheckService.EvaluateRule.
     //
-    // Empty / null / unrecognised price ids default to `"pro"` so a
-    // misconfigured Stripe row doesn't escalate into a webhook NRE —
-    // the Subscription stays on the paid plan it was already on, and
-    // the operator notices via Sentry logs. (A previous version
-    // defaulted to `"monthly"` — same behaviour, renamed to match
-    // the new vocab.)
-    private string ResolvePlanFromPriceId(string? priceId)
+    // Duplicate-config priority: if the operator configures the same price id under
+    // multiple keys, resolution is first-match-wins in declaration order:
+    // Annual > Founding > Monthly. Pinned by the pair
+    // StripePriceIdResolverTests.Duplicate_priceId_three_way_collision_resolves_to_annual_first
+    // (Annual beats both) +
+    // StripePriceIdResolverTests.Duplicate_priceId_for_founding_and_monthly_resolves_to_founding_first
+    // (Founding beats Monthly when Annual is unique).
+    internal static string ResolvePlanFromPriceId(string? priceId, StripeSettings cfg)
     {
-        if (priceId == _cfg.AnnualPriceId) return "annual";
-        if (priceId == _cfg.FoundingPriceId) return "founding";
-        if (priceId == _cfg.MonthlyPriceId) return "pro";
+        if (string.IsNullOrWhiteSpace(priceId)) return "pro";
+
+        // Per-key guard: priceId is already non-whitespace by the line above, so this
+        // protects the CONFIG side only — an unset cfg.XPriceId (default string.Empty)
+        // must not become a wildcard. Both guards are kept as defense-in-depth so a
+        // future refactor that drops one still keeps the other layer of protection.
+        if (!string.IsNullOrWhiteSpace(cfg.AnnualPriceId) && priceId == cfg.AnnualPriceId) return "annual";
+        if (!string.IsNullOrWhiteSpace(cfg.FoundingPriceId) && priceId == cfg.FoundingPriceId) return "founding";
+        if (!string.IsNullOrWhiteSpace(cfg.MonthlyPriceId) && priceId == cfg.MonthlyPriceId) return "pro";
+
         return "pro";
     }
 
