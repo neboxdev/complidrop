@@ -19,6 +19,19 @@ namespace CompliDrop.Api.Tests;
 /// <see cref="AuthEndpointsTests"/>'s rate-limit tests). A one-off host
 /// keeps the limiter's per-partition counter state isolated from
 /// neighboring tests in the same fixture.
+///
+/// <para><b>Why no <c>default-authed</c> test in this file:</b> the #45
+/// followup matrix in #144 nominally covers two remaining policies —
+/// <c>waitlist</c> + <c>default-authed</c>. <c>default-authed</c> is
+/// REGISTERED in <c>Program.cs</c>'s rate-limiter section but no
+/// endpoint applies <c>.RequireRateLimiting("default-authed")</c>
+/// today — i.e. it has no caller. Triggering it through the HTTP
+/// surface would require adding a test-only endpoint, which would
+/// itself become a contract to maintain and expand the prod-surface
+/// API for test-only coverage. Revisit if/when a real endpoint adopts
+/// the policy. The <c>default-authed</c> negative-leak assertion can
+/// be added then alongside the trigger test, mirroring the shape of
+/// the waitlist test below.</para>
 /// </summary>
 public sealed class WaitlistEndpointsTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
@@ -65,6 +78,15 @@ public sealed class WaitlistEndpointsTests(IntegrationTestFixture fixture) : Int
         var throttled = await client.PostAsJsonAsync("/api/waitlist", NewWaitlistRequest());
 
         throttled.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        // Belt-and-braces against a regression that bypasses the
+        // `ctx.HttpContext.Response.ContentType = "application/json"`
+        // line in Program.cs's OnRejected hook (e.g. a per-policy
+        // middleware that emits text/plain). The portal full-shape
+        // test pins the same invariant; without this line clients
+        // calling `await res.json()` would silently break on a
+        // text/plain regression and the waitlist limiter path
+        // wouldn't catch it.
+        throttled.Content.Headers.ContentType?.MediaType.Should().Be("application/json");
         var body = await throttled.Content.ReadFromJsonAsync<JsonElement>();
         body.GetProperty("error").GetProperty("code").GetString()
             .Should().Be(
