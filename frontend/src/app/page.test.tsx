@@ -18,7 +18,9 @@ vi.mock("next/link", () => ({
   ),
 }));
 
-// Control the auth state the landing page sees via useMe() (the homepage is a client component).
+// Control the auth state the marketing header sees via useMe(). The homepage is
+// now a server component; the auth-aware CTA lives in the <MarketingHeader>
+// client island (the page's only client surface), which consumes useMe().
 const { mockUseMe } = vi.hoisted(() => ({ mockUseMe: vi.fn() }));
 vi.mock("@/hooks/useAuth", () => ({ useMe: mockUseMe }));
 
@@ -94,5 +96,28 @@ describe("Landing page CTAs", () => {
     // aria-label="CompliDrop — home" as a separate accessible image-or-link
     // depending on the engine; we assert ≥2 to stay implementation-tolerant.)
     expect(brandImages.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("Landing page copy (SEO + jargon, #176)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockUseMe.mockReturnValue({ data: null });
+  });
+
+  it("does not surface the 'OCR' tech jargon flagged by the founder", () => {
+    render(<Home />);
+    // The old "OCR That Can't Read a PDF" card spoke to engineers, not the
+    // venue/property-manager buyer. The replacement keeps the pain, drops the
+    // acronym. A regression that reintroduces "OCR" should fail here.
+    expect(screen.queryByText(/\bOCR\b/i)).toBeNull();
+  });
+
+  it("leads with the buyer's search term, not just the brand tagline", () => {
+    render(<Home />);
+    // The H1 and subhead must carry "certificate of insurance" / "COI" — the
+    // words people actually search — so the page can rank and be cited for them.
+    expect(screen.getAllByText(/certificate of insurance/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/COI/i).length).toBeGreaterThan(0);
   });
 });
