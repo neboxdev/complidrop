@@ -5,7 +5,7 @@ import Home from "./page";
 // Direct import from the source-of-truth module (#71 followup) —
 // the previous test imported from `(auth)/register/register-form`
 // via a re-export shim, which crossed route boundaries unnecessarily.
-import { KNOWN_PLAN_IDS } from "@/lib/plans";
+import { KNOWN_PLAN_IDS, PLANS } from "@/lib/plans";
 
 // next/link needs a router context in a real app; in unit tests render it as a plain anchor
 // so we can assert exactly which routes the landing-page CTAs point at.
@@ -117,7 +117,31 @@ describe("Landing page copy (SEO + jargon, #176)", () => {
     render(<Home />);
     // The H1 and subhead must carry "certificate of insurance" / "COI" — the
     // words people actually search — so the page can rank and be cited for them.
+    // `\bCOI\b` (word-boundary, no /i) pins the literal acronym, not any word
+    // that merely contains "coi".
     expect(screen.getAllByText(/certificate of insurance/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/COI/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/\bCOI\b/).length).toBeGreaterThan(0);
+  });
+});
+
+describe("Homepage structured data (#176)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockUseMe.mockReturnValue({ data: null });
+  });
+
+  it("emits SoftwareApplication JSON-LD carrying the Pro price (end-to-end)", () => {
+    const { container } = render(<Home />);
+    const nodes = Array.from(
+      container.querySelectorAll('script[type="application/ld+json"]'),
+    ).map((el) => JSON.parse(el.textContent ?? "{}") as Record<string, unknown>);
+
+    const software = nodes.find((node) => node["@type"] === "SoftwareApplication");
+    expect(software, "homepage must render SoftwareApplication JSON-LD").toBeTruthy();
+    // Price flows from lib/plans → schema; pin it end-to-end so deleting the
+    // node or drifting the price fails here.
+    expect((software!.offers as Record<string, unknown>).price).toBe(
+      PLANS.pro.monthlyPriceLabel.replace(/[^0-9.]/g, ""),
+    );
   });
 });

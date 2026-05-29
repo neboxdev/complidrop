@@ -5,6 +5,7 @@ import { Providers } from "@/lib/providers";
 import { JsonLd } from "@/components/JsonLd";
 import { organizationLd, webSiteLd } from "@/lib/structured-data";
 import { SITE_DESCRIPTION, SITE_NAME, SITE_URL } from "@/lib/site";
+import { BRAND_COLORS } from "@/lib/brand";
 
 const plusJakartaSans = Plus_Jakarta_Sans({
   variable: "--font-sans",
@@ -61,7 +62,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0EA5E9",
+  themeColor: BRAND_COLORS.sky,
 };
 
 export default function RootLayout({

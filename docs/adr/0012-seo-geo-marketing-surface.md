@@ -18,7 +18,7 @@ This ADR records the structural decisions so future content pages follow one pat
 
 ## Decision
 
-1. **Public marketing pages are server components.** The homepage and all content pages (`/faq`, `/glossary`, `/glossary/[slug]`, `/coi-tracking-software-vs-spreadsheet`, `/coi-tracking-for-event-venues`) render their content server-side so it appears in the initial HTML for crawlers and AI, and ship no marketing JS. The single client island is `MarketingHeader` (auth-aware CTA via `useMe`); everything else, including CTA hover, uses CSS/design tokens, not JS handlers.
+1. **Public marketing pages are server components.** The homepage and all content pages (`/faq`, `/glossary`, `/glossary/[slug]`, `/coi-tracking-software-vs-spreadsheet`, `/coi-tracking-for-event-venues`) render their content server-side so it appears in the initial HTML for crawlers and AI, and ship no marketing JS. The single client island is `MarketingHeader` (auth-aware CTA via `useMe`); everything else, including CTA hover, uses CSS rather than JS handlers, composing from the design-system tokens (`primary`/`accent`/`foreground`/`muted-foreground`) wherever one exists. (The dark-surface `#082F49` and decorative-blob shades stay literal — `globals.css` has no token for them — matching the pre-change palette.)
 
 2. **Brand facts have one source.** `lib/site.ts` owns the canonical origin and NAP facts (name, description, category, price — the price imported from `lib/plans.ts`). Metadata, `sitemap.ts`, `robots.ts`, `manifest.ts`, and the JSON-LD builders all compose from it, so a fact can't drift between surfaces. Consistent brand facts are both an SEO signal and a GEO factor.
 

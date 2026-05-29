@@ -12,6 +12,13 @@
  * (`components/JsonLd.tsx`), which serializes it into an inline
  * `<script type="application/ld+json">` with the required XSS escaping.
  *
+ * Input invariant: every value these builders receive today is a static,
+ * build-time constant (brand facts, the glossary/FAQ arrays, prices from
+ * `lib/plans`). `<JsonLd>`'s `<`→`<` escaping is correct regardless, but if
+ * a dynamic or user-supplied source is ever fed in (a CMS, customer-named
+ * entities, review text), validate it at that boundary — and never synthesize
+ * facts (see the no-`aggregateRating` note on `softwareApplicationLd`).
+ *
  * `@id` values are stable URL fragments so entities can reference one another
  * (e.g. SoftwareApplication.publisher → the Organization) across the graph.
  */

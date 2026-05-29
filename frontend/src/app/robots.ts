@@ -1,5 +1,5 @@
 import type { MetadataRoute } from "next";
-import { SITE_URL, absoluteUrl } from "@/lib/site";
+import { absoluteUrl } from "@/lib/site";
 
 // The app surfaces — never useful in search, and the portal is token-gated, so
 // keep token URLs out of any index. (These sit behind auth too; disallowing
@@ -23,7 +23,7 @@ const APP_SURFACES = [
 // OAI-SearchBot removes CompliDrop from ChatGPT Search, Google-Extended from
 // Google AI Overviews, and so on. They get the same access as any crawler —
 // everything except the app surfaces.
-const AI_CRAWLERS = [
+export const AI_CRAWLERS = [
   "OAI-SearchBot",
   "ChatGPT-User",
   "GPTBot",
@@ -42,6 +42,5 @@ export default function robots(): MetadataRoute.Robots {
       ...AI_CRAWLERS.map((userAgent) => ({ userAgent, ...access })),
     ],
     sitemap: absoluteUrl("/sitemap.xml"),
-    host: SITE_URL,
   };
 }

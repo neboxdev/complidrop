@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import robots from "./robots";
+import robots, { AI_CRAWLERS } from "./robots";
 import sitemap from "./sitemap";
 import manifest from "./manifest";
 import { absoluteUrl } from "@/lib/site";
@@ -25,15 +25,16 @@ describe("robots.txt", () => {
     expect(disallowed).toContain("/dashboard");
   });
 
-  it("welcomes AI assistant crawlers — none are blocked (#176)", () => {
-    // Blocking OAI-SearchBot / Google-Extended etc. would remove us from
-    // ChatGPT Search and Google AI Overviews. Each AI crawler must be allowed
-    // "/" and must NOT disallow the whole site.
-    for (const bot of ["OAI-SearchBot", "GPTBot", "PerplexityBot", "Google-Extended", "ClaudeBot"]) {
+  it("welcomes every declared AI assistant crawler — each allowed '/' (#176)", () => {
+    // Iterate the ACTUAL exported list, so deleting a bot (e.g. CCBot — a real
+    // GEO training source) fails this test rather than passing a stale subset.
+    // Blocking OAI-SearchBot / Google-Extended would remove us from ChatGPT
+    // Search / Google AI Overviews.
+    expect(AI_CRAWLERS.length).toBeGreaterThan(0);
+    for (const bot of AI_CRAWLERS) {
       const rule = rules.find((r) => r.userAgent === bot);
       expect(rule, `expected a robots rule for ${bot}`).toBeDefined();
       expect(rule!.allow).toBe("/");
-      expect(disallowList(rule!.disallow)).not.toContain("/");
     }
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import FaqPage from "./faq/page";
@@ -27,25 +27,52 @@ vi.mock("@/hooks/useAuth", () => ({ useMe: () => ({ data: null }) }));
 const linkHrefs = () => screen.getAllByRole("link").map((el) => el.getAttribute("href"));
 
 /** Parse every JSON-LD <script> rendered into a container. */
-function jsonLdTypes(container: HTMLElement): string[] {
+function jsonLdNodes(container: HTMLElement): Array<Record<string, unknown>> {
   return Array.from(container.querySelectorAll('script[type="application/ld+json"]'))
     .map((el) => {
       try {
-        return (JSON.parse(el.textContent ?? "{}") as { "@type"?: string })["@type"] ?? "";
+        return JSON.parse(el.textContent ?? "{}") as Record<string, unknown>;
       } catch {
-        return "";
+        return {};
       }
     })
-    .filter(Boolean);
+    .filter((node) => typeof node["@type"] === "string");
+}
+
+function jsonLdTypes(container: HTMLElement): string[] {
+  return jsonLdNodes(container).map((node) => node["@type"] as string);
+}
+
+/** Pull the Q&A pairs out of the FAQPage node, if present. */
+function faqPairs(container: HTMLElement): Array<{ name: string; answer: string }> {
+  const faq = jsonLdNodes(container).find((node) => node["@type"] === "FAQPage");
+  const entities = (faq?.mainEntity ?? []) as Array<{
+    name: string;
+    acceptedAnswer: { text: string };
+  }>;
+  return entities.map((entity) => ({ name: entity.name, answer: entity.acceptedAnswer.text }));
 }
 
 describe("FAQ page", () => {
-  it("renders the questions, FAQPage schema, and a signup CTA", () => {
+  it("renders a body CTA and FAQPage schema that matches the visible Q&A verbatim", () => {
     const { container } = render(<FaqPage />);
     expect(screen.getByRole("heading", { level: 1, name: /frequently asked questions/i })).toBeInTheDocument();
-    expect(screen.getByText(/what is complidrop\?/i)).toBeInTheDocument();
-    expect(jsonLdTypes(container)).toContain("FAQPage");
-    expect(linkHrefs()).toContain("/register");
+
+    // The page's OWN ContentCta lives in <main>, so this proves the page body
+    // converts — not just the shared header/footer /register links.
+    const main = within(screen.getByRole("main"));
+    expect(main.getAllByRole("link").map((l) => l.getAttribute("href"))).toContain("/register");
+
+    // The FAQPage schema MUST match the visible Q&A verbatim — Google's
+    // requirement, and the manual-action risk the code claims to guard. Assert
+    // every schema question AND answer is actually rendered on the page (not
+    // just that a FAQPage script exists).
+    const pairs = faqPairs(container);
+    expect(pairs.length).toBeGreaterThan(0);
+    for (const { name, answer } of pairs) {
+      expect(screen.getByText(name)).toBeInTheDocument();
+      expect(screen.getByText(answer)).toBeInTheDocument();
+    }
   });
 });
 
@@ -101,12 +128,16 @@ describe("Comparison page (vs. spreadsheet)", () => {
 });
 
 describe("Event venues use-case page", () => {
-  it("speaks to venues, links the additional-insured gotcha, and converts", () => {
+  it("speaks to venues, links the additional-insured gotcha in the body, and converts", () => {
     render(<EventVenuesPage />);
     expect(screen.getByRole("heading", { level: 1, name: /event venues/i })).toBeInTheDocument();
-    expect(screen.getAllByText(/additional insured/i).length).toBeGreaterThan(0);
-    const hrefs = linkHrefs();
-    expect(hrefs).toContain("/glossary/additional-insured-vs-certificate-holder");
-    expect(hrefs).toContain("/register");
+
+    // Scope to <main> so the shared footer's hardcoded glossary/register links
+    // can't satisfy these — the page body itself must link the gotcha + CTA.
+    const main = within(screen.getByRole("main"));
+    expect(main.getAllByText(/additional insured/i).length).toBeGreaterThan(0);
+    const bodyHrefs = main.getAllByRole("link").map((l) => l.getAttribute("href"));
+    expect(bodyHrefs).toContain("/glossary/additional-insured-vs-certificate-holder");
+    expect(bodyHrefs).toContain("/register");
   });
 });

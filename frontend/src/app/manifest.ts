@@ -1,5 +1,6 @@
 import type { MetadataRoute } from "next";
 import { SITE_DESCRIPTION, SITE_NAME } from "@/lib/site";
+import { BRAND_COLORS } from "@/lib/brand";
 
 // Web app manifest — Next auto-links it (`<link rel="manifest">`). The icon
 // points at the stable static brand mark in public/brand (the route-generated
@@ -12,8 +13,8 @@ export default function manifest(): MetadataRoute.Manifest {
     description: SITE_DESCRIPTION,
     start_url: "/",
     display: "standalone",
-    background_color: "#ffffff",
-    theme_color: "#0EA5E9",
+    background_color: BRAND_COLORS.white,
+    theme_color: BRAND_COLORS.sky,
     icons: [
       {
         src: "/brand/complidrop-mark.svg",
