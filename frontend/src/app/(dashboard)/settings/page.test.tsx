@@ -15,7 +15,7 @@
  *     verify without spinning up the backend).
  *   - The legacy "Monthly" tile label is gone.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { http } from "msw";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import SettingsPage from "./page";
@@ -26,6 +26,9 @@ import {
   url,
   jsonOk,
   authedMe,
+  makeMe,
+  toastSuccess,
+  resetSonner,
 } from "@/test";
 
 // sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
@@ -174,4 +177,58 @@ describe("SettingsPage — billing tile vocab (#147, ADR 0011)", () => {
       }
     },
   );
+});
+
+describe("SettingsPage — editable organization (#185)", () => {
+  beforeEach(() => resetSonner());
+
+  it("renders org name + time zone as editable controls, pre-filled from the session", () => {
+    mockFreePlanSubscription();
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    const name = screen.getByLabelText(/organization name/i) as HTMLInputElement;
+    expect(name.value).toBe("Acme Inc");
+    const tz = screen.getByLabelText(/^time zone$/i) as HTMLSelectElement;
+    expect(tz.value).toBe("UTC");
+    // The next-send preview makes the zone's effect visible.
+    expect(screen.getByText(/reminders send at 8:00 AM/i)).toBeInTheDocument();
+  });
+
+  it("saves the new name + time zone and toasts success", async () => {
+    mockFreePlanSubscription();
+    let captured: { name: string; timeZone: string } | null = null;
+    server.use(
+      http.put(url("/api/auth/organization"), async ({ request }) => {
+        captured = (await request.json()) as { name: string; timeZone: string };
+        return jsonOk(makeMe({ organizationName: captured.name, timeZone: captured.timeZone }));
+      }),
+    );
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    fireEvent.change(screen.getByLabelText(/organization name/i), {
+      target: { value: "Acme Compliance LLC" },
+    });
+    fireEvent.change(screen.getByLabelText(/^time zone$/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => expect(captured).not.toBeNull());
+    expect(captured!).toEqual({ name: "Acme Compliance LLC", timeZone: "America/Chicago" });
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith("Organization settings saved."),
+    );
+  });
+
+  it("keeps Save disabled until a field changes", () => {
+    mockFreePlanSubscription();
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    const save = screen.getByRole("button", { name: /save changes/i });
+    expect(save).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/organization name/i), {
+      target: { value: "Acme Inc 2" },
+    });
+    expect(save).not.toBeDisabled();
+  });
 });

@@ -13,6 +13,8 @@ public record LoginRequest(string Email, string Password);
 
 public record VerifyEmailRequest(string Token);
 
+public record UpdateOrganizationRequest(string Name, string TimeZone);
+
 public record AuthMeResponse(
     Guid UserId,
     Guid OrganizationId,

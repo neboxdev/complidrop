@@ -194,6 +194,19 @@ export function useResendVerification() {
   });
 }
 
+/**
+ * Updates the org name + IANA time zone (#185). Returns the refreshed Me, which
+ * we write straight into the cache so the sidebar org name + settings reflect
+ * the change without a refetch.
+ */
+export function useUpdateOrganization() {
+  const qc = useQueryClient();
+  return useMutation<Me, ApiError, { name: string; timeZone: string }>({
+    mutationFn: (payload) => api.put<Me>("/api/auth/organization", payload),
+    onSuccess: (me) => setMeCache(qc, me),
+  });
+}
+
 export function useLogout() {
   const qc = useQueryClient();
   return useMutation<void, ApiError, void>({
