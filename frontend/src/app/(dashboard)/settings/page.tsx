@@ -4,16 +4,18 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { useMe } from "@/hooks/useAuth";
-import { api } from "@/lib/api";
+import { useMe, useUpdateOrganization, type Me } from "@/hooks/useAuth";
+import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { listTimeZones, describeNextSend } from "@/lib/timezones";
 import {
   KNOWN_CHECKOUT_PLAN_IDS,
   PLANS,
   type CheckoutPlanId,
 } from "@/lib/plans";
 import { useSearchParams } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 
 type SubscriptionInfo = {
   plan: string;
@@ -68,14 +70,16 @@ export default function SettingsPage() {
     <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
       <h1 className="text-2xl font-semibold text-sky-900">Settings</h1>
 
-      <Card>
-        <CardContent className="p-6 space-y-2 text-sm">
-          <p><span className="text-slate-500">Organization:</span> {me.data?.organizationName}</p>
-          <p><span className="text-slate-500">Email:</span> {me.data?.email}</p>
-          <p><span className="text-slate-500">Role:</span> {me.data?.role}</p>
-          <p><span className="text-slate-500">Time zone:</span> {me.data?.timeZone}</p>
-        </CardContent>
-      </Card>
+      {me.data && (
+        // `key` re-seeds the form's local state if the org name/zone changes
+        // from an external source (a background /me refetch, or another tab
+        // saving via the shared Me cache) — without it the inputs would keep
+        // showing stale edits against a moved baseline.
+        <OrgSettingsForm
+          key={`${me.data.organizationName}|${me.data.timeZone}`}
+          me={me.data}
+        />
+      )}
 
       <Card>
         <CardContent className="p-6 space-y-4">
@@ -151,6 +155,91 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+// Hoisted to module scope per the react-hooks/static-components rule. Lets the
+// org owner fix their organization name + IANA time zone — the zone silently
+// drives reminder send time (#185), so the form previews the next send to make
+// the effect visible before saving.
+function OrgSettingsForm({ me }: { me: Me }) {
+  const update = useUpdateOrganization();
+  const nameId = useId();
+  const tzId = useId();
+  const [name, setName] = useState(me.organizationName);
+  const [timeZone, setTimeZone] = useState(me.timeZone);
+  // Memoize the (~400-entry) IANA list; recompute only if the saved zone
+  // changes (so a saved-but-unusual zone is always present + selectable).
+  const zones = useMemo(() => listTimeZones(me.timeZone), [me.timeZone]);
+  const dirty = name.trim() !== me.organizationName || timeZone !== me.timeZone;
+
+  const onSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) {
+      toast.error("Organization name is required.");
+      return;
+    }
+    update.mutate(
+      { name: trimmed, timeZone },
+      {
+        onSuccess: () => toast.success("Organization settings saved."),
+        onError: (err) =>
+          toast.error(err instanceof Error && err.message ? err.message : GENERIC_FALLBACK_MESSAGE),
+      },
+    );
+  };
+
+  return (
+    <Card>
+      <CardContent className="p-6 space-y-4">
+        <div>
+          <h2 className="text-base font-semibold text-slate-800">Organization</h2>
+          <p className="text-sm text-slate-500">
+            Your time zone controls when daily reminders are sent.
+          </p>
+        </div>
+        <form onSubmit={onSubmit} className="space-y-4">
+          <div>
+            <label htmlFor={nameId} className="text-sm font-medium text-slate-700">
+              Organization name
+            </label>
+            <Input
+              id={nameId}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              maxLength={200}
+              className="mt-1"
+            />
+          </div>
+          <div>
+            <label htmlFor={tzId} className="text-sm font-medium text-slate-700">
+              Time zone
+            </label>
+            <select
+              id={tzId}
+              value={timeZone}
+              onChange={(e) => setTimeZone(e.target.value)}
+              className="mt-1 block w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus-visible:border-sky-500 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-sky-500/30"
+            >
+              {zones.map((z) => (
+                <option key={z} value={z}>
+                  {z}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1.5 text-xs text-slate-500">{describeNextSend(timeZone)}</p>
+          </div>
+          <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+            <p><span className="text-slate-500">Email:</span> {me.email}</p>
+            <p><span className="text-slate-500">Role:</span> {me.role}</p>
+          </div>
+          <Button type="submit" disabled={!dirty || update.isPending}>
+            {update.isPending ? "Saving…" : "Save changes"}
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
   );
 }
 

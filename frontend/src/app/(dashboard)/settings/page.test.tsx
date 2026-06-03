@@ -15,10 +15,11 @@
  *     verify without spinning up the backend).
  *   - The legacy "Monthly" tile label is gone.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { http } from "msw";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import SettingsPage from "./page";
+import { ME_KEY } from "@/hooks/useAuth";
 import { KNOWN_CHECKOUT_PLAN_IDS, PLANS } from "@/lib/plans";
 import {
   renderWithProviders,
@@ -26,6 +27,9 @@ import {
   url,
   jsonOk,
   authedMe,
+  makeMe,
+  toastSuccess,
+  resetSonner,
 } from "@/test";
 
 // sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
@@ -174,4 +178,66 @@ describe("SettingsPage — billing tile vocab (#147, ADR 0011)", () => {
       }
     },
   );
+});
+
+describe("SettingsPage — editable organization (#185)", () => {
+  beforeEach(() => resetSonner());
+
+  it("renders org name + time zone as editable controls, pre-filled from the session", () => {
+    mockFreePlanSubscription();
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    const name = screen.getByLabelText(/organization name/i) as HTMLInputElement;
+    expect(name.value).toBe("Acme Inc");
+    const tz = screen.getByLabelText(/^time zone$/i) as HTMLSelectElement;
+    expect(tz.value).toBe("UTC");
+    // The next-send preview makes the zone's effect visible.
+    expect(screen.getByText(/reminders send at 8:00 AM/i)).toBeInTheDocument();
+  });
+
+  it("saves the new name + time zone, toasts, and writes the SERVER response into the Me cache", async () => {
+    mockFreePlanSubscription();
+    let captured: { name: string; timeZone: string } | null = null;
+    // Server canonicalizes the name (distinct from the typed input) so the cache
+    // assertion proves the RESPONSE drove the update, not the local form state.
+    server.use(
+      http.put(url("/api/auth/organization"), async ({ request }) => {
+        captured = (await request.json()) as { name: string; timeZone: string };
+        return jsonOk(makeMe({ organizationName: "Acme Compliance LLC (canonical)", timeZone: captured.timeZone }));
+      }),
+    );
+    const { queryClient } = renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    fireEvent.change(screen.getByLabelText(/organization name/i), {
+      target: { value: "Acme Compliance LLC" },
+    });
+    fireEvent.change(screen.getByLabelText(/^time zone$/i), {
+      target: { value: "America/Chicago" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => expect(captured).not.toBeNull());
+    expect(captured!).toEqual({ name: "Acme Compliance LLC", timeZone: "America/Chicago" });
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith("Organization settings saved."),
+    );
+    // The hook's onSuccess setMeCache wrote the server's canonical value into the
+    // Me cache (which the sidebar org name reads) — pinned via the query cache.
+    await waitFor(() =>
+      expect((queryClient.getQueryData([...ME_KEY]) as { organizationName: string }).organizationName)
+        .toBe("Acme Compliance LLC (canonical)"),
+    );
+  });
+
+  it("keeps Save disabled until a field changes", () => {
+    mockFreePlanSubscription();
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    const save = screen.getByRole("button", { name: /save changes/i });
+    expect(save).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/organization name/i), {
+      target: { value: "Acme Inc 2" },
+    });
+    expect(save).not.toBeDisabled();
+  });
 });

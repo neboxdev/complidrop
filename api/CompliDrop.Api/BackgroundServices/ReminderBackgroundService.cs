@@ -1,5 +1,6 @@
 using System.Data;
 using System.Data.Common;
+using System.Net;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
@@ -384,13 +385,20 @@ public class ReminderBackgroundService(
     private static string BuildBody(string orgName, Document doc, int daysBefore)
     {
         var expiration = doc.ExpirationDate?.ToString("MMMM d, yyyy") ?? "an upcoming date";
-        var vendor = doc.Vendor?.Name ?? "a vendor";
+        // HTML-encode every caller-influenced value before interpolating into the
+        // email HTML. The org name is user-editable (#185) and the file/vendor
+        // names come from uploads + vendor records; reminder emails are delivered
+        // to vendors (outside the org's trust boundary), so an unescaped value
+        // would be a stored HTML-injection sink. Encode at the render sink.
+        var vendor = WebUtility.HtmlEncode(doc.Vendor?.Name ?? "a vendor");
+        var fileName = WebUtility.HtmlEncode(doc.OriginalFileName);
+        var org = WebUtility.HtmlEncode(orgName);
         return $"""
             <div style="font-family: system-ui, sans-serif; color: #0c4a6e;">
               <h2 style="color: #0284c7;">Compliance reminder</h2>
               <p>Hi there,</p>
-              <p>Your document <strong>{doc.OriginalFileName}</strong> from <strong>{vendor}</strong> expires on <strong>{expiration}</strong> — that's {daysBefore} days from today.</p>
-              <p>Log in to {orgName} on CompliDrop to review and upload the renewal.</p>
+              <p>Your document <strong>{fileName}</strong> from <strong>{vendor}</strong> expires on <strong>{expiration}</strong> — that's {daysBefore} days from today.</p>
+              <p>Log in to {org} on CompliDrop to review and upload the renewal.</p>
               <p style="color: #64748b; font-size: 12px;">Sent automatically by CompliDrop. You can adjust reminder cadence in Settings → Reminders.</p>
             </div>
             """;

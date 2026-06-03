@@ -29,6 +29,12 @@ public static class AuthEndpoints
         group.MapPost("/resend-verification", ResendVerification)
             .RequireAuthorization()
             .RequireRateLimiting("auth-strict");
+        // Org self-service (#185): the owner edits their org name + IANA time
+        // zone (the zone silently drives reminder send time, so it must be
+        // fixable). Tenant-scoped via AppDbContext; default-authed limiter.
+        group.MapPut("/organization", UpdateOrganization)
+            .RequireAuthorization()
+            .RequireRateLimiting("default-authed");
         // Refresh uses its own generous, cookie-partitioned limiter (not the
         // 5/min IP-based auth-strict) — see the "auth-refresh" policy in
         // Program.cs for why lumping keepalive with login/register brute-force
@@ -370,6 +376,55 @@ public static class AuthEndpoints
         return Results.Ok(new { data = new { message = "Verification email sent." }, error = (object?)null });
     }
 
+    /// <summary>
+    /// Authenticated (#185). Updates the caller's organization name + IANA time
+    /// zone. Tenant-scoped via AppDbContext (the global query filter guarantees
+    /// the caller can only ever touch their own org). The time zone strictly
+    /// drives reminder send time, so an invalid zone is REJECTED (400) rather
+    /// than silently normalized to a default — the user must end up with the
+    /// zone they intended. Returns the refreshed Me so the SPA updates its cache.
+    /// </summary>
+    private static async Task<IResult> UpdateOrganization(
+        UpdateOrganizationRequest req,
+        HttpContext http,
+        AppDbContext db)
+    {
+        var userIdStr = http.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userIdStr, out var userId))
+            return Error(401, "auth.unauthorized", "Not authenticated.");
+
+        var name = req.Name?.Trim();
+        if (string.IsNullOrWhiteSpace(name))
+            return Error(400, "validation.required", "Organization name is required.");
+        if (name.Length > 200)
+            return Error(400, "validation.required", "Organization name must be 200 characters or fewer.");
+
+        if (string.IsNullOrWhiteSpace(req.TimeZone) || !IsValidTimeZone(req.TimeZone))
+            return Error(400, "validation.timezone", "Choose a valid time zone.");
+
+        // AppDbContext's tenant filter scopes Organizations to CurrentOrgId, so
+        // this resolves the caller's own org and nothing else.
+        var org = await db.Organizations.FirstOrDefaultAsync();
+        if (org is null) return Error(404, "org.not_found", "Organization not found.");
+
+        org.Name = name;
+        org.TimeZone = req.TimeZone;
+        // The AuditSaveChangesInterceptor records the Organization Before/After
+        // (old zone → new zone), so no explicit audit call is needed.
+        await db.SaveChangesAsync();
+
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        if (user is null) return Error(401, "auth.unauthorized", "Not authenticated.");
+        var sub = await db.Subscriptions.FirstOrDefaultAsync();
+        return Results.Ok(new { data = ToMeResponse(user, org, sub?.Plan ?? "free"), error = (object?)null });
+    }
+
+    private static bool IsValidTimeZone(string tz)
+    {
+        try { TimeZoneInfo.FindSystemTimeZoneById(tz); return true; }
+        catch { return false; }
+    }
+
     // Email verification links stay valid for a week — users routinely confirm
     // late, and (unlike a password reset) the token grants no account access, so
     // a longer TTL trades little risk for far fewer "link expired" dead-ends.
@@ -473,12 +528,11 @@ public static class AuthEndpoints
         return hasLetter && hasDigit;
     }
 
-    private static string NormalizeTimeZone(string? tz)
-    {
-        if (string.IsNullOrWhiteSpace(tz)) return "America/New_York";
-        try { TimeZoneInfo.FindSystemTimeZoneById(tz); return tz; }
-        catch { return "America/New_York"; }
-    }
+    // Register normalizes a best-effort optional zone to a default; UpdateOrganization
+    // (#185) REJECTS an invalid zone instead. Both share the single validity check
+    // (IsValidTimeZone) so the two policies can never drift on what "valid" means.
+    private static string NormalizeTimeZone(string? tz) =>
+        !string.IsNullOrWhiteSpace(tz) && IsValidTimeZone(tz) ? tz : "America/New_York";
 
     private static IResult Error(int status, string code, string message) =>
         Results.Json(new { data = (object?)null, error = new { code, message } }, statusCode: status);

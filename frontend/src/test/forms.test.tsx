@@ -23,6 +23,7 @@ import VendorsPage from "@/app/(dashboard)/vendors/page";
 import VendorDetailPage from "@/app/(dashboard)/vendors/[id]/page";
 import DocumentDetailPage from "@/app/(dashboard)/documents/[id]/page";
 import ExportPage from "@/app/(dashboard)/export/page";
+import SettingsPage from "@/app/(dashboard)/settings/page";
 import {
   renderWithProviders,
   authedMe,
@@ -189,6 +190,29 @@ describe("form labels wired via htmlFor + id (#76)", () => {
     expect((policy as HTMLInputElement).id).not.toBe(
       (expiration as HTMLInputElement).id,
     );
+  });
+
+  it("SettingsPage org form: name input + time-zone select are wired via getByLabelText (#185)", () => {
+    // The org settings form (#185) adds an Input (org name) + a native
+    // <select> (time zone). Seed the billing query so the page mounts; the
+    // org form renders unconditionally once the session is present.
+    server.use(
+      http.get(url("/api/billing/subscription"), () =>
+        jsonOk({
+          plan: "free",
+          status: "active",
+          documentLimit: 5,
+          documentsUsed: 0,
+          hasVendorPortal: false,
+          currentPeriodEnd: null,
+          extractionSpend: 0,
+        }),
+      ),
+    );
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    expect(screen.getByLabelText(/organization name/i)).toBeInstanceOf(HTMLInputElement);
+    expect(screen.getByLabelText(/^time zone$/i)).toBeInstanceOf(HTMLSelectElement);
   });
 
   it("ExportPage: From/To date labels resolve to date inputs via getByLabelText (#76 followup)", () => {
