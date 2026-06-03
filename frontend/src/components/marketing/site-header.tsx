@@ -17,11 +17,20 @@
  * `accent` = CTA orange, `foreground` = navy) rather than hardcoded hex, so the
  * marketing chrome stays in sync with the rest of the app by construction.
  */
+import { useState } from "react";
 import Link from "next/link";
+import { Menu, X } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
 import { Logo } from "@/components/Logo";
 import { cn } from "@/lib/utils";
 import { useMe } from "@/hooks/useAuth";
+import {
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetTitle,
+  SheetTrigger,
+} from "@/components/ui/sheet";
 
 /** Secondary nav → the content pages, for discoverability + internal linking. Hidden below md to keep the bar uncluttered. */
 const NAV_LINKS = [
@@ -38,6 +47,9 @@ const ctaClass = cn(
 export function MarketingHeader() {
   const { data: me } = useMe({ skipRefresh: true });
   const authed = !!me;
+  // Drives the mobile menu drawer (below md). Desktop keeps the inline nav and
+  // never opens the Sheet. (#181)
+  const [menuOpen, setMenuOpen] = useState(false);
 
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-white/80 backdrop-blur-lg">
@@ -65,9 +77,12 @@ export function MarketingHeader() {
             </Link>
           ) : (
             <>
+              {/* Log in collapses into the mobile drawer below md to keep the
+                  bar from overflowing a ~390px phone; Get started (the
+                  conversion CTA) stays visible at every width. */}
               <Link
                 href="/login"
-                className="rounded-lg px-3 py-2 text-sm font-semibold text-foreground transition-opacity duration-200 hover:opacity-70"
+                className="hidden rounded-lg px-3 py-2 text-sm font-semibold text-foreground transition-opacity duration-200 hover:opacity-70 md:inline-block"
               >
                 Log in
               </Link>
@@ -76,6 +91,73 @@ export function MarketingHeader() {
               </Link>
             </>
           )}
+
+          {/* Mobile menu — exposes the secondary nav (and Log in) that are
+              hidden below md, so a cold-email click on a phone can still reach
+              FAQ / Glossary / Pricing and sign in. (#181) */}
+          <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
+            <SheetTrigger
+              aria-label="Open menu"
+              className="inline-flex size-11 items-center justify-center rounded-lg text-foreground hover:bg-muted md:hidden"
+            >
+              <Menu className="h-6 w-6" />
+            </SheetTrigger>
+            <SheetContent side="right" className="p-6">
+              <div className="flex items-center justify-between">
+                <SheetTitle className="text-base font-semibold text-foreground">
+                  Menu
+                </SheetTitle>
+                <SheetClose
+                  aria-label="Close menu"
+                  className="inline-flex size-11 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
+                >
+                  <X className="h-5 w-5" />
+                </SheetClose>
+              </div>
+
+              <nav aria-label="Site" className="mt-6 flex flex-col gap-1">
+                {NAV_LINKS.map((link) => (
+                  <Link
+                    key={link.href}
+                    href={link.href}
+                    onClick={() => setMenuOpen(false)}
+                    className="rounded-lg px-3 py-3 text-base font-medium text-foreground hover:bg-muted"
+                  >
+                    {link.label}
+                  </Link>
+                ))}
+              </nav>
+
+              <div className="mt-6 flex flex-col gap-3 border-t border-border pt-6">
+                {authed ? (
+                  <Link
+                    href="/dashboard"
+                    onClick={() => setMenuOpen(false)}
+                    className={cn(ctaClass, "w-full")}
+                  >
+                    Go to dashboard
+                  </Link>
+                ) : (
+                  <>
+                    <Link
+                      href="/login"
+                      onClick={() => setMenuOpen(false)}
+                      className="rounded-lg px-3 py-3 text-center text-base font-semibold text-foreground hover:bg-muted"
+                    >
+                      Log in
+                    </Link>
+                    <Link
+                      href="/register"
+                      onClick={() => setMenuOpen(false)}
+                      className={cn(ctaClass, "w-full")}
+                    >
+                      Get started
+                    </Link>
+                  </>
+                )}
+              </div>
+            </SheetContent>
+          </Sheet>
         </nav>
       </div>
     </header>

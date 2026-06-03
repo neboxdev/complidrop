@@ -128,7 +128,7 @@ export default function RegisterForm() {
         )}
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label htmlFor={fullNameId} className="text-sm font-medium text-slate-700">Full name</label>
               <Input {...r("fullName")} id={fullNameId} className="mt-1" />
@@ -151,7 +151,7 @@ export default function RegisterForm() {
             {errors.password && <p className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
             <p className="text-xs text-slate-500 mt-1">Min 12 chars, with a letter and a digit.</p>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label htmlFor={industryId} className="text-sm font-medium text-slate-700">Industry</label>
               <Input {...r("industry")} id={industryId} placeholder="Construction, healthcare…" className="mt-1" />
@@ -205,13 +205,13 @@ export function RegisterFormSkeleton() {
           <div className="mt-2 h-4 w-72 rounded bg-slate-100" />
         </div>
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <SkeletonRow />
             <SkeletonRow />
           </div>
           <SkeletonRow />
           <SkeletonRow />
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <SkeletonRow />
             <SkeletonRow />
           </div>

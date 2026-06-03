@@ -159,6 +159,24 @@ describe("VendorsPage — state matrix (#36)", () => {
     expect(screen.getByText("3")).toBeInTheDocument(); // documentCount
     expect(screen.getByText(/1 active/i)).toBeInTheDocument();
   });
+
+  it("mobile reflow: the vendors list is a stacked-table with labeled cells (#181)", async () => {
+    // Pins the responsive-table reflow so the Template / Docs / Active-links
+    // columns collapse into a readable card below md instead of being clipped.
+    server.use(http.get(url("/api/vendors"), () => jsonOk(VENDORS)));
+
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("link", { name: /acme subcontractor/i }),
+      ).toBeInTheDocument(),
+    );
+
+    const table = document.querySelector("table.stacked-table");
+    expect(table).not.toBeNull();
+    expect(table?.querySelector('td[data-label="Template"]')).not.toBeNull();
+    expect(table?.querySelector('td[data-label="Active links"]')).not.toBeNull();
+  });
 });
 
 describe("VendorsPage — add-vendor mutation (#36)", () => {

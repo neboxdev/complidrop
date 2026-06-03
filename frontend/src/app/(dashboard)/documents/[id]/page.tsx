@@ -199,12 +199,12 @@ export default function DocumentDetailPage() {
         <ArrowLeft className="w-4 h-4" /> All documents
       </Link>
 
-      <header className="flex items-start justify-between">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-sky-900">{doc.originalFileName}</h1>
+          <h1 className="text-xl font-semibold text-sky-900 break-words">{doc.originalFileName}</h1>
           <p className="text-sm text-slate-500 uppercase tracking-wide">{doc.documentType}</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <Button variant="outline" size="sm" onClick={() => reextract.mutate()} disabled={reextract.isPending}>
             <RefreshCw className={cn("w-4 h-4 mr-1", reextract.isPending && "animate-spin")} /> Re-extract
           </Button>

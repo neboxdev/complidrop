@@ -65,7 +65,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
       <Card>
         <CardContent className="p-6 space-y-4">
           <h1 className="text-xl font-semibold text-sky-900">{vendor.name}</h1>
-          <div className="grid grid-cols-2 gap-4 text-sm">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <LabeledInput label="Name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
             <LabeledInput label="Contact email" value={form.contactEmail} onChange={(v) => setForm({ ...form, contactEmail: v })} />
             <LabeledInput label="Contact phone" value={form.contactPhone} onChange={(v) => setForm({ ...form, contactPhone: v })} />
@@ -142,6 +142,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                   <Button
                     size="sm"
                     variant="outline"
+                    aria-label="Copy upload link"
                     onClick={async () => {
                       await navigator.clipboard.writeText(l.fullUrl);
                       toast.success("Copied");
@@ -154,7 +155,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                   </Badge>
                   <span className="text-xs text-slate-500">{l.uploadCount}/{l.maxUploads} uploads</span>
                   {l.isActive && (
-                    <Button size="sm" variant="ghost" onClick={() => revoke.mutate(l.id)}>
+                    <Button size="sm" variant="ghost" aria-label="Revoke link" onClick={() => revoke.mutate(l.id)}>
                       <XCircle className="w-4 h-4 text-slate-400 hover:text-rose-600" />
                     </Button>
                   )}

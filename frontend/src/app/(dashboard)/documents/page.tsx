@@ -117,8 +117,8 @@ export default function DocumentsPage() {
       )}
 
       <Card>
-        <CardContent className="p-0 overflow-hidden">
-          <table className="w-full text-sm">
+        <CardContent className="p-0 overflow-x-auto">
+          <table className="stacked-table w-full text-sm">
             <thead className="bg-slate-50 text-xs uppercase text-slate-500">
               <tr>
                 <th className="px-4 py-3 text-left">File</th>
@@ -204,20 +204,20 @@ export default function DocumentsPage() {
                         {d.originalFileName}
                       </Link>
                     </td>
-                    <td className="px-4 py-3 text-slate-600 uppercase text-xs">{d.documentType}</td>
-                    <td className="px-4 py-3 text-slate-600">{d.vendorName ?? "—"}</td>
-                    <td className="px-4 py-3">
+                    <td data-label="Type" className="px-4 py-3 text-slate-600 uppercase text-xs">{d.documentType}</td>
+                    <td data-label="Vendor" className="px-4 py-3 text-slate-600">{d.vendorName ?? "—"}</td>
+                    <td data-label="Extraction" className="px-4 py-3">
                       <Badge className={cn("border-transparent font-medium", STATUS_HUE[d.extractionStatus] ?? STATUS_HUE.Pending)}>
                         {d.extractionStatus}
                         {d.extractionConfidence != null && ` · ${Math.round(d.extractionConfidence * 100)}%`}
                       </Badge>
                     </td>
-                    <td className="px-4 py-3">
+                    <td data-label="Compliance" className="px-4 py-3">
                       <Badge className={cn("border-transparent", COMPLIANCE_HUE[d.complianceStatus] ?? COMPLIANCE_HUE.Pending)}>
                         {d.complianceStatus}
                       </Badge>
                     </td>
-                    <td className="px-4 py-3 text-slate-600">
+                    <td data-label="Expires" className="px-4 py-3 text-slate-600">
                       {d.expirationDate ? new Date(d.expirationDate).toLocaleDateString() : "—"}
                       {d.daysUntilExpiry != null && (
                         <span className={cn("ml-2 text-xs", d.daysUntilExpiry < 30 ? "text-rose-600" : "text-slate-400")}>
@@ -229,6 +229,7 @@ export default function DocumentsPage() {
                       <Button
                         variant="ghost"
                         size="sm"
+                        aria-label={`Remove ${d.originalFileName}`}
                         disabled={del.isPending}
                         onClick={() => {
                           if (confirm(`Remove ${d.originalFileName}?`)) {

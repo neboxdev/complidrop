@@ -31,7 +31,7 @@ export default function VendorsPage() {
       </header>
 
       <Card>
-        <CardContent className="p-5 flex gap-3 items-end">
+        <CardContent className="p-5 flex flex-col sm:flex-row gap-3 sm:items-end">
           <div className="flex-1">
             <label htmlFor={nameId} className="text-xs text-slate-500">Name</label>
             <Input id={nameId} value={name} onChange={(e) => setName(e.target.value)} placeholder="Mike's Electrical" />
@@ -41,6 +41,7 @@ export default function VendorsPage() {
             <Input id={emailId} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="mike@acme.com" />
           </div>
           <Button
+            className="w-full sm:w-auto"
             disabled={!name || createVendor.isPending}
             onClick={async () => {
               try {
@@ -59,8 +60,8 @@ export default function VendorsPage() {
       </Card>
 
       <Card>
-        <CardContent className="p-0 overflow-hidden">
-          <table className="w-full text-sm">
+        <CardContent className="p-0 overflow-x-auto">
+          <table className="stacked-table w-full text-sm">
             <thead className="bg-slate-50 text-xs uppercase text-slate-500">
               <tr>
                 <th className="px-4 py-3 text-left">Vendor</th>
@@ -123,9 +124,9 @@ export default function VendorsPage() {
                     <Link href={`/vendors/${v.id}`} className="text-sky-700 font-medium hover:underline">{v.name}</Link>
                     {v.contactEmail && <p className="text-xs text-slate-500">{v.contactEmail}</p>}
                   </td>
-                  <td className="px-4 py-3 text-slate-600">{v.complianceTemplateName ?? "—"}</td>
-                  <td className="px-4 py-3 text-slate-600">{v.documentCount}</td>
-                  <td className="px-4 py-3">
+                  <td data-label="Template" className="px-4 py-3 text-slate-600">{v.complianceTemplateName ?? "—"}</td>
+                  <td data-label="Docs" className="px-4 py-3 text-slate-600">{v.documentCount}</td>
+                  <td data-label="Active links" className="px-4 py-3">
                     {v.activePortalLinks > 0 ? (
                       <Badge className="bg-emerald-100 text-emerald-700 border-transparent">
                         {v.activePortalLinks} active

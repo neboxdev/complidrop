@@ -76,7 +76,7 @@ export default function ExportPage() {
             A formatted PDF covering all active documents plus the audit log for the date range you pick.
             Good to forward to an insurer or compliance officer.
           </p>
-          <div className="grid grid-cols-2 gap-3 items-end">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:items-end">
             <div>
               <label htmlFor={fromId} className="text-xs text-slate-500 flex items-center gap-1">
                 <Calendar className="w-3 h-3" /> From
