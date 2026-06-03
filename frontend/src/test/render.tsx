@@ -22,6 +22,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, type RenderOptions, type RenderResult } from "@testing-library/react";
 import type { ReactElement, ReactNode } from "react";
 import { ME_KEY, ME_PROBE_KEY, type Me } from "@/hooks/useAuth";
+import { createQueryClient } from "@/lib/query-client";
 import { setNavigationState, type NavigationState, type RouterMock } from "./navigation";
 
 /**
@@ -98,28 +99,31 @@ export type RenderWithProvidersOptions = Omit<RenderOptions, "wrapper"> & {
 };
 
 export function createTestQueryClient(): QueryClient {
-  return new QueryClient({
-    defaultOptions: {
-      // - retry: false        — a 4xx in a test should fail fast.
-      // - staleTime: Infinity — seeded cache entries never go stale.
-      // - gcTime: Infinity    — seeded entries must SURVIVE for cache
-      //   assertions even when no component is observing them. The login
-      //   page, for example, only uses useLogin (a mutation) — nothing
-      //   subscribes to ME_KEY directly, so with the default `gcTime: 0`
-      //   the mutation's onSuccess write would be reaped before the test
-      //   could read it. Per-render isolation is provided by spawning a
-      //   fresh QueryClient (line 91), not by per-query GC, so Infinity
-      //   here doesn't leak between tests.
-      // - refetchOnWindowFocus: false — jsdom triggers focus events
-      //   from the test runner; refetches would race the MSW handlers.
-      queries: {
-        retry: false,
-        gcTime: Infinity,
-        staleTime: Infinity,
-        refetchOnWindowFocus: false,
-      },
-      mutations: { retry: false },
+  // Routed through the production `createQueryClient` so tests exercise the
+  // REAL global error handling (auth-error → null the me-cache → redirect;
+  // `meta: { errorToast: true }` mutation failure → toast) instead of a
+  // hand-rolled client that silently diverges from production. Only the
+  // defaultOptions differ — test-tuned for determinism:
+  //   - retry: false        — a 4xx in a test should fail fast.
+  //   - staleTime: Infinity — seeded cache entries never go stale.
+  //   - gcTime: Infinity    — seeded entries must SURVIVE for cache
+  //     assertions even when no component is observing them. The login
+  //     page, for example, only uses useLogin (a mutation) — nothing
+  //     subscribes to ME_KEY directly, so with the default `gcTime: 0`
+  //     the mutation's onSuccess write would be reaped before the test
+  //     could read it. Per-render isolation is provided by spawning a
+  //     fresh QueryClient per render, not by per-query GC, so Infinity
+  //     here doesn't leak between tests.
+  //   - refetchOnWindowFocus: false — jsdom triggers focus events
+  //     from the test runner; refetches would race the MSW handlers.
+  return createQueryClient({
+    queries: {
+      retry: false,
+      gcTime: Infinity,
+      staleTime: Infinity,
+      refetchOnWindowFocus: false,
     },
+    mutations: { retry: false },
   });
 }
 

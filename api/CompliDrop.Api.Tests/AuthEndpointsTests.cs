@@ -330,4 +330,54 @@ public sealed class AuthEndpointsTests(IntegrationTestFixture fixture) : Integra
         var raw = await throttled.Content.ReadAsStringAsync();
         raw.Should().NotContain("auth-strict");
     }
+
+    [Fact]
+    public async Task Refresh_is_not_throttled_by_the_5_per_minute_auth_strict_limit()
+    {
+        // Regression pin for the prod logout / "Too many requests" storm.
+        // POST /api/auth/refresh moved OFF the 5/min IP-partitioned
+        // `auth-strict` bucket onto the generous, cookie-partitioned
+        // `auth-refresh` policy (60/min per session). Pre-fix, the 6th
+        // refresh in a minute returned 429 — which failed the SPA's silent
+        // refresh and logged the user out. With rate limiting ENABLED, six
+        // consecutive refreshes carrying a valid cd_refresh cookie must all
+        // succeed, proving keepalive is no longer on the brute-force bucket.
+        await using var factory = new CustomWebApplicationFactory(
+            Fixture.ConnectionString,
+            new Dictionary<string, string?> { ["RateLimiting:Enabled"] = "true" });
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = false });
+
+        var reg = await client.PostAsJsonAsync(
+            "/api/auth/register", NewRegistration($"refresh-{Guid.NewGuid():N}@x.com"));
+        reg.StatusCode.Should().Be(HttpStatusCode.OK);
+        var refreshCookie = CookieValue(SetCookies(reg), "cd_refresh");
+        refreshCookie.Should().NotBeNullOrEmpty();
+
+        for (var i = 0; i < 6; i++)
+        {
+            var req = new HttpRequestMessage(HttpMethod.Post, "/api/auth/refresh");
+            req.Headers.TryAddWithoutValidation("Cookie", $"cd_refresh={refreshCookie}");
+            var resp = await client.SendAsync(req);
+            resp.StatusCode.Should().Be(
+                HttpStatusCode.OK,
+                $"refresh attempt {i + 1}/6 must succeed — refresh is no longer on the 5/min auth-strict bucket");
+        }
+    }
+
+    [Fact]
+    public async Task Unauthenticated_request_to_a_protected_endpoint_returns_the_auth_envelope()
+    {
+        // The JwtBearer challenge used to write an EMPTY 401 body, which the
+        // SPA could not parse — it fell back to the generic "Something went
+        // wrong" card on every expired-session request. OnChallenge now emits
+        // the standard envelope with a stable `auth.unauthorized` code so the
+        // client distinguishes "session expired → redirect to /login" from a
+        // real server error.
+        var resp = await RawClient().GetAsync("/api/auth/me");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("auth.unauthorized");
+        body.GetProperty("error").GetProperty("message").GetString().Should().NotBeNullOrWhiteSpace();
+    }
 }

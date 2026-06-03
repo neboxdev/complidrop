@@ -12,6 +12,7 @@ import { StaleDataBanner } from "@/components/StaleDataBanner";
 import { useDocuments, useUploadDocument, useDeleteDocument } from "@/hooks/useDocuments";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { isAuthError } from "@/lib/query-client";
 
 const STATUS_HUE: Record<string, string> = {
   Pending: "bg-slate-100 text-slate-700",
@@ -136,10 +137,15 @@ export default function DocumentsPage() {
                     Loading documents…
                   </td>
                 </tr>
-              ) : docs.isError && items.length === 0 ? (
+              ) : docs.isError && items.length === 0 && !isAuthError(docs.error) ? (
                 // Error state distinct from empty so a backend outage is
                 // not mistaken for a brand-new org with zero documents
-                // (#80). Gate on `items.length === 0` so a polling
+                // (#80). The `!isAuthError` guard keeps an EXPIRED-SESSION
+                // 401 out of this card — that's handled globally by nulling
+                // the me-cache → the dashboard layout redirects to /login
+                // (lib/query-client.ts), so a logged-out user is sent to
+                // sign in rather than shown a scary "couldn't load" error.
+                // Gate on `items.length === 0` so a polling
                 // failure on a populated list does NOT clobber the
                 // rows the user is reading — the cached data stays
                 // visible and `useDocuments.refetchInterval` short-
