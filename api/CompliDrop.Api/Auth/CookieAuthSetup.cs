@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CompliDrop.Api.Configuration;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
@@ -10,6 +11,14 @@ public static class CookieAuthSetup
     public const string SessionCookie = "cd_session";
     public const string RefreshCookie = "cd_refresh";
     public const string RefreshPath = "/api/auth";
+
+    // CamelCase to match ExceptionHandlingMiddleware's envelope contract —
+    // the frontend ApiEnvelope type (frontend/src/lib/api.ts) reads
+    // camelCase `error.code` / `error.message` / `error.correlationId`.
+    private static readonly JsonSerializerOptions EnvelopeJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
     // Non-httpOnly companion cookie set/cleared alongside cd_session +
     // cd_refresh (#69). Its sole purpose: let the frontend read
@@ -38,6 +47,34 @@ public static class CookieAuthSetup
                             ctx.Token = token;
                         }
                         return Task.CompletedTask;
+                    },
+                    // The default JwtBearer challenge writes an EMPTY 401 body
+                    // (only a WWW-Authenticate header). The SPA's api.ts then
+                    // can't parse an error envelope and falls back to the
+                    // generic "Something went wrong" card on EVERY expired-
+                    // session request — indistinguishable from a real 5xx, so
+                    // a logged-out user sees a scary error instead of being
+                    // sent to /login. Emit the standard envelope instead, with
+                    // a stable `auth.unauthorized` code the client can act on
+                    // (clear the session + redirect rather than render a card).
+                    OnChallenge = async ctx =>
+                    {
+                        ctx.HandleResponse(); // suppress the default empty challenge
+                        if (ctx.Response.HasStarted) return;
+                        ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                        ctx.Response.ContentType = "application/json";
+                        var correlationId = ctx.HttpContext.Items["CorrelationId"] as string;
+                        var payload = new
+                        {
+                            data = (object?)null,
+                            error = new
+                            {
+                                code = "auth.unauthorized",
+                                message = "Session expired. Please log in again.",
+                                correlationId
+                            }
+                        };
+                        await JsonSerializer.SerializeAsync(ctx.Response.Body, payload, EnvelopeJsonOptions);
                     }
                 };
 

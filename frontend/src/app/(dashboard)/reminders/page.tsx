@@ -49,6 +49,10 @@ export default function RemindersPage() {
       });
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["reminders"] }),
+    // Toggles have no local error UI — opt into the global mutation-error
+    // toast so a failed save isn't silently lost (the switch would otherwise
+    // appear to flip with no persisted change). See lib/query-client.ts.
+    meta: { errorToast: true },
   });
 
   return (

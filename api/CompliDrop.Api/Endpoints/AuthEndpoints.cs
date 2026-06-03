@@ -20,7 +20,11 @@ public static class AuthEndpoints
         group.MapPost("/register", Register).RequireRateLimiting("auth-strict");
         group.MapPost("/login", Login).RequireRateLimiting("auth-strict");
         group.MapPost("/logout", Logout);
-        group.MapPost("/refresh", Refresh).RequireRateLimiting("auth-strict");
+        // Refresh uses its own generous, cookie-partitioned limiter (not the
+        // 5/min IP-based auth-strict) — see the "auth-refresh" policy in
+        // Program.cs for why lumping keepalive with login/register brute-force
+        // throttling logged users out behind Railway's proxy.
+        group.MapPost("/refresh", Refresh).RequireRateLimiting("auth-refresh");
         group.MapGet("/me", Me).RequireAuthorization();
     }
 

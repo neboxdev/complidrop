@@ -29,8 +29,10 @@ import {
   server,
   url,
   jsonOk,
+  jsonError,
   authedMe,
   toastSuccess,
+  toastError,
 } from "@/test";
 
 // sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
@@ -102,6 +104,44 @@ describe("RulesPage — smoke (#36)", () => {
       screen.getByPlaceholderText(/template name/i) ??
         screen.getByPlaceholderText(/new template/i),
     ).toBeInTheDocument();
+  });
+});
+
+describe("RulesPage — create-template failure surfaces a toast (no more silent failure)", () => {
+  it("a failed POST /api/compliance/templates fires toast.error with the server message, not HTTP jargon", async () => {
+    // Regression pin for the reported prod bug: clicking create when the
+    // request failed used to do NOTHING — createTemplate had no onError and
+    // there was no global handler, so the rejection was swallowed. With the
+    // global mutation-error net (createTemplate now carries
+    // `meta: { errorToast: true }`, handled in lib/query-client.ts), a
+    // failure MUST surface a jargon-free toast.
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+      http.post(url("/api/compliance/templates"), () =>
+        jsonError("server.error", "Could not create template.", { status: 500 }),
+      ),
+    );
+
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+
+    const input = await screen.findByPlaceholderText(/template name/i);
+    fireEvent.change(input, { target: { value: "My COI checklist" } });
+
+    const createBtn = screen.getByRole("button", { name: /create template/i });
+    expect(createBtn).not.toBeDisabled();
+    fireEvent.click(createBtn);
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith("Could not create template."),
+    );
+
+    // CLAUDE.md frontend error-message policy: never leak HTTP jargon /
+    // browser TypeErrors / raw status codes into toast copy.
+    const shown = String(toastError.mock.calls.at(-1)?.[0] ?? "");
+    expect(shown).not.toMatch(/bad gateway|failed to fetch|typeerror|\b50\d\b/i);
+
+    // The success toast must NOT have fired on a failed create.
+    expect(toastSuccess).not.toHaveBeenCalled();
   });
 });
 

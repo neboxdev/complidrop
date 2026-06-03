@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { useVendors, useCreateVendor } from "@/hooks/useVendors";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { isAuthError } from "@/lib/query-client";
 
 export default function VendorsPage() {
   const vendors = useVendors();
@@ -72,12 +73,14 @@ export default function VendorsPage() {
             <tbody>
               {vendors.isLoading ? (
                 <tr><td colSpan={5} className="py-8 text-center text-slate-400">Loading…</td></tr>
-              ) : vendors.isError && (vendors.data ?? []).length === 0 ? (
+              ) : vendors.isError && (vendors.data ?? []).length === 0 && !isAuthError(vendors.error) ? (
                 // Error state distinct from empty so a backend outage is
                 // not mistaken for an org with zero vendors (#80). Gate
                 // on `length === 0` so a transient failure does NOT
                 // clobber a previously-populated list. (Symmetric with
-                // documents/page.tsx — see #80 followup review.)
+                // documents/page.tsx — see #80 followup review.) The
+                // `!isAuthError` guard routes an expired-session 401 to the
+                // global redirect (lib/query-client.ts) instead of this card.
                 //
                 // `err.message` is the human server message; api.ts's
                 // GENERIC_FALLBACK_MESSAGE kicks in when the body is

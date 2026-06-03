@@ -90,6 +90,10 @@ export function useDeleteVendor() {
   return useMutation({
     mutationFn: (id: string) => api.delete<void>(`/api/vendors/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
+    // Callers don't wrap this in a local error handler — opt into the global
+    // mutation-error toast (lib/query-client.ts) so a failed delete surfaces
+    // instead of silently leaving the vendor in the list.
+    meta: { errorToast: true },
   });
 }
 
@@ -119,5 +123,9 @@ export function useRevokePortalLink(vendorId: string) {
     // count and the detail-page portal-link list (#113). See
     // useUpdateVendor above for the TQ prefix-match mechanics.
     onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
+    // The revoke button (vendors/[id]) calls `revoke.mutate(...)` with no
+    // local error handler — opt into the global mutation-error toast so a
+    // failed revoke isn't silently lost. See lib/query-client.ts.
+    meta: { errorToast: true },
   });
 }

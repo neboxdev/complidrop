@@ -200,6 +200,29 @@ builder.Services.AddRateLimiter(opts =>
         ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions { PermitLimit = 5, Window = TimeSpan.FromMinutes(1) }));
 
+    // POST /api/auth/refresh is routine session-keepalive: the SPA calls it on
+    // every 401 and whenever the 15-min cd_session expires. Keeping it on the
+    // 5/min `auth-strict` (login/register brute-force) bucket meant NORMAL use
+    // tripped the limiter — and because the per-IP partition COLLAPSES to a
+    // single bucket behind Railway's proxy (every request shares the proxy IP
+    // until ForwardedHeaders trusts it — see the ForwardedHeaders config
+    // below), a handful of users' refreshes 429'd each other and the SPA logged
+    // everyone out ("Too many requests" after 30s + constant logouts). Partition
+    // on the cd_refresh COOKIE (hashed — never store raw token material as a
+    // dictionary key) so each session gets its own generous bucket, independent
+    // of IP/proxy. Requests with no refresh cookie 401 cheaply, so they share
+    // one "anon" bucket. 60/min comfortably covers retry/burst while still
+    // bounding a stolen-cookie replay.
+    opts.AddPolicy("auth-refresh", ctx =>
+    {
+        var key = ctx.Request.Cookies.TryGetValue(CookieAuthSetup.RefreshCookie, out var rc)
+            && !string.IsNullOrWhiteSpace(rc)
+                ? HashPartitionKey(rc)
+                : "anon";
+        return RateLimitPartition.GetFixedWindowLimiter(key,
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = 60, Window = TimeSpan.FromMinutes(1) });
+    });
+
     opts.AddPolicy("waitlist", ctx => RateLimitPartition.GetFixedWindowLimiter(
         ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromHours(1) }));
@@ -233,6 +256,13 @@ builder.Services.AddRateLimiter(opts =>
             _ => new FixedWindowRateLimiterOptions { PermitLimit = 200, Window = TimeSpan.FromMinutes(1) });
     });
 
+    // Hash the refresh cookie before using it as a rate-limit partition key so
+    // raw token material never lands in the limiter's in-memory key set (which
+    // can surface in dumps / diagnostics). SHA-256 hex is a stable, bounded key.
+    static string HashPartitionKey(string value) =>
+        Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value)));
+
     static bool IsPortalUpload(HttpContext ctx) =>
         HttpMethods.IsPost(ctx.Request.Method)
             && ctx.Request.Path.StartsWithSegments("/api/portal")
@@ -254,6 +284,20 @@ builder.Services.Configure<Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServe
 builder.Services.Configure<ForwardedHeadersOptions>(opts =>
 {
     opts.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    // Railway terminates TLS at its edge proxy and appends the real client IP
+    // to X-Forwarded-For. ASP.NET only trusts XFF from loopback by default, so
+    // behind Railway `Connection.RemoteIpAddress` stays the proxy's IP — which
+    // collapses every per-IP rate-limit partition (auth-strict, portal-ip) into
+    // ONE global bucket shared by all users. We can't enumerate Railway's proxy
+    // IPs, so clear the known-proxy allowlist (this disables the loopback-only
+    // trust check) and cap ForwardLimit at 1 so exactly ONE hop is honored —
+    // the IP Railway appended — never a client-spoofed XFF entry to its left.
+    // POST-DEPLOY CHECK: confirm RemoteIpAddress resolves to real client IPs on
+    // Railway (Serilog request logs echo it); if Railway ever adds >1 forwarding
+    // hop, bump ForwardLimit to match the hop count.
+    opts.KnownNetworks.Clear();
+    opts.KnownProxies.Clear();
+    opts.ForwardLimit = 1;
 });
 
 // ============================================================

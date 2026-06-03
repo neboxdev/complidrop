@@ -64,6 +64,11 @@ export default function RulesPage() {
       setNewTemplateName("");
       toast.success("Template created");
     },
+    // No local error UI on this flow, so opt into the global mutation-error
+    // toast (lib/query-client.ts). Without it a failed create — a 401, a 500,
+    // a validation 400 — fails SILENTLY ("I clicked create and nothing
+    // happened"). See #<issue>.
+    meta: { errorToast: true },
   });
 
   const deleteTemplate = useMutation({
@@ -73,6 +78,7 @@ export default function RulesPage() {
       setSelectedId(null);
       toast.success("Template removed");
     },
+    meta: { errorToast: true },
   });
 
   const upsertRule = useMutation({
@@ -91,6 +97,7 @@ export default function RulesPage() {
       qc.invalidateQueries({ queryKey: ["templates"] });
       toast.success("Rule saved");
     },
+    meta: { errorToast: true },
   });
 
   const deleteRule = useMutation({
@@ -102,6 +109,7 @@ export default function RulesPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["templates"] });
     },
+    meta: { errorToast: true },
   });
 
   return (
@@ -121,8 +129,12 @@ export default function RulesPage() {
               />
               <Button
                 size="sm"
-                disabled={!newTemplateName || createTemplate.isPending}
-                onClick={() => createTemplate.mutate(newTemplateName)}
+                // Icon-only button — aria-label carries the accessible name
+                // for screen readers and tests (mirrors the "Delete rule"
+                // pattern from #93).
+                aria-label="Create template"
+                disabled={!newTemplateName.trim() || createTemplate.isPending}
+                onClick={() => createTemplate.mutate(newTemplateName.trim())}
               >
                 <Plus className="w-4 h-4" />
               </Button>
