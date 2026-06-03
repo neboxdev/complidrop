@@ -21,12 +21,13 @@ public class AuditSaveChangesInterceptor(Func<ICurrentUser?> currentUserAccessor
         nameof(IdempotencyRecord),
         nameof(ProcessedStripeEvent),
         nameof(WaitlistEntry),
-        // Short-lived auth infra (#184). Excluded so the interceptor never
-        // serializes TokenHash into AuditLog.AfterJson on the authenticated
-        // resend path — the entity's hash-only-storage contract must hold in the
-        // audit log too. The meaningful events are already covered by explicit
-        // IAuditLogger calls ("user.registered", "user.email_verified").
-        nameof(EmailVerificationToken)
+        // Short-lived auth infra (#184/#183). Excluded so the interceptor never
+        // serializes a TokenHash into AuditLog.AfterJson — the entities'
+        // hash-only-storage contract must hold in the audit log too. The
+        // meaningful events are covered by explicit IAuditLogger calls
+        // ("user.registered", "user.email_verified", "user.password_reset", …).
+        nameof(EmailVerificationToken),
+        nameof(PasswordResetToken)
     };
 
     public override ValueTask<InterceptionResult<int>> SavingChangesAsync(

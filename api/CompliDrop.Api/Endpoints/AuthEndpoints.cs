@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text.Json;
 using CompliDrop.Api.Auth;
 using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
@@ -35,6 +36,21 @@ public static class AuthEndpoints
         group.MapPut("/organization", UpdateOrganization)
             .RequireAuthorization()
             .RequireRateLimiting("default-authed");
+
+        // Account & access management (#183). The password flows + email send +
+        // deletion all ride the 5/min auth-strict bucket; export is a read so it
+        // gets the generous default-authed limiter. forgot/reset-password are
+        // anonymous (clicked while logged out); the rest require auth.
+        group.MapPost("/forgot-password", ForgotPassword).RequireRateLimiting("auth-strict");
+        group.MapPost("/reset-password", ResetPassword).RequireRateLimiting("auth-strict");
+        group.MapPost("/change-password", ChangePassword)
+            .RequireAuthorization().RequireRateLimiting("auth-strict");
+        group.MapPost("/change-email", ChangeEmail)
+            .RequireAuthorization().RequireRateLimiting("auth-strict");
+        group.MapPost("/account/delete", DeleteAccount)
+            .RequireAuthorization().RequireRateLimiting("auth-strict");
+        group.MapGet("/account/export", ExportAccount)
+            .RequireAuthorization().RequireRateLimiting("default-authed");
         // Refresh uses its own generous, cookie-partitioned limiter (not the
         // 5/min IP-based auth-strict) — see the "auth-refresh" policy in
         // Program.cs for why lumping keepalive with login/register brute-force
@@ -173,7 +189,7 @@ public static class AuthEndpoints
             return Error(401, "auth.invalid_credentials", "Invalid email or password.");
 
         if (user.LockedUntil is { } locked && locked > DateTime.UtcNow)
-            return Error(423, "auth.locked", "Account temporarily locked. Try again later.");
+            return Error(423, "auth.locked", await BuildLockoutMessageAsync(db, user, locked));
 
         if (!hasher.Verify(req.Password ?? string.Empty, user.PasswordHash))
         {
@@ -187,6 +203,11 @@ public static class AuthEndpoints
                 user.Id,
                 organizationIdOverride: user.OrganizationId,
                 userIdOverride: user.Id);
+            // If THIS attempt just locked the account, tell the user the unlock
+            // time + reset path now (#183) rather than a bare "invalid" that
+            // leaves them hammering a locked account.
+            if (user.LockedUntil is { } justLocked && justLocked > DateTime.UtcNow)
+                return Error(423, "auth.locked", await BuildLockoutMessageAsync(db, user, justLocked));
             return Error(401, "auth.invalid_credentials", "Invalid email or password.");
         }
 
@@ -302,22 +323,36 @@ public static class AuthEndpoints
         if (token is null || token.User is null)
             return Error(400, "auth.verification_invalid", "This verification link is invalid or has expired.");
 
-        // Idempotent success keyed on the USER, not the token: a double-click on
-        // the same link (first click already verified them) returns success. We
-        // deliberately do NOT key this on ConsumedAt — a token can be consumed by
-        // INVALIDATION on resend without the user being verified, and that link
-        // must NOT report success.
-        if (token.User.EmailVerifiedAt is not null)
-            return Results.Ok(new { data = new { message = "Your email is already confirmed." }, error = (object?)null });
+        var isChangeEmail = token.NewEmail is not null;
 
-        // Consumed but the user is still unverified ⇒ this link was superseded by
-        // a newer resend. Send them to the most recent link instead of redeeming
-        // a stale one.
+        // Idempotent success — keyed on the END STATE, not on ConsumedAt (a token
+        // can be consumed by INVALIDATION on resend without the goal being met):
+        //   - signup verification (#184): the user is already verified.
+        //   - change-email (#183): the user's email already equals the pending
+        //     new address, i.e. the swap already happened (double-click).
+        if (!isChangeEmail && token.User.EmailVerifiedAt is not null)
+            return Results.Ok(new { data = new { message = "Your email is already confirmed." }, error = (object?)null });
+        if (isChangeEmail && string.Equals(token.User.Email, token.NewEmail, StringComparison.OrdinalIgnoreCase))
+            return Results.Ok(new { data = new { message = "Your new email is confirmed." }, error = (object?)null });
+
+        // Consumed but the goal isn't met ⇒ this link was superseded by a newer
+        // request. Send them to the most recent link instead of redeeming a stale
+        // one.
         if (token.ConsumedAt is not null)
             return Error(400, "auth.verification_invalid", "This verification link is no longer valid. Use the most recent email, or resend a new link from your dashboard.");
 
         if (token.ExpiresAt <= DateTime.UtcNow)
             return Error(400, "auth.verification_expired", "This verification link has expired. Request a new one from your dashboard.");
+
+        // Change-email flow (#183): the token confirms a PENDING new address.
+        // Re-check uniqueness at redeem time (someone else may have taken it in
+        // the interim) before swapping it in.
+        if (token.NewEmail is { } pendingEmail)
+        {
+            if (await db.Users.AnyAsync(u => u.Email == pendingEmail && u.Id != token.UserId))
+                return Error(409, "auth.email_taken", "That email address is already in use by another account.");
+            token.User.Email = pendingEmail;
+        }
 
         var now = DateTime.UtcNow;
         token.ConsumedAt = now;
@@ -325,13 +360,17 @@ public static class AuthEndpoints
         await db.SaveChangesAsync();
 
         await audit.LogAsync(
-            "user.email_verified",
+            token.NewEmail is null ? "user.email_verified" : "user.email_changed",
             nameof(User),
             token.UserId,
             organizationIdOverride: token.User.OrganizationId,
             userIdOverride: token.UserId);
 
-        return Results.Ok(new { data = new { message = "Email confirmed. Thanks!" }, error = (object?)null });
+        return Results.Ok(new
+        {
+            data = new { message = token.NewEmail is null ? "Email confirmed. Thanks!" : "Your new email is confirmed." },
+            error = (object?)null
+        });
     }
 
     /// <summary>
@@ -425,12 +464,379 @@ public static class AuthEndpoints
         catch { return false; }
     }
 
+    // ───────────────────────── Account & access management (#183) ─────────────────────────
+
+    /// <summary>
+    /// Anonymous (#183). Sends a password-reset link. ALWAYS returns 200 with the
+    /// same body whether or not the email exists, so it can't be used to enumerate
+    /// registered accounts. Issuing a token invalidates any prior outstanding
+    /// reset tokens for that user (only the newest link works).
+    /// </summary>
+    private static async Task<IResult> ForgotPassword(
+        ForgotPasswordRequest req,
+        SystemDbContext db,
+        IOptions<FrontendSettings> frontendOpts,
+        IEmailService email,
+        ILogger<PasswordResetToken> logger,
+        IAuditLogger audit,
+        HttpContext http)
+    {
+        // One generic response for every path — never reveal account existence.
+        var generic = Results.Ok(new
+        {
+            data = new { message = "If that email is registered, we've sent a password reset link." },
+            error = (object?)null
+        });
+
+        var normalized = req.Email?.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalized)) return generic;
+
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Email == normalized);
+        if (user is null) return generic;
+
+        var now = DateTime.UtcNow;
+        var outstanding = await db.PasswordResetTokens
+            .Where(t => t.UserId == user.Id && t.ConsumedAt == null)
+            .ToListAsync();
+        foreach (var t in outstanding) t.ConsumedAt = now;
+
+        var (raw, hash) = SecureToken.Generate();
+        db.PasswordResetTokens.Add(new PasswordResetToken
+        {
+            Id = Guid.NewGuid(),
+            UserId = user.Id,
+            TokenHash = hash,
+            ExpiresAt = now.AddMinutes(PasswordResetTokenTtlMinutes),
+            CreatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        await SendPasswordResetEmailAsync(email, frontendOpts.Value, user.Email, raw, logger, http.RequestAborted);
+        await audit.LogAsync(
+            "user.password_reset_requested",
+            nameof(User), user.Id,
+            organizationIdOverride: user.OrganizationId, userIdOverride: user.Id);
+
+        return generic;
+    }
+
+    /// <summary>
+    /// Anonymous (#183). Redeems a reset token and sets a new password. On success
+    /// it CLEARS the account lockout (a locked-out user resets to regain access)
+    /// and invalidates every other outstanding reset token for the user.
+    /// </summary>
+    private static async Task<IResult> ResetPassword(
+        ResetPasswordRequest req,
+        SystemDbContext db,
+        IPasswordHasher hasher,
+        IAuditLogger audit)
+    {
+        if (string.IsNullOrWhiteSpace(req.Token))
+            return Error(400, "validation.token", "This reset link is invalid.");
+        if (!IsStrongPassword(req.NewPassword))
+            return Error(400, "validation.password", "Password must be at least 12 characters and include a letter and a digit.");
+
+        var hash = SecureToken.Hash(req.Token.Trim());
+        var token = await db.PasswordResetTokens
+            .Include(t => t.User)
+            .FirstOrDefaultAsync(t => t.TokenHash == hash);
+
+        // One generic rejection for unknown / consumed / expired — the link is the
+        // bearer secret, so we don't distinguish the failure modes.
+        if (token is null || token.User is null || token.ConsumedAt is not null || token.ExpiresAt <= DateTime.UtcNow)
+            return Error(400, "auth.reset_invalid", "This reset link is invalid or has expired. Request a new one.");
+
+        var now = DateTime.UtcNow;
+        token.User.PasswordHash = hasher.Hash(req.NewPassword);
+        // A successful reset is also the lockout escape hatch (#183).
+        token.User.FailedLoginAttempts = 0;
+        token.User.LockedUntil = null;
+        token.ConsumedAt = now;
+
+        var others = await db.PasswordResetTokens
+            .Where(t => t.UserId == token.UserId && t.ConsumedAt == null && t.Id != token.Id)
+            .ToListAsync();
+        foreach (var t in others) t.ConsumedAt = now;
+
+        await db.SaveChangesAsync();
+
+        await audit.LogAsync(
+            "user.password_reset",
+            nameof(User), token.UserId,
+            organizationIdOverride: token.User.OrganizationId, userIdOverride: token.UserId);
+
+        return Results.Ok(new
+        {
+            data = new { message = "Your password has been reset. You can sign in with your new password now." },
+            error = (object?)null
+        });
+    }
+
+    /// <summary>Authenticated (#183). Changes the password after verifying the current one.</summary>
+    private static async Task<IResult> ChangePassword(
+        ChangePasswordRequest req,
+        HttpContext http,
+        SystemDbContext db,
+        IPasswordHasher hasher,
+        IAuditLogger audit)
+    {
+        if (GetUserId(http) is not { } userId)
+            return Error(401, "auth.unauthorized", "Not authenticated.");
+        if (!IsStrongPassword(req.NewPassword))
+            return Error(400, "validation.password", "Password must be at least 12 characters and include a letter and a digit.");
+
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        if (user is null) return Error(401, "auth.unauthorized", "Not authenticated.");
+
+        if (!hasher.Verify(req.CurrentPassword ?? string.Empty, user.PasswordHash))
+            return Error(400, "auth.invalid_password", "Your current password is incorrect.");
+
+        user.PasswordHash = hasher.Hash(req.NewPassword);
+        await db.SaveChangesAsync();
+
+        await audit.LogAsync(
+            "user.password_changed",
+            nameof(User), user.Id,
+            organizationIdOverride: user.OrganizationId, userIdOverride: user.Id);
+
+        return Results.Ok(new { data = new { message = "Your password has been updated." }, error = (object?)null });
+    }
+
+    /// <summary>
+    /// Authenticated (#183). Starts a change-email flow: verifies the password,
+    /// then emails a confirmation link to the NEW address. The email only swaps
+    /// once that link is redeemed (VerifyEmail), so a typo'd new address can't
+    /// lock the user out of their account.
+    /// </summary>
+    private static async Task<IResult> ChangeEmail(
+        ChangeEmailRequest req,
+        HttpContext http,
+        SystemDbContext db,
+        IPasswordHasher hasher,
+        IOptions<FrontendSettings> frontendOpts,
+        IEmailService email,
+        ILogger<EmailVerificationToken> logger,
+        IAuditLogger audit)
+    {
+        if (GetUserId(http) is not { } userId)
+            return Error(401, "auth.unauthorized", "Not authenticated.");
+        if (!IsValidEmail(req.NewEmail))
+            return Error(400, "validation.email", "Enter a valid email.");
+
+        var newEmail = req.NewEmail.Trim().ToLowerInvariant();
+
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        if (user is null) return Error(401, "auth.unauthorized", "Not authenticated.");
+
+        if (!hasher.Verify(req.Password ?? string.Empty, user.PasswordHash))
+            return Error(400, "auth.invalid_password", "Your password is incorrect.");
+        if (string.Equals(user.Email, newEmail, StringComparison.OrdinalIgnoreCase))
+            return Error(400, "validation.email", "That's already your email address.");
+        if (await db.Users.AnyAsync(u => u.Email == newEmail))
+            return Error(409, "auth.email_taken", "That email address is already in use.");
+
+        var now = DateTime.UtcNow;
+        // Invalidate any prior outstanding verification tokens (a pending signup
+        // confirmation or an earlier change request) so only the newest applies.
+        var outstanding = await db.EmailVerificationTokens
+            .Where(t => t.UserId == userId && t.ConsumedAt == null)
+            .ToListAsync();
+        foreach (var t in outstanding) t.ConsumedAt = now;
+
+        var (token, raw) = CreateVerificationToken(user.Id, now, newEmail);
+        db.EmailVerificationTokens.Add(token);
+        await db.SaveChangesAsync();
+
+        // The confirmation link goes to the NEW address (proving the user owns it).
+        await SendVerificationEmailAsync(email, frontendOpts.Value, newEmail, raw, logger, http.RequestAborted);
+        await audit.LogAsync(
+            "user.email_change_requested",
+            nameof(User), user.Id,
+            organizationIdOverride: user.OrganizationId, userIdOverride: user.Id);
+
+        return Results.Ok(new
+        {
+            data = new { message = $"We've sent a confirmation link to {newEmail}. Click it to finish changing your email." },
+            error = (object?)null
+        });
+    }
+
+    /// <summary>
+    /// Authenticated (#183). Deletes the account after a password re-check
+    /// (GDPR/CCPA erasure): scrubs the user's PII (email + name), soft-deletes the
+    /// user + organization (revoking all access and hiding tenant data via the
+    /// query filters), and clears the auth cookies. Scrubbing the email also frees
+    /// it for a future re-registration.
+    /// </summary>
+    private static async Task<IResult> DeleteAccount(
+        DeleteAccountRequest req,
+        HttpContext http,
+        SystemDbContext db,
+        IPasswordHasher hasher,
+        IOptions<CookieSettings> cookieOpts,
+        IAuditLogger audit)
+    {
+        if (GetUserId(http) is not { } userId)
+            return Error(401, "auth.unauthorized", "Not authenticated.");
+
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        if (user is null) return Error(401, "auth.unauthorized", "Not authenticated.");
+
+        if (!hasher.Verify(req.Password ?? string.Empty, user.PasswordHash))
+            return Error(400, "auth.invalid_password", "Your password is incorrect.");
+
+        var orgId = user.OrganizationId;
+        // Audit FIRST so the deletion event is recorded with the still-intact
+        // identity (the explicit log is excluded from the scrub below).
+        await audit.LogAsync(
+            "user.account_deleted",
+            nameof(User), user.Id,
+            before: new { user.Email, user.OrganizationId },
+            organizationIdOverride: orgId, userIdOverride: user.Id);
+
+        var now = DateTime.UtcNow;
+        // Scrub PII + soft-delete the user (manual DeletedAt, not Remove(), so the
+        // scrubbed email/name land in the same UPDATE). The scrubbed email is
+        // unique per user id, freeing the original address for re-registration.
+        user.Email = $"deleted+{user.Id:N}@deleted.invalid";
+        user.FullName = "Deleted account";
+        user.DeletedAt = now;
+
+        // Soft-delete the org → its query filter hides it and (transitively) the
+        // tenant's data; login/me then resolve nothing for this account.
+        var org = await db.Organizations.FirstOrDefaultAsync(o => o.Id == orgId);
+        if (org is not null) org.DeletedAt = now;
+
+        await db.SaveChangesAsync();
+
+        ClearAuthCookies(http, cookieOpts.Value);
+        return Results.Ok(new { data = new { message = "Your account has been deleted." }, error = (object?)null });
+    }
+
+    /// <summary>
+    /// Authenticated (#183). Returns the account's data as a downloadable JSON file
+    /// (GDPR/CCPA data portability): the user, organization, vendors, documents
+    /// (metadata), and reminders.
+    /// </summary>
+    private static async Task<IResult> ExportAccount(
+        HttpContext http,
+        SystemDbContext db)
+    {
+        if (GetUserId(http) is not { } userId)
+            return Error(401, "auth.unauthorized", "Not authenticated.");
+
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        if (user is null) return Error(401, "auth.unauthorized", "Not authenticated.");
+
+        var orgId = user.OrganizationId;
+        var org = await db.Organizations.FirstOrDefaultAsync(o => o.Id == orgId);
+        var vendors = await db.Vendors.AsNoTracking()
+            .Where(v => v.OrganizationId == orgId)
+            .Select(v => new { v.Name, v.ContactEmail, v.ContactPhone, v.Category, v.CreatedAt })
+            .ToListAsync();
+        var documents = await db.Documents.AsNoTracking()
+            .Where(d => d.OrganizationId == orgId)
+            .Select(d => new { d.OriginalFileName, d.DocumentType, d.ExpirationDate, d.ComplianceStatus, d.CreatedAt })
+            .ToListAsync();
+        var reminders = await db.Reminders.AsNoTracking()
+            .Where(r => r.OrganizationId == orgId)
+            .Select(r => new { r.DaysBefore, r.NotifyInternalUser, r.NotifyVendor, r.IsActive })
+            .ToListAsync();
+
+        var export = new
+        {
+            exportedAt = DateTime.UtcNow,
+            account = new { user.Email, user.FullName, user.Role, EmailVerified = user.EmailVerifiedAt is not null, user.CreatedAt },
+            organization = org is null ? null : new { org.Name, org.Industry, org.CompanySize, org.TimeZone, org.CreatedAt },
+            vendors,
+            documents,
+            reminders,
+        };
+
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(export, new JsonSerializerOptions { WriteIndented = true });
+        return Results.File(bytes, "application/json", $"complidrop-account-export-{DateTime.UtcNow:yyyyMMdd}.json");
+    }
+
+    private static Guid? GetUserId(HttpContext http) =>
+        Guid.TryParse(http.User.FindFirstValue(ClaimTypes.NameIdentifier), out var id) ? id : null;
+
+    private static void ClearAuthCookies(HttpContext http, CookieSettings cookieCfg)
+    {
+        http.Response.Cookies.Append(
+            CookieAuthSetup.SessionCookie, string.Empty,
+            CookieAuthSetup.BuildExpiredSessionCookieOptions(cookieCfg));
+        http.Response.Cookies.Append(
+            CookieAuthSetup.RefreshCookie, string.Empty,
+            CookieAuthSetup.BuildExpiredRefreshCookieOptions(cookieCfg));
+        http.Response.Cookies.Append(
+            CookieAuthSetup.HintCookie, string.Empty,
+            CookieAuthSetup.BuildExpiredHintCookieOptions(cookieCfg));
+    }
+
+    // Password-reset tokens are short-lived: they grant the ability to set a new
+    // password (far more sensitive than email verification), so a 45-minute TTL
+    // bounds the window in which a leaked link is usable.
+    private const int PasswordResetTokenTtlMinutes = 45;
+
+    private static async Task SendPasswordResetEmailAsync(
+        IEmailService email,
+        FrontendSettings frontend,
+        string toEmail,
+        string rawToken,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        var link = $"{frontend.BaseUrl.TrimEnd('/')}/reset-password?token={Uri.EscapeDataString(rawToken)}";
+        const string subject = "Reset your CompliDrop password";
+        var body = $"""
+            <div style="font-family: system-ui, sans-serif; color: #0c4a6e;">
+              <h2 style="color: #0284c7;">Reset your password</h2>
+              <p>We received a request to reset your CompliDrop password. Click below to choose a new one:</p>
+              <p><a href="{link}" style="display:inline-block;background:#0284c7;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;">Reset my password</a></p>
+              <p style="color: #64748b; font-size: 12px;">Or paste this link into your browser:<br>{link}</p>
+              <p style="color: #64748b; font-size: 12px;">This link expires in {PasswordResetTokenTtlMinutes} minutes. If you didn't request this, you can ignore this email — your password won't change.</p>
+            </div>
+            """;
+        try
+        {
+            await email.SendAsync(toEmail, subject, body, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Password-reset email send failed for {Email}; the user can request another link.", toEmail);
+        }
+    }
+
+    /// <summary>
+    /// Builds the lockout message (#183) showing the unlock time in the org's local
+    /// zone plus the reset path. Loads the org for its time zone (lockout is rare —
+    /// only after 10 failures — so the extra read is negligible).
+    /// </summary>
+    private static async Task<string> BuildLockoutMessageAsync(SystemDbContext db, User user, DateTime lockedUntilUtc)
+    {
+        var org = await db.Organizations.FirstOrDefaultAsync(o => o.Id == user.OrganizationId);
+        var zoneId = org?.TimeZone;
+        string label;
+        try
+        {
+            var tz = string.IsNullOrWhiteSpace(zoneId) ? null : TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+            var local = tz is null ? lockedUntilUtc : TimeZoneInfo.ConvertTimeFromUtc(lockedUntilUtc, tz);
+            label = $"{local:h:mm tt} on {local:MMM d} ({(tz is null ? "UTC" : zoneId)})";
+        }
+        catch
+        {
+            label = $"{lockedUntilUtc:h:mm tt} on {lockedUntilUtc:MMM d} (UTC)";
+        }
+        return $"Too many sign-in attempts — your account is locked until {label}. Reset your password to regain access now.";
+    }
+
     // Email verification links stay valid for a week — users routinely confirm
     // late, and (unlike a password reset) the token grants no account access, so
     // a longer TTL trades little risk for far fewer "link expired" dead-ends.
     private const int VerificationTokenTtlDays = 7;
 
-    private static (EmailVerificationToken Token, string RawToken) CreateVerificationToken(Guid userId, DateTime now)
+    private static (EmailVerificationToken Token, string RawToken) CreateVerificationToken(
+        Guid userId, DateTime now, string? newEmail = null)
     {
         var (raw, hash) = SecureToken.Generate();
         var token = new EmailVerificationToken
@@ -438,6 +844,7 @@ public static class AuthEndpoints
             Id = Guid.NewGuid(),
             UserId = userId,
             TokenHash = hash,
+            NewEmail = newEmail,
             ExpiresAt = now.AddDays(VerificationTokenTtlDays),
             CreatedAt = now,
         };
