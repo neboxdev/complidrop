@@ -103,6 +103,25 @@ describe("SecuritySection — change email (#183)", () => {
       expect(toastSuccess).toHaveBeenCalledWith("We've sent a confirmation link to new@acme.test."),
     );
   });
+
+  it("surfaces the server's rejection (taken email) jargon-free", async () => {
+    server.use(
+      http.post(url("/api/auth/change-email"), () =>
+        jsonError("auth.email_taken", "That email address is already in use.", { status: 409 }),
+      ),
+    );
+    renderWithProviders(<SecuritySection />);
+
+    fireEvent.change(screen.getByLabelText(/new email/i), { target: { value: "taken@acme.test" } });
+    fireEvent.change(screen.getByLabelText(/confirm with your password/i), { target: { value: "Password1234" } });
+    fireEvent.click(screen.getByRole("button", { name: /send confirmation link/i }));
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith("That email address is already in use."),
+    );
+    const msg = String(toastError.mock.calls.at(-1)?.[0] ?? "");
+    expect(msg).not.toMatch(/409|conflict|failed to fetch/i);
+  });
 });
 
 describe("DangerZone — export (#183)", () => {

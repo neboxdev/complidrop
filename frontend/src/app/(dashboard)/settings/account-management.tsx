@@ -191,7 +191,18 @@ function ExportDataButton() {
       // Bare fetch (not the api.* client) — the response is a downloadable file,
       // not a JSON envelope. We own the jargon-free error discipline here (#77):
       // both branches collapse to GENERIC_FALLBACK_MESSAGE, never a raw status.
-      const res = await fetch(`${API_BASE}/api/auth/account/export`, { credentials: "include" }).catch(() => null);
+      let res = await fetch(`${API_BASE}/api/auth/account/export`, { credentials: "include" }).catch(() => null);
+      // Mirror the api client's one-shot 401→refresh→retry so an expired
+      // cd_session (but still-valid cd_refresh) doesn't dead-end the download.
+      if (res?.status === 401) {
+        const refreshed = await fetch(`${API_BASE}/api/auth/refresh`, {
+          method: "POST",
+          credentials: "include",
+        }).catch(() => null);
+        if (refreshed?.ok) {
+          res = await fetch(`${API_BASE}/api/auth/account/export`, { credentials: "include" }).catch(() => null);
+        }
+      }
       if (!res || !res.ok) throw new Error(GENERIC_FALLBACK_MESSAGE);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);

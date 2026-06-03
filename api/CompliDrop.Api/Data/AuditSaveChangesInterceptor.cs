@@ -148,12 +148,29 @@ public class AuditSaveChangesInterceptor(Func<ICurrentUser?> currentUserAccessor
         };
     }
 
+    // Property names whose VALUES are secrets and must never be serialized into
+    // the audit log, even when the owning entity IS audited. #183 added the first
+    // authenticated User-mutating endpoints (change-password / change-email /
+    // delete), which route through this audited interceptor — without this guard
+    // the BCrypt PasswordHash would land verbatim in AuditLog.Before/AfterJson, a
+    // long-lived + user-exportable table. Mirrors the NonAuditedTypes exclusion
+    // that keeps token hashes out of the audit log.
+    private static readonly HashSet<string> RedactedProperties = new(StringComparer.Ordinal)
+    {
+        nameof(Entities.User.PasswordHash),
+    };
+
     private static string SerializeSnapshot(EntityEntry entry, bool current)
     {
         var dict = new Dictionary<string, object?>();
         foreach (var prop in entry.Properties)
         {
             if (prop.Metadata.IsShadowProperty()) continue;
+            if (RedactedProperties.Contains(prop.Metadata.Name))
+            {
+                dict[prop.Metadata.Name] = "***";
+                continue;
+            }
             var value = current ? prop.CurrentValue : prop.OriginalValue;
             if (value is byte[] || value is System.Text.Json.JsonDocument) continue;
             dict[prop.Metadata.Name] = value;

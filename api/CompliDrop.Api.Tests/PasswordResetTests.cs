@@ -26,6 +26,19 @@ public sealed class PasswordResetTests(IntegrationTestFixture fixture) : Integra
         return m.Groups[1].Value;
     }
 
+    /// <summary>
+    /// forgot-password fires the Resend send fire-and-forget (so response time
+    /// can't leak account existence — #183), so the captured send may land a tick
+    /// after the 200. Poll briefly for it (deterministic: the fake completes
+    /// almost immediately).
+    /// </summary>
+    private async Task WaitForSendsAsync(int count)
+    {
+        for (var i = 0; i < 200 && Email.Sends.Count < count; i++)
+            await Task.Delay(10);
+        Email.Sends.Count.Should().BeGreaterThanOrEqualTo(count, "the reset email(s) should have been sent");
+    }
+
     [Fact]
     public async Task Forgot_password_for_a_real_user_sends_a_reset_email_and_returns_200()
     {
@@ -35,6 +48,7 @@ public sealed class PasswordResetTests(IntegrationTestFixture fixture) : Integra
         var resp = await CreateClient().PostAsJsonAsync("/api/auth/forgot-password", new { email = auth.Email });
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await WaitForSendsAsync(1);
         Email.Sends.Should().ContainSingle()
             .Which.ToEmail.Should().Be(auth.Email);
         Email.Sends.Single().HtmlBody.Should().Contain("/reset-password?token=");
@@ -57,6 +71,7 @@ public sealed class PasswordResetTests(IntegrationTestFixture fixture) : Integra
         var auth = await RegisterAndLoginAsync();
         Email.Reset();
         (await CreateClient().PostAsJsonAsync("/api/auth/forgot-password", new { email = auth.Email })).EnsureSuccessStatusCode();
+        await WaitForSendsAsync(1);
         var token = ExtractResetToken(Email.Sends.Single().HtmlBody);
 
         var resp = await CreateClient().PostAsJsonAsync(
@@ -78,8 +93,10 @@ public sealed class PasswordResetTests(IntegrationTestFixture fixture) : Integra
         Email.Reset();
         // Two reset requests → the FIRST token is invalidated by the second.
         (await CreateClient().PostAsJsonAsync("/api/auth/forgot-password", new { email = auth.Email })).EnsureSuccessStatusCode();
+        await WaitForSendsAsync(1);
         var firstToken = ExtractResetToken(Email.Sends.Last().HtmlBody);
         (await CreateClient().PostAsJsonAsync("/api/auth/forgot-password", new { email = auth.Email })).EnsureSuccessStatusCode();
+        await WaitForSendsAsync(2);
         var secondToken = ExtractResetToken(Email.Sends.Last().HtmlBody);
 
         // The superseded first token is dead.
@@ -100,6 +117,7 @@ public sealed class PasswordResetTests(IntegrationTestFixture fixture) : Integra
         var auth = await RegisterAndLoginAsync();
         Email.Reset();
         (await CreateClient().PostAsJsonAsync("/api/auth/forgot-password", new { email = auth.Email })).EnsureSuccessStatusCode();
+        await WaitForSendsAsync(1);
         var token = ExtractResetToken(Email.Sends.Single().HtmlBody);
 
         var resp = await CreateClient().PostAsJsonAsync("/api/auth/reset-password", new { token, newPassword = "short" });
@@ -117,6 +135,38 @@ public sealed class PasswordResetTests(IntegrationTestFixture fixture) : Integra
     }
 
     [Fact]
+    public async Task Reset_password_with_an_expired_token_is_rejected_and_leaves_the_password_unchanged()
+    {
+        var auth = await RegisterAndLoginAsync();
+
+        // Plant an expired reset token (the raw never leaves this test).
+        var (raw, hash) = CompliDrop.Api.Auth.SecureToken.Generate();
+        await using (var db = CreateSystemDb())
+        {
+            db.PasswordResetTokens.Add(new CompliDrop.Api.Entities.PasswordResetToken
+            {
+                Id = Guid.NewGuid(),
+                UserId = auth.UserId,
+                TokenHash = hash,
+                ExpiresAt = DateTime.UtcNow.AddMinutes(-1),
+                CreatedAt = DateTime.UtcNow.AddHours(-1),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var resp = await CreateClient().PostAsJsonAsync(
+            "/api/auth/reset-password",
+            new { token = raw, newPassword = "ShouldNotApply9" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await resp.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("error").GetProperty("code").GetString().Should().Be("auth.reset_invalid");
+        // The expired link must NOT have changed the password.
+        (await CreateClient().PostAsJsonAsync("/api/auth/login", new { email = auth.Email, password = "Password1234" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
     public async Task Resetting_password_clears_an_active_lockout()
     {
         // Lock the account (10 wrong-password attempts), then prove a reset unlocks it.
@@ -130,6 +180,7 @@ public sealed class PasswordResetTests(IntegrationTestFixture fixture) : Integra
 
         Email.Reset();
         (await CreateClient().PostAsJsonAsync("/api/auth/forgot-password", new { email = auth.Email })).EnsureSuccessStatusCode();
+        await WaitForSendsAsync(1);
         var token = ExtractResetToken(Email.Sends.Single().HtmlBody);
         (await CreateClient().PostAsJsonAsync("/api/auth/reset-password", new { token, newPassword = "RecoveredPass123" }))
             .EnsureSuccessStatusCode();

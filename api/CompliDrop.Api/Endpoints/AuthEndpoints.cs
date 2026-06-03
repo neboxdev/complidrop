@@ -510,12 +510,19 @@ public static class AuthEndpoints
             CreatedAt = now,
         });
         await db.SaveChangesAsync();
-
-        await SendPasswordResetEmailAsync(email, frontendOpts.Value, user.Email, raw, logger, http.RequestAborted);
         await audit.LogAsync(
             "user.password_reset_requested",
             nameof(User), user.Id,
             organizationIdOverride: user.OrganizationId, userIdOverride: user.Id);
+
+        // Fire-and-forget the Resend round-trip: awaiting it only on the
+        // account-exists path would make the response measurably slower for
+        // registered emails — a timing side-channel that re-opens the very
+        // enumeration the always-200 body closes (the HTTP send is the dominant
+        // signal). The token is already committed and SendPasswordResetEmailAsync
+        // swallows its own failures, so detaching is safe. CancellationToken.None
+        // (not RequestAborted) so the send isn't cancelled when the request ends.
+        _ = SendPasswordResetEmailAsync(email, frontendOpts.Value, user.Email, raw, logger, CancellationToken.None);
 
         return generic;
     }

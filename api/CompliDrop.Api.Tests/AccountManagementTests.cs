@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CompliDrop.Api.Tests;
@@ -110,6 +111,28 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
+    public async Task Change_email_confirmation_link_is_idempotent_on_a_second_click()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var newEmail = $"new-{Guid.NewGuid():N}@x.com";
+        Email.Reset();
+        (await auth.Client.PostAsJsonAsync("/api/auth/change-email",
+            new { password = "Password1234", newEmail })).EnsureSuccessStatusCode();
+        var token = ExtractVerifyToken(Email.Sends.Single().HtmlBody);
+
+        // First click swaps the email…
+        (await CreateClient().PostAsJsonAsync("/api/auth/verify-email", new { token }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        // …second click on the SAME link is idempotent success (user.Email already
+        // equals NewEmail), not an error.
+        (await CreateClient().PostAsJsonAsync("/api/auth/verify-email", new { token }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        (await CreateClient().PostAsJsonAsync("/api/auth/login", new { email = newEmail, password = "Password1234" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
     public async Task Change_email_with_a_wrong_password_is_rejected()
     {
         var auth = await RegisterAndLoginAsync();
@@ -158,7 +181,16 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
         (await CreateClient().PostAsJsonAsync("/api/auth/login", new { email = auth.Email, password = "Password1234" }))
             .StatusCode.Should().Be(HttpStatusCode.Unauthorized);
 
-        // The PII is scrubbed (email freed): the original address can register anew.
+        // The user row is tombstoned AND its PII scrubbed (GDPR erasure contract).
+        await using (var db = CreateSystemDb())
+        {
+            var scrubbed = await db.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == auth.UserId);
+            scrubbed.DeletedAt.Should().NotBeNull();
+            scrubbed.Email.Should().StartWith("deleted+").And.NotBe(auth.Email);
+            scrubbed.FullName.Should().Be("Deleted account");
+        }
+
+        // The freed email can register anew.
         var reReg = await CreateClient().PostAsJsonAsync("/api/auth/register", new
         {
             email = auth.Email,
@@ -194,19 +226,60 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
     // ───────── data export ─────────
 
     [Fact]
-    public async Task Export_returns_a_json_file_with_the_account_data()
+    public async Task Export_returns_a_json_file_with_the_account_data_and_no_secrets()
     {
         var auth = await RegisterAndLoginAsync();
+        // Seed a vendor so the vendor projection is actually exercised.
+        await using (var db = CreateSystemDb())
+        {
+            db.Vendors.Add(new CompliDrop.Api.Entities.Vendor
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                Name = "Acme Electric",
+                ContactEmail = "ops@acme-electric.test",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
 
         var resp = await auth.Client.GetAsync("/api/auth/account/export");
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         resp.Content.Headers.ContentType!.MediaType.Should().Be("application/json");
-        var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var raw = await resp.Content.ReadAsStringAsync();
+
+        var doc = JsonDocument.Parse(raw);
         doc.RootElement.GetProperty("account").GetProperty("email").GetString().Should().Be(auth.Email);
         doc.RootElement.TryGetProperty("organization", out _).Should().BeTrue();
         doc.RootElement.TryGetProperty("documents", out _).Should().BeTrue();
-        doc.RootElement.TryGetProperty("vendors", out _).Should().BeTrue();
+        doc.RootElement.GetProperty("vendors")[0].GetProperty("name").GetString().Should().Be("Acme Electric");
+
+        // GDPR export must NEVER leak credentials/token material — a future
+        // refactor to `account = user` (whole entity) would regress this.
+        raw.Should().NotContain("PasswordHash").And.NotContain("passwordHash");
+        raw.Should().NotContain("TokenHash");
+        raw.Should().NotContain("$2", "no BCrypt hash prefix may appear in the export");
+    }
+
+    [Fact]
+    public async Task Change_password_does_not_write_the_password_hash_into_the_audit_log()
+    {
+        var auth = await RegisterAndLoginAsync();
+
+        (await auth.Client.PostAsJsonAsync("/api/auth/change-password",
+            new { currentPassword = "Password1234", newPassword = "ChangedPass5678" }))
+            .EnsureSuccessStatusCode();
+
+        // The interceptor audits the User update, but PasswordHash must be redacted.
+        await using var db = CreateSystemDb();
+        var rows = await db.AuditLogs
+            .Where(a => a.OrganizationId == auth.OrgId)
+            .Select(a => (a.BeforeJson ?? "") + (a.AfterJson ?? ""))
+            .ToListAsync();
+        rows.Should().NotBeEmpty();
+        rows.Should().OnlyContain(json => !json.Contains("$2"), "no BCrypt hash may land in AuditLog JSON");
     }
 
     [Fact]
