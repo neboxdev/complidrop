@@ -8,7 +8,17 @@
  * via `useMe` to swap the primary CTA between "Get started" (anonymous) and
  * "Go to dashboard" (signed in). Keeping it isolated lets the pages that embed
  * it stay server components — so their copy renders in the initial HTML for
- * crawlers and AI, and they ship no marketing JS (the INP win in [#176]).
+ * crawlers and AI, and they add no *additional* client island (the INP win in
+ * [#176]).
+ *
+ * Since [#181] this island also hosts the mobile-nav drawer (a Base UI
+ * `Dialog`-backed `Sheet`) so FAQ / Glossary / Pricing stay reachable from a
+ * phone. That pulls the Dialog runtime into this one island's bundle — a few KB
+ * gzipped of app-shared code already loaded by the dashboard shell and HTTP-
+ * cached across routes. It does NOT mount until the hamburger is tapped
+ * (`Dialog.Portal` is gated on `open`), so INP is unaffected; the cost is First
+ * Load JS only. If that ever matters, the Sheet can be `next/dynamic`-imported
+ * so Dialog stays out of the marketing First Load entirely.
  *
  * `skipRefresh` keeps an anonymous visitor's auth probe to a single round-trip
  * (no automatic POST /api/auth/refresh on the 401) — see useAuth.ts (#30).

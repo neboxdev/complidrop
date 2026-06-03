@@ -92,4 +92,21 @@ describe("DashboardLayout — responsive shell (#181)", () => {
     );
     expect(screen.getByText("hello child")).toBeInTheDocument();
   });
+
+  it("closes the drawer on Escape", async () => {
+    renderWithProviders(
+      <DashboardLayout>
+        <div>child</div>
+      </DashboardLayout>,
+      { auth: authedMe, pathname: "/dashboard" },
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /open navigation menu/i }),
+    );
+    const drawer = await waitFor(() => screen.getByRole("dialog"));
+    fireEvent.keyDown(drawer, { key: "Escape", code: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
 });

@@ -665,6 +665,13 @@ describe("DocumentsPage — state matrix (#36)", () => {
     // `.stacked-table` card reflow (so columns aren't clipped / don't need a
     // horizontal swipe below md) AND the icon-only delete button — which was
     // previously nameless — now exposes an accessible name.
+    //
+    // NOTE: JSDOM applies no stylesheet, so this asserts the CONTRACT HOOKS
+    // (the `.stacked-table` opt-in class + the per-cell `data-label`s the CSS
+    // `::before` reads) — not the rendered ≤md layout. Deleting the
+    // `@media (max-width: 47.999rem)` block in globals.css would still pass
+    // here; the actual 390px no-clip behavior is a visual guarantee tracked in
+    // the QA plan (docs/qa) / e2e, not a unit-testable property.
     server.use(
       http.get(url("/api/documents"), () =>
         jsonOk(

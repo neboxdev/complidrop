@@ -100,4 +100,33 @@ describe("VendorDetailPage — smoke (#36)", () => {
     expect(toastSuccess).not.toHaveBeenCalled();
     expect(toastError).not.toHaveBeenCalled();
   });
+
+  it("portal-link icon controls expose accessible names + a coarse-pointer touch target (#181)", async () => {
+    // Before #181 the Copy and Revoke controls were icon-only buttons with no
+    // accessible name. AC #3 also requires destructive icon buttons (Revoke is
+    // destructive) to present a ≥44px hit area on touch — inherited from the
+    // Button base coarse-pointer class.
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+    );
+
+    renderWithProviders(<VendorDetailPage />, {
+      auth: authedMe,
+      params: { id: "v_acme_01" },
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: /acme subcontractor/i }),
+      ).toBeInTheDocument(),
+    );
+
+    expect(
+      screen.getByRole("button", { name: /copy upload link/i }),
+    ).toBeInTheDocument();
+    const revoke = screen.getByRole("button", { name: /revoke link/i });
+    expect(revoke).toBeInTheDocument();
+    expect(revoke.className).toContain("pointer-coarse:min-h-11");
+  });
 });

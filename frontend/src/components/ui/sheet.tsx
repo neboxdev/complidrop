@@ -22,6 +22,7 @@
  */
 import * as React from "react";
 import { Dialog } from "@base-ui/react/dialog";
+import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "@/lib/utils";
 
@@ -31,14 +32,30 @@ const SheetClose = Dialog.Close;
 const SheetTitle = Dialog.Title;
 const SheetDescription = Dialog.Description;
 
+// `side` is a variant axis, expressed via CVA to match the other ui/ primitives
+// (buttonVariants / badgeVariants) and the canonical shadcn Sheet. Enter/exit
+// slide is driven by Base UI's data-[starting-style]/data-[ending-style].
+const sheetVariants = cva(
+  "fixed top-0 z-50 flex h-dvh w-72 max-w-[85vw] flex-col overflow-y-auto bg-white shadow-xl outline-none transition-transform duration-200 ease-out motion-reduce:transition-none",
+  {
+    variants: {
+      side: {
+        left: "left-0 data-[starting-style]:-translate-x-full data-[ending-style]:-translate-x-full",
+        right:
+          "right-0 data-[starting-style]:translate-x-full data-[ending-style]:translate-x-full",
+      },
+    },
+    defaultVariants: { side: "left" },
+  },
+);
+
 function SheetContent({
   side = "left",
   className,
   children,
   ...props
-}: React.ComponentProps<typeof Dialog.Popup> & {
-  side?: "left" | "right";
-}) {
+}: React.ComponentProps<typeof Dialog.Popup> &
+  VariantProps<typeof sheetVariants>) {
   return (
     <Dialog.Portal>
       <Dialog.Backdrop
@@ -49,15 +66,7 @@ function SheetContent({
         )}
       />
       <Dialog.Popup
-        className={cn(
-          "fixed top-0 z-50 flex h-dvh w-72 max-w-[85vw] flex-col overflow-y-auto bg-white shadow-xl outline-none",
-          "transition-transform duration-200 ease-out motion-reduce:transition-none",
-          side === "left" &&
-            "left-0 data-[starting-style]:-translate-x-full data-[ending-style]:-translate-x-full",
-          side === "right" &&
-            "right-0 data-[starting-style]:translate-x-full data-[ending-style]:translate-x-full",
-          className,
-        )}
+        className={cn(sheetVariants({ side }), className)}
         {...props}
       >
         {children}

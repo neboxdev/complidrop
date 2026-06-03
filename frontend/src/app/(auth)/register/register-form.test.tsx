@@ -102,6 +102,19 @@ describe("RegisterForm — ?plan= consumption (#31)", () => {
     expect(screen.queryByText(/you selected the/i)).toBeNull();
   });
 
+  it("stacks the two-up field grids on a phone (responsive, #181)", () => {
+    setPlanParam("free");
+    const { container } = render(<RegisterForm />);
+
+    // The two-up rows (full name / company, industry / size) collapse to a
+    // single column below sm so inputs aren't squeezed to ~150px on a 390px
+    // phone. Class-presence proxy (JSDOM applies no stylesheet).
+    const stackedGrids = container.querySelectorAll(
+      ".grid.grid-cols-1.sm\\:grid-cols-2",
+    );
+    expect(stackedGrids.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("defaults to the free-tier copy when no plan param is present", () => {
     setPlanParam(null);
     render(<RegisterForm />);

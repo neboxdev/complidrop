@@ -1080,3 +1080,38 @@ describe("DocumentDetailPage — saveFields mutation toasts (#122 / #74 followup
     expect(args).not.toMatch(/failed to fetch/i);
   });
 });
+
+describe("DocumentDetailPage — responsive header (#181)", () => {
+  it("wraps the header so a long filename never crowds the Re-extract / View actions", async () => {
+    // A long COI filename used to sit in a `flex justify-between` header with no
+    // wrap, pushing the action buttons off a 390px screen. The header now
+    // stacks below sm and the h1 breaks long words. (Class-presence proxy —
+    // JSDOM applies no stylesheet.)
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Completed", // terminal → no polling in this test
+            originalFileName:
+              "a-very-long-certificate-of-insurance-filename.pdf",
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_x_01" },
+    });
+
+    const heading = await waitFor(() =>
+      screen.getByRole("heading", {
+        name: /a-very-long-certificate-of-insurance-filename\.pdf/i,
+      }),
+    );
+    expect(heading.className).toContain("break-words");
+    const header = heading.closest("header");
+    expect(header?.className).toContain("flex-col");
+    expect(header?.className).toContain("sm:flex-row");
+  });
+});

@@ -59,4 +59,20 @@ describe("Sheet (#181)", () => {
     fireEvent.keyDown(dialog, { key: "Escape", code: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
+
+  it("slides in from the requested edge (side=\"right\")", async () => {
+    render(<Harness side="right" />);
+    fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
+    const dialog = await waitFor(() => screen.getByRole("dialog"));
+    expect(dialog.className).toContain("right-0");
+    expect(dialog.className).not.toContain("left-0");
+  });
+
+  it("defaults to the left edge", async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
+    const dialog = await waitFor(() => screen.getByRole("dialog"));
+    expect(dialog.className).toContain("left-0");
+    expect(dialog.className).not.toContain("right-0");
+  });
 });

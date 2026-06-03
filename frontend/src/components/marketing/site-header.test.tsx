@@ -57,4 +57,14 @@ describe("MarketingHeader — mobile menu (#181)", () => {
 
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
+
+  it("closes the menu on Escape", async () => {
+    renderWithProviders(<MarketingHeader />, { auth: null });
+
+    fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
+    const menu = await waitFor(() => screen.getByRole("dialog"));
+    fireEvent.keyDown(menu, { key: "Escape", code: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
 });
