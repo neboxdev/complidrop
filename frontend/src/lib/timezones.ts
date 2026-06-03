@@ -67,6 +67,9 @@ export function describeNextSend(timeZone: string, now: Date = new Date()): stri
   } catch {
     return "Reminders send at 8:00 AM in your organization's time zone.";
   }
+  // "Next FUTURE send": before 08:00 local → today's 08:00 is still ahead;
+  // at/after 08:00 → today's batch has already fired (the worker runs at the
+  // top of the 08:00 hour), so the next one is tomorrow.
   const when = hourInZone(timeZone, now) < 8 ? "today" : "tomorrow";
   return `It's ${localTime} there now — reminders send at 8:00 AM, so the next one goes out ${when}.`;
 }

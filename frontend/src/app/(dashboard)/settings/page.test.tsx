@@ -19,6 +19,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { http } from "msw";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import SettingsPage from "./page";
+import { ME_KEY } from "@/hooks/useAuth";
 import { KNOWN_CHECKOUT_PLAN_IDS, PLANS } from "@/lib/plans";
 import {
   renderWithProviders,
@@ -194,16 +195,18 @@ describe("SettingsPage — editable organization (#185)", () => {
     expect(screen.getByText(/reminders send at 8:00 AM/i)).toBeInTheDocument();
   });
 
-  it("saves the new name + time zone and toasts success", async () => {
+  it("saves the new name + time zone, toasts, and writes the SERVER response into the Me cache", async () => {
     mockFreePlanSubscription();
     let captured: { name: string; timeZone: string } | null = null;
+    // Server canonicalizes the name (distinct from the typed input) so the cache
+    // assertion proves the RESPONSE drove the update, not the local form state.
     server.use(
       http.put(url("/api/auth/organization"), async ({ request }) => {
         captured = (await request.json()) as { name: string; timeZone: string };
-        return jsonOk(makeMe({ organizationName: captured.name, timeZone: captured.timeZone }));
+        return jsonOk(makeMe({ organizationName: "Acme Compliance LLC (canonical)", timeZone: captured.timeZone }));
       }),
     );
-    renderWithProviders(<SettingsPage />, { auth: authedMe });
+    const { queryClient } = renderWithProviders(<SettingsPage />, { auth: authedMe });
 
     fireEvent.change(screen.getByLabelText(/organization name/i), {
       target: { value: "Acme Compliance LLC" },
@@ -217,6 +220,12 @@ describe("SettingsPage — editable organization (#185)", () => {
     expect(captured!).toEqual({ name: "Acme Compliance LLC", timeZone: "America/Chicago" });
     await waitFor(() =>
       expect(toastSuccess).toHaveBeenCalledWith("Organization settings saved."),
+    );
+    // The hook's onSuccess setMeCache wrote the server's canonical value into the
+    // Me cache (which the sidebar org name reads) — pinned via the query cache.
+    await waitFor(() =>
+      expect((queryClient.getQueryData([...ME_KEY]) as { organizationName: string }).organizationName)
+        .toBe("Acme Compliance LLC (canonical)"),
     );
   });
 

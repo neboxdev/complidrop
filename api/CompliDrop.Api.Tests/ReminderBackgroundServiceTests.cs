@@ -82,6 +82,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         string internalEmail = "owner@example.com",
         bool internalEmailVerified = false,
         string? vendorEmail = "vendor@example.com",
+        string? orgName = null,
         DateTime? overrideExpirationUtc = null)
     {
         var orgId = Guid.NewGuid();
@@ -96,7 +97,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         db.Organizations.Add(new Organization
         {
             Id = orgId,
-            Name = $"Org-{orgId:N}",
+            Name = orgName ?? $"Org-{orgId:N}",
             TimeZone = timeZone,
             CreatedAt = now,
             UpdatedAt = now,
@@ -452,6 +453,23 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             send.Subject.Should().Contain("policy.pdf").And.Contain("30 days");
             send.HtmlBody.Should().Contain("policy.pdf").And.Contain("30 days from today").And.Contain(orgName);
         }
+    }
+
+    [Fact]
+    public async Task Org_name_is_html_encoded_in_the_reminder_body_no_injection()
+    {
+        // #185 makes the org name user-editable; it is interpolated into the
+        // reminder HTML body, which is delivered to vendors (outside the org's
+        // trust boundary). A malicious name must be HTML-encoded, not rendered
+        // as live markup.
+        await SeedReminderAsync(NyEightAm, orgName: "<script>alert('xss')</script>");
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle();
+        var body = Email.Sends[0].HtmlBody;
+        body.Should().NotContain("<script>alert('xss')</script>");
+        body.Should().Contain("&lt;script&gt;");
     }
 
     // ----- Regression tests from review --------------------------------------------------------

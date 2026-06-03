@@ -15,10 +15,14 @@ describe("listTimeZones (#185)", () => {
     expect(zones[0]).toBe("Custom/Unlisted");
   });
 
-  it("keeps a real, already-listed current zone present (alphabetical, not duplicated)", () => {
-    const zones = listTimeZones("Pacific/Chatham");
-    expect(zones).toContain("Pacific/Chatham");
-    expect(zones.filter((z) => z === "Pacific/Chatham")).toHaveLength(1);
+  it("keeps a real, already-listed current zone present without duplicating it", () => {
+    // Use a zone the runtime is guaranteed to enumerate (the first test pins
+    // that America/New_York is in the raw list), so this genuinely exercises
+    // the already-present branch rather than the prepend-when-absent fallback.
+    expect(listTimeZones()).toContain("America/New_York");
+    const zones = listTimeZones("America/New_York");
+    expect(zones).toContain("America/New_York");
+    expect(zones.filter((z) => z === "America/New_York")).toHaveLength(1);
   });
 
   it("does not duplicate the current zone when it's already in the list", () => {

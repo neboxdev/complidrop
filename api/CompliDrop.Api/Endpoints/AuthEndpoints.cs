@@ -528,12 +528,11 @@ public static class AuthEndpoints
         return hasLetter && hasDigit;
     }
 
-    private static string NormalizeTimeZone(string? tz)
-    {
-        if (string.IsNullOrWhiteSpace(tz)) return "America/New_York";
-        try { TimeZoneInfo.FindSystemTimeZoneById(tz); return tz; }
-        catch { return "America/New_York"; }
-    }
+    // Register normalizes a best-effort optional zone to a default; UpdateOrganization
+    // (#185) REJECTS an invalid zone instead. Both share the single validity check
+    // (IsValidTimeZone) so the two policies can never drift on what "valid" means.
+    private static string NormalizeTimeZone(string? tz) =>
+        !string.IsNullOrWhiteSpace(tz) && IsValidTimeZone(tz) ? tz : "America/New_York";
 
     private static IResult Error(int status, string code, string message) =>
         Results.Json(new { data = (object?)null, error = new { code, message } }, statusCode: status);

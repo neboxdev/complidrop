@@ -70,7 +70,16 @@ export default function SettingsPage() {
     <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
       <h1 className="text-2xl font-semibold text-sky-900">Settings</h1>
 
-      {me.data && <OrgSettingsForm me={me.data} />}
+      {me.data && (
+        // `key` re-seeds the form's local state if the org name/zone changes
+        // from an external source (a background /me refetch, or another tab
+        // saving via the shared Me cache) — without it the inputs would keep
+        // showing stale edits against a moved baseline.
+        <OrgSettingsForm
+          key={`${me.data.organizationName}|${me.data.timeZone}`}
+          me={me.data}
+        />
+      )}
 
       <Card>
         <CardContent className="p-6 space-y-4">
