@@ -12,6 +12,7 @@ import { describe, it, expect } from "vitest";
 import { http, HttpResponse } from "msw";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import DashboardLayout from "./layout";
+import { ME_KEY } from "@/hooks/useAuth";
 import { renderWithProviders, authedMe, server, url, jsonOk, jsonError, navState } from "@/test";
 
 const NAV_LABELS = [
@@ -159,6 +160,12 @@ describe("DashboardLayout — session resilience (#182)", () => {
     await waitFor(() =>
       expect(screen.getByText(/couldn't reach the server/i)).toBeInTheDocument(),
     );
+    // Symmetric with the 500 path: the network branch flows through a
+    // different api.ts code path (fetchOrFriendlyThrow → ApiError
+    // network.unreachable status 0), so assert it ALSO surfaces a working
+    // Retry and gates the protected child — not just "no redirect".
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+    expect(screen.queryByText("protected child")).toBeNull();
     expect(navState.router.replace).not.toHaveBeenCalled();
   });
 
@@ -182,6 +189,9 @@ describe("DashboardLayout — session resilience (#182)", () => {
     const retry = await waitFor(() =>
       screen.getByRole("button", { name: /retry/i }),
     );
+    // Smoke-check the disabled-state wiring (`disabled={isRetrying}`): the
+    // button is enabled at rest before a retry is in flight.
+    expect(retry).not.toBeDisabled();
     fireEvent.click(retry);
 
     // Second /me lands a 200 → the shell renders (org context + nav + child).
@@ -211,5 +221,38 @@ describe("DashboardLayout — session resilience (#182)", () => {
     await waitFor(() => expect(navState.router.replace).toHaveBeenCalledWith("/login"));
     // A genuine logout must NOT surface the transient-error card.
     expect(screen.queryByText(/couldn't reach the server/i)).toBeNull();
+  });
+
+  it("keeps an ALREADY-LOADED user in the shell when a background /me revalidation fails", async () => {
+    // The real-world #182 symptom: a user already working in the app whose
+    // periodic /me revalidation blips. TanStack retains the last-good data on
+    // a refetch error, so `me.data` stays populated and the guard
+    // `me.isError && me.data === undefined` is precisely what keeps them in
+    // the shell. A regression simplifying that guard to `if (me.isError)`
+    // would yank a working user into the error card — this test pins it.
+    const { queryClient } = renderWithProviders(
+      <DashboardLayout>
+        <div>protected child</div>
+      </DashboardLayout>,
+      { auth: authedMe },
+    );
+
+    // Seeded session → shell renders immediately.
+    expect(screen.getByText("protected child")).toBeInTheDocument();
+
+    // Now make the next /me revalidation fail, then force a refetch.
+    server.use(
+      http.get(url("/api/auth/me"), () =>
+        jsonError("server.error", "Background blip.", { status: 500 }),
+      ),
+    );
+    await queryClient.refetchQueries({ queryKey: [...ME_KEY] });
+
+    // The errored revalidation must NOT evict the user: the shell + child
+    // stay, no error card, no redirect.
+    await waitFor(() => expect(queryClient.getQueryState([...ME_KEY])?.status).toBe("error"));
+    expect(screen.getByText("protected child")).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't reach the server/i)).toBeNull();
+    expect(navState.router.replace).not.toHaveBeenCalled();
   });
 });
