@@ -183,4 +183,67 @@ public sealed class EmailVerificationTests(IntegrationTestFixture fixture) : Int
         (await CreateClient().PostAsync("/api/auth/resend-verification", null))
             .StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
+
+    [Fact]
+    public async Task Register_succeeds_and_persists_a_token_even_when_email_delivery_is_disabled()
+    {
+        // Signup must NEVER block on email delivery: with Resend disabled the send
+        // is a no-op, but the account is still created (logged in, unverified) and
+        // the durable token row survives so a later resend can deliver a link.
+        Email.IsEnabled = false;
+
+        var auth = await RegisterAndLoginAsync();
+
+        (await MeEmailVerifiedAsync(auth.Client)).Should().BeFalse();
+        Email.Sends.Should().BeEmpty("delivery was disabled, yet registration must still succeed");
+        await using (var db = CreateSystemDb())
+        {
+            (await db.EmailVerificationTokens.CountAsync(t => t.UserId == auth.UserId))
+                .Should().Be(1, "the verification token must persist so a resend can deliver later");
+        }
+
+        // Re-enable delivery → resend issues a working link.
+        Email.IsEnabled = true;
+        (await auth.Client.PostAsync("/api/auth/resend-verification", null)).EnsureSuccessStatusCode();
+        Email.Sends.Should().ContainSingle();
+        var token = ExtractToken(Email.Sends.Single().HtmlBody);
+        (await auth.Client.PostAsJsonAsync("/api/auth/verify-email", new { token }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        (await MeEmailVerifiedAsync(auth.Client)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Verify_with_a_still_open_token_after_the_user_is_already_verified_is_idempotent()
+    {
+        // Pins the user-keyed idempotency branch (NOT ConsumedAt-keyed): a token
+        // that is still open but whose user is already verified returns 200, not
+        // verification_invalid. A refactor that keyed idempotency on ConsumedAt
+        // would break this.
+        var auth = await RegisterAndLoginAsync();
+        var firstToken = ExtractToken(Email.Sends.Single().HtmlBody);
+
+        // Plant a SECOND independent, still-open token for the same user.
+        var (secondRaw, secondHash) = SecureToken.Generate();
+        await using (var db = CreateSystemDb())
+        {
+            db.EmailVerificationTokens.Add(new EmailVerificationToken
+            {
+                Id = Guid.NewGuid(),
+                UserId = auth.UserId,
+                TokenHash = secondHash,
+                ExpiresAt = DateTime.UtcNow.AddDays(7),
+                CreatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        // Verify via the FIRST token → user is now verified.
+        (await auth.Client.PostAsJsonAsync("/api/auth/verify-email", new { token = firstToken }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        (await MeEmailVerifiedAsync(auth.Client)).Should().BeTrue();
+
+        // Present the SECOND (still-open, never-consumed) token → idempotent 200.
+        (await auth.Client.PostAsJsonAsync("/api/auth/verify-email", new { token = secondRaw }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+    }
 }

@@ -29,10 +29,13 @@ describe("EmailVerificationBanner (#184)", () => {
     expect(screen.getByRole("region", { name: /confirm your email/i })).toBeInTheDocument();
   });
 
-  it("resends the verification email and toasts the server message", async () => {
+  it("resends the verification email and toasts the SERVER's message (not the client fallback)", async () => {
+    // Distinct from the component's "Verification email sent." fallback, so the
+    // assertion proves the server message was actually surfaced — a regression
+    // that dropped `res.message` would fail here instead of passing vacuously.
     server.use(
       http.post(url("/api/auth/resend-verification"), () =>
-        jsonOk({ message: "Verification email sent." }),
+        jsonOk({ message: "We just emailed you a fresh link." }),
       ),
     );
     renderWithProviders(<EmailVerificationBanner email="owner@acme.test" />);
@@ -40,7 +43,7 @@ describe("EmailVerificationBanner (#184)", () => {
     fireEvent.click(screen.getByRole("button", { name: /resend/i }));
 
     await waitFor(() =>
-      expect(toastSuccess).toHaveBeenCalledWith("Verification email sent."),
+      expect(toastSuccess).toHaveBeenCalledWith("We just emailed you a fresh link."),
     );
   });
 

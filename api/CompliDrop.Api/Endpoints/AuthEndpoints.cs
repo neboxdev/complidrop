@@ -46,6 +46,7 @@ public static class AuthEndpoints
         IOptions<JwtSettings> jwtOpts,
         IOptions<FrontendSettings> frontendOpts,
         IEmailService emailService,
+        ILogger<EmailVerificationToken> logger,
         IAuditLogger audit,
         HttpContext http)
     {
@@ -124,9 +125,11 @@ public static class AuthEndpoints
 
         // Best-effort send AFTER commit — the token row is durable, so a failed
         // send (Resend down / unconfigured) just means "resend later", never a
-        // dangling link. http.RequestAborted ties the send to the request
-        // lifetime without blocking the committed registration.
-        await SendVerificationEmailAsync(emailService, frontendOpts.Value, user.Email, rawVerificationToken, http.RequestAborted);
+        // dangling link. The await deliberately couples register latency to the
+        // Resend round-trip (bounded, acceptable at MVP and consistent with the
+        // reminder worker's inline send); SendVerificationEmailAsync swallows +
+        // logs any send exception so it can never fail the committed signup.
+        await SendVerificationEmailAsync(emailService, frontendOpts.Value, user.Email, rawVerificationToken, logger, http.RequestAborted);
 
         IssueCookies(http, user, "free", tokens, cookieOpts.Value, jwtOpts.Value);
 
@@ -334,7 +337,8 @@ public static class AuthEndpoints
         HttpContext http,
         SystemDbContext db,
         IOptions<FrontendSettings> frontendOpts,
-        IEmailService email)
+        IEmailService email,
+        ILogger<EmailVerificationToken> logger)
     {
         var userIdStr = http.User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!Guid.TryParse(userIdStr, out var userId))
@@ -347,8 +351,11 @@ public static class AuthEndpoints
             return Results.Ok(new { data = new { message = "Your email is already confirmed." }, error = (object?)null });
 
         var now = DateTime.UtcNow;
-        // Consume any still-open tokens so a previously-emailed link can't also
-        // be used — only the newest link is valid after a resend.
+        // Consume previously-emailed links so a stale one can't be redeemed after
+        // a resend. (Two near-simultaneous resends could each leave a valid link;
+        // that's benign — both belong to the same user verifying their own email,
+        // and the 5/min auth-strict limit makes the interleave rare — so we don't
+        // serialize.)
         var outstanding = await db.EmailVerificationTokens
             .Where(t => t.UserId == userId && t.ConsumedAt == null)
             .ToListAsync();
@@ -358,7 +365,7 @@ public static class AuthEndpoints
         db.EmailVerificationTokens.Add(token);
         await db.SaveChangesAsync();
 
-        await SendVerificationEmailAsync(email, frontendOpts.Value, user.Email, rawToken, http.RequestAborted);
+        await SendVerificationEmailAsync(email, frontendOpts.Value, user.Email, rawToken, logger, http.RequestAborted);
 
         return Results.Ok(new { data = new { message = "Verification email sent." }, error = (object?)null });
     }
@@ -387,6 +394,7 @@ public static class AuthEndpoints
         FrontendSettings frontend,
         string toEmail,
         string rawToken,
+        ILogger logger,
         CancellationToken ct)
     {
         var link = $"{frontend.BaseUrl.TrimEnd('/')}/verify-email?token={Uri.EscapeDataString(rawToken)}";
@@ -400,7 +408,23 @@ public static class AuthEndpoints
               <p style="color: #64748b; font-size: 12px;">This link expires in {VerificationTokenTtlDays} days. If you didn't create a CompliDrop account, you can ignore this email.</p>
             </div>
             """;
-        await email.SendAsync(toEmail, subject, body, ct);
+        // The send MUST NOT be able to fail the calling request. SendAsync
+        // swallows non-2xx Resend responses, but a transient transport failure
+        // (DNS/socket/TLS → HttpRequestException) or a client abort
+        // (http.RequestAborted → OperationCanceledException) would otherwise
+        // throw AFTER the caller has already committed the user + token row —
+        // surfacing a 500 to a user whose account actually exists. The durable
+        // token guarantees they can always resend later, so we log and continue.
+        try
+        {
+            await email.SendAsync(toEmail, subject, body, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Verification email send failed for {Email}; the durable token lets the user resend later.",
+                toEmail);
+        }
     }
 
     private static void IssueCookies(
