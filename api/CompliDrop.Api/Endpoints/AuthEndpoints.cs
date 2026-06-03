@@ -760,7 +760,12 @@ public static class AuthEndpoints
             reminders,
         };
 
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(export, new JsonSerializerOptions { WriteIndented = true });
+        // camelCase to match the rest of the API's JSON convention.
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(export, new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        });
         return Results.File(bytes, "application/json", $"complidrop-account-export-{DateTime.UtcNow:yyyyMMdd}.json");
     }
 

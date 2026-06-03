@@ -273,13 +273,17 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
             .EnsureSuccessStatusCode();
 
         // The interceptor audits the User update, but PasswordHash must be redacted.
+        // Pull Before/After (jsonb→string) and concat in MEMORY — concatenating
+        // jsonb columns in SQL would coerce the `?? ""` to invalid json.
         await using var db = CreateSystemDb();
         var rows = await db.AuditLogs
             .Where(a => a.OrganizationId == auth.OrgId)
-            .Select(a => (a.BeforeJson ?? "") + (a.AfterJson ?? ""))
+            .Select(a => new { a.BeforeJson, a.AfterJson })
             .ToListAsync();
         rows.Should().NotBeEmpty();
-        rows.Should().OnlyContain(json => !json.Contains("$2"), "no BCrypt hash may land in AuditLog JSON");
+        rows.Should().OnlyContain(
+            r => !((r.BeforeJson ?? "") + (r.AfterJson ?? "")).Contains("$2"),
+            "no BCrypt hash may land in AuditLog JSON");
     }
 
     [Fact]
