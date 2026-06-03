@@ -123,6 +123,13 @@ describe("DashboardPage — state matrix (#36)", () => {
     expect(
       screen.getByText(/document · uploaded/i),
     ).toBeInTheDocument();
+
+    // Responsive (#181): the 5-bucket expiry pipeline stacks to 2 columns on a
+    // phone and only expands to 5 at md — a fixed `grid-cols-5` would overflow
+    // a 390px screen. Class-presence proxy (JSDOM applies no stylesheet).
+    const pipelineGrid = document.querySelector(".md\\:grid-cols-5");
+    expect(pipelineGrid).not.toBeNull();
+    expect(pipelineGrid?.className).toContain("grid-cols-2");
   });
 
   it("error on /stats: page still renders via fallback `?? 0` values; pipeline+activity unaffected", async () => {

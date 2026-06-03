@@ -68,7 +68,7 @@ export default function DashboardPage() {
         <Card>
           <CardContent className="p-6">
             <h2 className="text-base font-semibold text-slate-800 mb-4">Expiry pipeline</h2>
-            <div className="grid grid-cols-5 gap-3 text-center">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 text-center">
               <PipelineBucket label="Expired" value={pipeline.data?.expired ?? 0} hue="rose" />
               <PipelineBucket label="0-30d" value={pipeline.data?.bucket30 ?? 0} hue="amber" />
               <PipelineBucket label="30-60d" value={pipeline.data?.bucket60 ?? 0} hue="sky" />

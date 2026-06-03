@@ -128,3 +128,73 @@
     @apply font-sans;
   }
 }
+
+/*
+ * Responsive "stacked-card" tables (#181).
+ *
+ * Below `md` (Tailwind's 48rem breakpoint) a `.stacked-table` collapses each
+ * <tr> into a card and each labeled <td> into a "LABEL …… value" line, so dense
+ * list tables (documents = 7 cols, vendors = 5 cols) stay fully readable on a
+ * ~390px phone with NO horizontal swiping — the at-a-glance compliance status
+ * and the per-row action are always visible.
+ *
+ * This is a single-DOM reflow (no duplicate mobile-only markup), so every
+ * page-test selector still resolves to exactly one element. The per-cell label
+ * comes from `data-label` via a `::before` pseudo-element — pseudo-content is
+ * not part of `textContent`, so it never collides with testing-library text
+ * queries. Cells WITHOUT `data-label` (the name/link = card heading, the row
+ * action, and `colspan` state-message rows) keep their natural block flow.
+ *
+ * Raw hex is used (not Tailwind tokens) to match the existing globals.css
+ * convention; the breakpoint mirrors Tailwind's `md`.
+ */
+@media (max-width: 47.999rem) {
+  table.stacked-table,
+  table.stacked-table tbody,
+  table.stacked-table tr,
+  table.stacked-table td {
+    display: block;
+  }
+
+  table.stacked-table thead {
+    display: none;
+  }
+
+  table.stacked-table tr {
+    margin-bottom: 0.75rem;
+    border: 1px solid #e2e8f0; /* slate-200 */
+    border-radius: 0.5rem;
+    background: #fff;
+    padding: 0.5rem 1rem 0.75rem;
+  }
+
+  /* The card (tr) owns the horizontal inset now — drop the desktop cell
+     padding on every cell. */
+  table.stacked-table td {
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  /* Labeled data cells render as "LABEL …… value" lines. */
+  table.stacked-table td[data-label] {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-top: 0.375rem;
+    padding-bottom: 0.375rem;
+    text-align: right;
+  }
+
+  table.stacked-table td[data-label]::before {
+    content: attr(data-label);
+    flex: none;
+    text-align: left;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+    color: #64748b; /* slate-500 — ≥AA on white */
+  }
+}

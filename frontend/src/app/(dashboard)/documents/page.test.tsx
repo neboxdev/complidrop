@@ -659,4 +659,44 @@ describe("DocumentsPage — state matrix (#36)", () => {
       screen.getByRole("link", { name: /coi-completed\.pdf/i }),
     ).toHaveAttribute("href", "/documents/d_completed_01");
   });
+
+  it("mobile reflow: the list is a stacked-table with labeled cells and a NAMED delete control (#181)", async () => {
+    // Pins the responsive-table reflow contract: the table opts into the
+    // `.stacked-table` card reflow (so columns aren't clipped / don't need a
+    // horizontal swipe below md) AND the icon-only delete button — which was
+    // previously nameless — now exposes an accessible name.
+    //
+    // NOTE: JSDOM applies no stylesheet, so this asserts the CONTRACT HOOKS
+    // (the `.stacked-table` opt-in class + the per-cell `data-label`s the CSS
+    // `::before` reads) — not the rendered ≤md layout. Deleting the
+    // `@media (max-width: 47.999rem)` block in globals.css would still pass
+    // here; the actual 390px no-clip behavior is a visual guarantee tracked in
+    // the QA plan (docs/qa) / e2e, not a unit-testable property.
+    server.use(
+      http.get(url("/api/documents"), () =>
+        jsonOk(
+          makeDocumentsResponse({
+            items: [{ ...documentsAllStatuses[2] }], // coi-completed.pdf
+            total: 1,
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() =>
+      expect(screen.getByText("coi-completed.pdf")).toBeInTheDocument(),
+    );
+
+    const table = document.querySelector("table.stacked-table");
+    expect(table).not.toBeNull();
+    // The compliance + expiry cells carry mobile card labels (rendered via a
+    // CSS ::before from data-label, so they never collide with text queries).
+    expect(table?.querySelector('td[data-label="Compliance"]')).not.toBeNull();
+    expect(table?.querySelector('td[data-label="Expires"]')).not.toBeNull();
+    // The destructive control is reachable by its accessible name.
+    expect(
+      screen.getByRole("button", { name: /remove coi-completed\.pdf/i }),
+    ).toBeInTheDocument();
+  });
 });

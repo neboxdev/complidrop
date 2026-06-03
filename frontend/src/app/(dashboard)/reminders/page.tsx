@@ -149,18 +149,28 @@ function statusHue(status: string): string {
 }
 
 function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
+  // The clickable button carries a ≥44px hit area on touch
+  // (`pointer-coarse:min-h-11/min-w-11`, WCAG 2.5.5) while the visual track
+  // stays compact — the track is an inner span so enlarging the target doesn't
+  // enlarge the pill. Switch SEMANTICS (role="switch" / aria-checked /
+  // aria-label / focus ring / non-color cue) are intentionally left to the
+  // accessibility-hardening ticket #189; #181 owns the touch-target only.
   return (
     <button
       onClick={onToggle}
-      className={`relative inline-flex h-5 w-9 items-center rounded-full transition ${
-        on ? "bg-sky-500" : "bg-slate-200"
-      }`}
+      className="inline-flex items-center justify-center pointer-coarse:min-h-11 pointer-coarse:min-w-11"
     >
       <span
-        className={`inline-block h-3 w-3 transform rounded-full bg-white transition ${
-          on ? "translate-x-5" : "translate-x-1"
+        className={`relative inline-flex h-5 w-9 items-center rounded-full transition ${
+          on ? "bg-sky-500" : "bg-slate-200"
         }`}
-      />
+      >
+        <span
+          className={`inline-block h-3 w-3 transform rounded-full bg-white transition ${
+            on ? "translate-x-5" : "translate-x-1"
+          }`}
+        />
+      </span>
     </button>
   );
 }

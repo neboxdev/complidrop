@@ -62,4 +62,35 @@ describe("RemindersPage — smoke (#36)", () => {
     );
     expect(screen.queryByText(/30/)).toBeNull();
   });
+
+  it("each toggle presents a ≥44px coarse-pointer hit target (#181)", async () => {
+    // Pins the touch-target fix for the reminder toggles (3 per row: team /
+    // vendor / active). The clickable button grows to ≥44px on coarse pointers
+    // while the visual pill stays compact. (Switch SEMANTICS are tracked
+    // separately in #189.)
+    server.use(
+      http.get(url("/api/reminders"), () =>
+        jsonOk([
+          {
+            id: "r_01",
+            daysBefore: 30,
+            notifyInternalUser: true,
+            notifyVendor: false,
+            isActive: true,
+            emailSubjectTemplate: null,
+            emailBodyTemplate: null,
+          },
+        ]),
+      ),
+      http.get(url("/api/reminders/history"), () => jsonOk([])),
+    );
+
+    renderWithProviders(<RemindersPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText(/30/)).toBeInTheDocument());
+
+    const coarseHitTargets = Array.from(
+      document.querySelectorAll("button"),
+    ).filter((b) => b.className.includes("pointer-coarse:min-h-11"));
+    expect(coarseHitTargets.length).toBeGreaterThanOrEqual(3);
+  });
 });

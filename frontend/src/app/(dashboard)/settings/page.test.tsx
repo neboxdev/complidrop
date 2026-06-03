@@ -59,6 +59,14 @@ describe("SettingsPage — smoke (#36)", () => {
     await waitFor(() =>
       expect(screen.getByText(/2\s*\/\s*5/)).toBeInTheDocument(),
     );
+
+    // Responsive (#181): the usage stat tiles (Documents / Vendor portal / LLM
+    // spend) stack on a phone (grid-cols-1) and only go 3-up at sm — a fixed
+    // grid-cols-3 would squeeze them to ~110px on a 390px screen. Class-presence
+    // proxy (JSDOM applies no stylesheet).
+    const usageGrid = document.querySelector(".sm\\:grid-cols-3");
+    expect(usageGrid).not.toBeNull();
+    expect(usageGrid?.className).toContain("grid-cols-1");
   });
 });
 

@@ -93,7 +93,7 @@ export default function SettingsPage() {
           </div>
 
           {subscription.data && (
-            <div className="grid grid-cols-3 gap-4 text-sm">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
               <div className="p-3 rounded-md bg-slate-50">
                 <p className="text-xs uppercase text-slate-500">Documents</p>
                 <p className="text-lg font-semibold text-slate-900">
