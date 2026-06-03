@@ -3,10 +3,12 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { LayoutDashboard, FileText, Users, Settings, LogOut, Bell, ClipboardList, Download, Menu, X } from "lucide-react";
+import { LayoutDashboard, FileText, Users, Settings, LogOut, Bell, ClipboardList, Download, Menu, X, AlertTriangle, RotateCw } from "lucide-react";
 import { useLogout, useMe, type Me } from "@/hooks/useAuth";
+import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/Logo";
 import { Sheet, SheetClose, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
@@ -57,6 +59,55 @@ function SidebarNav({
   );
 }
 
+// Full-screen neutral placeholder shown while the session is still loading,
+// or while an explicit logout/expiry redirect to /login is in flight. Hoisted
+// to module scope per the `react-hooks/static-components` rule.
+function ShellLoading() {
+  return (
+    <div className="min-h-screen flex items-center justify-center text-slate-400 text-sm">
+      Loading your workspace…
+    </div>
+  );
+}
+
+// Shown when the `/me` probe fails TRANSIENTLY (backend 5xx / network blip)
+// with no cached session — a logged-in user must NOT be evicted to /login on
+// a server outage, which would mask the outage as an auth problem and is
+// scary for a compliance tool (#182). Keeps the user in the app with an
+// in-shell Retry instead of redirecting. `message` is already jargon-free
+// (api.ts sanitizes every ApiError to the server copy or GENERIC_FALLBACK_
+// MESSAGE — never raw statusText / status codes / TypeErrors, per the
+// frontend error-message policy in CLAUDE.md).
+function ShellUnreachable({
+  message,
+  onRetry,
+  isRetrying,
+}: {
+  message: string;
+  onRetry: () => void;
+  isRetrying: boolean;
+}) {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-slate-50 px-6">
+      <div className="text-center max-w-sm" role="alert">
+        <AlertTriangle className="w-8 h-8 mx-auto text-rose-500" />
+        <p className="mt-3 text-sm font-medium text-slate-800">Couldn&apos;t reach the server.</p>
+        <p className="mt-1 text-xs text-slate-500">{message}</p>
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-4"
+          onClick={onRetry}
+          disabled={isRetrying}
+        >
+          <RotateCw className={cn("w-3.5 h-3.5 mr-1", isRetrying && "animate-spin")} />
+          Retry
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function SidebarFooter({ me, onLogout }: { me: Me; onLogout: () => void }) {
   return (
     <div className="px-4 py-4 border-t border-sky-900 text-sm">
@@ -82,18 +133,36 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const pathname = usePathname();
   const [navOpen, setNavOpen] = useState(false);
 
+  // Redirect to /login ONLY on the explicit logged-out signal. useMe maps a
+  // genuine 401 (after the api-client refresh attempt) to `null`; a transient
+  // /me 500 or network failure instead leaves `me.data === undefined` with
+  // `me.isError` set. Guarding on `=== null` (not `!me.data`) means a backend
+  // blip no longer evicts a valid session mid-task (#182).
   useEffect(() => {
-    if (me.isLoading) return;
-    if (!me.data) router.replace("/login");
-  }, [me.isLoading, me.data, router]);
+    if (me.data === null) router.replace("/login");
+  }, [me.data, router]);
 
-  if (me.isLoading || !me.data) {
+  // Explicit logout/expiry → the redirect above is in flight; show the neutral
+  // placeholder (not the error card) so there's no flash before /login.
+  if (me.data === null) return <ShellLoading />;
+
+  // Transient failure with NO cached session (first-load 5xx / offline): keep
+  // the user in the app with a Retry rather than bouncing them to /login. A
+  // background refetch that errors while a prior session is cached keeps
+  // `me.data` populated (TanStack retains last-good data), so it falls through
+  // to the shell below and is unaffected.
+  if (me.isError && me.data === undefined) {
     return (
-      <div className="min-h-screen flex items-center justify-center text-slate-400 text-sm">
-        Loading your workspace…
-      </div>
+      <ShellUnreachable
+        message={me.error?.message?.trim() || GENERIC_FALLBACK_MESSAGE}
+        onRetry={() => void me.refetch()}
+        isRetrying={me.isFetching}
+      />
     );
   }
+
+  // Still loading the first /me with nothing cached yet.
+  if (!me.data) return <ShellLoading />;
 
   const onLogout = () => logout.mutate(undefined, { onSuccess: () => router.push("/login") });
 
