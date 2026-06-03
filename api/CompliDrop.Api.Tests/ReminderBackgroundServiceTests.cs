@@ -8,6 +8,7 @@ using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 
@@ -45,6 +46,14 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             new FixedTimeProvider(nowUtc),
             NullLogger<ReminderBackgroundService>.Instance);
 
+    /// <summary>As <see cref="BuildWorker"/>, but with a capturing logger so a test can assert on
+    /// emitted warnings (the #184 dead-letter flag).</summary>
+    private ReminderBackgroundService BuildWorker(DateTimeOffset nowUtc, ListLogger<ReminderBackgroundService> logger) =>
+        new(
+            Fixture.Factory.Services.GetRequiredService<IServiceScopeFactory>(),
+            new FixedTimeProvider(nowUtc),
+            logger);
+
     /// <summary>
     /// Returns the UTC instant at the *start* of the org-local target day so the worker's
     /// expiration window query matches. Mirrors the prod-code calculation (which uses
@@ -71,6 +80,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         bool notifyVendor = false,
         bool reminderIsActive = true,
         string internalEmail = "owner@example.com",
+        bool internalEmailVerified = false,
         string? vendorEmail = "vendor@example.com",
         DateTime? overrideExpirationUtc = null)
     {
@@ -110,6 +120,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
                 PasswordHash = "x",
                 FullName = "Owner",
                 Role = "admin",
+                EmailVerifiedAt = internalEmailVerified ? now : null,
                 CreatedAt = now,
             });
         }
@@ -172,6 +183,42 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
 
         Email.Sends.Should().BeEmpty();
         (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(0);
+    }
+
+    // ----- #184: unverified internal recipient dead-letter flag ------------------------------
+
+    [Fact]
+    public async Task Unverified_internal_recipient_still_receives_the_reminder_but_is_flagged()
+    {
+        // Soft-gate: an unverified (possibly typo'd) internal email must NOT block the org's
+        // reminders — the send still happens — but the worker logs a warning so a forming
+        // dead-letter is visible instead of silent (#184).
+        var seed = await SeedReminderAsync(NyEightAm, internalEmail: "owner@example.com", internalEmailVerified: false);
+        var logger = new ListLogger<ReminderBackgroundService>();
+
+        await BuildWorker(NyEightAm, logger).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle().Which.ToEmail.Should().Be("owner@example.com");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+        logger.Entries.Should().Contain(e =>
+            e.Level == LogLevel.Warning
+            && e.Message.Contains("unverified")
+            && e.Message.Contains("owner@example.com"));
+    }
+
+    [Fact]
+    public async Task Verified_internal_recipient_is_not_flagged()
+    {
+        // The negative: a verified internal email sends with no dead-letter warning, so the flag
+        // can't become noise that operators learn to ignore.
+        await SeedReminderAsync(NyEightAm, internalEmail: "owner@example.com", internalEmailVerified: true);
+        var logger = new ListLogger<ReminderBackgroundService>();
+
+        await BuildWorker(NyEightAm, logger).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle();
+        logger.Entries.Should().NotContain(e =>
+            e.Level == LogLevel.Warning && e.Message.Contains("unverified"));
     }
 
     // ----- AC2: dedupe (ReminderId, DocumentId, SendDate) ------------------------------------
