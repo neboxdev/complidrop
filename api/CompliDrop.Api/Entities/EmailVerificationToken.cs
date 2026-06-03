@@ -17,6 +17,14 @@ public class EmailVerificationToken
     /// <summary>SHA-256 hex of the raw token. Unique-indexed for O(1) lookup on verify.</summary>
     public string TokenHash { get; set; } = string.Empty;
 
+    /// <summary>
+    /// For a change-email flow (#183): the pending NEW address this token
+    /// confirms. When set, redeeming the token swaps <see cref="User.Email"/> to
+    /// this value (re-checking uniqueness at redeem time). Null for the ordinary
+    /// signup-verification flow (#184), which confirms the user's CURRENT email.
+    /// </summary>
+    public string? NewEmail { get; set; }
+
     public DateTime ExpiresAt { get; set; }
 
     /// <summary>Set the moment the token is redeemed; a non-null value makes the token unusable.</summary>

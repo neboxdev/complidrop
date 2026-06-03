@@ -32,10 +32,20 @@ internal static class ModelConfiguration
             // single index seek and a (statistically impossible) hash collision
             // surfaces as a write conflict rather than silent ambiguity.
             e.Property(t => t.TokenHash).HasMaxLength(64);
+            e.Property(t => t.NewEmail).HasMaxLength(256);
             e.HasIndex(t => t.TokenHash).IsUnique();
             e.HasIndex(t => t.UserId);
             // Cascade: when a user is hard-deleted (#183 account deletion), their
             // outstanding verification tokens go with them.
+            e.HasOne(t => t.User).WithMany()
+                .HasForeignKey(t => t.UserId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<PasswordResetToken>(e =>
+        {
+            e.Property(t => t.TokenHash).HasMaxLength(64);
+            e.HasIndex(t => t.TokenHash).IsUnique();
+            e.HasIndex(t => t.UserId);
             e.HasOne(t => t.User).WithMany()
                 .HasForeignKey(t => t.UserId).OnDelete(DeleteBehavior.Cascade);
         });

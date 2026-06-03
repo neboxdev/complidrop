@@ -61,7 +61,14 @@ export default function LoginPage() {
             {errors.email && <p className="text-xs text-red-600 mt-1">{errors.email.message}</p>}
           </div>
           <div>
-            <label htmlFor={passwordId} className="text-sm font-medium text-slate-700">Password</label>
+            <div className="flex items-center justify-between">
+              <label htmlFor={passwordId} className="text-sm font-medium text-slate-700">Password</label>
+              {/* The lockout escape path (#183): a locked-out user resets to
+                  regain access immediately. */}
+              <Link href="/forgot-password" className="text-xs text-sky-700 hover:underline">
+                Forgot your password?
+              </Link>
+            </div>
             <Input {...register("password")} id={passwordId} type="password" autoComplete="current-password" className="mt-1" />
             {errors.password && <p className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
           </div>
