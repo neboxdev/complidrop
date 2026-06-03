@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/Logo";
+import { EmailVerificationBanner } from "@/components/EmailVerificationBanner";
 import { Sheet, SheetClose, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
 const NAV = [
@@ -208,7 +209,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </Sheet>
       </header>
 
-      <main className="bg-slate-50 min-h-screen min-w-0">{children}</main>
+      <main className="bg-slate-50 min-h-screen min-w-0">
+        {/* Persistent until the signup email is confirmed (#184) — shown on
+            every dashboard route so reminders can't silently dead-letter. */}
+        {!me.data.emailVerified && <EmailVerificationBanner email={me.data.email} />}
+        {children}
+      </main>
     </div>
   );
 }

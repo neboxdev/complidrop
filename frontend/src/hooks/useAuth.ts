@@ -13,6 +13,9 @@ export type Me = {
   plan: string;
   organizationName: string;
   timeZone: string;
+  /** True once the user has confirmed their signup email via the #184 link.
+   * Gates the persistent "confirm your email" dashboard banner. */
+  emailVerified: boolean;
 };
 
 export type UseMeOptions = {
@@ -162,6 +165,32 @@ export function useLogin() {
       identify(me.userId, { email: me.email, organizationId: me.organizationId, plan: me.plan });
       track("user.logged_in");
     },
+  });
+}
+
+/**
+ * Redeems an email-verification token (#184). Public — the link may be opened
+ * in a logged-out browser. On success we invalidate the Me cache so an
+ * authenticated tab drops the "confirm your email" banner without a reload.
+ */
+export function useVerifyEmail() {
+  const qc = useQueryClient();
+  return useMutation<{ message: string }, ApiError, { token: string }>({
+    mutationFn: (payload) => api.post<{ message: string }>("/api/auth/verify-email", payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ME_KEY });
+      qc.invalidateQueries({ queryKey: ME_PROBE_KEY });
+    },
+  });
+}
+
+/**
+ * Asks the server to re-send the verification link to the logged-in user's own
+ * address (#184). Surfaced by the dashboard banner's "Resend" action.
+ */
+export function useResendVerification() {
+  return useMutation<{ message: string }, ApiError, void>({
+    mutationFn: () => api.post<{ message: string }>("/api/auth/resend-verification"),
   });
 }
 

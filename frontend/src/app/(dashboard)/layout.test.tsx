@@ -13,7 +13,7 @@ import { http, HttpResponse } from "msw";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import DashboardLayout from "./layout";
 import { ME_KEY } from "@/hooks/useAuth";
-import { renderWithProviders, authedMe, server, url, jsonOk, jsonError, navState } from "@/test";
+import { renderWithProviders, authedMe, makeMe, server, url, jsonOk, jsonError, navState } from "@/test";
 
 const NAV_LABELS = [
   "Dashboard",
@@ -221,6 +221,32 @@ describe("DashboardLayout — session resilience (#182)", () => {
     await waitFor(() => expect(navState.router.replace).toHaveBeenCalledWith("/login"));
     // A genuine logout must NOT surface the transient-error card.
     expect(screen.queryByText(/couldn't reach the server/i)).toBeNull();
+  });
+
+  it("shows the email-verification banner when the session is unverified (#184)", () => {
+    renderWithProviders(
+      <DashboardLayout>
+        <div>protected child</div>
+      </DashboardLayout>,
+      { auth: makeMe({ emailVerified: false, email: "typo@exmaple.test" }) },
+    );
+
+    const banner = screen.getByRole("region", { name: /confirm your email/i });
+    expect(banner).toBeInTheDocument();
+    expect(within(banner).getByText("typo@exmaple.test")).toBeInTheDocument();
+    // The app still renders — the banner soft-gates, never blocks.
+    expect(screen.getByText("protected child")).toBeInTheDocument();
+  });
+
+  it("hides the email-verification banner once the session is verified (#184)", () => {
+    renderWithProviders(
+      <DashboardLayout>
+        <div>protected child</div>
+      </DashboardLayout>,
+      { auth: authedMe }, // emailVerified: true by default
+    );
+
+    expect(screen.queryByRole("region", { name: /confirm your email/i })).toBeNull();
   });
 
   it("keeps an ALREADY-LOADED user in the shell when a background /me revalidation fails", async () => {
