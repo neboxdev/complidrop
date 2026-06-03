@@ -220,4 +220,10 @@ describe("LoginPage — loading state (#35)", () => {
     // mid-afterEach against an unmounted tree.
     await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
   });
+
+  it("offers a 'Forgot your password?' reset path to /forgot-password (#183)", () => {
+    renderWithProviders(<LoginPage />, { auth: null });
+    expect(screen.getByRole("link", { name: /forgot your password/i }))
+      .toHaveAttribute("href", "/forgot-password");
+  });
 });

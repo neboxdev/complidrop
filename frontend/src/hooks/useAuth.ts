@@ -207,6 +207,49 @@ export function useUpdateOrganization() {
   });
 }
 
+/** Requests a password-reset link (#183). Always resolves (server returns 200
+ * whether or not the email exists — no enumeration). */
+export function useForgotPassword() {
+  return useMutation<{ message: string }, ApiError, { email: string }>({
+    mutationFn: (payload) => api.post<{ message: string }>("/api/auth/forgot-password", payload),
+  });
+}
+
+/** Redeems a reset token + sets a new password (#183). Public. */
+export function useResetPassword() {
+  return useMutation<{ message: string }, ApiError, { token: string; newPassword: string }>({
+    mutationFn: (payload) => api.post<{ message: string }>("/api/auth/reset-password", payload),
+  });
+}
+
+/** Changes the password after re-checking the current one (#183). */
+export function useChangePassword() {
+  return useMutation<{ message: string }, ApiError, { currentPassword: string; newPassword: string }>({
+    mutationFn: (payload) => api.post<{ message: string }>("/api/auth/change-password", payload),
+  });
+}
+
+/** Starts a change-email flow — emails a confirmation link to the new address (#183). */
+export function useChangeEmail() {
+  return useMutation<{ message: string }, ApiError, { password: string; newEmail: string }>({
+    mutationFn: (payload) => api.post<{ message: string }>("/api/auth/change-email", payload),
+  });
+}
+
+/** Deletes the account after a password re-check (#183). Clears all cached
+ * session state on success, mirroring logout. */
+export function useDeleteAccount() {
+  const qc = useQueryClient();
+  return useMutation<{ message: string }, ApiError, { password: string }>({
+    mutationFn: (payload) => api.post<{ message: string }>("/api/auth/account/delete", payload),
+    onSuccess: () => {
+      setMeCache(qc, null);
+      resetIdentity();
+      qc.clear();
+    },
+  });
+}
+
 export function useLogout() {
   const qc = useQueryClient();
   return useMutation<void, ApiError, void>({

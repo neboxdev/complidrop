@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { useMe, useUpdateOrganization, type Me } from "@/hooks/useAuth";
 import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { listTimeZones, describeNextSend } from "@/lib/timezones";
+import { SecuritySection, DangerZone } from "./account-management";
 import {
   KNOWN_CHECKOUT_PLAN_IDS,
   PLANS,
@@ -154,6 +155,10 @@ export default function SettingsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Account & access management (#183). */}
+      <SecuritySection />
+      <DangerZone />
     </div>
   );
 }

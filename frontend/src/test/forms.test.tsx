@@ -24,6 +24,9 @@ import VendorDetailPage from "@/app/(dashboard)/vendors/[id]/page";
 import DocumentDetailPage from "@/app/(dashboard)/documents/[id]/page";
 import ExportPage from "@/app/(dashboard)/export/page";
 import SettingsPage from "@/app/(dashboard)/settings/page";
+import ForgotPasswordPage from "@/app/(auth)/forgot-password/page";
+import { ResetPasswordClient } from "@/app/(auth)/reset-password/reset-password-client";
+import { SecuritySection } from "@/app/(dashboard)/settings/account-management";
 import {
   renderWithProviders,
   authedMe,
@@ -213,6 +216,26 @@ describe("form labels wired via htmlFor + id (#76)", () => {
 
     expect(screen.getByLabelText(/organization name/i)).toBeInstanceOf(HTMLInputElement);
     expect(screen.getByLabelText(/^time zone$/i)).toBeInstanceOf(HTMLSelectElement);
+  });
+
+  it("ForgotPasswordPage: email label resolves an input (#183)", () => {
+    renderWithProviders(<ForgotPasswordPage />, { auth: null });
+    expect(screen.getByLabelText(/^email$/i)).toBeInstanceOf(HTMLInputElement);
+  });
+
+  it("ResetPasswordClient: new-password + confirm labels resolve inputs (#183)", () => {
+    renderWithProviders(<ResetPasswordClient />, { auth: null, searchParams: { token: "t" } });
+    expect(screen.getByLabelText(/^new password$/i)).toBeInstanceOf(HTMLInputElement);
+    expect(screen.getByLabelText(/confirm new password/i)).toBeInstanceOf(HTMLInputElement);
+  });
+
+  it("SecuritySection: change-password + change-email labels resolve inputs (#183)", () => {
+    renderWithProviders(<SecuritySection />, { auth: authedMe });
+    expect(screen.getByLabelText(/current password/i)).toBeInstanceOf(HTMLInputElement);
+    expect(screen.getByLabelText(/^new password$/i)).toBeInstanceOf(HTMLInputElement);
+    expect(screen.getByLabelText(/confirm new password/i)).toBeInstanceOf(HTMLInputElement);
+    expect(screen.getByLabelText(/new email/i)).toBeInstanceOf(HTMLInputElement);
+    expect(screen.getByLabelText(/confirm with your password/i)).toBeInstanceOf(HTMLInputElement);
   });
 
   it("ExportPage: From/To date labels resolve to date inputs via getByLabelText (#76 followup)", () => {
