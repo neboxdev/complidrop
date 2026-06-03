@@ -11,6 +11,8 @@ public record RegisterRequest(
 
 public record LoginRequest(string Email, string Password);
 
+public record VerifyEmailRequest(string Token);
+
 public record AuthMeResponse(
     Guid UserId,
     Guid OrganizationId,
@@ -19,4 +21,5 @@ public record AuthMeResponse(
     string Role,
     string Plan,
     string OrganizationName,
-    string TimeZone);
+    string TimeZone,
+    bool EmailVerified);

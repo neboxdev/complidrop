@@ -7,6 +7,7 @@ public class SystemDbContext(DbContextOptions<SystemDbContext> options) : DbCont
 {
     public DbSet<Organization> Organizations => Set<Organization>();
     public DbSet<User> Users => Set<User>();
+    public DbSet<EmailVerificationToken> EmailVerificationTokens => Set<EmailVerificationToken>();
     public DbSet<Vendor> Vendors => Set<Vendor>();
     public DbSet<VendorPortalLink> VendorPortalLinks => Set<VendorPortalLink>();
     public DbSet<Document> Documents => Set<Document>();

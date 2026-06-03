@@ -83,6 +83,7 @@ const ME: Me = {
   plan: "pro",
   organizationName: "Acme",
   timeZone: "UTC",
+  emailVerified: true,
 };
 
 describe("hasSessionHint() — gate primitive (#69)", () => {

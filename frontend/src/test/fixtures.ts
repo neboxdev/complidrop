@@ -53,6 +53,9 @@ export const authedMe: Readonly<Me> = {
   plan: "pro",
   organizationName: "Acme Inc",
   timeZone: "UTC",
+  // Verified by default so the "confirm your email" banner (#184) stays hidden
+  // in the bulk of tests; use makeMe({ emailVerified: false }) to exercise it.
+  emailVerified: true,
 };
 
 export function makeMe(overrides: Partial<Me> = {}): Me {

@@ -123,14 +123,29 @@ public class ReminderBackgroundService(
                     // reminder under the same org, so we resolve it once and reuse. OrderBy keeps the
                     // recipient order stable across runs (Postgres returns rows in physical order
                     // otherwise), which keeps multi-user assertions in tests deterministic.
-                    var internalUsers = reminders.Any(r => r.NotifyInternalUser)
+                    var internalRecipients = reminders.Any(r => r.NotifyInternalUser)
                         ? await db.Users
                             .AsNoTracking()
                             .Where(u => u.OrganizationId == org.Id && u.DeletedAt == null)
                             .OrderBy(u => u.Email)
-                            .Select(u => u.Email)
+                            .Select(u => new InternalRecipient(u.Email, u.EmailVerifiedAt))
                             .ToListAsync(ct)
-                        : new List<string>();
+                        : new List<InternalRecipient>();
+                    var internalUsers = internalRecipients.Select(r => r.Email).ToList();
+
+                    // Dead-letter visibility (#184): an unverified internal address may be a
+                    // signup typo that bounces every reminder silently. We still SEND (soft-gate
+                    // — never withhold a paying org's reminders over a verification gap), but
+                    // surface the risk in logs so a forming dead-letter is visible to an operator
+                    // instead of invisible. Fires at most once per org per local-08:00 tick.
+                    var unverifiedInternal = internalRecipients
+                        .Where(r => r.EmailVerifiedAt is null)
+                        .Select(r => r.Email)
+                        .ToList();
+                    if (unverifiedInternal.Count > 0)
+                        logger.LogWarning(
+                            "Reminder tick: org {OrgId} has {Count} unverified internal recipient(s); reminders may dead-letter to {Emails}.",
+                            org.Id, unverifiedInternal.Count, string.Join(", ", unverifiedInternal));
 
                     foreach (var reminder in reminders)
                     {
@@ -297,6 +312,10 @@ public class ReminderBackgroundService(
     /// </summary>
     internal static string BuildOrgDayLockKey(Guid orgId, DateOnly sendDate) =>
         $"reminder:{orgId:N}:{sendDate:yyyyMMdd}";
+
+    /// <summary>An org's internal (admin) recipient plus its verification state, projected for the
+    /// dead-letter-visibility check (#184). EmailVerifiedAt == null ⇒ a possibly-typo'd address.</summary>
+    private sealed record InternalRecipient(string Email, DateTime? EmailVerifiedAt);
 
     /// <summary>
     /// Tries to acquire the session-scoped Postgres advisory lock keyed by

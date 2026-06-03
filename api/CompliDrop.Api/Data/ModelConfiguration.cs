@@ -26,6 +26,20 @@ internal static class ModelConfiguration
                 .HasForeignKey(u => u.OrganizationId).OnDelete(DeleteBehavior.Cascade);
         });
 
+        builder.Entity<EmailVerificationToken>(e =>
+        {
+            // SHA-256 hex is a fixed 64 chars. Unique so a verify lookup is a
+            // single index seek and a (statistically impossible) hash collision
+            // surfaces as a write conflict rather than silent ambiguity.
+            e.Property(t => t.TokenHash).HasMaxLength(64);
+            e.HasIndex(t => t.TokenHash).IsUnique();
+            e.HasIndex(t => t.UserId);
+            // Cascade: when a user is hard-deleted (#183 account deletion), their
+            // outstanding verification tokens go with them.
+            e.HasOne(t => t.User).WithMany()
+                .HasForeignKey(t => t.UserId).OnDelete(DeleteBehavior.Cascade);
+        });
+
         builder.Entity<Vendor>(e =>
         {
             e.Property(v => v.Name).HasMaxLength(200);
