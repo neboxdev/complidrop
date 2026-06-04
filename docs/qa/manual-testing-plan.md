@@ -540,11 +540,11 @@ Use a real phone, not just DevTools emulation.
   - If `expiration_date` is in the next 30 days → amber **"ExpiringSoon"** (only when other rules pass).
   - If `general_liability_limit` < 1000000 or missing → rose **"NonCompliant"**.
 
-### 7.7 Delete custom template
+### 7.7 Delete a checklist
 
-- [ ] **7.7.1** Back to `/rules`, select "QA Custom Template". Click **"Delete template"**. **Expect:** browser confirm dialog **"Delete QA Custom Template?"**.
+- [ ] **7.7.1** Back to `/rules`, select "QA Caterer" (under "Your checklists"). Click **"Delete checklist"**. **Expect:** a styled confirm **dialog** (NOT a native browser `confirm()`) titled **"Delete QA Caterer?"** with a destructive **"Delete"** button.
 - [ ] **7.7.2** Cancel. **Expect:** no change.
-- [ ] **7.7.3** Try again, OK. **Expect:** toast **"Template removed"**, template disappears from sidebar, main panel resets to "Select or create a template to edit its rules."
+- [ ] **7.7.3** Try again, click **Delete**. **Expect:** toast **"Checklist removed"**, the checklist disappears from "Your checklists", and the main panel resets to "Pick a checklist on the left, or create one, to set what a vendor must prove."
 
 ---
 

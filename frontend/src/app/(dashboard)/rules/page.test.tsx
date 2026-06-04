@@ -305,14 +305,17 @@ describe("RulesPage — delete requirement fires one refetch (#93 carried over)"
 });
 
 describe("RulesPage — suggested checklists clone (#192)", () => {
+  // Rules are listed OUT of sortOrder (sortOrder-2 first) on purpose, so the
+  // "in order" assertion below actually pins the cloneChecklist sortOrder sort —
+  // a dropped .sort() would replay them in array order and fail.
   const TWO_RULE_SUGGESTED = {
     id: "t_sys_01",
     name: "Photographer / Videographer",
     description: "Suggested",
     isSystemTemplate: true,
     rules: [
-      { id: "s1", documentType: "coi", fieldName: "general_liability_limit", operator: "min_value", expectedValue: "500000", errorMessage: "x", sortOrder: 1 },
       { id: "s2", documentType: "coi", fieldName: "expiration_date", operator: "required", expectedValue: null, errorMessage: "y", sortOrder: 2 },
+      { id: "s1", documentType: "coi", fieldName: "general_liability_limit", operator: "min_value", expectedValue: "500000", errorMessage: "x", sortOrder: 1 },
     ],
   };
 
