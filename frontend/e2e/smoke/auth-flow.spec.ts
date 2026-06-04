@@ -83,7 +83,7 @@ test.describe("Flow 1 — sign-up → dashboard (#39)", () => {
     // "Email" sibling. Companion Vitest migration: #132.
     await page.getByLabel(/^full name$/i).fill("Smoke Owner");
     await page.getByLabel(/^company$/i).fill("Smoke Test Inc");
-    await page.getByLabel(/^work email$/i).fill("owner@smoke.test");
+    await page.getByLabel(/^email$/i).fill("owner@smoke.test");
     await page.getByLabel(/^password$/i).fill("verystrongsmokepass1");
 
     await page.getByRole("button", { name: /create my account/i }).click();

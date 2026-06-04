@@ -147,10 +147,14 @@ function buildSupportMailto(doc: DocDetail): string {
 // Renders only when there's at least one failed check, so a compliant document
 // shows nothing. (#193)
 function NonComplianceExplainer({ doc }: { doc: DocDetail }) {
-  const failed = doc.complianceChecks.filter((c) => !c.isPassed);
+  // Defensive `?? []`: the API always sends complianceChecks, but a payload that
+  // omits it (older cache, a partial mock) must not white-screen the whole detail
+  // page on `.filter`. (#198)
+  const checks = doc.complianceChecks ?? [];
+  const failed = checks.filter((c) => !c.isPassed);
   if (failed.length === 0) return null;
   const reasons = failed.map(complianceFailureReason);
-  const passedCount = doc.complianceChecks.length - failed.length;
+  const passedCount = checks.length - failed.length;
   return (
     <Card className="border-rose-200 bg-rose-50/50">
       <CardContent className="p-4 sm:p-6 space-y-3">
