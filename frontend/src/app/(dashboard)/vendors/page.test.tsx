@@ -341,12 +341,35 @@ describe("VendorsPage — client-side search + pagination (#187)", () => {
     fireEvent.click(screen.getByRole("button", { name: /next/i }));
     expect(screen.getByText(/page 2 of 2/i)).toBeInTheDocument();
 
-    // Typing a query that narrows below one page must reset to page 1 so the
-    // matches are visible (not hidden on a now-nonexistent page 2).
+    // Search a term that STILL spans two pages (matches all 30) so the snap-back
+    // is driven by the onChange page reset, not by the safePage clamp — removing
+    // the reset must make this fail. (#187 review — test-quality reviewer)
     fireEvent.change(screen.getByLabelText(/search vendors/i), {
-      target: { value: "Vendor 03" },
+      target: { value: "Vendor" },
     });
-    expect(screen.getByRole("link", { name: "Vendor 03" })).toBeInTheDocument();
-    expect(screen.getByText(/page 1 of 1/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Vendor 01" })).toBeInTheDocument();
+    expect(screen.getByText(/page 1 of 2/i)).toBeInTheDocument();
+  });
+
+  it("self-heals when the loaded list shrinks below the current page (safePage clamp) (#187)", async () => {
+    const many = Array.from({ length: 30 }, (_, i) => makeVendorRow(i + 1));
+    server.use(http.get(url("/api/vendors"), () => jsonOk(many)));
+
+    const { queryClient } = renderWithProviders(<VendorsPage />, { auth: authedMe });
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Vendor 01" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+    expect(screen.getByText(/page 2 of 2/i)).toBeInTheDocument();
+
+    // The loaded list shrinks to a single page underneath us (e.g. vendors
+    // deleted in another tab → refetch). safePage must re-base to page 1.
+    queryClient.setQueryData(["vendors"], [makeVendorRow(1)]);
+
+    await waitFor(() =>
+      expect(screen.getByText(/page 1 of 1/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("link", { name: "Vendor 01" })).toBeInTheDocument();
   });
 });

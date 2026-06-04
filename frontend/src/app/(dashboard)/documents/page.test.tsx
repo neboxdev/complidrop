@@ -802,15 +802,20 @@ describe("DocumentsPage — capture vendor + type at upload (#186)", () => {
 
   it("keepPreviousData: the current page stays visible while the next page loads (#187)", async () => {
     // Gate created UP FRONT so `releasePage2` is assigned before any request
-    // reaches the handler (otherwise the handler's own assignment races the
-    // test's call to it).
+    // reaches the handler. `page2Entered` lets the test wait until the page-2
+    // request is actually IN FLIGHT — that's the moment the loading transition
+    // would flush WITHOUT keepPreviousData, so the mid-flight assertion below
+    // genuinely distinguishes the two. (#187 review — test-quality reviewer)
     let releasePage2: () => void = () => {};
     const page2Gate = new Promise<void>((r) => (releasePage2 = r));
+    let signalPage2Entered: () => void = () => {};
+    const page2Entered = new Promise<void>((r) => (signalPage2Entered = r));
     server.use(
       http.get(url("/api/documents"), async ({ request }) => {
         const p = new URL(request.url).searchParams.get("page") ?? "1";
         if (p === "2") {
           // Hold page 2 so we can observe page 1 still rendered meanwhile.
+          signalPage2Entered();
           await page2Gate;
         }
         return jsonOk(
@@ -828,7 +833,10 @@ describe("DocumentsPage — capture vendor + type at upload (#186)", () => {
     await waitFor(() => expect(screen.getByText("row-p1.pdf")).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: /next/i }));
-    // While page 2 is in flight, page 1's row is STILL shown (no loading flash).
+    // Wait until the page-2 request is in flight (React has flushed the
+    // fetching transition). WITHOUT keepPreviousData the table would now show
+    // the loading row; WITH it, page 1's row stays put.
+    await page2Entered;
     expect(screen.getByText("row-p1.pdf")).toBeInTheDocument();
     expect(screen.queryByText(/loading documents/i)).toBeNull();
 

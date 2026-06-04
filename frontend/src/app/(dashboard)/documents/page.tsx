@@ -80,13 +80,13 @@ export default function DocumentsPage() {
   const [typeFilter, setTypeFilter] = useState("");
   const [expiresWithin, setExpiresWithin] = useState("");
 
-  // Debounce the search box so we don't fire a request per keystroke; reset to
-  // page 1 whenever the query changes so results aren't hidden on a later page.
+  // Debounce the search box so we don't fire a request per keystroke. The
+  // page-1 reset lives in the input's onChange (an event handler) — NOT here —
+  // so this effect only ever syncs the debounced value. Resetting page in this
+  // effect would also fire on mount (~300ms later) and clobber any page the user
+  // had navigated to in the meantime. (#187 review — test-quality reviewer)
   useEffect(() => {
-    const t = setTimeout(() => {
-      setSearch(searchInput);
-      setPage(1);
-    }, 300);
+    const t = setTimeout(() => setSearch(searchInput), 300);
     return () => clearTimeout(t);
   }, [searchInput]);
 
@@ -327,7 +327,10 @@ export default function DocumentsPage() {
             aria-label="Search documents"
             placeholder="Search by file or vendor name…"
             value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
+            onChange={(e) => {
+              setSearchInput(e.target.value);
+              setPage(1); // reset immediately on type so matches aren't hidden on a later page
+            }}
             className="pl-8"
           />
         </div>
