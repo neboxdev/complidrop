@@ -77,6 +77,39 @@ function rejectionCopy(rejections: FileRejection[]): string | null {
   }
 }
 
+// Branded loading state that mirrors the portal shell (secure-upload brand +
+// a skeleton dropzone) instead of a bare unstyled "Loading…". The portal is a
+// one-shot, high-empathy surface often hit on a slow mobile connection — a
+// blank "Loading…" reads as broken. role="status" + aria-label keeps it
+// announced and detectable. (#196)
+function PortalLoadingSkeleton() {
+  return (
+    <main
+      role="status"
+      aria-label="Loading your upload page"
+      className="min-h-screen bg-sky-50/60 flex items-start justify-center px-4 py-12"
+    >
+      <div className="w-full max-w-xl space-y-6">
+        <div className="text-center space-y-3">
+          <div className="inline-flex items-center gap-2 text-sky-700 text-sm font-medium">
+            <ShieldCheck className="w-5 h-5" /> Secure upload
+          </div>
+          <div className="mx-auto h-8 w-48 rounded bg-slate-200/70 motion-safe:animate-pulse" />
+          <div className="mx-auto h-4 w-64 rounded bg-slate-200/60 motion-safe:animate-pulse" />
+        </div>
+        <div className="bg-white border-2 border-dashed border-slate-200 rounded-xl p-10 text-center shadow-sm">
+          <div className="mx-auto h-12 w-12 rounded-full bg-slate-200/70 motion-safe:animate-pulse" />
+          <div className="mx-auto mt-4 h-4 w-56 rounded bg-slate-200/60 motion-safe:animate-pulse" />
+          <div className="mx-auto mt-2 h-3 w-40 rounded bg-slate-200/50 motion-safe:animate-pulse" />
+        </div>
+        <p className="text-center text-xs text-slate-400">
+          Powered by <span className="font-semibold text-sky-700">CompliDrop</span>
+        </p>
+      </div>
+    </main>
+  );
+}
+
 export default function PortalPage() {
   const params = useParams<{ token: string }>();
   const [info, setInfo] = useState<PortalInfo | null>(null);
@@ -250,11 +283,7 @@ export default function PortalPage() {
   }, [fetchInfo]);
 
   if (loading) {
-    return (
-      <main className="min-h-screen flex items-center justify-center text-sm text-slate-500">
-        Loading…
-      </main>
-    );
+    return <PortalLoadingSkeleton />;
   }
 
   // `info` is the only signal for the bad-link branch — `error && !info`
@@ -298,6 +327,21 @@ export default function PortalPage() {
           </p>
         </div>
 
+        {/* The owner's specific ask — typed when the link was created and fetched
+            in PortalInfo, but previously never rendered, so the vendor never saw
+            it. Show it prominently above the dropzone. whitespace-pre-line keeps
+            any line breaks the owner typed; it renders as escaped JSX text. (#196) */}
+        {info.instructions?.trim() && (
+          <div className="rounded-xl border border-sky-100 bg-white p-5 shadow-sm">
+            <p className="text-sm font-semibold text-sky-900">
+              What {info.orgName} needs from you
+            </p>
+            <p className="mt-1 whitespace-pre-line text-sm text-slate-700">
+              {info.instructions}
+            </p>
+          </div>
+        )}
+
         <div
           {...getRootProps()}
           aria-disabled={atQuota || undefined}
@@ -309,14 +353,26 @@ export default function PortalPage() {
                 : "border-slate-200 hover:border-sky-300 hover:bg-sky-50/30 cursor-pointer"
           }`}
         >
-          <input {...getInputProps()} />
+          {/* Override react-dropzone's input `accept` to include `image/*` so the
+              native file picker on iOS/Android surfaces "Take Photo" — a vendor
+              photographing a paper certificate is the common mobile case. The
+              dropzone's own onDrop still validates against PDF/JPEG/PNG + 10 MB,
+              so a stray HEIC/library pick is rejected with clear copy. (#196) */}
+          <input {...getInputProps()} accept="image/*,application/pdf" />
           <UploadCloud className="w-12 h-12 mx-auto text-sky-500" />
           <p className="mt-3 text-base font-medium text-slate-800">
-            {atQuota
-              ? "Upload limit reached on this link"
-              : isDragActive
-                ? "Drop to upload…"
-                : "Drag a file here or click to select"}
+            {atQuota ? (
+              "Upload limit reached on this link"
+            ) : isDragActive ? (
+              "Drop to upload…"
+            ) : (
+              <>
+                {/* Mobile-first copy points at the camera; the drag wording stays
+                    for desktop (and pins the existing affordance test). */}
+                <span className="sm:hidden">Tap to choose a file or take a photo</span>
+                <span className="hidden sm:inline">Drag a file here or click to select</span>
+              </>
+            )}
           </p>
           <p className="text-sm text-slate-500 mt-1">PDF, JPEG, or PNG · 10 MB max</p>
           <p className="text-xs text-slate-500 mt-2">

@@ -67,14 +67,20 @@ describe("PortalPage — loading state (#37)", () => {
 
     ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
-    expect(screen.getByText(/^loading…$/i)).toBeInTheDocument();
+    // Branded skeleton (role=status), not a bare "Loading…" text. (#196)
+    expect(
+      screen.getByRole("status", { name: /loading your upload page/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^loading…$/i)).toBeNull();
 
     // Drain the held promise inside the test boundary so the post-
     // release setState doesn't fire during afterEach. Mirrors the
     // uploading-in-flight pattern.
     release();
     await waitFor(() =>
-      expect(screen.queryByText(/^loading…$/i)).toBeNull(),
+      expect(
+        screen.queryByRole("status", { name: /loading your upload page/i }),
+      ).toBeNull(),
     );
   });
 });
@@ -96,10 +102,49 @@ describe("PortalPage — success state (#37)", () => {
         }),
       ).toBeInTheDocument(),
     );
-    // Org context — "{orgName} asked for your latest compliance documents."
-    expect(screen.getByText(new RegExp(portalInfo.orgName))).toBeInTheDocument();
+    // Org context appears in the subhead AND the "What {org} needs from you"
+    // instructions header now, so assert at least one (getAllByText).
+    expect(
+      screen.getAllByText(new RegExp(portalInfo.orgName)).length,
+    ).toBeGreaterThanOrEqual(1);
+    // The owner's instructions are now RENDERED (previously fetched but never
+    // shown — the core #196 bug). Assert a unique phrase from the fixture.
+    expect(
+      screen.getByText(/please upload your current COI and any state license/i),
+    ).toBeInTheDocument();
     // Quota counter reflects 1/5 used (the wording is "X / Y uploads used").
     expect(screen.getByText(/1\s*\/\s*5\s+uploads used/i)).toBeInTheDocument();
+  });
+
+  it("does not render an empty instructions block when instructions are blank", async () => {
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () =>
+        jsonOk(makePortalInfo({ instructions: "" })),
+      ),
+    );
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: new RegExp(`hi ${portalInfo.vendorName}`, "i") }),
+      ).toBeInTheDocument(),
+    );
+    // No "What … needs from you" header when there are no instructions.
+    expect(screen.queryByText(/needs from you/i)).toBeNull();
+  });
+
+  it("surfaces the camera on mobile: the file input accepts images + the copy mentions a photo (#196)", async () => {
+    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/tap to choose a file or take a photo/i),
+      ).toBeInTheDocument(),
+    );
+    // accept includes image/* so iOS/Android offer "Take Photo", plus PDF.
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(input.getAttribute("accept")).toMatch(/image\/\*/);
+    expect(input.getAttribute("accept")).toMatch(/application\/pdf/);
   });
 
   it("renders the dropzone affordance + accepted-file copy", async () => {
