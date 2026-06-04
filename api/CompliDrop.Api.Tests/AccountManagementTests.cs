@@ -144,6 +144,10 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
             .StatusCode.Should().Be(HttpStatusCode.OK);
         (await CreateClient().PostAsJsonAsync("/api/auth/login", new { email = auth.Email, password = "Password1234" }))
             .StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+
+        // #202: change-email does NOT rotate the security stamp (the password is
+        // unchanged), so the original session that initiated it stays valid.
+        (await auth.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.OK);
     }
 
     [Fact]
