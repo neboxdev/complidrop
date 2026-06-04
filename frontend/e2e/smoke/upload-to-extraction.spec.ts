@@ -196,25 +196,23 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
       timeout: 10_000,
     });
 
-    // First detail render: Pending. The extraction badge carries
-    // `data-testid="extraction-status"` (#92) so the assertion is
-    // pinned to the badge regardless of how many other "Pending"
-    // strings end up on the page over time (compliance, audit,
-    // tooltips, headings).
+    // First detail render: Pending → the badge reads its humanized label
+    // "Waiting to read" (#188). The badge carries `data-testid=
+    // "extraction-status"` (#92) so the assertion is pinned to it regardless
+    // of how much other copy ends up on the page.
     const extractionStatus = page.getByTestId("extraction-status");
-    await expect(extractionStatus).toHaveText("Pending");
+    await expect(extractionStatus).toHaveText("Waiting to read");
     expect(detailCalls).toBeGreaterThanOrEqual(1);
 
-    // After 3s, refetchInterval fires: Pending → Processing.
-    await expect(extractionStatus).toHaveText("Processing", {
+    // After 3s, refetchInterval fires: Pending → Processing ("Reading…").
+    await expect(extractionStatus).toHaveText("Reading…", {
       timeout: 10_000,
     });
     expect(detailCalls).toBeGreaterThanOrEqual(2);
 
-    // After another 3s, refetchInterval fires again: Processing →
-    // Completed. The predicate returns false on Completed so polling
-    // stops naturally.
-    await expect(extractionStatus).toHaveText("Completed", {
+    // After another 3s, refetchInterval fires again: Processing → Completed
+    // ("Read"). The predicate returns false on Completed so polling stops.
+    await expect(extractionStatus).toHaveText("Read", {
       timeout: 10_000,
     });
     expect(detailCalls).toBeGreaterThanOrEqual(3);
@@ -224,7 +222,8 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
     // property (set via React's defaultValue, which doesn't write a
     // DOM `value=""` attribute), so we read it via Playwright's
     // inputValue() rather than getByDisplayValue (RTL-only API).
-    await expect(page.getByText("PolicyNumber")).toBeVisible();
+    // The field NAME renders humanized (#188): "PolicyNumber" → "Policy Number".
+    await expect(page.getByText("Policy Number")).toBeVisible();
     const allInputValues = await Promise.all(
       (await page.locator("input").all()).map((i) => i.inputValue()),
     );
