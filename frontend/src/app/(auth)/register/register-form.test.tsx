@@ -25,7 +25,7 @@
  * has its own smoke test in register/page.test.tsx.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import type { ReactNode } from "react";
 import RegisterForm from "./register-form";
 import { fillByLabel, submitFormIn } from "@/test";
@@ -197,5 +197,47 @@ describe("RegisterForm — submission payload (#31 Non-goals: no billing)", () =
     // timeZone is derived client-side from Intl, asserted as present (value
     // varies by test runner host so don't pin a literal).
     expect(payload).toHaveProperty("timeZone");
+  });
+});
+
+describe("RegisterForm — signup-friction reducers (#195)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMutateAsync.mockResolvedValue({});
+    setPlanParam(null);
+  });
+
+  it("marks Industry and Size as optional", () => {
+    render(<RegisterForm />);
+    expect(screen.getByText(/^industry/i).textContent).toMatch(/optional/i);
+    expect(screen.getByText(/^size/i).textContent).toMatch(/optional/i);
+  });
+
+  it("repeats the free / no-card reassurance at the commit point", () => {
+    render(<RegisterForm />);
+    expect(
+      screen.getByText(/free for your first 5 documents\. no credit card/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a live password checklist that turns each rule green as it's met", () => {
+    render(<RegisterForm />);
+    // All three rules are visible up-front — guidance, not a post-submit rejection.
+    expect(screen.getByText(/at least 12 characters/i)).toBeInTheDocument();
+    expect(screen.getByText(/^a letter$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^a number$/i)).toBeInTheDocument();
+
+    const pw = screen.getByLabelText(/^password$/i);
+    // Letters only, too short: "a letter" met (green), length + number not.
+    fireEvent.change(pw, { target: { value: "abc" } });
+    expect(screen.getByText(/^a letter$/i).className).toMatch(/emerald/);
+    expect(screen.getByText(/at least 12 characters/i).className).not.toMatch(/emerald/);
+    expect(screen.getByText(/^a number$/i).className).not.toMatch(/emerald/);
+
+    // A fully-valid password turns all three green.
+    fireEvent.change(pw, { target: { value: "abcdefgh1234" } });
+    expect(screen.getByText(/at least 12 characters/i).className).toMatch(/emerald/);
+    expect(screen.getByText(/^a letter$/i).className).toMatch(/emerald/);
+    expect(screen.getByText(/^a number$/i).className).toMatch(/emerald/);
   });
 });

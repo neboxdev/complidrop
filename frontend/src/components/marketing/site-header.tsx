@@ -42,11 +42,16 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 
-/** Secondary nav → the content pages, for discoverability + internal linking. Hidden below md to keep the bar uncluttered. */
+/** Secondary nav → pricing + the content pages + support, for discoverability +
+ *  internal linking. Hidden below md to keep the bar uncluttered (the mobile
+ *  drawer below exposes the same set). Pricing + Support added in #195 so a
+ *  skeptical cold-email visitor can find the price and a human before signing up. */
 const NAV_LINKS = [
+  { href: "/#pricing", label: "Pricing" },
   { href: "/coi-tracking-for-event-venues", label: "Event venues" },
   { href: "/faq", label: "FAQ" },
   { href: "/glossary", label: "Glossary" },
+  { href: "/contact", label: "Support" },
 ] as const;
 
 const ctaClass = cn(

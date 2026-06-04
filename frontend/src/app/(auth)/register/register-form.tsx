@@ -3,15 +3,17 @@
 import { useId } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
+import { Check, Circle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/PasswordInput";
 import { Card, CardContent } from "@/components/ui/card";
 import { useRegister } from "@/hooks/useAuth";
+import { cn } from "@/lib/utils";
 
 const schema = z.object({
   fullName: z.string().min(2, "Your full name is required"),
@@ -55,13 +57,48 @@ const PLAN_HEADINGS: Record<
   },
   pro: {
     heading: "Start your Pro account",
-    subtitle: "Unlimited documents, vendor portal, multi-channel reminders.",
+    subtitle: "Unlimited documents, a no-login vendor upload link, and automatic email reminders.",
   },
   annual: {
     heading: "Start your Annual account",
-    subtitle: "Unlimited documents, vendor portal, multi-channel reminders.",
+    subtitle: "Unlimited documents, a no-login vendor upload link, and automatic email reminders.",
   },
 };
+
+// Live password-criteria checklist — each rule turns green as the user satisfies
+// it, so the 12-char minimum reads as guidance instead of a post-submit rejection.
+// Rules mirror the zod schema above. Module scope per the static-components rule (#73). (#195)
+const PASSWORD_RULES: ReadonlyArray<{ label: string; test: (v: string) => boolean }> = [
+  { label: "At least 12 characters", test: (v) => v.length >= 12 },
+  { label: "A letter", test: (v) => /[A-Za-z]/.test(v) },
+  { label: "A number", test: (v) => /[0-9]/.test(v) },
+];
+
+function PasswordChecklist({ value, id }: { value: string; id: string }) {
+  return (
+    <ul id={id} className="mt-2 space-y-1">
+      {PASSWORD_RULES.map((rule) => {
+        const ok = rule.test(value);
+        return (
+          <li
+            key={rule.label}
+            className={cn(
+              "flex items-center gap-1.5 text-xs",
+              ok ? "text-emerald-700" : "text-slate-500",
+            )}
+          >
+            {ok ? (
+              <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />
+            ) : (
+              <Circle className="h-3 w-3 shrink-0" aria-hidden />
+            )}
+            {rule.label}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
 
 export default function RegisterForm() {
   const router = useRouter();
@@ -92,6 +129,7 @@ export default function RegisterForm() {
   const {
     register: r,
     handleSubmit,
+    control,
     formState: { errors },
   } = useForm<RegisterForm>({
     resolver: zodResolver(schema),
@@ -100,6 +138,9 @@ export default function RegisterForm() {
     // default shouldFocusError moves focus to the first invalid field on submit.
     mode: "onTouched",
   });
+  // Subscription-based watch (compiler-friendly, unlike calling watch() inline)
+  // drives the live password checklist. (#195)
+  const passwordValue = useWatch({ control, name: "password" }) ?? "";
 
   const onSubmit = async (values: RegisterForm) => {
     try {
@@ -190,21 +231,29 @@ export default function RegisterForm() {
               aria-describedby={`${errors.password ? `${passwordErrId} ` : ""}${passwordHintId}`}
             />
             {errors.password && <p id={passwordErrId} className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
-            <p id={passwordHintId} className="text-xs text-slate-500 mt-1">Min 12 chars, with a letter and a digit.</p>
+            <PasswordChecklist value={passwordValue} id={passwordHintId} />
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label htmlFor={industryId} className="text-sm font-medium text-slate-700">Industry</label>
+              <label htmlFor={industryId} className="text-sm font-medium text-slate-700">
+                Industry <span className="font-normal text-slate-400">(optional)</span>
+              </label>
               <Input {...r("industry")} id={industryId} placeholder="Construction, healthcare…" className="mt-1" />
             </div>
             <div>
-              <label htmlFor={companySizeId} className="text-sm font-medium text-slate-700">Size</label>
+              <label htmlFor={companySizeId} className="text-sm font-medium text-slate-700">
+                Size <span className="font-normal text-slate-400">(optional)</span>
+              </label>
               <Input {...r("companySize")} id={companySizeId} placeholder="10-30" className="mt-1" />
             </div>
           </div>
           <Button type="submit" className="w-full" disabled={register.isPending}>
             {register.isPending ? "Creating account…" : "Create my account"}
           </Button>
+          {/* Repeat the risk-free reassurance right at the commit point (#195). */}
+          <p className="text-center text-xs text-slate-500">
+            Free for your first 5 documents. No credit card required.
+          </p>
           {/* Affirmative assent so the Terms + Privacy Policy actually bind the
               user (clickwrap-style), with both links discoverable at signup. (#194) */}
           <p className="mt-3 text-center text-xs text-slate-500">

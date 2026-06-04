@@ -124,6 +124,49 @@ describe("Landing page copy (SEO + jargon, #176)", () => {
   });
 });
 
+describe("Landing page — product preview, social proof, nav, de-jargon (#195)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockUseMe.mockReturnValue({ data: null });
+  });
+
+  it("shows a coded product preview (extracted fields + Compliant verdict + expiry countdown)", () => {
+    render(<Home />);
+    // Strings unique to the preview mock — so a cold-email visitor SEES the product.
+    expect(screen.getByText("GL-4471902")).toBeInTheDocument();
+    expect(screen.getByText(/Expires in 23 days/i)).toBeInTheDocument();
+    expect(screen.getByText(/read and checked in seconds/i)).toBeInTheDocument();
+    // The green Compliant verdict badge appears (the word may also occur in copy).
+    expect(screen.getAllByText(/Compliant/).length).toBeGreaterThan(0);
+  });
+
+  it("renders a social-proof block without fabricating a named customer", () => {
+    render(<Home />);
+    expect(screen.getByText(/built by people who/i)).toBeInTheDocument();
+    // Honestly attributed to the team — NOT a fake named/titled customer testimonial.
+    expect(screen.getByText(/the complidrop team/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /be one of our first customers/i }),
+    ).toHaveAttribute("href", "/register");
+  });
+
+  it("exposes Pricing + Support in the site nav", () => {
+    render(<Home />);
+    const hrefs = linkHrefs();
+    expect(hrefs).toContain("/#pricing");
+    expect(hrefs).toContain("/contact");
+  });
+
+  it("replaces engineer-jargon pricing copy with plain outcomes", () => {
+    render(<Home />);
+    expect(screen.queryByText(/compliance rules engine/i)).toBeNull();
+    expect(screen.queryByText(/multi-channel reminders/i)).toBeNull();
+    expect(screen.queryByText(/vendor upload portal/i)).toBeNull();
+    // …replaced with the plain-English outcome.
+    expect(screen.getByText(/no-login link your vendors use/i)).toBeInTheDocument();
+  });
+});
+
 describe("Homepage structured data (#176)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
