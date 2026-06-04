@@ -43,7 +43,7 @@ import { ME_KEY } from "@/hooks/useAuth";
 function fillFullForm() {
   fillByLabel(/^full name$/i, "Owner Name");
   fillByLabel(/^company$/i, "Acme Inc");
-  fillByLabel(/^work email$/i, "owner@acme.test");
+  fillByLabel(/^email$/i, "owner@acme.test");
   fillByLabel(/^password$/i, "verystrongpass1");
 }
 
@@ -54,7 +54,7 @@ describe("RegisterForm — validation (#35)", () => {
     const { container } = renderWithProviders(<RegisterForm />, { auth: null });
     fillByLabel(/^full name$/i, "Owner Name");
     fillByLabel(/^company$/i, "Acme Inc");
-    fillByLabel(/^work email$/i, "owner@acme.test");
+    fillByLabel(/^email$/i, "owner@acme.test");
     fillByLabel(/^password$/i, "short1");
     submitFormIn(container);
 
@@ -70,7 +70,7 @@ describe("RegisterForm — validation (#35)", () => {
     const { container } = renderWithProviders(<RegisterForm />, { auth: null });
     fillByLabel(/^full name$/i, "Owner Name");
     fillByLabel(/^company$/i, "Acme Inc");
-    fillByLabel(/^work email$/i, "owner@acme.test");
+    fillByLabel(/^email$/i, "owner@acme.test");
     fillByLabel(/^password$/i, "123456789012");
     submitFormIn(container);
 
@@ -85,7 +85,7 @@ describe("RegisterForm — validation (#35)", () => {
     const { container } = renderWithProviders(<RegisterForm />, { auth: null });
     fillByLabel(/^full name$/i, "Owner Name");
     fillByLabel(/^company$/i, "Acme Inc");
-    fillByLabel(/^work email$/i, "owner@acme.test");
+    fillByLabel(/^email$/i, "owner@acme.test");
     fillByLabel(/^password$/i, "abcdefghijklm");
     submitFormIn(container);
 
@@ -100,7 +100,7 @@ describe("RegisterForm — validation (#35)", () => {
     const { container } = renderWithProviders(<RegisterForm />, { auth: null });
     fillByLabel(/^full name$/i, "Owner Name");
     fillByLabel(/^company$/i, "Acme Inc");
-    fillByLabel(/^work email$/i, "owner@acme.test");
+    fillByLabel(/^email$/i, "owner@acme.test");
     fillByLabel(/^password$/i, "short1");
     submitFormIn(container);
 
@@ -115,7 +115,7 @@ describe("RegisterForm — validation (#35)", () => {
   it("flags a missing full name with the user-facing copy", async () => {
     const { container } = renderWithProviders(<RegisterForm />, { auth: null });
     fillByLabel(/^company$/i, "Acme Inc");
-    fillByLabel(/^work email$/i, "owner@acme.test");
+    fillByLabel(/^email$/i, "owner@acme.test");
     fillByLabel(/^password$/i, "verystrongpass1");
     submitFormIn(container);
 

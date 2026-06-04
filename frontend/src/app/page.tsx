@@ -20,6 +20,8 @@ import {
   DollarSign,
   FileWarning,
   ArrowRight,
+  Check,
+  Quote,
 } from "lucide-react";
 
 // Keyword-first <title> ("COI Tracking Software for Small Business | CompliDrop")
@@ -47,6 +49,116 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
     <p className="text-center text-xs font-bold uppercase tracking-[0.2em] text-primary">
       {children}
     </p>
+  );
+}
+
+/* ── Product preview ────────────────────────────────────────────────────────
+   A coded mock of the document-detail view (extracted fields + a green
+   Compliant badge + an expiry countdown) so a cold-email visitor SEES the
+   product in the hero. Built in markup rather than a binary screenshot so it
+   stays crisp, responsive, theme-synced, and never goes stale. (#195) */
+// No expiration-date row here on purpose: the "Expires in 23 days" chip already
+// carries the expiry story, and a far-future date next to a 23-day countdown
+// would read as a sloppy fake. "Additional insured" shows the product checking a
+// real requirement (the #1 thing a venue needs), not just reading text. (#195 review)
+const PREVIEW_FIELDS = [
+  { label: "Policyholder", value: "Acme Catering LLC" },
+  { label: "Policy number", value: "GL-4471902" },
+  { label: "General liability", value: "$2,000,000" },
+  { label: "Additional insured", value: "Your venue" },
+] as const;
+
+function ProductPreview() {
+  return (
+    <div className="relative mx-auto mt-16 max-w-3xl">
+      <div className="overflow-hidden rounded-2xl border border-border bg-white text-left shadow-2xl">
+        {/* window chrome */}
+        <div className="flex items-center gap-1.5 border-b border-border bg-slate-50 px-4 py-3">
+          <span className="h-3 w-3 rounded-full bg-rose-300" aria-hidden />
+          <span className="h-3 w-3 rounded-full bg-amber-300" aria-hidden />
+          <span className="h-3 w-3 rounded-full bg-emerald-300" aria-hidden />
+          <span className="ml-3 truncate text-xs font-medium text-muted-foreground">
+            Acme-Catering-COI.pdf
+          </span>
+        </div>
+        <div className="p-6 sm:p-8">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Certificate of insurance
+              </p>
+              <p className="mt-1 text-lg font-semibold text-foreground">Acme Catering LLC</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2.5">
+              {/* Inline badge by design — NOT the shared <ComplianceBadge>, which is a
+                  "use client" component; importing it would pull a client island into
+                  this server-rendered marketing page (ADR 0012). This is a static mock,
+                  not live status. */}
+              <Badge className="inline-flex items-center gap-1 border-transparent bg-emerald-100 text-emerald-700">
+                <ShieldCheck className="h-3.5 w-3.5" aria-hidden /> Compliant
+              </Badge>
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
+                <Clock className="h-3.5 w-3.5" aria-hidden /> Expires in 23 days
+              </span>
+            </div>
+          </div>
+          <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {PREVIEW_FIELDS.map((f) => (
+              <div key={f.label} className="rounded-lg border border-border/70 bg-slate-50/60 p-3">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  {f.label}
+                </p>
+                <p className="mt-0.5 flex items-center gap-1.5 text-sm font-medium text-foreground">
+                  <Check className="h-3.5 w-3.5 shrink-0 text-emerald-600" aria-hidden />
+                  {f.value}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <p className="mt-3 text-center text-xs text-muted-foreground">
+        A real certificate, read and checked in seconds — names, dates, and limits pulled
+        out for you.
+      </p>
+    </div>
+  );
+}
+
+/* ── Social proof ───────────────────────────────────────────────────────────
+   Honest pre-launch framing — a founder's promise, NOT a fabricated customer
+   quote (faking a named testimonial would be deceptive). Fills the silence a
+   skeptical buyer notices, and invites the first real customers. Swap in real
+   named testimonials once we have them. (#195) */
+function SocialProof() {
+  return (
+    <section className="bg-white py-20 sm:py-28">
+      <div className="mx-auto max-w-4xl px-4 text-center sm:px-6">
+        <SectionLabel>A note from the team</SectionLabel>
+        <h2 className="mt-3 text-3xl font-bold tracking-tight text-foreground sm:text-4xl">
+          Built by people who&rsquo;ve chased a certificate at 4&nbsp;a.m.
+        </h2>
+        <figure className="mx-auto mt-10 max-w-2xl rounded-2xl border border-border bg-secondary/40 p-8 sm:p-10">
+          <Quote className="mx-auto h-7 w-7 text-primary" aria-hidden />
+          <blockquote className="mt-4 text-lg leading-relaxed text-foreground">
+            &ldquo;Every vendor folder we&rsquo;ve seen is a spreadsheet held together by
+            sticky notes and dread. We built CompliDrop to be the tool we wished we&rsquo;d
+            had&nbsp;&mdash; read the document, check the coverage, chase the renewal, so
+            you don&rsquo;t have to.&rdquo;
+          </blockquote>
+          <figcaption className="mt-5 text-sm font-medium text-muted-foreground">
+            &mdash; The CompliDrop team
+          </figcaption>
+        </figure>
+        <p className="mt-6 text-sm text-muted-foreground">
+          We&rsquo;re just getting started.{" "}
+          <Link href="/register" className="font-semibold text-primary hover:underline">
+            Be one of our first customers
+          </Link>{" "}
+          &mdash; your story could be here.
+        </p>
+      </div>
+    </section>
   );
 }
 
@@ -86,7 +198,7 @@ const STEPS = [
     step: "3",
     icon: BellRing,
     title: "Forget it",
-    body: "Reminders go out at 60, 30, and 7 days before expiration — to you and straight to your vendor. They get a simple upload link (no login, no account) and send the new document themselves. You stop being the bad guy.",
+    body: "Reminders go out at 60, 30, 14, and 7 days before expiration — to you and straight to your vendor. They get a simple upload link (no login, no account) and send the new document themselves. You stop being the bad guy.",
   },
 ] as const;
 
@@ -174,6 +286,8 @@ export default function Home() {
             <p className="mt-5 text-sm text-muted-foreground">
               Free for your first 5 documents. No credit card.
             </p>
+
+            <ProductPreview />
           </div>
         </section>
 
@@ -248,6 +362,9 @@ export default function Home() {
           </div>
         </section>
 
+        {/* ── Social proof ──────────────────────────────────────── */}
+        <SocialProof />
+
         {/* ── Pricing ───────────────────────────────────────────── */}
         {/* id="pricing" backs the /#pricing deep-link the register page's
             plan-banner "Change" affordance uses (#31). */}
@@ -299,8 +416,9 @@ export default function Home() {
                     <span className="text-base font-normal text-muted-foreground">/month</span>
                   </p>
                   <p className="mt-5 flex-1 text-sm leading-relaxed text-muted-foreground">
-                    Unlimited documents. Vendor upload portal. Multi-channel
-                    reminders. Compliance rules engine. Audit-ready exports.
+                    Unlimited documents. A no-login link your vendors use to send their
+                    own certificates. Email reminders at 60, 30, 14, and 7 days. Automatic
+                    checks against the coverage you require. One-click reports for audits.
                     Everything you need, nothing you don&rsquo;t.
                   </p>
                   <Link

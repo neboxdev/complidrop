@@ -25,7 +25,7 @@ const FAQ_ITEMS: readonly FaqItem[] = [
   },
   {
     question: "What does it cost?",
-    answer: `CompliDrop is free for your first 5 documents, with full automatic extraction and email reminders. Pro is ${PLANS.pro.monthlyPriceLabel}/month for unlimited documents, the vendor upload portal, the compliance rules engine, and audit-ready exports. Annual is ${PLANS.annual.monthlyPriceLabel}/month billed yearly. No contracts, no minimums, and you can cancel anytime.`,
+    answer: `CompliDrop is free for your first 5 documents, with full automatic extraction and email reminders. Pro is ${PLANS.pro.monthlyPriceLabel}/month for unlimited documents, a no-login link your vendors use to send their own certificates, automatic checks against the coverage you require, and one-click audit reports. Annual is ${PLANS.annual.monthlyPriceLabel}/month billed yearly. No contracts, no minimums, and you can cancel anytime.`,
   },
   {
     question: "How is this different from tracking COIs in a spreadsheet?",
