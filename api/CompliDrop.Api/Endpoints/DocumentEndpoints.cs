@@ -79,7 +79,12 @@ public static class DocumentEndpoints
             // passed as a bound PARAMETER (no string-concatenated SQL), so there's
             // no injection surface. A literal "%"/"_" typed by the user acts as an
             // ILIKE wildcard — acceptable, even handy, for a free-text search box.
-            var pattern = $"%{search.Trim()}%";
+            // Cap the term (mirrors the 120-char SanitizeFileName clamp) so an
+            // authenticated client can't force a multi-kilobyte leading-wildcard
+            // scan over two columns. (#187 review — security reviewer)
+            var term = search.Trim();
+            if (term.Length > 200) term = term[..200];
+            var pattern = $"%{term}%";
             query = query.Where(d =>
                 EF.Functions.ILike(d.OriginalFileName, pattern)
                 || (d.Vendor != null && EF.Functions.ILike(d.Vendor.Name, pattern)));

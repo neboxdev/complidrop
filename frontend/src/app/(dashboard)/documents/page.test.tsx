@@ -792,19 +792,158 @@ describe("DocumentsPage — capture vendor + type at upload (#186)", () => {
     await waitFor(() => expect(screen.getByText("page2.pdf")).toBeInTheDocument());
     expect(screen.getByText(/page 2 of 2/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /next/i })).toBeDisabled();
+
+    // Prev navigates back to page 1 (the other direction of reachability).
+    fireEvent.click(screen.getByRole("button", { name: /prev/i }));
+    await waitFor(() => expect(screen.getByText("page1.pdf")).toBeInTheDocument());
+    expect(screen.getByText(/page 1 of 2/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /prev/i })).toBeDisabled();
   });
 
-  it("status filter adds the status query param and resets to page 1 (#187)", async () => {
-    let lastUrl = "";
+  it("keepPreviousData: the current page stays visible while the next page loads (#187)", async () => {
+    // Gate created UP FRONT so `releasePage2` is assigned before any request
+    // reaches the handler (otherwise the handler's own assignment races the
+    // test's call to it).
+    let releasePage2: () => void = () => {};
+    const page2Gate = new Promise<void>((r) => (releasePage2 = r));
     server.use(
-      http.get(url("/api/documents"), ({ request }) => {
-        lastUrl = request.url;
-        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      http.get(url("/api/documents"), async ({ request }) => {
+        const p = new URL(request.url).searchParams.get("page") ?? "1";
+        if (p === "2") {
+          // Hold page 2 so we can observe page 1 still rendered meanwhile.
+          await page2Gate;
+        }
+        return jsonOk(
+          makeDocumentsResponse({
+            items: [makeDocument({ id: `d_${p}`, originalFileName: `row-p${p}.pdf` })],
+            total: 30,
+            page: Number(p),
+            pageSize: 25,
+          }),
+        );
       }),
     );
 
     renderWithProviders(<DocumentsPage />, { auth: authedMe });
-    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("row-p1.pdf")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+    // While page 2 is in flight, page 1's row is STILL shown (no loading flash).
+    expect(screen.getByText("row-p1.pdf")).toBeInTheDocument();
+    expect(screen.queryByText(/loading documents/i)).toBeNull();
+
+    releasePage2();
+    await waitFor(() => expect(screen.getByText("row-p2.pdf")).toBeInTheDocument());
+  });
+
+  it("deleting the last row on a later page steps back to the previous page (#187)", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let lastUrl = "";
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        lastUrl = request.url;
+        const p = new URL(request.url).searchParams.get("page") ?? "1";
+        // 26 docs total → page 2 holds exactly one row.
+        return jsonOk(
+          makeDocumentsResponse({
+            items: [makeDocument({ id: `only-on-p${p}`, originalFileName: `row-p${p}.pdf` })],
+            total: 26,
+            page: Number(p),
+            pageSize: 25,
+          }),
+        );
+      }),
+      http.delete(url("/api/documents/:id"), () => new Response(null, { status: 204 })),
+    );
+
+    try {
+      renderWithProviders(<DocumentsPage />, { auth: authedMe });
+      await waitFor(() => expect(screen.getByText("row-p1.pdf")).toBeInTheDocument());
+
+      fireEvent.click(screen.getByRole("button", { name: /next/i }));
+      await waitFor(() => expect(new URL(lastUrl).searchParams.get("page")).toBe("2"));
+
+      // Delete the only row on page 2 → the handler steps back to page 1.
+      fireEvent.click(screen.getByRole("button", { name: /remove row-p2\.pdf/i }));
+      await waitFor(() => expect(new URL(lastUrl).searchParams.get("page")).toBe("1"));
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it("self-heals when the total shrinks below the current page (concurrent change) (#187)", async () => {
+    // Models another session deleting rows while we sit on page 2: the next
+    // fetch returns a smaller total, and the page must re-base to a valid page
+    // rather than strand the user on an empty out-of-range page.
+    let shrunk = false;
+    let lastUrl = "";
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        lastUrl = request.url;
+        const p = new URL(request.url).searchParams.get("page") ?? "1";
+        if (shrunk) {
+          // Only one page of data exists now.
+          return jsonOk(
+            makeDocumentsResponse({
+              items: [makeDocument({ id: "d_only", originalFileName: "survivor.pdf" })],
+              total: 1,
+              page: Number(p),
+              pageSize: 25,
+            }),
+          );
+        }
+        return jsonOk(
+          makeDocumentsResponse({
+            items: [makeDocument({ id: `d_${p}`, originalFileName: `row-p${p}.pdf` })],
+            total: 30,
+            page: Number(p),
+            pageSize: 25,
+          }),
+        );
+      }),
+    );
+
+    const { queryClient } = renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText("row-p1.pdf")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+    await waitFor(() => expect(screen.getByText("row-p2.pdf")).toBeInTheDocument());
+
+    // The data shrinks underneath us; invalidate to force a same-page refetch
+    // (page stays 2, so this exercises the render-time clamp, NOT the
+    // filter-reset path). The page-2 refetch returns total=1, so the page must
+    // re-base to 1 of 1 instead of stranding on an empty page 2.
+    shrunk = true;
+    queryClient.invalidateQueries({ queryKey: ["documents"] });
+
+    await waitFor(() => expect(screen.getByText("survivor.pdf")).toBeInTheDocument());
+    expect(screen.getByText(/page 1 of 1/i)).toBeInTheDocument();
+    expect(new URL(lastUrl).searchParams.get("page")).toBe("1");
+  });
+
+  it("status filter adds the status query param AND resets pagination to page 1 (#187)", async () => {
+    // Navigate to page 2 FIRST so the reset-to-page-1 assertion isn't
+    // tautological (the page renders at page 1 by default). (#187 review)
+    let lastUrl = "";
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        lastUrl = request.url;
+        const p = new URL(request.url).searchParams.get("page") ?? "1";
+        return jsonOk(
+          makeDocumentsResponse({
+            items: [makeDocument({ id: `d_${p}`, originalFileName: `row-p${p}.pdf` })],
+            total: 30,
+            page: Number(p),
+            pageSize: 25,
+          }),
+        );
+      }),
+    );
+
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText("row-p1.pdf")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+    await waitFor(() => expect(new URL(lastUrl).searchParams.get("page")).toBe("2"));
 
     fireEvent.change(screen.getByLabelText(/filter by compliance status/i), {
       target: { value: "NonCompliant" },

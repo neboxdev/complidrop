@@ -321,5 +321,32 @@ describe("VendorsPage — client-side search + pagination (#187)", () => {
     expect(screen.getByRole("link", { name: "Vendor 30" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Vendor 01" })).toBeNull();
     expect(screen.getByText(/page 2 of 2/i)).toBeInTheDocument();
+
+    // Prev returns to page 1.
+    fireEvent.click(screen.getByRole("button", { name: /prev/i }));
+    expect(screen.getByRole("link", { name: "Vendor 01" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Vendor 26" })).toBeNull();
+    expect(screen.getByText(/page 1 of 2/i)).toBeInTheDocument();
+  });
+
+  it("searching from a later page snaps back to page 1 (#187)", async () => {
+    const many = Array.from({ length: 30 }, (_, i) => makeVendorRow(i + 1));
+    server.use(http.get(url("/api/vendors"), () => jsonOk(many)));
+
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Vendor 01" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+    expect(screen.getByText(/page 2 of 2/i)).toBeInTheDocument();
+
+    // Typing a query that narrows below one page must reset to page 1 so the
+    // matches are visible (not hidden on a now-nonexistent page 2).
+    fireEvent.change(screen.getByLabelText(/search vendors/i), {
+      target: { value: "Vendor 03" },
+    });
+    expect(screen.getByRole("link", { name: "Vendor 03" })).toBeInTheDocument();
+    expect(screen.getByText(/page 1 of 1/i)).toBeInTheDocument();
   });
 });

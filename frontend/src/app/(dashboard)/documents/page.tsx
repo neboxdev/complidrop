@@ -109,11 +109,15 @@ export default function DocumentsPage() {
   const serverPageSize = docs.data?.pageSize ?? PAGE_SIZE;
   const totalPages = Math.max(1, Math.ceil(total / serverPageSize));
 
-  // `page` is kept in range purely by the UI: filter changes reset it to 1 and
-  // the Prev/Next buttons are disabled at the boundaries, so it can't be driven
-  // past totalPages. The one case that could strand it past the end — deleting
-  // the last row on the last page — is handled in the delete onSuccess below
-  // (decrement), avoiding a setState-in-effect clamp.
+  // Self-heal if `page` fell out of range — e.g. another tab/user (or a backend
+  // mutation) shrank the result set while we sat on the last page. Setting state
+  // during render is React's supported "adjust state when derived data changes"
+  // path: it re-renders immediately with the corrected value, so the user never
+  // sees a stranded empty out-of-range page (and the request re-bases). This
+  // converges — once page == totalPages the guard is false. The delete onSuccess
+  // below still decrements as a same-session fast path so we skip the empty
+  // fetch. (#187 review — correctness reviewer)
+  if (page > totalPages) setPage(totalPages);
 
   // Any filter dropdown change returns to page 1 so the new results are visible.
   const onFilterChange = (setter: (v: string) => void) => (value: string) => {

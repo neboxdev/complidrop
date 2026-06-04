@@ -99,6 +99,7 @@ describe("useDocuments — list params → query string (#187)", () => {
           search: "acme",
           status: "Compliant",
           type: "coi",
+          vendorId: "v_acme_01",
           expiresWithin: 30,
         }),
       { wrapper: Wrapper },
@@ -111,6 +112,7 @@ describe("useDocuments — list params → query string (#187)", () => {
     expect(sp.get("search")).toBe("acme");
     expect(sp.get("status")).toBe("Compliant");
     expect(sp.get("type")).toBe("coi");
+    expect(sp.get("vendorId")).toBe("v_acme_01");
     expect(sp.get("expiresWithin")).toBe("30");
   });
 

@@ -500,6 +500,63 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
+    public async Task List_filters_by_status_type_and_expiry()
+    {
+        var auth = await RegisterAndLoginAsync();
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "a-coi.pdf",
+                BlobStorageUrl = "memory://a",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ComplianceStatus = ComplianceStatus.Compliant,
+                ExpirationDate = now.AddDays(20),
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "b-permit.pdf",
+                BlobStorageUrl = "memory://b",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "permit",
+                ComplianceStatus = ComplianceStatus.NonCompliant,
+                ExpirationDate = now.AddDays(60),
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+            await db.SaveChangesAsync();
+        }
+
+        async Task<JsonElement> Items(string qs) =>
+            (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/?{qs}")).GetProperty("data");
+
+        // type filter
+        var byType = await Items("type=permit");
+        byType.GetProperty("total").GetInt32().Should().Be(1);
+        byType.GetProperty("items")[0].GetProperty("originalFileName").GetString().Should().Be("b-permit.pdf");
+
+        // status filter
+        var byStatus = await Items("status=Compliant");
+        byStatus.GetProperty("total").GetInt32().Should().Be(1);
+        byStatus.GetProperty("items")[0].GetProperty("originalFileName").GetString().Should().Be("a-coi.pdf");
+
+        // expiresWithin filter: the +20d doc is within 30 days, the +60d one is not.
+        var byExpiry = await Items("expiresWithin=30");
+        byExpiry.GetProperty("total").GetInt32().Should().Be(1);
+        byExpiry.GetProperty("items")[0].GetProperty("originalFileName").GetString().Should().Be("a-coi.pdf");
+    }
+
+    [Fact]
     public async Task List_search_matches_file_name_and_vendor_name_case_insensitively()
     {
         var auth = await RegisterAndLoginAsync();
