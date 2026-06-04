@@ -9,6 +9,7 @@ import { z } from "zod";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/PasswordInput";
 import { Card, CardContent } from "@/components/ui/card";
 import { useLogin } from "@/hooks/useAuth";
 
@@ -29,11 +30,13 @@ export default function LoginPage() {
   // (#76)
   const emailId = useId();
   const passwordId = useId();
+  const emailErrId = useId();
+  const passwordErrId = useId();
   const {
     register,
     handleSubmit,
     formState: { errors },
-  } = useForm<LoginForm>({ resolver: zodResolver(schema) });
+  } = useForm<LoginForm>({ resolver: zodResolver(schema), mode: "onTouched" });
 
   const onSubmit = async (values: LoginForm) => {
     try {
@@ -57,8 +60,16 @@ export default function LoginPage() {
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div>
             <label htmlFor={emailId} className="text-sm font-medium text-slate-700">Email</label>
-            <Input {...register("email")} id={emailId} type="email" autoComplete="email" className="mt-1" />
-            {errors.email && <p className="text-xs text-red-600 mt-1">{errors.email.message}</p>}
+            <Input
+              {...register("email")}
+              id={emailId}
+              type="email"
+              autoComplete="email"
+              className="mt-1"
+              aria-invalid={errors.email ? true : undefined}
+              aria-describedby={errors.email ? emailErrId : undefined}
+            />
+            {errors.email && <p id={emailErrId} className="text-xs text-red-600 mt-1">{errors.email.message}</p>}
           </div>
           <div>
             <div className="flex items-center justify-between">
@@ -69,8 +80,15 @@ export default function LoginPage() {
                 Forgot your password?
               </Link>
             </div>
-            <Input {...register("password")} id={passwordId} type="password" autoComplete="current-password" className="mt-1" />
-            {errors.password && <p className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
+            <PasswordInput
+              {...register("password")}
+              id={passwordId}
+              autoComplete="current-password"
+              className="mt-1"
+              aria-invalid={errors.password ? true : undefined}
+              aria-describedby={errors.password ? passwordErrId : undefined}
+            />
+            {errors.password && <p id={passwordErrId} className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
           </div>
           <Button type="submit" className="w-full" disabled={login.isPending}>
             {login.isPending ? "Signing in…" : "Sign in"}

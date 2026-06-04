@@ -63,11 +63,10 @@ describe("RemindersPage — smoke (#36)", () => {
     expect(screen.queryByText(/30/)).toBeNull();
   });
 
-  it("each toggle presents a ≥44px coarse-pointer hit target (#181)", async () => {
-    // Pins the touch-target fix for the reminder toggles (3 per row: team /
-    // vendor / active). The clickable button grows to ≥44px on coarse pointers
-    // while the visual pill stays compact. (Switch SEMANTICS are tracked
-    // separately in #189.)
+  it("each toggle is an accessible switch (role/aria-checked/name) with a ≥44px hit target (#181 + #189)", async () => {
+    // The 3 toggles per row (team / vendor / active) are now real switches:
+    // role="switch" + aria-checked + a per-instance accessible name + a ≥44px
+    // touch target via the inset ::before. (#189 replaced the bare button.)
     server.use(
       http.get(url("/api/reminders"), () =>
         jsonOk([
@@ -88,10 +87,16 @@ describe("RemindersPage — smoke (#36)", () => {
     renderWithProviders(<RemindersPage />, { auth: authedMe });
     await waitFor(() => expect(screen.getByText(/30/)).toBeInTheDocument());
 
-    const coarseHitTargets = Array.from(
-      document.querySelectorAll("button"),
-    ).filter((b) => b.className.includes("pointer-coarse:min-h-11"));
-    expect(coarseHitTargets.length).toBeGreaterThanOrEqual(3);
+    const switches = screen.getAllByRole("switch");
+    expect(switches).toHaveLength(3);
+    // Each carries a per-instance accessible name and the ≥44px hit area.
+    for (const s of switches) {
+      expect(s).toHaveAccessibleName();
+      expect(s.className).toContain("before:h-11");
+    }
+    // aria-checked reflects state: team + active on, vendor off.
+    expect(screen.getByRole("switch", { name: /notify team/i })).toBeChecked();
+    expect(screen.getByRole("switch", { name: /notify vendor/i })).not.toBeChecked();
   });
 });
 

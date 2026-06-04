@@ -96,6 +96,22 @@ describe("RegisterForm — validation (#35)", () => {
     );
   });
 
+  it("wires aria-invalid + aria-describedby on a field error so a screen reader hears it (#189)", async () => {
+    const { container } = renderWithProviders(<RegisterForm />, { auth: null });
+    fillByLabel(/^full name$/i, "Owner Name");
+    fillByLabel(/^company$/i, "Acme Inc");
+    fillByLabel(/^work email$/i, "owner@acme.test");
+    fillByLabel(/^password$/i, "short1");
+    submitFormIn(container);
+
+    const err = await screen.findByText(/password must be at least 12 characters/i);
+    const input = screen.getByLabelText(/^password$/i);
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    // The input points at the error message's id (alongside the hint id), so a
+    // screen reader reads the error when the field is focused.
+    expect(input.getAttribute("aria-describedby") ?? "").toContain(err.id);
+  });
+
   it("flags a missing full name with the user-facing copy", async () => {
     const { container } = renderWithProviders(<RegisterForm />, { auth: null });
     fillByLabel(/^company$/i, "Acme Inc");

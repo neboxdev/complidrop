@@ -809,7 +809,6 @@ describe("DocumentsPage — capture vendor + type at upload (#186)", () => {
   // timeout. The hook test fails fast at the intended assertion. (#187 review)
 
   it("deleting the last row on a later page steps back to the previous page (#187)", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     let lastUrl = "";
     server.use(
       http.get(url("/api/documents"), ({ request }) => {
@@ -828,19 +827,17 @@ describe("DocumentsPage — capture vendor + type at upload (#186)", () => {
       http.delete(url("/api/documents/:id"), () => new Response(null, { status: 204 })),
     );
 
-    try {
-      renderWithProviders(<DocumentsPage />, { auth: authedMe });
-      await waitFor(() => expect(screen.getByText("row-p1.pdf")).toBeInTheDocument());
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText("row-p1.pdf")).toBeInTheDocument());
 
-      fireEvent.click(screen.getByRole("button", { name: /next/i }));
-      await waitFor(() => expect(new URL(lastUrl).searchParams.get("page")).toBe("2"));
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+    await waitFor(() => expect(new URL(lastUrl).searchParams.get("page")).toBe("2"));
 
-      // Delete the only row on page 2 → the handler steps back to page 1.
-      fireEvent.click(screen.getByRole("button", { name: /remove row-p2\.pdf/i }));
-      await waitFor(() => expect(new URL(lastUrl).searchParams.get("page")).toBe("1"));
-    } finally {
-      confirmSpy.mockRestore();
-    }
+    // Delete the only row on page 2: open the accessible confirm dialog (#189),
+    // then confirm → the handler steps back to page 1.
+    fireEvent.click(screen.getByRole("button", { name: /remove row-p2\.pdf/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^remove$/i }));
+    await waitFor(() => expect(new URL(lastUrl).searchParams.get("page")).toBe("1"));
   });
 
   it("self-heals when the total shrinks below the current page (concurrent change) (#187)", async () => {
@@ -1075,5 +1072,52 @@ describe("DocumentsPage — capture vendor + type at upload (#186)", () => {
 
     await waitFor(() => expect(patchedId).toBe("d_orphan"));
     expect(patchBody).toEqual({ vendorId: "v1" });
+  });
+});
+
+describe("DocumentsPage — a11y live-region announcement (#189)", () => {
+  it("announces in a polite live region when a document finishes reading on a poll", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const seq = sequencedJsonOk(
+        makeDocumentsResponse({
+          items: [
+            makeDocument({
+              id: "d_live",
+              originalFileName: "live.pdf",
+              extractionStatus: "Processing",
+              vendorName: "Acme Sub",
+            }),
+          ],
+          total: 1,
+        }),
+        makeDocumentsResponse({
+          items: [
+            makeDocument({
+              id: "d_live",
+              originalFileName: "live.pdf",
+              extractionStatus: "Completed",
+              vendorName: "Acme Sub",
+            }),
+          ],
+          total: 1,
+        }),
+      );
+      server.use(http.get(url("/api/documents"), () => seq()));
+
+      const { container } = renderWithProviders(<DocumentsPage />, { auth: authedMe });
+      await waitFor(() => expect(screen.getByText("Reading…")).toBeInTheDocument());
+
+      const live = container.querySelector('[aria-live="polite"]') as HTMLElement;
+      expect(live).not.toBeNull();
+      expect(live.textContent).toBe("");
+
+      await vi.advanceTimersByTimeAsync(5000);
+      await waitFor(() =>
+        expect(live.textContent).toMatch(/live\.pdf finished processing/i),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

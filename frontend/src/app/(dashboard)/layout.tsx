@@ -65,7 +65,7 @@ function SidebarNav({
 // to module scope per the `react-hooks/static-components` rule.
 function ShellLoading() {
   return (
-    <div className="min-h-screen flex items-center justify-center text-slate-400 text-sm">
+    <div className="min-h-screen flex items-center justify-center text-slate-500 text-sm">
       Loading your workspace…
     </div>
   );
@@ -169,6 +169,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="min-h-screen grid grid-cols-1 md:[grid-template-columns:240px_1fr]">
+      {/* Skip link: the first focusable element, visually hidden until focused,
+          jumps keyboard users past the nav straight to the page content (#189). */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-sky-900 focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-white"
+      >
+        Skip to content
+      </a>
       {/* Desktop sidebar — hidden below md, where the mobile top bar + drawer
           take over. */}
       <aside className="hidden md:flex bg-sky-950 text-sky-50 flex-col">
@@ -209,7 +217,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </Sheet>
       </header>
 
-      <main className="bg-slate-50 min-h-screen min-w-0">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="bg-slate-50 min-h-screen min-w-0 focus:outline-none"
+      >
         {/* Persistent until the signup email is confirmed (#184) — shown on
             every dashboard route so reminders can't silently dead-letter. */}
         {!me.data.emailVerified && <EmailVerificationBanner email={me.data.email} />}

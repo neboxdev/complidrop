@@ -8,6 +8,7 @@ import { z } from "zod";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/PasswordInput";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   useChangePassword,
@@ -89,18 +90,18 @@ function ChangePasswordForm() {
       <h3 className="text-sm font-medium text-slate-700">Change password</h3>
       <div>
         <label htmlFor={currentId} className="text-xs text-slate-500">Current password</label>
-        <Input {...register("currentPassword")} id={currentId} type="password" autoComplete="current-password" className="mt-1" />
+        <PasswordInput {...register("currentPassword")} id={currentId} autoComplete="current-password" className="mt-1" />
         {errors.currentPassword && <p className="text-xs text-red-600 mt-1">{errors.currentPassword.message}</p>}
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
           <label htmlFor={newId} className="text-xs text-slate-500">New password</label>
-          <Input {...register("newPassword")} id={newId} type="password" autoComplete="new-password" className="mt-1" />
+          <PasswordInput {...register("newPassword")} id={newId} autoComplete="new-password" className="mt-1" />
           {errors.newPassword && <p className="text-xs text-red-600 mt-1">{errors.newPassword.message}</p>}
         </div>
         <div>
           <label htmlFor={confirmId} className="text-xs text-slate-500">Confirm new password</label>
-          <Input {...register("confirm")} id={confirmId} type="password" autoComplete="new-password" className="mt-1" />
+          <PasswordInput {...register("confirm")} id={confirmId} autoComplete="new-password" className="mt-1" />
           {errors.confirm && <p className="text-xs text-red-600 mt-1">{errors.confirm.message}</p>}
         </div>
       </div>
@@ -153,7 +154,7 @@ function ChangeEmailForm() {
         </div>
         <div>
           <label htmlFor={pwId} className="text-xs text-slate-500">Confirm with your password</label>
-          <Input {...register("password")} id={pwId} type="password" autoComplete="current-password" className="mt-1" />
+          <PasswordInput {...register("password")} id={pwId} autoComplete="current-password" className="mt-1" />
           {errors.password && <p className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
         </div>
       </div>
@@ -270,7 +271,7 @@ function DeleteAccountForm() {
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-3 rounded-md border border-rose-200 bg-rose-50/50 p-3">
           <div>
             <label htmlFor={pwId} className="text-xs text-slate-600">Enter your password to confirm</label>
-            <Input {...register("password")} id={pwId} type="password" autoComplete="current-password" className="mt-1" />
+            <PasswordInput {...register("password")} id={pwId} autoComplete="current-password" className="mt-1" />
             {errors.password && <p className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
           </div>
           <div className="flex gap-2">

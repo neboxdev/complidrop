@@ -168,7 +168,7 @@ export default function SettingsPage() {
                 <p className="text-lg font-semibold text-slate-900">
                   ${subscription.data.extractionSpend.toFixed(2)}
                 </p>
-                <p className="text-[10px] text-slate-400">this month · included in your plan</p>
+                <p className="text-[10px] text-slate-500">this month · included in your plan</p>
               </div>
             </div>
           )}

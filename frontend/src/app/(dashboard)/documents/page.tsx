@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useId } from "react";
+import { useState, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useDropzone } from "react-dropzone";
 import { toast } from "sonner";
@@ -17,9 +17,10 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { StaleDataBanner } from "@/components/StaleDataBanner";
+import { ComplianceBadge, ExtractionBadge } from "@/components/StatusBadges";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { VendorPicker, type VendorOption } from "@/components/VendorPicker";
 import { DocumentTypeSelect } from "@/components/DocumentTypeSelect";
 import {
@@ -30,7 +31,7 @@ import {
   type DocumentListParams,
 } from "@/hooks/useDocuments";
 import { DOCUMENT_TYPES, documentTypeLabel } from "@/lib/document-types";
-import { complianceStatusLabel, extractionStatusLabel } from "@/lib/display-labels";
+import { complianceStatusLabel } from "@/lib/display-labels";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { isAuthError } from "@/lib/query-client";
@@ -54,22 +55,6 @@ const EXPIRY_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
   { value: "60", label: "Expiring in 60 days" },
   { value: "90", label: "Expiring in 90 days" },
 ];
-
-const STATUS_HUE: Record<string, string> = {
-  Pending: "bg-slate-100 text-slate-700",
-  Processing: "bg-sky-100 text-sky-700 animate-pulse",
-  Completed: "bg-emerald-100 text-emerald-700",
-  ManualRequired: "bg-amber-100 text-amber-700",
-  Failed: "bg-rose-100 text-rose-700",
-};
-
-const COMPLIANCE_HUE: Record<string, string> = {
-  Pending: "bg-slate-100 text-slate-700",
-  Compliant: "bg-emerald-100 text-emerald-700",
-  NonCompliant: "bg-rose-100 text-rose-700",
-  ExpiringSoon: "bg-amber-100 text-amber-700",
-  Expired: "bg-rose-100 text-rose-700",
-};
 
 const FILTER_SELECT_CLASS =
   "h-9 rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-500/40";
@@ -192,10 +177,41 @@ export default function DocumentsPage() {
     setStagedType("coi");
   }
 
-  const items = docs.data?.items ?? [];
+  // Memoized so the live-region effect's dep is stable across renders (a fresh
+  // `?? []` literal would otherwise re-run it every render).
+  const items = useMemo(() => docs.data?.items ?? [], [docs.data]);
+
+  // Announce when a document finishes reading on a polling refetch
+  // (Pending/Processing → a terminal state) so screen-reader users hear it
+  // without watching the badge. We write textContent directly on the live
+  // region (rather than via state) — that's the canonical aria-live update and
+  // avoids a render-coupled setState. (#189)
+  const liveRef = useRef<HTMLDivElement>(null);
+  const prevExtraction = useRef<Record<string, string>>({});
+  useEffect(() => {
+    const finished: string[] = [];
+    for (const d of items) {
+      const prev = prevExtraction.current[d.id];
+      const wasInFlight = prev === "Pending" || prev === "Processing";
+      const isTerminal =
+        d.extractionStatus === "Completed" ||
+        d.extractionStatus === "Failed" ||
+        d.extractionStatus === "ManualRequired";
+      if (wasInFlight && isTerminal) finished.push(d.originalFileName);
+      prevExtraction.current[d.id] = d.extractionStatus;
+    }
+    if (finished.length && liveRef.current) {
+      liveRef.current.textContent = finished
+        .map((name) => `${name} finished processing.`)
+        .join(" ");
+    }
+  }, [items]);
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
+      {/* aria-live (not role="status") so it announces without colliding with
+          the StaleDataBanner's role="status" on the same page. */}
+      <div ref={liveRef} aria-live="polite" aria-atomic="true" className="sr-only" />
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-sky-900">Documents</h1>
@@ -412,7 +428,7 @@ export default function DocumentsPage() {
             <tbody>
               {docs.isLoading ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-400">
+                  <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-500">
                     Loading documents…
                   </td>
                 </tr>
@@ -538,46 +554,48 @@ export default function DocumentsPage() {
                       )}
                     </td>
                     <td data-label="Extraction" className="px-4 py-3">
-                      <Badge className={cn("border-transparent font-medium", STATUS_HUE[d.extractionStatus] ?? STATUS_HUE.Pending)}>
-                        {extractionStatusLabel(d.extractionStatus)}
-                      </Badge>
+                      <ExtractionBadge status={d.extractionStatus} />
                     </td>
                     <td data-label="Compliance" className="px-4 py-3">
-                      <Badge className={cn("border-transparent", COMPLIANCE_HUE[d.complianceStatus] ?? COMPLIANCE_HUE.Pending)}>
-                        {complianceStatusLabel(d.complianceStatus)}
-                      </Badge>
+                      <ComplianceBadge status={d.complianceStatus} />
                     </td>
                     <td data-label="Expires" className="px-4 py-3 text-slate-600">
                       {d.expirationDate ? new Date(d.expirationDate).toLocaleDateString() : "—"}
                       {d.daysUntilExpiry != null && (
-                        <span className={cn("ml-2 text-xs", d.daysUntilExpiry < 30 ? "text-rose-600" : "text-slate-400")}>
+                        <span className={cn("ml-2 text-xs", d.daysUntilExpiry < 30 ? "text-rose-600" : "text-slate-500")}>
                           {d.daysUntilExpiry < 0 ? `${-d.daysUntilExpiry}d ago` : `in ${d.daysUntilExpiry}d`}
                         </span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        aria-label={`Remove ${d.originalFileName}`}
-                        disabled={del.isPending}
-                        onClick={() => {
-                          if (confirm(`Remove ${d.originalFileName}?`)) {
-                            del.mutate(d.id, {
-                              onSuccess: () => {
-                                toast.success("Document removed");
-                                // If that was the last row on a page past the
-                                // first, step back so we don't strand the user
-                                // on a now-empty page.
-                                if (items.length === 1 && page > 1) setPage((p) => p - 1);
-                              },
-                              onError: (err) => toast.error(err instanceof Error ? err.message : "Remove failed"),
-                            });
-                          }
-                        }}
-                      >
-                        <Trash2 className="w-4 h-4 text-slate-400 hover:text-rose-600" />
-                      </Button>
+                      <ConfirmDialog
+                        title={`Remove ${d.originalFileName}?`}
+                        description="This removes the document from your records and can't be undone."
+                        confirmLabel="Remove"
+                        destructive
+                        onConfirm={() =>
+                          del.mutate(d.id, {
+                            onSuccess: () => {
+                              toast.success("Document removed");
+                              // If that was the last row on a page past the
+                              // first, step back so we don't strand the user
+                              // on a now-empty page.
+                              if (items.length === 1 && page > 1) setPage((p) => p - 1);
+                            },
+                            onError: (err) => toast.error(err instanceof Error ? err.message : "Remove failed"),
+                          })
+                        }
+                        trigger={
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            aria-label={`Remove ${d.originalFileName}`}
+                            disabled={del.isPending}
+                          >
+                            <Trash2 className="w-4 h-4 text-slate-400 hover:text-rose-600" />
+                          </Button>
+                        }
+                      />
                     </td>
                   </tr>
                 ))

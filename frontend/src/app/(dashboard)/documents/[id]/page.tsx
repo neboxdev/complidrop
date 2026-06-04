@@ -7,19 +7,15 @@ import { toast } from "sonner";
 import { AlertTriangle, ArrowLeft, RefreshCw, RotateCw, ShieldCheck } from "lucide-react";
 import { api, ApiError, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { ComplianceBadge, ExtractionBadge } from "@/components/StatusBadges";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StaleDataBanner } from "@/components/StaleDataBanner";
 import { DocumentTypeSelect } from "@/components/DocumentTypeSelect";
 import { useUpdateDocument } from "@/hooks/useDocuments";
-import {
-  complianceStatusLabel,
-  extractionStatusLabel,
-  fieldLabel,
-} from "@/lib/display-labels";
+import { fieldLabel } from "@/lib/display-labels";
 import { cn } from "@/lib/utils";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 type DocField = {
   id: string;
@@ -144,8 +140,27 @@ export default function DocumentDetailPage() {
     },
   });
 
+  // Announce the terminal transition (Pending/Processing → Read/Failed/Needs
+  // review) to screen-reader users via a polite live region — written by
+  // textContent rather than state to keep it out of the render path. (#189)
+  const liveRef = useRef<HTMLDivElement>(null);
+  const prevExtraction = useRef<string | null>(null);
+  const liveStatus = detail.data?.extractionStatus;
+  const liveName = detail.data?.originalFileName;
+  useEffect(() => {
+    if (!liveStatus) return;
+    const prev = prevExtraction.current;
+    const wasInFlight = prev === "Pending" || prev === "Processing";
+    const isTerminal =
+      liveStatus === "Completed" || liveStatus === "Failed" || liveStatus === "ManualRequired";
+    if (wasInFlight && isTerminal && liveRef.current) {
+      liveRef.current.textContent = `${liveName ?? "Document"} finished processing.`;
+    }
+    prevExtraction.current = liveStatus;
+  }, [liveStatus, liveName]);
+
   if (detail.isLoading) {
-    return <div className="p-8 text-sm text-slate-400">Loading document…</div>;
+    return <div className="p-8 text-sm text-slate-500">Loading document…</div>;
   }
   if (!detail.data) {
     // Initial-load failed with no cached data. Split 404 (the document
@@ -219,6 +234,9 @@ export default function DocumentDetailPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
+      {/* aria-live (not role="status") so it announces without colliding with
+          the StaleDataBanner's role="status" on the same page. */}
+      <div ref={liveRef} aria-live="polite" aria-atomic="true" className="sr-only" />
       <Link href="/documents" className="inline-flex items-center gap-1 text-sm text-sky-700 hover:text-sky-800">
         <ArrowLeft className="w-4 h-4" /> All documents
       </Link>
@@ -290,28 +308,14 @@ export default function DocumentDetailPage() {
       )}
 
       <section className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-        <SummaryCell label="Reading" value={
-          <Badge
-            data-testid="extraction-status"
-            className={cn("border-transparent",
-              doc.extractionStatus === "Completed" ? "bg-emerald-100 text-emerald-700"
-                : doc.extractionStatus === "Failed" ? "bg-rose-100 text-rose-700"
-                : "bg-sky-100 text-sky-700")}
-          >
-            {extractionStatusLabel(doc.extractionStatus)}
-          </Badge>
-        } />
-        <SummaryCell label="Compliance" value={
-          <Badge
-            data-testid="compliance-status"
-            className={cn("border-transparent",
-              doc.complianceStatus === "Compliant" ? "bg-emerald-100 text-emerald-700"
-                : doc.complianceStatus === "NonCompliant" ? "bg-rose-100 text-rose-700"
-                : "bg-slate-100 text-slate-700")}
-          >
-            {complianceStatusLabel(doc.complianceStatus)}
-          </Badge>
-        } />
+        <SummaryCell
+          label="Reading"
+          value={<ExtractionBadge status={doc.extractionStatus} data-testid="extraction-status" />}
+        />
+        <SummaryCell
+          label="Compliance"
+          value={<ComplianceBadge status={doc.complianceStatus} data-testid="compliance-status" />}
+        />
         <SummaryCell label="Expires" value={doc.expirationDate ? new Date(doc.expirationDate).toLocaleDateString() : "—"} />
         <SummaryCell label="Verified" value={doc.isManuallyVerified ? <span className="inline-flex items-center gap-1 text-emerald-700"><ShieldCheck className="w-3.5 h-3.5" /> Yes</span> : "—"} />
       </section>
@@ -362,7 +366,7 @@ export default function DocumentDetailPage() {
                     <ConfidenceHint confidence={f.confidence} />
                     {f.isManuallyEdited && <span className="text-sky-700">✎ Manually edited</span>}
                     {f.originalValue && f.originalValue !== f.fieldValue && (
-                      <span className="text-slate-400">was: {f.originalValue}</span>
+                      <span className="text-slate-500">was: {f.originalValue}</span>
                     )}
                   </div>
                 </div>

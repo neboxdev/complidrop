@@ -7,6 +7,7 @@ import { Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { documentTypeLabel } from "@/lib/document-types";
 import { fieldLabel, operatorLabel } from "@/lib/display-labels";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -171,7 +172,7 @@ export default function RulesPage() {
           </Card>
         ) : detail.isLoading || !detail.data ? (
           <Card>
-            <CardContent className="p-8 text-sm text-slate-400">Loading…</CardContent>
+            <CardContent className="p-8 text-sm text-slate-500">Loading…</CardContent>
           </Card>
         ) : (
           <>
@@ -181,15 +182,18 @@ export default function RulesPage() {
                 <p className="text-sm text-slate-500">{detail.data.description ?? "No description"}</p>
               </div>
               {!detail.data.isSystemTemplate && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    if (confirm(`Delete ${detail.data!.name}?`)) deleteTemplate.mutate(selectedId!);
-                  }}
-                >
-                  Delete template
-                </Button>
+                <ConfirmDialog
+                  title={`Delete ${detail.data.name}?`}
+                  description="This removes the requirement set and all of its rules. Vendors assigned to it will no longer be checked against it."
+                  confirmLabel="Delete"
+                  destructive
+                  onConfirm={() => deleteTemplate.mutate(selectedId!)}
+                  trigger={
+                    <Button variant="outline" size="sm">
+                      Delete template
+                    </Button>
+                  }
+                />
               )}
             </div>
 
