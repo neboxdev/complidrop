@@ -27,11 +27,32 @@ public class ExportService(SystemDbContext db) : IExportService
             .Include(d => d.Vendor)
             .OrderBy(d => d.ExpirationDate)
             .ToListAsync(ct);
-        var audit = await db.AuditLogs
+        // Fetch one past the cap so we can disclose truncation instead of
+        // silently dropping events. The cap stays at 500 (a multi-thousand-row
+        // PDF is unusable anyway); the report now SAYS when it's showing only
+        // the most recent 500. (#197)
+        const int auditCap = 500;
+        var auditRaw = await db.AuditLogs
             .Where(a => a.OrganizationId == organizationId && a.CreatedAt >= from && a.CreatedAt <= to)
             .OrderByDescending(a => a.CreatedAt)
-            .Take(500)
+            .Take(auditCap + 1)
             .ToListAsync(ct);
+        var auditTruncated = auditRaw.Count > auditCap;
+        var audit = auditTruncated ? auditRaw.Take(auditCap).ToList() : auditRaw;
+
+        // Resolve UserIds to human names so the report shows WHO acted, not a raw
+        // GUID. IgnoreQueryFilters so a soft-deleted account (ADR 0013) still
+        // attributes its historical actions — an audit report that forgets who
+        // did something the moment they delete their account is worthless. This
+        // is a system/export context, where IgnoreQueryFilters is sanctioned.
+        var userIds = audit.Where(a => a.UserId is not null)
+            .Select(a => a.UserId!.Value).Distinct().ToList();
+        var userDisplay = (await db.Users
+                .IgnoreQueryFilters()
+                .Where(u => userIds.Contains(u.Id))
+                .Select(u => new { u.Id, u.FullName, u.Email })
+                .ToListAsync(ct))
+            .ToDictionary(u => u.Id, u => DisplayName(u.FullName, u.Email));
 
         var reportDate = DateTime.UtcNow.ToString("MMMM d, yyyy");
 
@@ -78,7 +99,10 @@ public class ExportService(SystemDbContext db) : IExportService
                         }));
 
                     col.Item().PaddingTop(18).Text("Audit Log").SemiBold().FontSize(14);
-                    col.Item().Text($"{audit.Count} events from {from:yyyy-MM-dd} to {to:yyyy-MM-dd}").FontSize(9).FontColor("#64748b");
+                    col.Item().Text(auditTruncated
+                            ? $"Showing the {auditCap} most recent events from {from:yyyy-MM-dd} to {to:yyyy-MM-dd}"
+                            : $"{audit.Count} events from {from:yyyy-MM-dd} to {to:yyyy-MM-dd}")
+                        .FontSize(9).FontColor("#64748b");
                     col.Item().Element(e =>
                         e.Border(1).BorderColor("#e2e8f0").Padding(8).Column(inner =>
                         {
@@ -96,7 +120,7 @@ public class ExportService(SystemDbContext db) : IExportService
                                     r.RelativeItem(2).Text(a.CreatedAt.ToString("yyyy-MM-dd HH:mm")).FontSize(8);
                                     r.RelativeItem(3).Text(DisplayLabels.Action(a.Action)).FontSize(8);
                                     r.RelativeItem(2).Text(DisplayLabels.EntityType(a.EntityType)).FontSize(8);
-                                    r.RelativeItem(3).Text(a.UserId?.ToString() ?? "system").FontSize(8);
+                                    r.RelativeItem(3).Text(UserLabel(a.UserId, userDisplay)).FontSize(8);
                                 });
                             }
                         }));
@@ -110,6 +134,19 @@ public class ExportService(SystemDbContext db) : IExportService
             });
         }).GeneratePdf();
     }
+
+    // Human label for an audit row's actor: the user's name/email, or a
+    // capitalized "System" for system-initiated events (null UserId) and the
+    // rare hard-deleted-user edge. NEVER a raw GUID. internal for direct unit
+    // testing (InternalsVisibleTo → CompliDrop.Api.Tests). (#197)
+    internal static string UserLabel(Guid? userId, IReadOnlyDictionary<Guid, string> userDisplay) =>
+        userId is Guid id && userDisplay.TryGetValue(id, out var name) ? name : "System";
+
+    // The display name for an audit actor: their full name, or their email when
+    // the name is blank/whitespace (e.g. a vendor-portal-era account). internal
+    // for unit testing. (#197 review)
+    internal static string DisplayName(string? fullName, string email) =>
+        string.IsNullOrWhiteSpace(fullName) ? email : fullName;
 
     public async Task<byte[]> BuildCsvAsync(Guid organizationId, CancellationToken ct)
     {

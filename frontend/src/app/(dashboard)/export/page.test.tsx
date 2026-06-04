@@ -28,5 +28,12 @@ describe("ExportPage — smoke (#36)", () => {
     const dateGrid = document.querySelector(".sm\\:grid-cols-2");
     expect(dateGrid).not.toBeNull();
     expect(dateGrid?.className).toContain("grid-cols-1");
+
+    // Scope clarification (#197): the date range bounds the activity log only,
+    // not the always-complete documents table. ("activity log" sits in a <strong>,
+    // so match the phrase that lives in a single text node.)
+    expect(
+      screen.getByText(/the documents table always lists all of your active documents/i),
+    ).toBeInTheDocument();
   });
 });
