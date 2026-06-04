@@ -51,6 +51,12 @@ describe("sitemap.xml", () => {
     expect(urls).toContain(absoluteUrl("/coi-tracking-software-vs-spreadsheet"));
   });
 
+  it("lists the legal + contact pages (#194)", () => {
+    expect(urls).toContain(absoluteUrl("/privacy"));
+    expect(urls).toContain(absoluteUrl("/terms"));
+    expect(urls).toContain(absoluteUrl("/contact"));
+  });
+
   it("includes one entry per glossary term", () => {
     for (const term of GLOSSARY_TERMS) {
       expect(urls).toContain(absoluteUrl(`/glossary/${term.slug}`));
