@@ -60,8 +60,8 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
                         id: DOC_ID,
                         originalFileName: "smoke.pdf",
                         documentType: "COI",
-                        vendorName: null,
-                        vendorId: null,
+                        vendorName: "Smoke Vendor",
+                        vendorId: "v_smoke_01",
                         extractionStatus: "Pending",
                         extractionConfidence: null,
                         complianceStatus: "Pending",
@@ -80,6 +80,25 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
             }),
           });
         },
+      },
+      // Vendors list backs the upload staging step's VendorPicker (#186):
+      // the user must pick a vendor before the upload fires.
+      {
+        method: "GET",
+        path: "/api/vendors",
+        handler: jsonOk([
+          {
+            id: "v_smoke_01",
+            name: "Smoke Vendor",
+            contactEmail: null,
+            contactPhone: null,
+            category: null,
+            complianceTemplateId: null,
+            complianceTemplateName: null,
+            documentCount: 0,
+            activePortalLinks: 0,
+          },
+        ]),
       },
       // Upload endpoint: flips `didUpload` so the next list-fetch
       // (triggered by useUploadDocument.onSuccess's invalidation)
@@ -150,15 +169,24 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
       page.getByRole("heading", { name: /^documents$/i }),
     ).toBeVisible();
 
-    // Arm the upload-response wait BEFORE setInputFiles so the test
-    // pins the upload actually fired (sibling to flow 2's pattern).
-    const uploadResponse = waitForApi(page, "POST", "/api/documents/upload", {
-      status: 200,
-    });
-
+    // Dropping a file now STAGES it behind a vendor + type step (#186) — the
+    // upload POST fires only after a vendor is chosen and Upload is clicked.
     await page
       .locator('input[type="file"]')
       .setInputFiles(makeFakePdf("smoke.pdf"));
+
+    await expect(
+      page.getByText(/add details before uploading/i),
+    ).toBeVisible();
+    // Pick the vendor from the type-ahead, then upload.
+    await page.getByRole("button", { name: "Smoke Vendor" }).click();
+
+    // Arm the upload-response wait BEFORE clicking Upload so the test pins the
+    // upload actually fired (sibling to flow 2's pattern).
+    const uploadResponse = waitForApi(page, "POST", "/api/documents/upload", {
+      status: 200,
+    });
+    await page.getByRole("button", { name: /upload 1 file/i }).click();
     await uploadResponse;
 
     // The list mock's `didUpload` gate is now true. The link surfaces
