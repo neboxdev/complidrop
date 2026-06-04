@@ -22,6 +22,7 @@ import {
   useDocuments,
   useUploadDocument,
   useDeleteDocument,
+  useUpdateDocument,
 } from "./useDocuments";
 import {
   createTestWrapper,
@@ -303,5 +304,38 @@ describe("useUploadDocument / useDeleteDocument — cache invalidation (#36)", (
     await del.result.current.mutateAsync("d_completed_01");
 
     await waitFor(() => expect(listCalls).toBe(2));
+  });
+
+  it("update onSuccess invalidates ['documents'] and sends ONLY the provided keys (partial PATCH)", async () => {
+    let listCalls = 0;
+    let patchedBody: unknown = null;
+    server.use(
+      http.get(url("/api/documents"), () => {
+        listCalls++;
+        return jsonOk(
+          makeDocumentsResponse({
+            items: [{ ...documentsAllStatuses[2] }],
+            total: 1,
+          }),
+        );
+      }),
+      http.patch(url("/api/documents/:id"), async ({ request }) => {
+        patchedBody = await request.json();
+        return jsonOk({ message: "Document updated." });
+      }),
+    );
+
+    const { Wrapper } = createTestWrapper();
+    const docs = renderHook(() => useDocuments(), { wrapper: Wrapper });
+    await waitFor(() => expect(docs.result.current.isSuccess).toBe(true));
+    expect(listCalls).toBe(1);
+
+    const update = renderHook(() => useUpdateDocument(), { wrapper: Wrapper });
+    // Assigning a vendor must NOT also send documentType — the partial payload
+    // is what keeps the PATCH from nulling the type server-side.
+    await update.result.current.mutateAsync({ id: "d_completed_01", vendorId: "v_x" });
+
+    await waitFor(() => expect(listCalls).toBe(2));
+    expect(patchedBody).toEqual({ vendorId: "v_x" });
   });
 });

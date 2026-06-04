@@ -21,11 +21,24 @@ public static class DocumentEndpoints
         group.MapPost("/upload", UploadDocument)
             .DisableAntiforgery()
             .WithMetadata(new RequestSizeLimitAttribute(10 * 1024 * 1024));
+        group.MapPatch("/{id:guid}", UpdateDocument);
         group.MapPut("/{id:guid}/fields", UpdateFields);
         group.MapPut("/{id:guid}/verify", MarkVerified);
         group.MapPost("/{id:guid}/reextract", Reextract);
         group.MapDelete("/{id:guid}", DeleteDocument);
     }
+
+    /// <summary>
+    /// Canonical document-type vocabulary, mirroring the LLM extraction prompt
+    /// (<see cref="Services.Extraction.ExtractionPrompts"/>). A manual type edit
+    /// must resolve to one of these so a typo can't create an unmatchable type
+    /// that silently excludes every compliance rule. Case-insensitive; stored
+    /// lower-case.
+    /// </summary>
+    private static readonly HashSet<string> AllowedDocumentTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "coi", "license", "permit", "certification", "contract", "other"
+    };
 
     private static async Task<IResult> ListDocuments(
         AppDbContext db,
@@ -144,6 +157,80 @@ public static class DocumentEndpoints
         return Results.Ok(new { data = detail, error = (object?)null });
     }
 
+    private static async Task<IResult> UpdateDocument(
+        Guid id,
+        DocumentPatchRequest req,
+        AppDbContext db,
+        IComplianceCheckService compliance,
+        ILoggerFactory loggerFactory,
+        CancellationToken ct)
+    {
+        var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
+        if (doc is null) return NotFound();
+
+        var changed = false;
+
+        if (req.VendorId is Guid vendorId)
+        {
+            // The AppDbContext tenant filter scopes Vendors to the caller's org,
+            // so a cross-org or nonexistent id simply isn't found here — that's
+            // the multi-tenant guard, not just a friendliness check.
+            var vendorExists = await db.Vendors.AnyAsync(v => v.Id == vendorId, ct);
+            if (!vendorExists)
+                return Error(400, "vendor.not_found", "That vendor no longer exists.");
+            if (doc.VendorId != vendorId)
+            {
+                doc.VendorId = vendorId;
+                changed = true;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(req.DocumentType))
+        {
+            var type = req.DocumentType.Trim().ToLowerInvariant();
+            if (!AllowedDocumentTypes.Contains(type))
+                return Error(400, "document.invalid_type", "That document type isn't recognized.");
+            if (!string.Equals(doc.DocumentType, type, StringComparison.Ordinal))
+            {
+                doc.DocumentType = type;
+                changed = true;
+            }
+        }
+
+        if (!changed)
+            return Results.Ok(new { data = new { message = "No changes." }, error = (object?)null });
+
+        doc.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        // Assigning a vendor (which may carry a requirement set) or changing the
+        // document type (which changes WHICH rules apply — see ComplianceCheckService's
+        // applicableRules filter) can turn a forever-"Pending" verdict into a real
+        // answer. Re-evaluate inline; the extraction worker is the only other place
+        // that ever triggers a compliance check, and it won't re-run for a doc that
+        // already finished extracting. Best-effort: a failure here must NOT fail the
+        // assignment the user just made — the verdict can be recomputed on the next
+        // re-extract.
+        try
+        {
+            await compliance.EvaluateAsync(doc.Id, ct);
+        }
+        catch (Exception ex)
+        {
+            loggerFactory.CreateLogger("DocumentEndpoints")
+                .LogError(ex, "Compliance re-evaluation failed after updating document {DocumentId}", doc.Id);
+        }
+
+        // No explicit IAuditLogger call: the vendor/type change is an ENTITY
+        // mutation, so AuditSaveChangesInterceptor already emitted a
+        // "document.updated" row (full Before/After) on the SaveChanges above —
+        // and the compliance re-eval's own SaveChanges audits the verdict change.
+        // Per CLAUDE.md, manual IAuditLogger is reserved for NON-entity events;
+        // re-emitting "document.updated" here would double the row in the
+        // customer's audit export (#186 review — architecture reviewer).
+        return Results.Ok(new { data = new { message = "Document updated." }, error = (object?)null });
+    }
+
     private static async Task<IResult> UploadDocument(
         HttpContext http,
         AppDbContext db,
@@ -188,7 +275,15 @@ public static class DocumentEndpoints
 
         Guid? vendorId = null;
         if (Guid.TryParse(form["vendorId"].ToString(), out var parsedVendorId))
+        {
+            // Validate vendor ownership the same way PATCH does — the tenant
+            // filter on AppDbContext.Vendors scopes the lookup to this org, so a
+            // cross-org or stale id can't silently associate the document with a
+            // vendor the uploader can't see (#186 review — test-quality reviewer).
+            if (!await db.Vendors.AnyAsync(v => v.Id == parsedVendorId, ct))
+                return Error(400, "vendor.not_found", "That vendor no longer exists.");
             vendorId = parsedVendorId;
+        }
         var declaredType = form["documentType"].ToString();
         if (string.IsNullOrWhiteSpace(declaredType)) declaredType = "other";
 

@@ -23,9 +23,12 @@ import {
   jsonError,
   authedMe,
   documentsAllStatuses,
+  makeDocument,
   makeDocumentsResponse,
   sequencedJsonOk,
   sequencedResponses,
+  dropFilesIn,
+  makeFile,
 } from "@/test";
 
 afterEach(() => {
@@ -698,5 +701,163 @@ describe("DocumentsPage — state matrix (#36)", () => {
     expect(
       screen.getByRole("button", { name: /remove coi-completed\.pdf/i }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("DocumentsPage — capture vendor + type at upload (#186)", () => {
+  it("drop stages the file behind a vendor/type step; upload is blocked until a vendor is chosen, then sends both", async () => {
+    let uploadCalled = false;
+    server.use(
+      http.get(url("/api/documents"), () =>
+        jsonOk(makeDocumentsResponse({ items: [], total: 0 })),
+      ),
+      http.get(url("/api/vendors"), () =>
+        jsonOk([{ id: "v1", name: "Acme Catering" }]),
+      ),
+      http.post(url("/api/documents/upload"), () => {
+        uploadCalled = true;
+        return jsonOk({
+          id: "d_new",
+          originalFileName: "coi.pdf",
+          extractionStatus: "Pending",
+        });
+      }),
+    );
+
+    // The jsdom + undici fetch path doesn't serialize FormData into an
+    // inspectable multipart body (request.text() yields "[object FormData]"),
+    // so spy on FormData.append to pin the exact wire contract — that the page
+    // passes the chosen vendorId and document type into the upload form.
+    const appendSpy = vi.spyOn(FormData.prototype, "append");
+    try {
+      const { container } = renderWithProviders(<DocumentsPage />, { auth: authedMe });
+      await waitFor(() =>
+        expect(screen.getByText(/no documents yet/i)).toBeInTheDocument(),
+      );
+
+      // Dropping does NOT upload immediately — it stages the file.
+      dropFilesIn(container, [makeFile("coi.pdf")]);
+      await waitFor(() =>
+        expect(screen.getByText(/add details before uploading/i)).toBeInTheDocument(),
+      );
+      expect(uploadCalled).toBe(false);
+
+      // Upload is gated on choosing a vendor.
+      expect(screen.getByRole("button", { name: /upload 1 file/i })).toBeDisabled();
+
+      // Pick the vendor AND change the document type away from the default,
+      // then upload.
+      fireEvent.click(await screen.findByRole("button", { name: "Acme Catering" }));
+      fireEvent.change(screen.getByLabelText(/^document type$/i), {
+        target: { value: "permit" },
+      });
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /upload 1 file/i })).not.toBeDisabled(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /upload 1 file/i }));
+
+      // The upload carried the chosen vendor AND the user-selected type — pins
+      // the page wiring (DocumentTypeSelect onChange → stagedType → upload form),
+      // the exact wiring that stops documents from landing orphaned-and-Pending.
+      await waitFor(() => expect(uploadCalled).toBe(true));
+      expect(appendSpy).toHaveBeenCalledWith("vendorId", "v1");
+      expect(appendSpy).toHaveBeenCalledWith("documentType", "permit");
+      expect(appendSpy).toHaveBeenCalledWith("file", expect.any(File));
+    } finally {
+      appendSpy.mockRestore();
+    }
+  });
+
+  it("a mid-batch upload failure keeps only the un-uploaded files staged — no duplicate re-upload on retry", async () => {
+    let uploadCalls = 0;
+    server.use(
+      http.get(url("/api/documents"), () =>
+        jsonOk(makeDocumentsResponse({ items: [], total: 0 })),
+      ),
+      http.get(url("/api/vendors"), () =>
+        jsonOk([{ id: "v1", name: "Acme Catering" }]),
+      ),
+      http.post(url("/api/documents/upload"), () => {
+        uploadCalls++;
+        // Call 1 (file A) succeeds, call 2 (file B) fails, call 3 (retry of B) succeeds.
+        if (uploadCalls === 2) {
+          return jsonError("server.error", "blip", { status: 500 });
+        }
+        return jsonOk({
+          id: `d_${uploadCalls}`,
+          originalFileName: "x.pdf",
+          extractionStatus: "Pending",
+        });
+      }),
+    );
+
+    const { container } = renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() =>
+      expect(screen.getByText(/no documents yet/i)).toBeInTheDocument(),
+    );
+
+    dropFilesIn(container, [makeFile("fileA.pdf"), makeFile("fileB.pdf")]);
+    await waitFor(() => expect(screen.getByText("fileA.pdf")).toBeInTheDocument());
+    expect(screen.getByText("fileB.pdf")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Acme Catering" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /upload 2 files/i })).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /upload 2 files/i }));
+
+    // After the mid-batch failure: the succeeded file (A) is removed from the
+    // staging list; the failed file (B) remains so it can be retried.
+    await waitFor(() => expect(screen.queryByText("fileA.pdf")).toBeNull());
+    expect(screen.getByText("fileB.pdf")).toBeInTheDocument();
+    expect(uploadCalls).toBe(2);
+
+    // Retry re-sends ONLY file B — never the already-uploaded file A. With the
+    // bug, A would re-upload too (uploadCalls would reach 4 and mint a duplicate).
+    fireEvent.click(screen.getByRole("button", { name: /upload 1 file/i }));
+    await waitFor(() => expect(uploadCalls).toBe(3));
+    await waitFor(() => expect(screen.queryByText("fileB.pdf")).toBeNull());
+  });
+
+  it("an orphaned row exposes an Assign affordance that PATCHes the chosen vendor", async () => {
+    let patchedId: string | null = null;
+    let patchBody: unknown = null;
+    server.use(
+      http.get(url("/api/documents"), () =>
+        jsonOk(
+          makeDocumentsResponse({
+            items: [
+              makeDocument({
+                id: "d_orphan",
+                originalFileName: "orphan.pdf",
+                vendorName: null,
+                vendorId: null,
+                extractionStatus: "Completed", // terminal → no polling
+                complianceStatus: "Pending",
+              }),
+            ],
+            total: 1,
+          }),
+        ),
+      ),
+      http.get(url("/api/vendors"), () =>
+        jsonOk([{ id: "v1", name: "Acme Catering" }]),
+      ),
+      http.patch(url("/api/documents/:id"), async ({ params, request }) => {
+        patchedId = params.id as string;
+        patchBody = await request.json();
+        return jsonOk({ message: "Document updated." });
+      }),
+    );
+
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText("orphan.pdf")).toBeInTheDocument());
+
+    // The orphaned vendor cell shows an assign affordance instead of "—".
+    fireEvent.click(screen.getByRole("button", { name: /assign vendor/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Acme Catering" }));
+
+    await waitFor(() => expect(patchedId).toBe("d_orphan"));
+    expect(patchBody).toEqual({ vendorId: "v1" });
   });
 });

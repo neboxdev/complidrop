@@ -21,6 +21,7 @@ import LoginPage from "@/app/(auth)/login/page";
 import RegisterForm from "@/app/(auth)/register/register-form";
 import VendorsPage from "@/app/(dashboard)/vendors/page";
 import VendorDetailPage from "@/app/(dashboard)/vendors/[id]/page";
+import DocumentsPage from "@/app/(dashboard)/documents/page";
 import DocumentDetailPage from "@/app/(dashboard)/documents/[id]/page";
 import ExportPage from "@/app/(dashboard)/export/page";
 import SettingsPage from "@/app/(dashboard)/settings/page";
@@ -34,6 +35,9 @@ import {
   url,
   jsonOk,
   makeDocumentDetail,
+  makeDocumentsResponse,
+  dropFilesIn,
+  makeFile,
 } from "@/test";
 import { http } from "msw";
 
@@ -138,6 +142,31 @@ describe("form labels wired via htmlFor + id (#76)", () => {
     expect(screen.getByLabelText(/^compliance template$/i)).toBeInstanceOf(
       HTMLSelectElement,
     );
+  });
+
+  it("DocumentsPage upload staging card: Vendor + Document type labels resolve their controls (#186)", async () => {
+    // The staging card's labeled controls only render once a file is dropped.
+    // Pins that the new Vendor (VendorPicker <Input>) and Document type
+    // (DocumentTypeSelect <select>) labels are wired via htmlFor + id so
+    // getByLabelText resolves them — the #76 contract for every new form.
+    server.use(
+      http.get(url("/api/documents"), () =>
+        jsonOk(makeDocumentsResponse({ items: [], total: 0 })),
+      ),
+      http.get(url("/api/vendors"), () => jsonOk([{ id: "v1", name: "Acme" }])),
+    );
+    const { container } = renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() =>
+      expect(screen.getByText(/no documents yet/i)).toBeInTheDocument(),
+    );
+
+    dropFilesIn(container, [makeFile("coi.pdf")]);
+    await waitFor(() =>
+      expect(screen.getByText(/add details before uploading/i)).toBeInTheDocument(),
+    );
+
+    expect(screen.getByLabelText(/^vendor$/i)).toBeInstanceOf(HTMLInputElement);
+    expect(screen.getByLabelText(/^document type$/i)).toBeInstanceOf(HTMLSelectElement);
   });
 
   it("DocumentDetailPage: dynamic field labels (`docfield-${id}`) are wired per row (#76 followup)", async () => {
