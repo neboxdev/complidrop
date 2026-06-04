@@ -50,3 +50,14 @@ public record DocumentFieldDto(
 public record FieldUpdateRequest(string FieldName, string? FieldValue);
 
 public record FieldsUpdateRequest(FieldUpdateRequest[] Fields);
+
+/// <summary>
+/// Partial update for a document's vendor assignment and/or declared type.
+/// Both fields are optional (PATCH semantics):
+///   - <see cref="VendorId"/> non-null  → (re)assign the document to that vendor.
+///   - <see cref="DocumentType"/> non-empty → set the declared type.
+/// A null/absent field is left unchanged. Unassigning a vendor (setting it back
+/// to null) is intentionally not supported here — the whole point of #186 is to
+/// keep every document associated with a vendor, never to re-orphan it.
+/// </summary>
+public record DocumentPatchRequest(Guid? VendorId, string? DocumentType);
