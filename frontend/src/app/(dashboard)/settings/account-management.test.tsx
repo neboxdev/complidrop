@@ -7,6 +7,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { http } from "msw";
 import { screen, fireEvent, waitFor } from "@testing-library/react";
 import { SecuritySection, DangerZone } from "./account-management";
+import { ME_KEY } from "@/hooks/useAuth";
 import {
   renderWithProviders,
   server,
@@ -17,6 +18,7 @@ import {
   toastError,
   resetSonner,
   navState,
+  authedMe,
 } from "@/test";
 
 describe("SecuritySection — change password (#183)", () => {
@@ -180,7 +182,7 @@ describe("DangerZone — delete account (#183)", () => {
         return jsonOk({ message: "deleted" });
       }),
     );
-    renderWithProviders(<DangerZone />);
+    const { queryClient } = renderWithProviders(<DangerZone />, { auth: authedMe });
 
     // The password field is hidden until the user opts in.
     expect(screen.queryByLabelText(/enter your password to confirm/i)).toBeNull();
@@ -193,5 +195,8 @@ describe("DangerZone — delete account (#183)", () => {
 
     await waitFor(() => expect(captured).toEqual({ password: "Password1234" }));
     await waitFor(() => expect(navState.router.push).toHaveBeenCalledWith("/login"));
+    // useDeleteAccount's onSuccess must tear down the cached session (setMeCache(null)
+    // + qc.clear()) so the deleted user can't keep rendering as authenticated.
+    await waitFor(() => expect(queryClient.getQueryData([...ME_KEY])).toBeUndefined());
   });
 });

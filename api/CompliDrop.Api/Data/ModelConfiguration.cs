@@ -35,8 +35,10 @@ internal static class ModelConfiguration
             e.Property(t => t.NewEmail).HasMaxLength(256);
             e.HasIndex(t => t.TokenHash).IsUnique();
             e.HasIndex(t => t.UserId);
-            // Cascade: when a user is hard-deleted (#183 account deletion), their
-            // outstanding verification tokens go with them.
+            // Cascade so a genuine HARD delete of a user takes its tokens with it
+            // (FK integrity). Note: #183 account deletion is a SOFT delete (ADR
+            // 0013) — it never fires this cascade; the soft-delete query filter
+            // makes the tokens unreachable instead.
             e.HasOne(t => t.User).WithMany()
                 .HasForeignKey(t => t.UserId).OnDelete(DeleteBehavior.Cascade);
         });

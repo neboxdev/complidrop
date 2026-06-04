@@ -27,15 +27,16 @@ public sealed class PasswordResetTests(IntegrationTestFixture fixture) : Integra
     }
 
     /// <summary>
-    /// forgot-password fires the Resend send fire-and-forget (so response time
-    /// can't leak account existence — #183), so the captured send may land a tick
-    /// after the 200. Poll briefly for it (deterministic: the fake completes
-    /// almost immediately).
+    /// forgot-password does ALL its work (user lookup, token write, audit, send)
+    /// on a DETACHED background scope so response time can't leak account existence
+    /// (#183 + #180 re-review). The captured send therefore lands after the 200 —
+    /// poll for it. Deterministic (the fake email completes synchronously); the
+    /// generous bound covers the background scope + DB round-trips on CI.
     /// </summary>
     private async Task WaitForSendsAsync(int count)
     {
-        for (var i = 0; i < 200 && Email.Sends.Count < count; i++)
-            await Task.Delay(10);
+        for (var i = 0; i < 500 && Email.Sends.Count < count; i++)
+            await Task.Delay(20);
         Email.Sends.Count.Should().BeGreaterThanOrEqualTo(count, "the reset email(s) should have been sent");
     }
 
@@ -203,7 +204,11 @@ public sealed class PasswordResetTests(IntegrationTestFixture fixture) : Integra
         var body = await last.Content.ReadFromJsonAsync<JsonElement>();
         body.GetProperty("error").GetProperty("code").GetString().Should().Be("auth.locked");
         var message = body.GetProperty("error").GetProperty("message").GetString()!;
-        message.Should().Contain("locked until", "the lockout message must show when access returns (#183)");
+        // Relative duration ("about N more minutes") — conveys when access returns
+        // WITHOUT leaking the org's time zone to an unauthenticated caller (#180 re-review).
+        message.Should().MatchRegex(@"locked for about \d+ more minute", "the lockout message must show when access returns (#183)");
         message.Should().Contain("Reset your password", "the lockout message must point to the recovery path");
+        // Must NOT leak org-internal config (an IANA zone like 'America/...') pre-auth.
+        message.Should().NotContain("/", "the unauthenticated lockout message must not embed an IANA time zone");
     }
 }

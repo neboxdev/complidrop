@@ -6,8 +6,10 @@ namespace CompliDrop.Api.Entities;
 /// Consumed exactly once (<see cref="ConsumedAt"/>) and expires at
 /// <see cref="ExpiresAt"/>. Not tenant-scoped — verification happens before any
 /// org context exists (the verify endpoint is anonymous, like register), so the
-/// token itself is the bearer secret. Soft-delete is intentionally absent:
-/// these rows are short-lived and pruned, not user-visible data.
+/// token itself is the bearer secret. Soft-delete is intentionally absent: these
+/// rows are short-lived, single-purpose, and not user-visible data. (No retention
+/// sweep exists yet — consumed/expired rows accumulate, same as IdempotencyRecord
+/// / ProcessedStripeEvent; a future cleanup job can prune past a horizon.)
 /// </summary>
 public class EmailVerificationToken
 {
