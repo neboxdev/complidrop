@@ -46,10 +46,33 @@ public class DisplayLabelsTests
     [InlineData("compliancetemplate.created", "Requirement set created")]
     [InlineData("document.uploaded", "Document uploaded")]
     [InlineData("vendor.created", "Vendor added")]
+    // Real actions emitted explicitly with camelCase + custom verbs — resolved
+    // case-insensitively, so the export PDF never shows them raw.
+    [InlineData("user.logged_in", "Signed in")]
+    [InlineData("complianceRule.upserted", "Requirement saved")]
+    [InlineData("vendorPortalLink.revoked", "Portal link revoked")]
     public void Action_humanizes_known_actions(string action, string expected)
         => DisplayLabels.Action(action).Should().Be(expected);
 
     [Fact]
     public void Action_does_not_garble_an_all_lowercase_entity_name()
         => DisplayLabels.Action("compliancetemplate.created").Should().NotContain("Compliancetemplate");
+
+    [Fact]
+    public void Action_humanizes_an_unmapped_action_instead_of_printing_it_raw()
+    {
+        // The audit PDF renders EVERY action; an action we forgot to map must
+        // still come out humanized (de-dotted / de-camelCased), never raw.
+        var label = DisplayLabels.Action("someNewEntity.weird_verb");
+        label.Should().NotContain(".");
+        label.Should().NotContain("_");
+        label.Should().Be("Some New Entity · Weird Verb");
+    }
+
+    [Theory]
+    [InlineData("ComplianceTemplate", "Requirement set")]
+    [InlineData("VendorPortalLink", "Portal link")]
+    [InlineData("Document", "Document")]
+    public void EntityType_humanizes_the_raw_entity_class_name(string entity, string expected)
+        => DisplayLabels.EntityType(entity).Should().Be(expected);
 }

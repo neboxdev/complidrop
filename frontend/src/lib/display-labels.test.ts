@@ -9,6 +9,8 @@ import {
   extractionStatusLabel,
   fieldLabel,
   actionLabel,
+  operatorLabel,
+  deliveryStatusLabel,
 } from "./display-labels";
 
 describe("complianceStatusLabel (#188)", () => {
@@ -40,6 +42,11 @@ describe("extractionStatusLabel (#188)", () => {
   it("never leaks the ManualRequired camelCase enum", () => {
     expect(extractionStatusLabel("ManualRequired")).not.toMatch(/ManualRequired/);
   });
+  it("falls back to the raw value for unknown, and to Waiting to read for empty", () => {
+    expect(extractionStatusLabel("Whatever")).toBe("Whatever");
+    expect(extractionStatusLabel(null)).toBe("Waiting to read");
+    expect(extractionStatusLabel(undefined)).toBe("Waiting to read");
+  });
 });
 
 describe("fieldLabel (#188)", () => {
@@ -64,6 +71,11 @@ describe("actionLabel (#188)", () => {
     expect(actionLabel("document.uploaded")).toBe("Document uploaded");
     expect(actionLabel("vendor.created")).toBe("Vendor added");
   });
+  it("maps the real login + explicit camelCase actions (not the dead user.login key)", () => {
+    expect(actionLabel("user.logged_in")).toBe("Signed in");
+    expect(actionLabel("complianceRule.upserted")).toBe("Requirement saved");
+    expect(actionLabel("vendorPortalLink.revoked")).toBe("Portal link revoked");
+  });
   it("fixes the all-lowercase entity garble the old prettyAction produced", () => {
     // Old prettyAction → "Compliancetemplate · Created"; the map gives English.
     expect(actionLabel("compliancetemplate.created")).toBe("Requirement set created");
@@ -72,5 +84,28 @@ describe("actionLabel (#188)", () => {
   it("falls back to a de-dotted, de-camelCased, title-cased form for unknown actions", () => {
     expect(actionLabel("fooBar.created")).toBe("Foo Bar · Created");
     expect(actionLabel("weird.action")).toBe("Weird · Action");
+  });
+});
+
+describe("operatorLabel (#188)", () => {
+  it("humanizes compliance-rule operators", () => {
+    expect(operatorLabel("min_value")).toBe("Must be at least");
+    expect(operatorLabel("required")).toBe("Must be present");
+    expect(operatorLabel("contains")).toBe("Must contain");
+  });
+  it("falls back to the raw operator for unknown / empty", () => {
+    expect(operatorLabel("weird_op")).toBe("weird_op");
+    expect(operatorLabel(null)).toBe("");
+  });
+});
+
+describe("deliveryStatusLabel (#188)", () => {
+  it("humanizes reminder delivery statuses", () => {
+    expect(deliveryStatusLabel("delivered")).toBe("Delivered");
+    expect(deliveryStatusLabel("bounced")).toBe("Bounced — bad address");
+    expect(deliveryStatusLabel("complained")).toBe("Marked as spam");
+  });
+  it("never leaks the raw lowercase token for a known status", () => {
+    expect(deliveryStatusLabel("complained")).not.toBe("complained");
   });
 });

@@ -1170,3 +1170,60 @@ describe("DocumentDetailPage — editable document type (#186)", () => {
     );
   });
 });
+
+describe("DocumentDetailPage — confidence hints instead of raw % (#188)", () => {
+  it("shows tiered hints for low/mid confidence and NO raw percentage", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_conf_01",
+            extractionStatus: "Completed",
+            fields: [
+              {
+                id: "f-high",
+                fieldName: "policy_number",
+                fieldValue: "POL-1",
+                fieldType: "string",
+                confidence: 0.97, // high → no hint
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+              {
+                id: "f-mid",
+                fieldName: "general_liability_limit",
+                fieldValue: "1000000",
+                fieldType: "string",
+                confidence: 0.8, // mid → "Double-check this"
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+              {
+                id: "f-low",
+                fieldName: "expiration_date",
+                fieldValue: "2026-12-31",
+                fieldType: "string",
+                confidence: 0.5, // low → "Please verify"
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_conf_01" },
+    });
+
+    await waitFor(() => expect(screen.getByText("Double-check this")).toBeInTheDocument());
+    expect(screen.getByText("Please verify")).toBeInTheDocument();
+    // The raw "NN% confident" copy is gone entirely.
+    expect(screen.queryByText(/% confident/i)).toBeNull();
+    expect(screen.queryByText(/\d+%/)).toBeNull();
+    // High-confidence field gets NO hint (only one "Double-check"/"Please verify" each).
+    expect(screen.getAllByText(/double-check this|please verify/i)).toHaveLength(2);
+  });
+});

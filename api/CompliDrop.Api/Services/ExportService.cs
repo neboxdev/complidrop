@@ -95,7 +95,7 @@ public class ExportService(SystemDbContext db) : IExportService
                                 {
                                     r.RelativeItem(2).Text(a.CreatedAt.ToString("yyyy-MM-dd HH:mm")).FontSize(8);
                                     r.RelativeItem(3).Text(DisplayLabels.Action(a.Action)).FontSize(8);
-                                    r.RelativeItem(2).Text(a.EntityType).FontSize(8);
+                                    r.RelativeItem(2).Text(DisplayLabels.EntityType(a.EntityType)).FontSize(8);
                                     r.RelativeItem(3).Text(a.UserId?.ToString() ?? "system").FontSize(8);
                                 });
                             }

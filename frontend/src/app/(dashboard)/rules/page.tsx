@@ -5,6 +5,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
+import { documentTypeLabel } from "@/lib/document-types";
+import { fieldLabel, operatorLabel } from "@/lib/display-labels";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -207,9 +209,9 @@ export default function RulesPage() {
                   <tbody>
                     {detail.data.rules.map((r) => (
                       <tr key={r.id} className="border-t border-slate-100">
-                        <td className="py-2 uppercase text-xs">{r.documentType}</td>
-                        <td className="py-2 text-slate-700">{r.fieldName}</td>
-                        <td className="py-2 text-slate-600">{r.operator}</td>
+                        <td className="py-2 text-xs">{documentTypeLabel(r.documentType)}</td>
+                        <td className="py-2 text-slate-700">{fieldLabel(r.fieldName)}</td>
+                        <td className="py-2 text-slate-600">{operatorLabel(r.operator)}</td>
                         <td className="py-2 text-slate-600">{r.expectedValue ?? "—"}</td>
                         <td className="py-2 text-slate-500 text-xs">{r.errorMessage ?? "—"}</td>
                         <td className="py-2 text-right">
@@ -267,12 +269,17 @@ function NewRuleRow({ onSave }: { onSave: (rule: Partial<TemplateRule>) => void 
         <select
           value={documentType}
           onChange={(e) => setDocumentType(e.target.value)}
-          className="border border-slate-200 rounded px-2 py-1 text-xs uppercase"
+          className="border border-slate-200 rounded px-2 py-1 text-xs"
         >
-          {DOC_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+          {DOC_TYPES.map((t) => <option key={t} value={t}>{documentTypeLabel(t)}</option>)}
         </select>
       </td>
       <td className="py-2">
+        {/* The field name is the technical extraction key the rules engine
+            matches against (LookupValue), so the user must enter the raw
+            snake_case key — the example placeholder is required guidance, not a
+            jargon leak. (A friendlier field picker is part of the separate
+            rules-page redesign, not #188.) */}
         <Input value={fieldName} onChange={(e) => setFieldName(e.target.value)} placeholder="e.g. general_liability_limit" className="h-8" />
       </td>
       <td className="py-2">
@@ -281,7 +288,7 @@ function NewRuleRow({ onSave }: { onSave: (rule: Partial<TemplateRule>) => void 
           onChange={(e) => setOperator(e.target.value)}
           className="border border-slate-200 rounded px-2 py-1 text-xs"
         >
-          {OPERATORS.map((o) => <option key={o} value={o}>{o}</option>)}
+          {OPERATORS.map((o) => <option key={o} value={o}>{operatorLabel(o)}</option>)}
         </select>
       </td>
       <td className="py-2">

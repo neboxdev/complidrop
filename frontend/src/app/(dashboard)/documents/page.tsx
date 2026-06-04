@@ -37,14 +37,16 @@ import { isAuthError } from "@/lib/query-client";
 
 const PAGE_SIZE = 25;
 
-// Compliance-status filter options. Labels stay friendly here; #188 introduces
-// the app-wide shared status-label map and will reconcile these with it.
-const STATUS_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: "Compliant", label: "Compliant" },
-  { value: "NonCompliant", label: "Not compliant" },
-  { value: "ExpiringSoon", label: "Expiring soon" },
-  { value: "Expired", label: "Expired" },
-  { value: "Pending", label: "Pending" },
+// Compliance-status filter values. The <option> labels come from the shared
+// complianceStatusLabel map (#188) so the dropdown and the row badges speak the
+// SAME words ("Action needed", "Awaiting review", …); the value stays the raw
+// enum the server's ?status= filter expects.
+const STATUS_FILTER_VALUES: ReadonlyArray<string> = [
+  "Compliant",
+  "NonCompliant",
+  "ExpiringSoon",
+  "Expired",
+  "Pending",
 ];
 
 const EXPIRY_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
@@ -342,9 +344,9 @@ export default function DocumentsPage() {
           onChange={(e) => onFilterChange(setStatus)(e.target.value)}
         >
           <option value="">All statuses</option>
-          {STATUS_FILTERS.map((s) => (
-            <option key={s.value} value={s.value}>
-              {s.label}
+          {STATUS_FILTER_VALUES.map((value) => (
+            <option key={value} value={value}>
+              {complianceStatusLabel(value)}
             </option>
           ))}
         </select>

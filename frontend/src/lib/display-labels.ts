@@ -75,7 +75,8 @@ const FIELD_LABELS: Readonly<Record<string, string>> = {
  * an unknown one falls back to a sentence-cased de-snaked / de-camelCased form
  * (so it's still readable, never a raw `some_new_field`).
  */
-export function fieldLabel(name: string): string {
+export function fieldLabel(name: string | null | undefined): string {
+  if (!name) return "";
   const known = FIELD_LABELS[name.trim().toLowerCase()];
   if (known) return known;
   const spaced = name
@@ -87,6 +88,10 @@ export function fieldLabel(name: string): string {
 
 // -------- Audit / activity actions --------
 
+// Keyed lower-case; lookups lower-case the input, so this resolves BOTH the
+// interceptor's all-lower-case entity actions (`compliancetemplate.created`)
+// AND the explicit camelCase ones (`complianceRule.upserted`,
+// `vendorPortalLink.revoked`). Keep in sync with DisplayLabels.cs's Actions.
 const ACTION_LABELS: Readonly<Record<string, string>> = {
   "document.created": "Document added",
   "document.uploaded": "Document uploaded",
@@ -95,19 +100,31 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   "document.verified": "Document verified",
   "document.fields_edited": "Document details edited",
   "document.reextract_queued": "Document re-read",
+  "documentfield.created": "Document detail added",
+  "documentfield.updated": "Document detail edited",
   "vendor.created": "Vendor added",
   "vendor.updated": "Vendor updated",
   "vendor.deleted": "Vendor removed",
   "vendorportallink.created": "Portal link created",
+  "vendorportallink.revoked": "Portal link revoked",
   "vendorportallink.deleted": "Portal link revoked",
   "compliancetemplate.created": "Requirement set created",
   "compliancetemplate.updated": "Requirement set updated",
   "compliancetemplate.deleted": "Requirement set removed",
   "compliancerule.created": "Requirement added",
   "compliancerule.updated": "Requirement updated",
+  "compliancerule.upserted": "Requirement saved",
   "compliancerule.deleted": "Requirement removed",
   "user.registered": "Account created",
-  "user.login": "Signed in",
+  "user.logged_in": "Signed in",
+  "user.login_failed": "Sign-in failed",
+  "user.password_changed": "Password changed",
+  "user.password_reset": "Password reset",
+  "user.password_reset_requested": "Password reset requested",
+  "user.email_verified": "Email verified",
+  "user.email_changed": "Email changed",
+  "user.email_change_requested": "Email change requested",
+  "user.account_deleted": "Account deleted",
 };
 
 /**
@@ -125,4 +142,36 @@ export function actionLabel(action: string): string {
     .replace(/\./g, " · ")
     .replace(/_/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// -------- Compliance-rule operators (the rules / requirements page) --------
+
+const OPERATOR_LABELS: Readonly<Record<string, string>> = {
+  required: "Must be present",
+  equals: "Must equal",
+  contains: "Must contain",
+  min_value: "Must be at least",
+};
+
+/** Human label for a compliance-rule operator (e.g. "min_value" → "Must be at least"). */
+export function operatorLabel(op: string | null | undefined): string {
+  if (!op) return "";
+  return OPERATOR_LABELS[op.trim().toLowerCase()] ?? op;
+}
+
+// -------- Reminder email delivery status --------
+
+const DELIVERY_STATUS_LABELS: Readonly<Record<string, string>> = {
+  sent: "Sent",
+  delivered: "Delivered",
+  failed: "Couldn't send",
+  bounced: "Bounced — bad address",
+  complained: "Marked as spam",
+};
+
+/** Human label for a Resend delivery status (e.g. "bounced" → "Bounced — bad address"). */
+export function deliveryStatusLabel(status: string | null | undefined): string {
+  if (!status) return "";
+  const key = status.trim().toLowerCase();
+  return DELIVERY_STATUS_LABELS[key] ?? status;
 }

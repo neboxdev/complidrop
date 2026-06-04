@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
+import { deliveryStatusLabel } from "@/lib/display-labels";
 
 type Reminder = {
   id: string;
@@ -124,7 +125,7 @@ export default function RemindersPage() {
                     <td className="py-2 text-slate-600">{new Date(h.sentAt).toLocaleString()}</td>
                     <td className="py-2 text-slate-600">{h.recipient}</td>
                     <td className="py-2">
-                      <Badge className={statusHue(h.status)}>{h.status}</Badge>
+                      <Badge className={statusHue(h.status)}>{deliveryStatusLabel(h.status)}</Badge>
                     </td>
                   </tr>
                 ))}
