@@ -92,21 +92,32 @@ export default function RulesPage() {
   // copy by replaying its rules through the existing POST endpoints — no clone
   // endpoint / migration needed for the MVP (#192).
   const cloneChecklist = useMutation({
-    mutationFn: async (source: TemplateSummary) => {
+    mutationFn: async (source: { id: string; name: string; description: string | null }) => {
       const full = await api.get<TemplateDetail>(`/api/compliance/templates/${source.id}`);
       const created = await api.post<{ id: string }>("/api/compliance/templates", {
         name: source.name,
         description: source.description,
       });
-      for (const r of [...full.rules].sort((a, b) => a.sortOrder - b.sortOrder)) {
-        await api.post(`/api/compliance/templates/${created.id}/rules`, {
-          documentType: r.documentType,
-          fieldName: r.fieldName,
-          operator: r.operator,
-          expectedValue: r.expectedValue,
-          errorMessage: r.errorMessage,
-          sortOrder: r.sortOrder,
-        });
+      try {
+        for (const r of [...full.rules].sort((a, b) => a.sortOrder - b.sortOrder)) {
+          await api.post(`/api/compliance/templates/${created.id}/rules`, {
+            documentType: r.documentType,
+            fieldName: r.fieldName,
+            operator: r.operator,
+            expectedValue: r.expectedValue,
+            errorMessage: r.errorMessage,
+            sortOrder: r.sortOrder,
+          });
+        }
+      } catch (replayError) {
+        // Roll back the partial clone so the user is never left with an orphaned,
+        // half-populated checklist (best effort — the rollback delete itself may fail).
+        try {
+          await api.delete(`/api/compliance/templates/${created.id}`);
+        } catch {
+          /* swallow — the original error is what we surface */
+        }
+        throw replayError;
       }
       return created.id;
     },
@@ -227,7 +238,15 @@ export default function RulesPage() {
               onAddRequirement={(rule) =>
                 upsertRule.mutate({
                   templateId: detail.data!.id,
-                  rule: { ...rule, sortOrder: (detail.data?.rules.length ?? 0) + 1 },
+                  // Derive from max existing sortOrder, NOT the count — after a middle
+                  // requirement is removed, length no longer equals the max and a new
+                  // rule would collide with an existing one's sortOrder.
+                  rule: {
+                    ...rule,
+                    sortOrder: detail.data!.rules.length
+                      ? Math.max(...detail.data!.rules.map((r) => r.sortOrder)) + 1
+                      : 1,
+                  },
                 })
               }
               onEditRequirement={(ruleId, rule, sortOrder) =>
@@ -237,7 +256,7 @@ export default function RulesPage() {
                 deleteRule.mutate({ templateId: detail.data!.id, ruleId })
               }
               onDeleteChecklist={() => deleteChecklist.mutate(detail.data!.id)}
-              onUse={() => cloneChecklist.mutate(detail.data as unknown as TemplateSummary)}
+              onUse={() => cloneChecklist.mutate(detail.data!)}
               using={cloneChecklist.isPending}
             />
           )}

@@ -27,6 +27,17 @@ namespace CompliDrop.Api.Migrations
         {
             foreach (var (oldName, newName) in Renames)
                 Rename(migrationBuilder, oldName, newName);
+
+            // Drop the old generic "additional_insured = 'property'" rule the Property
+            // Vendor template carried — it reads nonsensically once renamed/cloned ("Names
+            // 'property' as additional insured"), and a venue names ITSELF, so the value is
+            // per-tenant (the user adds it after cloning). additional_insured appears only in
+            // this one seeded system checklist, so the IsSystemTemplate-scoped delete is
+            // precise. Constant SQL, no timestamptz → ADR 0009 N/A. (#192 review.)
+            migrationBuilder.Sql(
+                "DELETE FROM \"ComplianceRules\" WHERE \"FieldName\" = 'additional_insured' " +
+                "AND \"ComplianceTemplateId\" IN " +
+                "(SELECT \"Id\" FROM \"ComplianceTemplates\" WHERE \"IsSystemTemplate\" = true);");
         }
 
         /// <inheritdoc />

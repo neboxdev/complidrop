@@ -25,6 +25,13 @@ describe("money helpers (#192)", () => {
     expect(parseMoneyInput("")).toBeNull();
     expect(parseMoneyInput("abc")).toBeNull();
   });
+
+  it("truncates a pasted decimal to whole dollars (never concatenates the cents)", () => {
+    // "$1,000,000.50" must NOT become 100000050 — coverage limits are whole dollars.
+    expect(parseMoneyInput("$1,000,000.50")).toBe(1_000_000);
+    expect(parseMoneyInput("12.99")).toBe(12);
+    expect(parseMoneyInput(".50")).toBeNull(); // no whole-dollar part
+  });
 });
 
 describe("requirementSentence (#192)", () => {
@@ -61,6 +68,25 @@ describe("requirementSentence (#192)", () => {
     ).toBe("License has not expired");
   });
 
+  it("interpolates the typed value for text requirements (additional insured / license type)", () => {
+    expect(
+      requirementSentence({
+        documentType: "coi",
+        fieldName: "additional_insured",
+        operator: "contains",
+        expectedValue: "Riverside Event Hall",
+      }),
+    ).toMatch(/riverside event hall.*additional insured/i);
+    expect(
+      requirementSentence({
+        documentType: "license",
+        fieldName: "license_type",
+        operator: "equals",
+        expectedValue: "CDL",
+      }),
+    ).toMatch(/holds a .cdl. license/i);
+  });
+
   it("falls back to a readable sentence for an unknown rule — never a raw token", () => {
     const s = requirementSentence({
       documentType: "coi",
@@ -70,6 +96,17 @@ describe("requirementSentence (#192)", () => {
     });
     expect(s).not.toMatch(/some_new_field/);
     expect(s).toMatch(/some new field/i);
+  });
+
+  it("never leaks a raw operator token for a future/unknown operator", () => {
+    const s = requirementSentence({
+      documentType: "coi",
+      fieldName: "general_liability_limit",
+      operator: "in_range", // not an engine operator the catalog knows
+      expectedValue: "1-5",
+    });
+    expect(s).not.toMatch(/in_range/);
+    expect(s).toMatch(/custom rule/i);
   });
 });
 
@@ -87,6 +124,13 @@ describe("REQUIREMENT_TYPES → engine mapping (#192)", () => {
     expect(
       findRequirementType({ documentType: "coi", fieldName: "general_liability_limit", operator: "min_value" })?.key,
     ).toBe("general_liability");
+    // Text requirements resolve too (so the Edit affordance can pre-fill them).
+    expect(
+      findRequirementType({ documentType: "coi", fieldName: "additional_insured", operator: "contains" })?.key,
+    ).toBe("additional_insured");
+    expect(
+      findRequirementType({ documentType: "license", fieldName: "license_type", operator: "equals" })?.key,
+    ).toBe("license_type");
     // A different documentType for the same field is a DIFFERENT requirement (no match here).
     expect(
       findRequirementType({ documentType: "license", fieldName: "general_liability_limit", operator: "min_value" }),

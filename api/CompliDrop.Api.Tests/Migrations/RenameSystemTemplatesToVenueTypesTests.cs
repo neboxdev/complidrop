@@ -1,8 +1,12 @@
+using System.Reflection;
 using CompliDrop.Api.Data.Seed;
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Migrations;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations.Operations;
 
 namespace CompliDrop.Api.Tests.Migrations;
 
@@ -109,5 +113,38 @@ public sealed class RenameSystemTemplatesToVenueTypesTests(IntegrationTestFixtur
                 .Where(o => o.Id == tenantOrgId)
                 .ExecuteDeleteAsync();
         }
+    }
+}
+
+/// <summary>
+/// Pure unit test that inspects the migration's OWN operations (no DB), so a regression
+/// that dropped the load-bearing <c>IsSystemTemplate</c> key guard from the UpdateData
+/// renames — which a hand-written-SQL re-derivation could not catch — fails the build.
+/// </summary>
+public sealed class RenameSystemTemplatesToVenueTypesGuardTests
+{
+    [Fact]
+    public void Up_renames_are_scoped_to_system_templates_and_drop_the_orphan_rule()
+    {
+        var migration = new RenameSystemTemplatesToVenueTypes();
+        var builder = new MigrationBuilder(activeProvider: null);
+        // Up is protected — invoke via reflection to capture the real operations.
+        typeof(RenameSystemTemplatesToVenueTypes)
+            .GetMethod("Up", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(migration, [builder]);
+
+        var renames = builder.Operations.OfType<UpdateDataOperation>().ToList();
+        renames.Should().HaveCount(5, "one rename per seeded system checklist");
+        renames.Should().OnlyContain(
+            op => op.Table == "ComplianceTemplates"
+                  && op.KeyColumns.Contains("Name")
+                  && op.KeyColumns.Contains("IsSystemTemplate") // the guard
+                  && op.Columns.Contains("Name"),
+            "every rename must be keyed on IsSystemTemplate so a user's same-named checklist is left alone");
+
+        // The orphan additional_insured cleanup is present + IsSystemTemplate-scoped.
+        builder.Operations.OfType<SqlOperation>()
+            .Should().ContainSingle(op =>
+                op.Sql.Contains("additional_insured") && op.Sql.Contains("IsSystemTemplate"));
     }
 }

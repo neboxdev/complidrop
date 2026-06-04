@@ -103,11 +103,14 @@ public static class ComplianceTemplateSeed
                 new("coi", "workers_comp_limit", "required", null, "Workers comp coverage is required.", 3)
             ]),
         new("Event Rental Company",
-            "Coverage for table, tent, and equipment rental vendors who name your venue as additional insured.",
+            "Coverage for table, tent, and equipment rental vendors.",
             [
+                // The "names your venue as additional insured" requirement is intentionally
+                // NOT seeded: a venue names ITSELF, so the value is per-tenant — the user adds
+                // it (with their own venue name) after cloning. A one-size placeholder reads
+                // nonsensically. (#192 review.)
                 new("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000.", 1),
-                new("coi", "additional_insured", "contains", "property", "Certificate holder must be named as additional insured.", 2),
-                new("coi", "expiration_date", "required", null, "Expiration date is required.", 3)
+                new("coi", "expiration_date", "required", null, "Expiration date is required.", 2)
             ]),
         new("Security Service",
             "Licensing for event security and guard services.",

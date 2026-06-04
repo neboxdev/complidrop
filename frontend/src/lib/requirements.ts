@@ -57,9 +57,13 @@ export function formatMoney(amount: number): string {
   return `$${Math.trunc(amount).toLocaleString("en-US")}`;
 }
 
-/** "$1,000,000" / "1,000,000" / "1000000" → 1000000; blank / non-numeric → null. */
+/**
+ * "$1,000,000" / "1,000,000" / "1000000" → 1000000; blank / non-numeric → null.
+ * Coverage limits are whole dollars, so a pasted decimal is TRUNCATED at the
+ * point ("$1,000,000.50" → 1000000), never concatenated into 100000050.
+ */
 export function parseMoneyInput(raw: string): number | null {
-  const digits = raw.replace(/[^0-9]/g, "");
+  const digits = raw.split(".")[0].replace(/[^0-9]/g, "");
   if (digits === "") return null;
   const n = Number.parseInt(digits, 10);
   return Number.isFinite(n) ? n : null;
@@ -239,8 +243,14 @@ export function requirementSentence(rule: {
   if (type) return type.sentence(rule.expectedValue);
 
   const field = fieldLabel(rule.fieldName) || "This document";
-  const op = operatorLabel(rule.operator).toLowerCase();
   if (rule.operator === "required") return `${field} must be present`;
+  // Only the engine's known operators get an English phrasing; anything else
+  // (a future operator) degrades to a neutral sentence rather than leaking the
+  // raw token — keeping this function's "never a raw operator" promise true.
+  if (!["equals", "contains", "min_value"].includes(rule.operator)) {
+    return `${field} must meet a custom rule`;
+  }
+  const op = operatorLabel(rule.operator).toLowerCase();
   const value = rule.expectedValue?.trim();
   return value ? `${field} ${op} ${value}` : `${field} ${op}`;
 }

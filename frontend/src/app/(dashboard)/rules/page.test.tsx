@@ -140,6 +140,93 @@ describe("RulesPage — plain-English authoring (#192)", () => {
     });
   });
 
+  it("the 'not expired' toggle POSTs the honest required-on-expiration_date rule (no value)", async () => {
+    let body: Record<string, unknown> | undefined;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk({ ...DETAIL, rules: [] })),
+      http.post(url("/api/compliance/templates/:id/rules"), async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return jsonOk({ id: "r_exp" });
+      }),
+    );
+
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    await screen.findByRole("heading", { name: /caterer/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /add a requirement/i }));
+    fireEvent.click(screen.getByRole("button", { name: /document must not be expired/i }));
+    // valueKind "none" → Add is immediately enabled (no fill-in).
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+    await waitFor(() => expect(body).toBeDefined());
+    expect(body).toMatchObject({ documentType: "coi", fieldName: "expiration_date", operator: "required" });
+    expect(body!.expectedValue).toBeNull();
+  });
+
+  it("a text requirement (additional insured) POSTs the typed value as a contains rule", async () => {
+    let body: Record<string, unknown> | undefined;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk({ ...DETAIL, rules: [] })),
+      http.post(url("/api/compliance/templates/:id/rules"), async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return jsonOk({ id: "r_ai" });
+      }),
+    );
+
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    await screen.findByRole("heading", { name: /caterer/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /add a requirement/i }));
+    fireEvent.click(screen.getByRole("button", { name: /names you as additional insured/i }));
+    fireEvent.change(screen.getByLabelText(/name to look for/i), {
+      target: { value: "Riverside Event Hall" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+    await waitFor(() => expect(body).toBeDefined());
+    expect(body).toMatchObject({
+      documentType: "coi",
+      fieldName: "additional_insured",
+      operator: "contains",
+      expectedValue: "Riverside Event Hall",
+    });
+  });
+
+  it("editing a money requirement pre-fills the formatted amount and upserts with the existing rule id", async () => {
+    let body: Record<string, unknown> | undefined;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL)), // has r_gl_01 @ $1,000,000
+      http.post(url("/api/compliance/templates/:id/rules"), async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return jsonOk({ id: "r_gl_01" });
+      }),
+    );
+
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /edit requirement/i }));
+
+    // The stored bare integer "1000000" pre-fills as the formatted display.
+    const amount = screen.getByLabelText(/minimum coverage amount/i) as HTMLInputElement;
+    expect(amount.value).toBe("$1,000,000");
+    fireEvent.change(amount, { target: { value: "2000000" } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(body).toBeDefined());
+    // Upsert-with-id (an EDIT, not a duplicate insert), new amount stored as bare integer.
+    expect(body).toMatchObject({
+      id: "r_gl_01",
+      fieldName: "general_liability_limit",
+      operator: "min_value",
+      expectedValue: "2000000",
+    });
+  });
+
   it("the money field uses a numeric keyboard and disables Add until an amount is entered (gap #21)", async () => {
     server.use(
       http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
@@ -218,29 +305,32 @@ describe("RulesPage — delete requirement fires one refetch (#93 carried over)"
 });
 
 describe("RulesPage — suggested checklists clone (#192)", () => {
-  it("'Use this' replays the suggested rules into a new editable checklist and selects it", async () => {
+  const TWO_RULE_SUGGESTED = {
+    id: "t_sys_01",
+    name: "Photographer / Videographer",
+    description: "Suggested",
+    isSystemTemplate: true,
+    rules: [
+      { id: "s1", documentType: "coi", fieldName: "general_liability_limit", operator: "min_value", expectedValue: "500000", errorMessage: "x", sortOrder: 1 },
+      { id: "s2", documentType: "coi", fieldName: "expiration_date", operator: "required", expectedValue: null, errorMessage: "y", sortOrder: 2 },
+    ],
+  };
+
+  it("'Use this' replays EVERY suggested rule in order into a new editable checklist and selects it", async () => {
     let created = 0;
-    let replayed = 0;
+    const replayed: string[] = [];
     server.use(
       http.get(url("/api/compliance/templates"), () => jsonOk([SUGGESTED])),
-      http.get(url("/api/compliance/templates/t_sys_01"), () =>
-        jsonOk({
-          id: "t_sys_01",
-          name: "Photographer / Videographer",
-          description: "Suggested",
-          isSystemTemplate: true,
-          rules: DETAIL.rules,
-        }),
-      ),
+      http.get(url("/api/compliance/templates/t_sys_01"), () => jsonOk(TWO_RULE_SUGGESTED)),
       http.post(url("/api/compliance/templates"), () => {
         created++;
         return jsonOk({ id: "t_clone_01" });
       }),
-      http.post(url("/api/compliance/templates/t_clone_01/rules"), () => {
-        replayed++;
+      http.post(url("/api/compliance/templates/t_clone_01/rules"), async ({ request }) => {
+        const b = (await request.json()) as { fieldName: string };
+        replayed.push(b.fieldName);
         return jsonOk({ id: "r_clone" });
       }),
-      // After cloning, the page selects the new id and fetches its detail.
       http.get(url("/api/compliance/templates/t_clone_01"), () =>
         jsonOk({ ...DETAIL, id: "t_clone_01", isSystemTemplate: false }),
       ),
@@ -251,11 +341,44 @@ describe("RulesPage — suggested checklists clone (#192)", () => {
 
     await waitFor(() => {
       expect(created).toBe(1);
-      expect(replayed).toBe(1); // one rule replayed
+      // BOTH rules replayed, in sortOrder.
+      expect(replayed).toEqual(["general_liability_limit", "expiration_date"]);
     });
     await waitFor(() =>
       expect(toastSuccess).toHaveBeenCalledWith("Checklist added — edit it to fit your vendors"),
     );
+  });
+
+  it("rolls back the new checklist (and surfaces a friendly toast) if a rule fails mid-replay", async () => {
+    let ruleCalls = 0;
+    let rolledBack = false;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([SUGGESTED])),
+      http.get(url("/api/compliance/templates/t_sys_01"), () => jsonOk(TWO_RULE_SUGGESTED)),
+      http.post(url("/api/compliance/templates"), () => jsonOk({ id: "t_clone_01" })),
+      http.post(url("/api/compliance/templates/t_clone_01/rules"), () => {
+        ruleCalls++;
+        // First rule succeeds, second fails mid-replay.
+        return ruleCalls === 1
+          ? jsonOk({ id: "r_clone" })
+          : jsonError("server.error", "Couldn't copy a requirement.", { status: 500 });
+      }),
+      http.delete(url("/api/compliance/templates/t_clone_01"), () => {
+        rolledBack = true;
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /use this/i }));
+
+    // The half-created checklist is deleted (no orphan)...
+    await waitFor(() => expect(rolledBack).toBe(true));
+    // ...and the failure is surfaced jargon-free, not as a silent success.
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    const msg = String(toastError.mock.calls.at(-1)?.[0] ?? "");
+    expect(msg).not.toMatch(/typeerror|failed to fetch|\b50\d\b/i);
+    expect(toastSuccess).not.toHaveBeenCalled();
   });
 });
 
