@@ -786,18 +786,23 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         log.SendDate.Should().Be(new DateOnly(2026, 1, 15));
     }
 
-    [Fact]
-    public async Task Time_zone_edit_dedupe_guard_is_bounded_to_recent_sends()
+    [Theory]
+    [InlineData(25.0, true)]   // just inside the 26h window → suppressed (even on an earlier SendDate)
+    [InlineData(27.0, false)]  // just outside the window → not suppressed
+    [InlineData(48.0, false)]  // a stale prior occurrence, well outside → not suppressed
+    public async Task Tz_edit_guard_suppresses_a_prior_send_only_within_the_26h_window(
+        double priorSendHoursAgo, bool expectSuppressed)
     {
-        // The guard suppresses a recipient only when a prior send for this (reminder, doc) falls
-        // inside the trailing 26h window. A *stale* prior log — older than the window and on an
-        // earlier SendDate — must NOT suppress a legitimately-due send, or the guard would wedge a
-        // (reminder, doc, recipient) forever instead of staying a recent-send check. Pins the
-        // window's lower bound (ADR 0015) so a future "any prior send suppresses" simplification
-        // fails here.
+        // Pins the guard WIDTH. The prior log is written on an EARLIER SendDate so the same-day arm
+        // (l.SendDate == sendDate) cannot match — only the new trailing-window arm
+        // (l.SentAt >= nowUtc - TzEditDedupeWindow) decides. A prior send is suppressed iff its
+        // SentAt is inside the 26h window. A regression that shrank or grew TzEditDedupeWindow flips
+        // one of these cases — the marquee test's ~10h gap survives any plausible shrink, so it can't
+        // pin the width on its own. The 48h case also pins the lower bound: a stale send never wedges
+        // a (reminder, doc, recipient) forever, it stays a *recent*-send check.
         var seed = await SeedReminderAsync(NyEightAm, internalEmail: "owner@example.com");
 
-        // A send logged 48h before this tick (well outside the 26h guard), on an earlier SendDate.
+        var priorSentAt = NyEightAm.UtcDateTime.AddHours(-priorSendHoursAgo);
         await using (var db = CreateSystemDb())
         {
             db.ReminderLogs.Add(new ReminderLog
@@ -806,9 +811,9 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
                 ReminderId = seed.ReminderId,
                 DocumentId = seed.DocumentId,
                 RecipientEmail = "owner@example.com",
-                SentAt = NyEightAm.UtcDateTime.AddHours(-48),
-                SendDate = new DateOnly(2026, 1, 13), // earlier day, ≠ today's Jan 15
-                ResendMessageId = "resend_stale",
+                SentAt = priorSentAt,
+                SendDate = DateOnly.FromDateTime(priorSentAt), // earlier day, ≠ today's Jan 15
+                ResendMessageId = "resend_prior",
                 Status = "sent",
             });
             await db.SaveChangesAsync();
@@ -816,9 +821,210 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
 
         await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
 
-        // Stale row is outside the window and on a different SendDate → today's send proceeds.
+        if (expectSuppressed)
+        {
+            Email.Sends.Should().BeEmpty("a prior send inside the 26h window suppresses today's send");
+            (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1); // only the prior row
+        }
+        else
+        {
+            Email.Sends.Should().ContainSingle().Which.ToEmail.Should().Be("owner@example.com");
+            (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(2); // prior + today's
+        }
+    }
+
+    [Fact]
+    public async Task Tz_edit_guard_is_per_recipient_a_recent_send_to_one_does_not_suppress_another()
+    {
+        // The widened clause drops the SendDate constraint; the per-RecipientEmail HashSet is what
+        // keeps it from over-suppressing. A recent send to the internal owner (on an earlier
+        // SendDate, so matched only by the new SentAt arm) must NOT suppress the vendor's first send.
+        var seed = await SeedReminderAsync(
+            NyEightAm, notifyInternal: true, notifyVendor: true,
+            internalEmail: "owner@example.com", vendorEmail: "vendor@example.com");
+
+        // Prior send to owner only, 20h ago (inside the 26h window) on an earlier SendDate.
+        var priorSentAt = NyEightAm.UtcDateTime.AddHours(-20);
+        await using (var db = CreateSystemDb())
+        {
+            db.ReminderLogs.Add(new ReminderLog
+            {
+                Id = Guid.NewGuid(),
+                ReminderId = seed.ReminderId,
+                DocumentId = seed.DocumentId,
+                RecipientEmail = "owner@example.com",
+                SentAt = priorSentAt,
+                SendDate = DateOnly.FromDateTime(priorSentAt), // Jan 14, ≠ today's Jan 15
+                ResendMessageId = "resend_prior_owner",
+                Status = "sent",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        // Owner is suppressed by the guard; vendor (no prior send) is sent.
+        Email.Sends.Select(s => s.ToEmail).Should().Equal(["vendor@example.com"]);
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(2); // prior owner + new vendor
+    }
+
+    [Fact]
+    public async Task Tz_edit_guard_is_per_document_a_recent_send_for_one_doc_does_not_suppress_another()
+    {
+        // The lookup is pinned by DocumentId, so a recent send for doc A must not suppress doc B
+        // under the same reminder. Structurally guaranteed by the unchanged DocumentId filter; this
+        // pins it so a future mis-scoping regression in the widened clause is caught.
+        var orgId = Guid.NewGuid();
+        var reminderId = Guid.NewGuid();
+        var docAId = Guid.NewGuid();
+        var docBId = Guid.NewGuid();
+        var vendorId = Guid.NewGuid();
+        var userId = Guid.NewGuid();
+        var now = NyEightAm.UtcDateTime;
+        var exp = ExpirationForOrgWindow(NyTz, NyEightAm, 30);
+
+        await using (var db = CreateSystemDb())
+        {
+            db.Organizations.Add(new Organization { Id = orgId, Name = $"Org-{orgId:N}", TimeZone = NyTz, CreatedAt = now, UpdatedAt = now });
+            db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = orgId, Name = "V", CreatedAt = now, UpdatedAt = now });
+            db.Users.Add(new User { Id = userId, OrganizationId = orgId, Email = "owner@example.com", PasswordHash = "x", FullName = "Owner", Role = "admin", CreatedAt = now });
+            db.Documents.AddRange(
+                new Document { Id = docAId, OrganizationId = orgId, VendorId = vendorId, OriginalFileName = "a.pdf", BlobStorageUrl = "b", FileSizeBytes = 1, ContentType = "application/pdf", ExpirationDate = exp, CreatedAt = now, UpdatedAt = now },
+                new Document { Id = docBId, OrganizationId = orgId, VendorId = vendorId, OriginalFileName = "b.pdf", BlobStorageUrl = "b", FileSizeBytes = 1, ContentType = "application/pdf", ExpirationDate = exp, CreatedAt = now, UpdatedAt = now });
+            db.Reminders.Add(new Reminder { Id = reminderId, OrganizationId = orgId, DaysBefore = 30, NotifyInternalUser = true, IsActive = true });
+            // Recent send for doc A only, 20h ago on an earlier SendDate.
+            var priorSentAt = now.AddHours(-20);
+            db.ReminderLogs.Add(new ReminderLog
+            {
+                Id = Guid.NewGuid(),
+                ReminderId = reminderId,
+                DocumentId = docAId,
+                RecipientEmail = "owner@example.com",
+                SentAt = priorSentAt,
+                SendDate = DateOnly.FromDateTime(priorSentAt),
+                ResendMessageId = "resend_prior_docA",
+                Status = "sent",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        // Doc A's recipient is suppressed (recent send); doc B's is sent — the guard is per-document.
+        Email.Sends.Select(s => s.ToEmail).Should().Equal(["owner@example.com"]); // exactly one, for doc B
+        (await LogCountAsync(reminderId, docAId)).Should().Be(1); // prior only, no re-send
+        (await LogCountAsync(reminderId, docBId)).Should().Be(1); // newly sent
+    }
+
+    [Fact]
+    public async Task Editing_time_zone_suppresses_the_re_fire_for_both_internal_and_vendor_recipients()
+    {
+        // The multi-recipient end-to-end. The double-send is most costly for the vendor (outside the
+        // org's trust boundary, real Resend cost). Tick 1 (NY) sends to owner + vendor; after the zone
+        // edit, tick 2 (Tokyo, next local day) must suppress BOTH.
+        var docExpiresUtc = new DateTime(2026, 1, 15, 20, 0, 0, DateTimeKind.Utc);
+        var seed = await SeedReminderAsync(
+            NyEightAm, timeZone: NyTz, daysBefore: 0,
+            notifyInternal: true, notifyVendor: true,
+            internalEmail: "owner@example.com", vendorEmail: "vendor@example.com",
+            overrideExpirationUtc: docExpiresUtc);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+        Email.Sends.Select(s => s.ToEmail).Should().BeEquivalentTo(["owner@example.com", "vendor@example.com"]);
+
+        await using (var db = CreateSystemDb())
+        {
+            var org = await db.Organizations.SingleAsync(o => o.Id == seed.OrgId);
+            org.TimeZone = TokyoTz;
+            await db.SaveChangesAsync();
+        }
+
+        var tokyoNextDayTick = new DateTimeOffset(2026, 1, 15, 23, 0, 0, TimeSpan.Zero);
+        await BuildWorker(tokyoNextDayTick).ProcessHourlyTickAsync(CancellationToken.None);
+
+        // No additional sends; exactly the two original rows remain, both on NY-local Jan 15.
+        Email.Sends.Should().HaveCount(2);
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(2);
+        await using var assertDb = CreateSystemDb();
+        var sendDates = await assertDb.ReminderLogs
+            .Where(l => l.ReminderId == seed.ReminderId)
+            .Select(l => l.SendDate)
+            .ToListAsync();
+        sendDates.Should().AllBeEquivalentTo(new DateOnly(2026, 1, 15));
+    }
+
+    [Fact]
+    public async Task Editing_time_zone_across_an_extreme_offset_jump_still_dedupes_a_two_day_send_date_shift()
+    {
+        // The asymmetric / robustness case the SentAt key (vs a SendDate-adjacency guard) exists for.
+        // An extreme eastward jump — Pacific/Pago_Pago (UTC-11) → Pacific/Kiritimati (UTC+14), a 25h
+        // increase — pushes the second qualifying tick TWO local calendar days later (SendDate shifts
+        // Jan 15 → Jan 17) while the two ticks stay 23h apart in UTC. A ±1-day SendDate-adjacency
+        // guard would miss this; the 26h SentAt window catches it.
+        const string pagoPago = "Pacific/Pago_Pago";   // UTC-11, no DST
+        const string kiritimati = "Pacific/Kiritimati"; // UTC+14, no DST
+
+        // Expiration in the 1h overlap of the two target windows: 10:30 UTC Jan 16
+        // = Pago_Pago 23:30 Jan 15 (inside its Jan 15 window) = Kiritimati 00:30 Jan 17 (inside Jan 17).
+        var docExpiresUtc = new DateTime(2026, 1, 16, 10, 30, 0, DateTimeKind.Utc);
+        var pagoTick = new DateTimeOffset(2026, 1, 15, 19, 0, 0, TimeSpan.Zero); // Pago_Pago 08:00 Jan 15
+        var seed = await SeedReminderAsync(
+            pagoTick, timeZone: pagoPago, daysBefore: 0,
+            internalEmail: "owner@example.com",
+            overrideExpirationUtc: docExpiresUtc);
+
+        await BuildWorker(pagoTick).ProcessHourlyTickAsync(CancellationToken.None);
         Email.Sends.Should().ContainSingle().Which.ToEmail.Should().Be("owner@example.com");
-        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(2); // stale + today's
+        await using (var db = CreateSystemDb())
+        {
+            var firstLog = await db.ReminderLogs.SingleAsync(l => l.ReminderId == seed.ReminderId);
+            firstLog.SendDate.Should().Be(new DateOnly(2026, 1, 15)); // Pago_Pago-local day
+        }
+
+        await using (var db = CreateSystemDb())
+        {
+            var org = await db.Organizations.SingleAsync(o => o.Id == seed.OrgId);
+            org.TimeZone = kiritimati;
+            await db.SaveChangesAsync();
+        }
+
+        var kiritimatiTick = new DateTimeOffset(2026, 1, 16, 18, 0, 0, TimeSpan.Zero); // Kiritimati 08:00 Jan 17
+        await BuildWorker(kiritimatiTick).ProcessHourlyTickAsync(CancellationToken.None);
+
+        // localDate Jan 17 (a 2-day shift); without the SentAt guard it would double-send. The
+        // 23h-old prior send is inside the 26h window → suppressed.
+        Email.Sends.Should().ContainSingle("a 2-day SendDate shift from an extreme zone edit must not re-send");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Editing_time_zone_within_the_same_local_day_still_dedupes_via_the_same_day_key()
+    {
+        // The widening must be purely ADDITIVE: a zone edit whose next qualifying tick lands on the
+        // SAME local calendar day is still deduped by the unchanged same-day SendDate arm (ADR 0002 /
+        // 0007), independent of the new guard. NY → Chicago: NY 08:00 Jan 15 (13:00 UTC) then Chicago
+        // 08:00 Jan 15 (14:00 UTC) — both localDate Jan 15, same SendDate.
+        var docExpiresUtc = new DateTime(2026, 1, 15, 18, 0, 0, DateTimeKind.Utc); // mid-Jan-15 in both zones
+        var seed = await SeedReminderAsync(
+            NyEightAm, timeZone: NyTz, daysBefore: 0,
+            internalEmail: "owner@example.com",
+            overrideExpirationUtc: docExpiresUtc);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+        Email.Sends.Should().ContainSingle();
+
+        await using (var db = CreateSystemDb())
+        {
+            var org = await db.Organizations.SingleAsync(o => o.Id == seed.OrgId);
+            org.TimeZone = "America/Chicago";
+            await db.SaveChangesAsync();
+        }
+
+        var chicagoTick = new DateTimeOffset(2026, 1, 15, 14, 0, 0, TimeSpan.Zero); // Chicago 08:00 Jan 15
+        await BuildWorker(chicagoTick).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle("a same-local-day zone edit is deduped by the unchanged SendDate key");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
     }
 
     // ----- Additional coverage from review (DST, multi-reminder, retry, subject template) ------
