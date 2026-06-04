@@ -736,6 +736,91 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1); // unchanged
     }
 
+    // ----- #205: editable-time-zone double-send guard ----------------------------------------
+    // #185 made the org time zone user-editable. Editing it around local 08:00 can re-open the
+    // send window on a *different* org-local calendar day within ~24h, computing a different
+    // SendDate that the (…, SendDate, …) unique index and the same-day dedupe set would miss.
+    // The trailing-window guard (TzEditDedupeWindow, ADR 0015) keys on the prior send's UTC
+    // SentAt — which a zone edit cannot move — to suppress the re-fire.
+
+    [Fact]
+    public async Task Editing_time_zone_around_local_08_does_not_double_send_the_same_reminder()
+    {
+        // The marquee #205 regression. A document expires at 20:00 UTC Jan 15, which lands inside
+        // BOTH the NY-local Jan 15 target window AND the Tokyo-local Jan 16 window (DaysBefore = 0):
+        // 20:00 UTC Jan 15 = NY 15:00 Jan 15 = Tokyo 05:00 Jan 16. So after the org switches zones,
+        // the same doc qualifies on two different local calendar days within ~10h.
+        var docExpiresUtc = new DateTime(2026, 1, 15, 20, 0, 0, DateTimeKind.Utc);
+        var seed = await SeedReminderAsync(
+            NyEightAm, timeZone: NyTz, daysBefore: 0,
+            internalEmail: "owner@example.com",
+            overrideExpirationUtc: docExpiresUtc);
+
+        // Tick 1: NY-local 08:00 Jan 15 (13:00 UTC). One send; SendDate = Jan 15.
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+        Email.Sends.Should().ContainSingle().Which.ToEmail.Should().Be("owner@example.com");
+
+        // Owner edits the org time zone to Asia/Tokyo (the #185 capability). Updating the row
+        // directly is equivalent to the endpoint's effect — the worker reads TimeZone fresh each
+        // tick.
+        await using (var db = CreateSystemDb())
+        {
+            var org = await db.Organizations.SingleAsync(o => o.Id == seed.OrgId);
+            org.TimeZone = TokyoTz;
+            await db.SaveChangesAsync();
+        }
+
+        // Tick 2: 23:00 UTC Jan 15 = Tokyo-local 08:00 Jan 16 → the window re-opens with
+        // SendDate = Jan 16 (≠ Jan 15), and the same doc matches the Tokyo-local Jan 16 window.
+        // Without the guard this is a second send to the same recipient; the guard sees the prior
+        // SentAt (13:00 UTC Jan 15) inside the trailing 26h window and suppresses it.
+        var tokyoNextDayTick = new DateTimeOffset(2026, 1, 15, 23, 0, 0, TimeSpan.Zero);
+        await BuildWorker(tokyoNextDayTick).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle("the zone edit must not re-send the same reminder");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+
+        // The single retained row is the NY-local Jan 15 send; no Jan 16 row was written.
+        await using var assertDb = CreateSystemDb();
+        var log = await assertDb.ReminderLogs.SingleAsync(l => l.ReminderId == seed.ReminderId);
+        log.SendDate.Should().Be(new DateOnly(2026, 1, 15));
+    }
+
+    [Fact]
+    public async Task Time_zone_edit_dedupe_guard_is_bounded_to_recent_sends()
+    {
+        // The guard suppresses a recipient only when a prior send for this (reminder, doc) falls
+        // inside the trailing 26h window. A *stale* prior log — older than the window and on an
+        // earlier SendDate — must NOT suppress a legitimately-due send, or the guard would wedge a
+        // (reminder, doc, recipient) forever instead of staying a recent-send check. Pins the
+        // window's lower bound (ADR 0015) so a future "any prior send suppresses" simplification
+        // fails here.
+        var seed = await SeedReminderAsync(NyEightAm, internalEmail: "owner@example.com");
+
+        // A send logged 48h before this tick (well outside the 26h guard), on an earlier SendDate.
+        await using (var db = CreateSystemDb())
+        {
+            db.ReminderLogs.Add(new ReminderLog
+            {
+                Id = Guid.NewGuid(),
+                ReminderId = seed.ReminderId,
+                DocumentId = seed.DocumentId,
+                RecipientEmail = "owner@example.com",
+                SentAt = NyEightAm.UtcDateTime.AddHours(-48),
+                SendDate = new DateOnly(2026, 1, 13), // earlier day, ≠ today's Jan 15
+                ResendMessageId = "resend_stale",
+                Status = "sent",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        // Stale row is outside the window and on a different SendDate → today's send proceeds.
+        Email.Sends.Should().ContainSingle().Which.ToEmail.Should().Be("owner@example.com");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(2); // stale + today's
+    }
+
     // ----- Additional coverage from review (DST, multi-reminder, retry, subject template) ------
 
     [Fact]
