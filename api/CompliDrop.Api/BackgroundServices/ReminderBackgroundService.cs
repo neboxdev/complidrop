@@ -15,6 +15,24 @@ public class ReminderBackgroundService(
 {
     private const int TargetLocalHour = 8;
 
+    /// <summary>
+    /// Trailing window for the editable-time-zone double-send guard (#205). The org time zone
+    /// became user-editable in #185; changing it around the local 08:00 window can open a
+    /// <em>second</em> qualifying tick on a different org-local calendar day within ~24h. That
+    /// second tick computes a different <see cref="ReminderLog.SendDate"/>, so it slips past both
+    /// the <c>(ReminderId, DocumentId, SendDate, RecipientEmail)</c> unique index and the same-day
+    /// <c>alreadySent</c> set — re-sending the same document's reminder to the same recipient.
+    /// <para/>
+    /// The two qualifying ticks are provably &lt;24h apart in UTC: each fires at a fixed offset
+    /// from its ~24h org-local expiration window, and both windows must contain the same document's
+    /// single (fixed-UTC) expiration instant, so their starts — and therefore the ticks — fall
+    /// inside one 24h span. 26h also matches the maximum IANA UTC-offset span (UTC+14…UTC-12), the
+    /// most a zone edit can shift the local calendar day. A 26h trailing guard therefore catches
+    /// the re-fire with margin while staying far short of a reminder's once-per-document cadence,
+    /// so it cannot suppress a legitimately distinct future occurrence. See ADR 0015.
+    /// </summary>
+    private static readonly TimeSpan TzEditDedupeWindow = TimeSpan.FromHours(26);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("ReminderBackgroundService starting.");
@@ -207,10 +225,26 @@ public class ReminderBackgroundService(
                             // Pull the set of recipients we've already logged for this (reminder, doc,
                             // day) so multi-recipient reminders dedupe per recipient instead of skipping
                             // the doc once any recipient has been sent.
+                            //
+                            // Two predicates, OR'd:
+                            //   (a) l.SendDate == sendDate — the same-org-local-day dedupe of ADR 0002 /
+                            //       ADR 0007. Unchanged; this is the per-recipient invariant the unique
+                            //       index enforces.
+                            //   (b) l.SentAt >= tzEditGuardStart — the editable-time-zone guard (#205).
+                            //       A zone edit (#185) around local 08:00 can re-open the send window on a
+                            //       *different* local calendar day within ~24h, computing a different
+                            //       SendDate that (a) alone would miss. Suppress a recipient already sent
+                            //       this (reminder, doc) within the trailing guard window regardless of
+                            //       which SendDate that prior send recorded. See TzEditDedupeWindow / ADR 0015.
+                            //
+                            // The (ReminderId, DocumentId) prefix of the unique index makes this selective
+                            // — a single (reminder, doc) accrues at most a handful of log rows over its
+                            // lifetime — so the added SentAt predicate needs no separate index.
+                            var tzEditGuardStart = nowUtc - TzEditDedupeWindow;
                             var alreadySent = (await db.ReminderLogs
                                 .Where(l => l.ReminderId == reminder.Id
                                             && l.DocumentId == doc.Id
-                                            && l.SendDate == sendDate)
+                                            && (l.SendDate == sendDate || l.SentAt >= tzEditGuardStart))
                                 .Select(l => l.RecipientEmail)
                                 .ToListAsync(ct))
                                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
