@@ -22,6 +22,10 @@ internal static class ModelConfiguration
             e.Property(u => u.FullName).HasMaxLength(200);
             e.Property(u => u.Role).HasMaxLength(50).HasDefaultValue("admin");
             e.HasIndex(u => u.Email).IsUnique();
+            // Store-generated default so EVERY existing row gets a non-empty stamp
+            // on migration (gen_random_uuid()), and rows inserted without an
+            // explicit stamp still get one. Register sets it explicitly. (#202)
+            e.Property(u => u.SecurityStamp).HasDefaultValueSql("gen_random_uuid()");
             e.HasOne(u => u.Organization).WithMany(o => o.Users)
                 .HasForeignKey(u => u.OrganizationId).OnDelete(DeleteBehavior.Cascade);
         });

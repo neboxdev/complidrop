@@ -1,6 +1,10 @@
+using System.Security.Claims;
 using System.Text.Json;
 using CompliDrop.Api.Configuration;
+using CompliDrop.Api.Data;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 
@@ -47,6 +51,50 @@ public static class CookieAuthSetup
                             ctx.Token = token;
                         }
                         return Task.CompletedTask;
+                    },
+                    // Per-request principal re-validation (#202). Stateless JWTs
+                    // have no native revocation, so after the signature/lifetime
+                    // pass we re-check the live user against the DB. This:
+                    //   (a) rejects a soft-deleted account's still-valid session on
+                    //       EVERY authenticated endpoint — not only those that
+                    //       re-load the user — closing the gap where a deleted
+                    //       account kept reading/exporting for the session TTL; and
+                    //   (b) evicts any token whose `stamp` no longer matches the
+                    //       user's SecurityStamp (rotated on password reset/change),
+                    //       so a stolen/old token stops working the moment the
+                    //       credential changes.
+                    // One indexed PK lookup per authed request — acceptable for an
+                    // auth-critical SaaS; can be short-TTL cached later if needed.
+                    OnTokenValidated = async ctx =>
+                    {
+                        if (!Guid.TryParse(ctx.Principal?.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+                        {
+                            ctx.Fail("Invalid token subject.");
+                            return;
+                        }
+
+                        var db = ctx.HttpContext.RequestServices.GetRequiredService<SystemDbContext>();
+                        // SystemDbContext applies the soft-delete filter, so a
+                        // deleted (or missing) user resolves to null.
+                        var current = await db.Users.AsNoTracking()
+                            .Where(u => u.Id == userId)
+                            .Select(u => new { u.SecurityStamp })
+                            .FirstOrDefaultAsync(ctx.HttpContext.RequestAborted);
+                        if (current is null)
+                        {
+                            ctx.Fail("Account is no longer active.");
+                            return;
+                        }
+
+                        // Grandfather pre-#202 tokens (no `stamp` claim): liveness
+                        // above already applies; only reject an explicit MISMATCH so
+                        // a deploy doesn't mass-evict everyone holding an old token.
+                        var stamp = ctx.Principal!.FindFirstValue("stamp");
+                        if (!string.IsNullOrEmpty(stamp)
+                            && !string.Equals(stamp, current.SecurityStamp.ToString(), StringComparison.Ordinal))
+                        {
+                            ctx.Fail("Credentials changed; please sign in again.");
+                        }
                     },
                     // The default JwtBearer challenge writes an EMPTY 401 body
                     // (only a WWW-Authenticate header). The SPA's api.ts then

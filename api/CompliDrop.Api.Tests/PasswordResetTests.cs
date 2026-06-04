@@ -192,6 +192,26 @@ public sealed class PasswordResetTests(IntegrationTestFixture fixture) : Integra
     }
 
     [Fact]
+    public async Task Reset_password_evicts_an_existing_session()
+    {
+        // #202: a reset is the account-takeover recovery path, so an already-issued
+        // session (e.g. the attacker's) must stop working after the reset. The
+        // stamp rotation + per-request re-validation (ADR 0014) enforces it.
+        var auth = await RegisterAndLoginAsync(); // a live session, separate from the reset
+        (await auth.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        Email.Reset();
+        (await CreateClient().PostAsJsonAsync("/api/auth/forgot-password", new { email = auth.Email })).EnsureSuccessStatusCode();
+        await WaitForSendsAsync(1);
+        var token = ExtractResetToken(Email.Sends.Single().HtmlBody);
+        (await CreateClient().PostAsJsonAsync("/api/auth/reset-password", new { token, newPassword = "BrandNewPass123" }))
+            .EnsureSuccessStatusCode();
+
+        // The pre-reset session carries the OLD security stamp → now 401.
+        (await auth.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
     public async Task Lockout_response_shows_an_unlock_time()
     {
         var auth = await RegisterAndLoginAsync();

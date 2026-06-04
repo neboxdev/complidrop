@@ -1,9 +1,13 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Claims;
+using System.Text;
 using System.Text.Json;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.IdentityModel.Tokens;
 
 namespace CompliDrop.Api.Tests;
 
@@ -379,5 +383,74 @@ public sealed class AuthEndpointsTests(IntegrationTestFixture fixture) : Integra
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
         body.GetProperty("error").GetProperty("code").GetString().Should().Be("auth.unauthorized");
         body.GetProperty("error").GetProperty("message").GetString().Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Fact]
+    public async Task A_refresh_token_minted_before_a_password_change_can_no_longer_refresh()
+    {
+        // #202: the Refresh path validates the refresh token MANUALLY (it bypasses
+        // the OnTokenValidated middleware), so its own stamp check must reject a
+        // refresh token issued before a credential change — this guards the 30-day
+        // cd_refresh, the longest-lived credential the ticket targets.
+        var email = $"stamp-refresh-{Guid.NewGuid():N}@x.com";
+        var reg = await RawClient().PostAsJsonAsync("/api/auth/register", NewRegistration(email));
+        var cookies = SetCookies(reg);
+        var session = CookieValue(cookies, "cd_session");
+        var oldRefresh = CookieValue(cookies, "cd_refresh");
+        session.Should().NotBeNullOrEmpty();
+        oldRefresh.Should().NotBeNullOrEmpty();
+
+        // Change the password (rotates the security stamp) using the session cookie.
+        var change = new HttpRequestMessage(HttpMethod.Post, "/api/auth/change-password")
+        {
+            Content = JsonContent.Create(new { currentPassword = "Password1234", newPassword = "RotatedPass456" })
+        };
+        change.Headers.TryAddWithoutValidation("Cookie", $"cd_session={session}");
+        (await RawClient().SendAsync(change)).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // The refresh token captured BEFORE the change carries the old stamp → 401.
+        var refresh = new HttpRequestMessage(HttpMethod.Post, "/api/auth/refresh");
+        refresh.Headers.TryAddWithoutValidation("Cookie", $"cd_refresh={oldRefresh}");
+        (await RawClient().SendAsync(refresh)).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task A_session_token_without_a_stamp_claim_is_grandfathered()
+    {
+        // Deploy-safety (#202/ADR 0014): a token minted before security stamps
+        // existed (no `stamp` claim) must still authenticate against a live user —
+        // liveness applies, the stamp check is skipped — so deploying #202 doesn't
+        // mass-logout everyone holding a pre-existing token.
+        var auth = await RegisterAndLoginAsync();
+        var stampless = MintStamplessSessionToken(auth.UserId, auth.OrgId);
+
+        var req = new HttpRequestMessage(HttpMethod.Get, "/api/auth/me");
+        req.Headers.TryAddWithoutValidation("Cookie", $"cd_session={stampless}");
+        (await RawClient().SendAsync(req)).StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    /// <summary>Mints a valid session JWT with NO `stamp` claim, signed with the test host's
+    /// Jwt secret/issuer/audience (see CustomWebApplicationFactory) — simulates a pre-#202 token.</summary>
+    private static string MintStamplessSessionToken(Guid userId, Guid orgId)
+    {
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes("integration-test-signing-secret-key-0123456789"));
+        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        var now = DateTime.UtcNow;
+        var token = new JwtSecurityToken(
+            issuer: "complidrop-api-test",
+            audience: "complidrop-frontend-test",
+            claims: new[]
+            {
+                new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()),
+                new Claim(ClaimTypes.NameIdentifier, userId.ToString()),
+                new Claim("org_id", orgId.ToString()),
+                new Claim("plan", "free"),
+                new Claim("typ", "session"),
+                // deliberately NO "stamp" claim
+            },
+            notBefore: now,
+            expires: now.AddMinutes(15),
+            signingCredentials: creds);
+        return new JwtSecurityTokenHandler().WriteToken(token);
     }
 }
