@@ -8,6 +8,7 @@ using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace CompliDrop.Api.Endpoints;
@@ -189,7 +190,7 @@ public static class AuthEndpoints
             return Error(401, "auth.invalid_credentials", "Invalid email or password.");
 
         if (user.LockedUntil is { } locked && locked > DateTime.UtcNow)
-            return Error(423, "auth.locked", await BuildLockoutMessageAsync(db, user, locked));
+            return Error(423, "auth.locked", BuildLockoutMessage(locked));
 
         if (!hasher.Verify(req.Password ?? string.Empty, user.PasswordHash))
         {
@@ -207,7 +208,7 @@ public static class AuthEndpoints
             // time + reset path now (#183) rather than a bare "invalid" that
             // leaves them hammering a locked account.
             if (user.LockedUntil is { } justLocked && justLocked > DateTime.UtcNow)
-                return Error(423, "auth.locked", await BuildLockoutMessageAsync(db, user, justLocked));
+                return Error(423, "auth.locked", BuildLockoutMessage(justLocked));
             return Error(401, "auth.invalid_credentials", "Invalid email or password.");
         }
 
@@ -396,13 +397,16 @@ public static class AuthEndpoints
             return Results.Ok(new { data = new { message = "Your email is already confirmed." }, error = (object?)null });
 
         var now = DateTime.UtcNow;
-        // Consume previously-emailed links so a stale one can't be redeemed after
-        // a resend. (Two near-simultaneous resends could each leave a valid link;
-        // that's benign — both belong to the same user verifying their own email,
-        // and the 5/min auth-strict limit makes the interleave rare — so we don't
-        // serialize.)
+        // Consume previously-emailed SIGNUP-verification links (NewEmail == null)
+        // so a stale one can't be redeemed after a resend. Deliberately leave any
+        // pending CHANGE-EMAIL token (NewEmail != null) intact: resend targets the
+        // user's CURRENT address, and a one-tap banner resend must NOT silently
+        // cancel an in-flight email change (a cross-flow data-loss seam surfaced
+        // in the #180 re-review). (Two near-simultaneous resends could each leave
+        // a valid signup link; that's benign — same user, same address, 5/min
+        // limited — so we don't serialize.)
         var outstanding = await db.EmailVerificationTokens
-            .Where(t => t.UserId == userId && t.ConsumedAt == null)
+            .Where(t => t.UserId == userId && t.ConsumedAt == null && t.NewEmail == null)
             .ToListAsync();
         foreach (var t in outstanding) t.ConsumedAt = now;
 
@@ -467,21 +471,22 @@ public static class AuthEndpoints
     // ───────────────────────── Account & access management (#183) ─────────────────────────
 
     /// <summary>
-    /// Anonymous (#183). Sends a password-reset link. ALWAYS returns 200 with the
-    /// same body whether or not the email exists, so it can't be used to enumerate
-    /// registered accounts. Issuing a token invalidates any prior outstanding
-    /// reset tokens for that user (only the newest link works).
+    /// Anonymous (#183). Sends a password-reset link. ALWAYS returns the same 200
+    /// body, and now does ALL account-existence-dependent work (the user lookup,
+    /// token write, audit, and email send) on a DETACHED background scope — so the
+    /// response time is identical whether or not the email is registered. An
+    /// earlier version only detached the email send, but the exists-path still did
+    /// extra synchronous DB round-trips (token query/insert + audit), leaving a
+    /// measurable timing oracle (#180 re-review). Moving everything off the
+    /// request path closes it: both the registered and unregistered cases return
+    /// after zero DB work.
     /// </summary>
-    private static async Task<IResult> ForgotPassword(
+    private static IResult ForgotPassword(
         ForgotPasswordRequest req,
-        SystemDbContext db,
+        IServiceScopeFactory scopeFactory,
         IOptions<FrontendSettings> frontendOpts,
-        IEmailService email,
-        ILogger<PasswordResetToken> logger,
-        IAuditLogger audit,
-        HttpContext http)
+        ILogger<PasswordResetToken> logger)
     {
-        // One generic response for every path — never reveal account existence.
         var generic = Results.Ok(new
         {
             data = new { message = "If that email is registered, we've sent a password reset link." },
@@ -491,38 +496,51 @@ public static class AuthEndpoints
         var normalized = req.Email?.Trim().ToLowerInvariant();
         if (string.IsNullOrWhiteSpace(normalized)) return generic;
 
-        var user = await db.Users.FirstOrDefaultAsync(u => u.Email == normalized);
-        if (user is null) return generic;
-
-        var now = DateTime.UtcNow;
-        var outstanding = await db.PasswordResetTokens
-            .Where(t => t.UserId == user.Id && t.ConsumedAt == null)
-            .ToListAsync();
-        foreach (var t in outstanding) t.ConsumedAt = now;
-
-        var (raw, hash) = SecureToken.Generate();
-        db.PasswordResetTokens.Add(new PasswordResetToken
+        var frontend = frontendOpts.Value;
+        // Detached: a fresh DI scope (the request scope is gone once we return).
+        _ = Task.Run(async () =>
         {
-            Id = Guid.NewGuid(),
-            UserId = user.Id,
-            TokenHash = hash,
-            ExpiresAt = now.AddMinutes(PasswordResetTokenTtlMinutes),
-            CreatedAt = now,
-        });
-        await db.SaveChangesAsync();
-        await audit.LogAsync(
-            "user.password_reset_requested",
-            nameof(User), user.Id,
-            organizationIdOverride: user.OrganizationId, userIdOverride: user.Id);
+            try
+            {
+                using var scope = scopeFactory.CreateScope();
+                var sp = scope.ServiceProvider;
+                var db = sp.GetRequiredService<SystemDbContext>();
+                var email = sp.GetRequiredService<IEmailService>();
+                var audit = sp.GetRequiredService<IAuditLogger>();
 
-        // Fire-and-forget the Resend round-trip: awaiting it only on the
-        // account-exists path would make the response measurably slower for
-        // registered emails — a timing side-channel that re-opens the very
-        // enumeration the always-200 body closes (the HTTP send is the dominant
-        // signal). The token is already committed and SendPasswordResetEmailAsync
-        // swallows its own failures, so detaching is safe. CancellationToken.None
-        // (not RequestAborted) so the send isn't cancelled when the request ends.
-        _ = SendPasswordResetEmailAsync(email, frontendOpts.Value, user.Email, raw, logger, CancellationToken.None);
+                var user = await db.Users.FirstOrDefaultAsync(u => u.Email == normalized);
+                if (user is null) return; // unknown email — no-op (no enumeration signal)
+
+                var now = DateTime.UtcNow;
+                // Only the newest reset link works: consume prior outstanding ones.
+                var outstanding = await db.PasswordResetTokens
+                    .Where(t => t.UserId == user.Id && t.ConsumedAt == null)
+                    .ToListAsync();
+                foreach (var t in outstanding) t.ConsumedAt = now;
+
+                var (raw, hash) = SecureToken.Generate();
+                db.PasswordResetTokens.Add(new PasswordResetToken
+                {
+                    Id = Guid.NewGuid(),
+                    UserId = user.Id,
+                    TokenHash = hash,
+                    ExpiresAt = now.AddMinutes(PasswordResetTokenTtlMinutes),
+                    CreatedAt = now,
+                });
+                await db.SaveChangesAsync();
+                await audit.LogAsync(
+                    "user.password_reset_requested",
+                    nameof(User), user.Id,
+                    organizationIdOverride: user.OrganizationId, userIdOverride: user.Id);
+
+                // Save BEFORE send so the emailed link always resolves to a row.
+                await SendPasswordResetEmailAsync(email, frontend, user.Email, raw, logger, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Background forgot-password processing failed.");
+            }
+        });
 
         return generic;
     }
@@ -639,6 +657,14 @@ public static class AuthEndpoints
             return Error(400, "auth.invalid_password", "Your password is incorrect.");
         if (string.Equals(user.Email, newEmail, StringComparison.OrdinalIgnoreCase))
             return Error(400, "validation.email", "That's already your email address.");
+        // Uniqueness MUST be checked across ALL tenants (the Email unique index is
+        // global), which is exactly why every authed handler here uses
+        // SystemDbContext, NOT AppDbContext: AppDbContext's tenant filter
+        // (OrganizationId == CurrentOrgId) would hide a clash owned by another org
+        // and let a duplicate slip past into a DB unique-constraint violation. This
+        // is the intentional reason #183's authed writes diverge from #185's
+        // UpdateOrganization (which uses AppDbContext) — do NOT "unify" them onto
+        // AppDbContext.
         if (await db.Users.AnyAsync(u => u.Email == newEmail))
             return Error(409, "auth.email_taken", "That email address is already in use.");
 
@@ -820,26 +846,18 @@ public static class AuthEndpoints
     }
 
     /// <summary>
-    /// Builds the lockout message (#183) showing the unlock time in the org's local
-    /// zone plus the reset path. Loads the org for its time zone (lockout is rare —
-    /// only after 10 failures — so the extra read is negligible).
+    /// Builds the lockout message (#183) as a RELATIVE duration + the reset path.
+    /// Deliberately NOT org-local wall-clock: the login 423 is reachable by an
+    /// unauthenticated caller (before any password check), so rendering the org's
+    /// IANA time zone here would leak org-internal config to an anonymous party.
+    /// A relative "about N more minutes" conveys the unlock time, leaks nothing,
+    /// and needs no DB read.
     /// </summary>
-    private static async Task<string> BuildLockoutMessageAsync(SystemDbContext db, User user, DateTime lockedUntilUtc)
+    private static string BuildLockoutMessage(DateTime lockedUntilUtc)
     {
-        var org = await db.Organizations.FirstOrDefaultAsync(o => o.Id == user.OrganizationId);
-        var zoneId = org?.TimeZone;
-        string label;
-        try
-        {
-            var tz = string.IsNullOrWhiteSpace(zoneId) ? null : TimeZoneInfo.FindSystemTimeZoneById(zoneId);
-            var local = tz is null ? lockedUntilUtc : TimeZoneInfo.ConvertTimeFromUtc(lockedUntilUtc, tz);
-            label = $"{local:h:mm tt} on {local:MMM d} ({(tz is null ? "UTC" : zoneId)})";
-        }
-        catch
-        {
-            label = $"{lockedUntilUtc:h:mm tt} on {lockedUntilUtc:MMM d} (UTC)";
-        }
-        return $"Too many sign-in attempts — your account is locked until {label}. Reset your password to regain access now.";
+        var minutes = Math.Max(1, (int)Math.Ceiling((lockedUntilUtc - DateTime.UtcNow).TotalMinutes));
+        var unit = minutes == 1 ? "minute" : "minutes";
+        return $"Too many sign-in attempts — your account is locked for about {minutes} more {unit}. Reset your password to regain access now.";
     }
 
     // Email verification links stay valid for a week — users routinely confirm

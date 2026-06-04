@@ -133,6 +133,30 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
+    public async Task Resend_verification_does_not_cancel_a_pending_change_email()
+    {
+        // #180 re-review: an unverified user starts a change-email, then taps the
+        // banner's one-tap Resend. Resend must invalidate only SIGNUP tokens, NOT
+        // the pending change-email — otherwise the change is silently lost and the
+        // new-inbox link reports "no longer valid".
+        var auth = await RegisterAndLoginAsync();
+        var newEmail = $"new-{Guid.NewGuid():N}@x.com";
+        Email.Reset();
+        (await auth.Client.PostAsJsonAsync("/api/auth/change-email", new { password = "Password1234", newEmail }))
+            .EnsureSuccessStatusCode();
+        var changeToken = ExtractVerifyToken(Email.Sends.Single(s => s.ToEmail == newEmail).HtmlBody);
+
+        // Tap Resend (a fresh signup-verification to the CURRENT address).
+        (await auth.Client.PostAsync("/api/auth/resend-verification", null)).EnsureSuccessStatusCode();
+
+        // The pending change-email link still works → the swap completes.
+        (await CreateClient().PostAsJsonAsync("/api/auth/verify-email", new { token = changeToken }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        (await CreateClient().PostAsJsonAsync("/api/auth/login", new { email = newEmail, password = "Password1234" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
     public async Task Change_email_with_a_wrong_password_is_rejected()
     {
         var auth = await RegisterAndLoginAsync();
@@ -202,6 +226,30 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
             timeZone = "America/New_York",
         });
         reReg.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task Delete_account_revokes_a_concurrent_live_session()
+    {
+        var auth = await RegisterAndLoginAsync();
+        // A second, independent live session for the same user (separate cookie
+        // jar) — simulates another open tab. It never sees the delete response's
+        // cookie-clear, so its cd_session JWT stays present and valid for the full
+        // TTL; revocation must come from the soft-delete filter on the user lookup,
+        // not from cookie clearing.
+        var other = await LoginAsync(auth.Email);
+        (await other.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        (await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" }))
+            .EnsureSuccessStatusCode();
+
+        // The concurrent session is revoked on the endpoints that resolve the user
+        // (Me / account-export): the soft-deleted user lookup returns null → 401,
+        // even though the JWT is still cryptographically valid. (Broader tenant
+        // endpoints that authorize on the org_id claim alone are hardened
+        // separately in #202's per-request principal re-validation.)
+        (await other.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        (await other.Client.GetAsync("/api/auth/account/export")).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
     [Fact]
