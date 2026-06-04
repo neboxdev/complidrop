@@ -48,6 +48,7 @@ public static class DocumentEndpoints
         [FromQuery] string? type = null,
         [FromQuery] Guid? vendorId = null,
         [FromQuery] int? expiresWithin = null,
+        [FromQuery] string? search = null,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 25,
         [FromQuery] string? sortBy = "createdAt",
@@ -69,6 +70,19 @@ public static class DocumentEndpoints
         {
             var cutoff = DateTime.UtcNow.Date.AddDays(days);
             query = query.Where(d => d.ExpirationDate != null && d.ExpirationDate <= cutoff);
+        }
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            // Case-insensitive substring match on the file name OR the vendor
+            // name — the two things a venue manager scans for. EF.Functions.ILike
+            // is translated to a server-side Postgres ILIKE and the pattern is
+            // passed as a bound PARAMETER (no string-concatenated SQL), so there's
+            // no injection surface. A literal "%"/"_" typed by the user acts as an
+            // ILIKE wildcard — acceptable, even handy, for a free-text search box.
+            var pattern = $"%{search.Trim()}%";
+            query = query.Where(d =>
+                EF.Functions.ILike(d.OriginalFileName, pattern)
+                || (d.Vendor != null && EF.Functions.ILike(d.Vendor.Name, pattern)));
         }
 
         query = (sortBy?.ToLowerInvariant(), sortDir?.ToLowerInvariant()) switch

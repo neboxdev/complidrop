@@ -469,6 +469,98 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
+    public async Task List_paginates_with_page_and_pageSize()
+    {
+        var auth = await RegisterAndLoginAsync();
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            for (var i = 0; i < 3; i++)
+                db.Documents.Add(new Document
+                {
+                    Id = Guid.NewGuid(),
+                    OrganizationId = auth.OrgId,
+                    OriginalFileName = $"d{i}.pdf",
+                    BlobStorageUrl = "memory://x",
+                    FileSizeBytes = 1,
+                    ContentType = "application/pdf",
+                    CreatedAt = now.AddSeconds(i),
+                    UpdatedAt = now
+                });
+            await db.SaveChangesAsync();
+        }
+
+        var p1 = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?page=1&pageSize=2");
+        p1.GetProperty("data").GetProperty("total").GetInt32().Should().Be(3);
+        p1.GetProperty("data").GetProperty("items").GetArrayLength().Should().Be(2);
+        p1.GetProperty("data").GetProperty("page").GetInt32().Should().Be(1);
+
+        var p2 = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?page=2&pageSize=2");
+        p2.GetProperty("data").GetProperty("items").GetArrayLength().Should().Be(1);
+    }
+
+    [Fact]
+    public async Task List_search_matches_file_name_and_vendor_name_case_insensitively()
+    {
+        var auth = await RegisterAndLoginAsync();
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            var vendor = new Vendor
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                Name = "Northside Tents",
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.Vendors.Add(vendor);
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "acme-coi.pdf",
+                BlobStorageUrl = "memory://x",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                VendorId = vendor.Id,
+                OriginalFileName = "permit-2026.pdf",
+                BlobStorageUrl = "memory://y",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "permit",
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+            await db.SaveChangesAsync();
+        }
+
+        // Match on file name.
+        var byFile = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?search=ACME");
+        byFile.GetProperty("data").GetProperty("total").GetInt32().Should().Be(1);
+        byFile.GetProperty("data").GetProperty("items")[0]
+            .GetProperty("originalFileName").GetString().Should().Be("acme-coi.pdf");
+
+        // Match on the assigned vendor's name (case-insensitive).
+        var byVendor = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?search=northside");
+        byVendor.GetProperty("data").GetProperty("total").GetInt32().Should().Be(1);
+        byVendor.GetProperty("data").GetProperty("items")[0]
+            .GetProperty("originalFileName").GetString().Should().Be("permit-2026.pdf");
+
+        // A term that matches neither returns nothing.
+        var none = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?search=zzz-nomatch");
+        none.GetProperty("data").GetProperty("total").GetInt32().Should().Be(0);
+    }
+
+    [Fact]
     public async Task Upload_with_a_cross_org_vendor_is_rejected()
     {
         var owner = await RegisterAndLoginAsync();
