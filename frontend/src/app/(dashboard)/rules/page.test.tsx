@@ -327,7 +327,7 @@ describe("RulesPage — rule mutations prefix-invalidate ['templates'] (#93)", (
     // unambiguously. (#93 review — test-quality reviewer flagged
     // the previous closest+querySelector chain as fragile.)
     const ruleRow = within(screen.getByRole("table"))
-      .getByText("policy_number")
+      .getByText("Policy number") // humanized fieldName (#188)
       .closest("tr");
     expect(ruleRow).not.toBeNull();
     const deleteBtn = within(ruleRow as HTMLElement).getByRole("button", {
@@ -354,5 +354,46 @@ describe("RulesPage — rule mutations prefix-invalidate ['templates'] (#93)", (
     // deleteRule.onSuccess MUST update this assertion in the same
     // PR, forcing the deliberate-asymmetry conversation.
     expect(toastSuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe("RulesPage — humanized rule display (#188)", () => {
+  it("renders the doc type, field, and operator as friendly labels, not raw codes", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE_TEMPLATE])),
+      http.get(url("/api/compliance/templates/:id"), () =>
+        jsonOk({
+          ...TEMPLATE_DETAIL_INITIAL,
+          rules: [
+            {
+              id: "r_gll",
+              documentType: "coi",
+              fieldName: "general_liability_limit",
+              operator: "min_value",
+              expectedValue: "1000000",
+              errorMessage: "GL must be at least $1M",
+              sortOrder: 1,
+            },
+          ],
+        }),
+      ),
+    );
+
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /custom coi template/i }),
+    );
+
+    // Scope to the existing rule's row — the NewRuleRow add-form <select>
+    // options also render humanized doc-type/operator labels, so a bare
+    // getByText would be ambiguous.
+    const fieldCell = await screen.findByText("General liability limit");
+    const row = fieldCell.closest("tr") as HTMLElement;
+    expect(within(row).getByText("Certificate of Insurance")).toBeInTheDocument();
+    expect(within(row).getByText("Must be at least")).toBeInTheDocument();
+    // None of the raw machine codes leak into the requirements table.
+    expect(screen.queryByText("general_liability_limit")).toBeNull();
+    expect(screen.queryByText("min_value")).toBeNull();
+    expect(within(row).queryByText("coi")).toBeNull();
   });
 });

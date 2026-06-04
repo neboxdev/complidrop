@@ -19,7 +19,7 @@ const NAV_LABELS = [
   "Dashboard",
   "Documents",
   "Vendors",
-  "Compliance rules",
+  "Requirements",
   "Reminders",
   "Export",
   "Settings",

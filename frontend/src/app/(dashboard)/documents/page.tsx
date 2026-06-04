@@ -29,21 +29,24 @@ import {
   useUpdateDocument,
   type DocumentListParams,
 } from "@/hooks/useDocuments";
-import { DOCUMENT_TYPES } from "@/lib/document-types";
+import { DOCUMENT_TYPES, documentTypeLabel } from "@/lib/document-types";
+import { complianceStatusLabel, extractionStatusLabel } from "@/lib/display-labels";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { isAuthError } from "@/lib/query-client";
 
 const PAGE_SIZE = 25;
 
-// Compliance-status filter options. Labels stay friendly here; #188 introduces
-// the app-wide shared status-label map and will reconcile these with it.
-const STATUS_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: "Compliant", label: "Compliant" },
-  { value: "NonCompliant", label: "Not compliant" },
-  { value: "ExpiringSoon", label: "Expiring soon" },
-  { value: "Expired", label: "Expired" },
-  { value: "Pending", label: "Pending" },
+// Compliance-status filter values. The <option> labels come from the shared
+// complianceStatusLabel map (#188) so the dropdown and the row badges speak the
+// SAME words ("Action needed", "Awaiting review", …); the value stays the raw
+// enum the server's ?status= filter expects.
+const STATUS_FILTER_VALUES: ReadonlyArray<string> = [
+  "Compliant",
+  "NonCompliant",
+  "ExpiringSoon",
+  "Expired",
+  "Pending",
 ];
 
 const EXPIRY_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
@@ -341,9 +344,9 @@ export default function DocumentsPage() {
           onChange={(e) => onFilterChange(setStatus)(e.target.value)}
         >
           <option value="">All statuses</option>
-          {STATUS_FILTERS.map((s) => (
-            <option key={s.value} value={s.value}>
-              {s.label}
+          {STATUS_FILTER_VALUES.map((value) => (
+            <option key={value} value={value}>
+              {complianceStatusLabel(value)}
             </option>
           ))}
         </select>
@@ -472,7 +475,7 @@ export default function DocumentsPage() {
                     <p className="mt-2 text-sm text-slate-500">
                       {hasActiveFilters
                         ? "No documents match your filters."
-                        : "No documents yet. Drop one above to get started."}
+                        : "No documents yet — drop a COI, license, or permit above and we'll read it and track its expiry for you."}
                     </p>
                   </td>
                 </tr>
@@ -484,7 +487,7 @@ export default function DocumentsPage() {
                         {d.originalFileName}
                       </Link>
                     </td>
-                    <td data-label="Type" className="px-4 py-3 text-slate-600 uppercase text-xs">{d.documentType}</td>
+                    <td data-label="Type" className="px-4 py-3 text-slate-600 text-xs">{documentTypeLabel(d.documentType)}</td>
                     <td data-label="Vendor" className="px-4 py-3 text-slate-600">
                       {d.vendorName ? (
                         d.vendorName
@@ -536,13 +539,12 @@ export default function DocumentsPage() {
                     </td>
                     <td data-label="Extraction" className="px-4 py-3">
                       <Badge className={cn("border-transparent font-medium", STATUS_HUE[d.extractionStatus] ?? STATUS_HUE.Pending)}>
-                        {d.extractionStatus}
-                        {d.extractionConfidence != null && ` · ${Math.round(d.extractionConfidence * 100)}%`}
+                        {extractionStatusLabel(d.extractionStatus)}
                       </Badge>
                     </td>
                     <td data-label="Compliance" className="px-4 py-3">
                       <Badge className={cn("border-transparent", COMPLIANCE_HUE[d.complianceStatus] ?? COMPLIANCE_HUE.Pending)}>
-                        {d.complianceStatus}
+                        {complianceStatusLabel(d.complianceStatus)}
                       </Badge>
                     </td>
                     <td data-label="Expires" className="px-4 py-3 text-slate-600">

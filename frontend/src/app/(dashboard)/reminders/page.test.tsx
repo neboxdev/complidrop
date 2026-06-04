@@ -94,3 +94,32 @@ describe("RemindersPage — smoke (#36)", () => {
     expect(coarseHitTargets.length).toBeGreaterThanOrEqual(3);
   });
 });
+
+describe("RemindersPage — humanized delivery status (#188)", () => {
+  it("renders a friendly delivery-status label, not the raw lowercase token", async () => {
+    server.use(
+      http.get(url("/api/reminders"), () => jsonOk([])),
+      http.get(url("/api/reminders/history"), () =>
+        jsonOk([
+          {
+            id: "h_1",
+            recipient: "ops@acmecatering.com",
+            sentAt: "2026-05-26T12:00:00Z",
+            sendDate: "2026-05-26",
+            status: "bounced",
+            reminderId: "r_1",
+            documentId: "d_1",
+          },
+        ]),
+      ),
+    );
+
+    renderWithProviders(<RemindersPage />, { auth: authedMe });
+
+    await waitFor(() =>
+      expect(screen.getByText("Bounced — bad address")).toBeInTheDocument(),
+    );
+    // The raw provider token must not surface.
+    expect(screen.queryByText("bounced")).toBeNull();
+  });
+});

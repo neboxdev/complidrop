@@ -174,7 +174,7 @@ describe("VendorsPage — state matrix (#36)", () => {
 
     const table = document.querySelector("table.stacked-table");
     expect(table).not.toBeNull();
-    expect(table?.querySelector('td[data-label="Template"]')).not.toBeNull();
+    expect(table?.querySelector('td[data-label="Requirements"]')).not.toBeNull();
     expect(table?.querySelector('td[data-label="Active links"]')).not.toBeNull();
   });
 });
@@ -203,11 +203,11 @@ describe("VendorsPage — add-vendor mutation (#36)", () => {
     // `document.querySelectorAll("input")[0/1]`, so a future header
     // search/filter input doesn't shift the indices silently.
     fireEvent.input(
-      screen.getByPlaceholderText(/mike's electrical/i),
+      screen.getByPlaceholderText(/acme catering/i),
       { target: { value: "New Sub LLC" } },
     );
     fireEvent.input(
-      screen.getByPlaceholderText(/mike@acme\.com/i),
+      screen.getByPlaceholderText(/ops@acmecatering\.com/i),
       { target: { value: "ops@new.test" } },
     );
     fireEvent.click(screen.getByRole("button", { name: /add vendor/i }));
@@ -219,10 +219,10 @@ describe("VendorsPage — add-vendor mutation (#36)", () => {
     await waitFor(() => expect(listCalls).toBe(2));
     // Form cleared — reads the same placeholder-scoped inputs.
     expect(
-      (screen.getByPlaceholderText(/mike's electrical/i) as HTMLInputElement).value,
+      (screen.getByPlaceholderText(/acme catering/i) as HTMLInputElement).value,
     ).toBe("");
     expect(
-      (screen.getByPlaceholderText(/mike@acme\.com/i) as HTMLInputElement).value,
+      (screen.getByPlaceholderText(/ops@acmecatering\.com/i) as HTMLInputElement).value,
     ).toBe("");
   });
 
@@ -246,7 +246,7 @@ describe("VendorsPage — add-vendor mutation (#36)", () => {
     );
 
     fireEvent.input(
-      screen.getByPlaceholderText(/mike's electrical/i),
+      screen.getByPlaceholderText(/acme catering/i),
       { target: { value: "Acme Subcontractor" } },
     );
     fireEvent.click(screen.getByRole("button", { name: /add vendor/i }));

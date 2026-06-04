@@ -180,6 +180,66 @@ describe("SettingsPage — billing tile vocab (#147, ADR 0011)", () => {
   );
 });
 
+describe("SettingsPage — friendly billing copy (#188)", () => {
+  it("renders the annual billed label + savings under the Annual tile", async () => {
+    mockFreePlanSubscription();
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    const annual = await screen.findByRole("group", { name: /annual plan/i });
+    expect(within(annual).getByText(/Billed \$468\/year/)).toBeInTheDocument();
+    expect(within(annual).getByText(/save \$120/)).toBeInTheDocument();
+  });
+
+  it("maps a past_due Stripe status to a friendly banner — never the raw code", async () => {
+    server.use(
+      http.get(url("/api/billing/subscription"), () =>
+        jsonOk({
+          plan: "pro",
+          status: "past_due",
+          documentLimit: null,
+          documentsUsed: 3,
+          hasVendorPortal: true,
+          currentPeriodEnd: null,
+          extractionSpend: 1.2,
+        }),
+      ),
+    );
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/your last payment didn't go through/i),
+      ).toBeInTheDocument(),
+    );
+    // The raw Stripe status string must never reach the UI.
+    expect(document.body).not.toHaveTextContent(/past_due/i);
+  });
+
+  it("maps an UNKNOWN Stripe status to the generic friendly notice (no raw leak)", async () => {
+    server.use(
+      http.get(url("/api/billing/subscription"), () =>
+        jsonOk({
+          plan: "pro",
+          status: "some_brand_new_stripe_state",
+          documentLimit: null,
+          documentsUsed: 0,
+          hasVendorPortal: true,
+          currentPeriodEnd: null,
+          extractionSpend: 0,
+        }),
+      ),
+    );
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/there's a problem with your billing/i),
+      ).toBeInTheDocument(),
+    );
+    expect(document.body).not.toHaveTextContent(/some_brand_new_stripe_state/i);
+  });
+});
+
 describe("SettingsPage — editable organization (#185)", () => {
   beforeEach(() => resetSonner());
 

@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useMe, useUpdateOrganization, type Me } from "@/hooks/useAuth";
 import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { listTimeZones, describeNextSend } from "@/lib/timezones";
 import { SecuritySection, DangerZone } from "./account-management";
 import {
@@ -27,6 +28,40 @@ type SubscriptionInfo = {
   currentPeriodEnd: string | null;
   extractionSpend: number;
 };
+
+// Map the raw Stripe subscription status to friendly copy — never interpolate
+// "past_due" / "incomplete_expired" into the UI. The default branch catches any
+// status we haven't enumerated so a new Stripe state can't leak as a raw code.
+// (#188)
+function billingStatusNotice(
+  status: string | undefined,
+): { text: string; warn: boolean } | null {
+  switch ((status ?? "").toLowerCase()) {
+    case "":
+    case "active":
+      return null;
+    case "trialing":
+      return { text: "You're in your free trial.", warn: false };
+    case "past_due":
+      return {
+        text: "Your last payment didn't go through. Update your card to keep your account active.",
+        warn: true,
+      };
+    case "canceled":
+    case "cancelled":
+      return { text: "Your plan is canceled and won't renew.", warn: true };
+    case "unpaid":
+      return {
+        text: "Your account has an unpaid invoice — update your billing to restore full access.",
+        warn: true,
+      };
+    case "incomplete":
+    case "incomplete_expired":
+      return { text: "Your subscription setup didn't finish. Try upgrading again.", warn: true };
+    default:
+      return { text: "There's a problem with your billing. Open Manage billing to fix it.", warn: true };
+  }
+}
 
 export default function SettingsPage() {
   const me = useMe();
@@ -87,15 +122,31 @@ export default function SettingsPage() {
           <div className="flex items-start justify-between">
             <div>
               <h2 className="text-base font-semibold text-slate-800">Plan & billing</h2>
-              <p className="text-sm text-slate-500 capitalize">
-                You&apos;re on the <strong>{subscription.data?.plan ?? "free"}</strong> plan
-                {subscription.data?.status ? ` · ${subscription.data.status}` : ""}.
+              <p className="text-sm text-slate-500">
+                You&apos;re on the{" "}
+                <strong className="capitalize">{subscription.data?.plan ?? "free"}</strong> plan.
               </p>
             </div>
             {isPaid && (
               <Badge className="bg-emerald-100 text-emerald-700 border-transparent">paid</Badge>
             )}
           </div>
+
+          {(() => {
+            const notice = billingStatusNotice(subscription.data?.status);
+            return notice ? (
+              <p
+                className={cn(
+                  "rounded-md px-3 py-2 text-sm",
+                  notice.warn
+                    ? "bg-rose-50 text-rose-700"
+                    : "bg-sky-50 text-sky-700",
+                )}
+              >
+                {notice.text}
+              </p>
+            ) : null;
+          })()}
 
           {subscription.data && (
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
@@ -113,10 +164,11 @@ export default function SettingsPage() {
                 </p>
               </div>
               <div className="p-3 rounded-md bg-slate-50">
-                <p className="text-xs uppercase text-slate-500">LLM spend MTD</p>
+                <p className="text-xs uppercase text-slate-500">AI reading cost</p>
                 <p className="text-lg font-semibold text-slate-900">
                   ${subscription.data.extractionSpend.toFixed(2)}
                 </p>
+                <p className="text-[10px] text-slate-400">this month · included in your plan</p>
               </div>
             </div>
           )}
@@ -140,6 +192,11 @@ export default function SettingsPage() {
                   name={PLANS[id].label}
                   price={PLANS[id].monthlyPriceLabel}
                   tagline={PLANS[id].tagline ?? ""}
+                  billedNote={
+                    PLANS[id].annualBilledLabel
+                      ? `${PLANS[id].annualBilledLabel}${PLANS[id].annualSavingsLabel ? ` · ${PLANS[id].annualSavingsLabel}` : ""}`
+                      : null
+                  }
                   featured={id === "annual"}
                   onClick={() => checkout.mutate(id)}
                   pending={checkout.isPending}
@@ -252,6 +309,7 @@ function PlanCard({
   name,
   price,
   tagline,
+  billedNote,
   featured,
   onClick,
   pending,
@@ -259,6 +317,7 @@ function PlanCard({
   name: string;
   price: string;
   tagline: string;
+  billedNote?: string | null;
   featured?: boolean;
   onClick: () => void;
   pending: boolean;
@@ -279,6 +338,7 @@ function PlanCard({
         {price}
         <span className="text-xs text-slate-500 font-normal">/mo</span>
       </p>
+      {billedNote && <p className="text-xs text-emerald-700 mt-0.5">{billedNote}</p>}
       <p className="text-xs text-slate-500 mt-1">{tagline}</p>
       <Button className="w-full mt-3" size="sm" onClick={onClick} disabled={pending}>
         {pending ? "Redirecting…" : `Upgrade to ${name}`}

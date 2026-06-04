@@ -121,7 +121,7 @@ describe("DashboardPage — state matrix (#36)", () => {
 
     // Activity panel surfaces a single entry's pretty-printed action.
     expect(
-      screen.getByText(/document · uploaded/i),
+      screen.getByText(/document uploaded/i),
     ).toBeInTheDocument();
 
     // Responsive (#181): the 5-bucket expiry pipeline stacks to 2 columns on a
@@ -130,6 +130,14 @@ describe("DashboardPage — state matrix (#36)", () => {
     const pipelineGrid = document.querySelector(".md\\:grid-cols-5");
     expect(pipelineGrid).not.toBeNull();
     expect(pipelineGrid?.className).toContain("grid-cols-2");
+
+    // #188: plain-English chrome — the heading + bucket labels, not "Expiry
+    // pipeline" / "0-30d" / "90d+".
+    expect(screen.getByText(/when documents expire/i)).toBeInTheDocument();
+    expect(screen.getByText("Next 30 days")).toBeInTheDocument();
+    expect(screen.getByText("90+ days")).toBeInTheDocument();
+    expect(screen.getByText(/still being read/i)).toBeInTheDocument();
+    expect(screen.queryByText("0-30d")).toBeNull();
   });
 
   it("error on /stats: page still renders via fallback `?? 0` values; pipeline+activity unaffected", async () => {
@@ -155,10 +163,10 @@ describe("DashboardPage — state matrix (#36)", () => {
     );
     // Activity panel populated normally.
     await waitFor(() =>
-      expect(screen.getByText(/document · uploaded/i)).toBeInTheDocument(),
+      expect(screen.getByText(/document uploaded/i)).toBeInTheDocument(),
     );
     // Pipeline panel populated normally.
-    expect(screen.getByText(/expiry pipeline/i)).toBeInTheDocument();
+    expect(screen.getByText(/when documents expire/i)).toBeInTheDocument();
     // Stats panel falls back to zeroes (no crash). The page renders
     // exactly SIX cards bound to `stats.data?.xxx ?? 0`: Total documents,
     // Compliant, Expiring ≤ 30d, Non-compliant, Vendors tracked, Awaiting

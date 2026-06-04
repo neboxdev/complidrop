@@ -70,9 +70,9 @@ public class ExportService(SystemDbContext db) : IExportService
                                 {
                                     r.RelativeItem(3).Text(d.OriginalFileName).FontSize(9);
                                     r.RelativeItem(2).Text(d.Vendor?.Name ?? "—").FontSize(9);
-                                    r.RelativeItem(2).Text(d.DocumentType).FontSize(9);
+                                    r.RelativeItem(2).Text(DisplayLabels.DocumentType(d.DocumentType)).FontSize(9);
                                     r.RelativeItem(2).Text(d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "—").FontSize(9);
-                                    r.RelativeItem(2).Text(d.ComplianceStatus.ToString()).FontSize(9);
+                                    r.RelativeItem(2).Text(DisplayLabels.Compliance(d.ComplianceStatus)).FontSize(9);
                                 });
                             }
                         }));
@@ -94,8 +94,8 @@ public class ExportService(SystemDbContext db) : IExportService
                                 inner.Item().PaddingTop(3).Row(r =>
                                 {
                                     r.RelativeItem(2).Text(a.CreatedAt.ToString("yyyy-MM-dd HH:mm")).FontSize(8);
-                                    r.RelativeItem(3).Text(a.Action).FontSize(8);
-                                    r.RelativeItem(2).Text(a.EntityType).FontSize(8);
+                                    r.RelativeItem(3).Text(DisplayLabels.Action(a.Action)).FontSize(8);
+                                    r.RelativeItem(2).Text(DisplayLabels.EntityType(a.EntityType)).FontSize(8);
                                     r.RelativeItem(3).Text(a.UserId?.ToString() ?? "system").FontSize(8);
                                 });
                             }
@@ -142,9 +142,9 @@ public class ExportService(SystemDbContext db) : IExportService
             csv.WriteField(d.Id);
             csv.WriteField(d.OriginalFileName);
             csv.WriteField(d.Vendor?.Name ?? "");
-            csv.WriteField(d.DocumentType);
-            csv.WriteField(d.ExtractionStatus.ToString());
-            csv.WriteField(d.ComplianceStatus.ToString());
+            csv.WriteField(DisplayLabels.DocumentType(d.DocumentType));
+            csv.WriteField(DisplayLabels.Extraction(d.ExtractionStatus));
+            csv.WriteField(DisplayLabels.Compliance(d.ComplianceStatus));
             csv.WriteField(d.EffectiveDate?.ToString("yyyy-MM-dd"));
             csv.WriteField(d.ExpirationDate?.ToString("yyyy-MM-dd"));
             csv.WriteField(d.GeneralLiabilityLimit?.ToString(CultureInfo.InvariantCulture));
@@ -180,7 +180,7 @@ public class ExportService(SystemDbContext db) : IExportService
                     col.Item().Text($"Documents: {vendor.Documents.Count}");
                     foreach (var d in vendor.Documents.OrderBy(d => d.ExpirationDate))
                     {
-                        col.Item().PaddingTop(6).Text($"• {d.OriginalFileName} — {d.DocumentType} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {d.ComplianceStatus}");
+                        col.Item().PaddingTop(6).Text($"• {d.OriginalFileName} — {DisplayLabels.DocumentType(d.DocumentType)} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {DisplayLabels.Compliance(d.ComplianceStatus)}");
                     }
                 });
             });

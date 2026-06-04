@@ -13,7 +13,7 @@
  */
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { http } from "msw";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import DocumentsPage from "./page";
 import {
   renderWithProviders,
@@ -71,7 +71,7 @@ describe("DocumentsPage — state matrix (#36)", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText(/no documents yet\. drop one above to get started/i),
+        screen.getByText(/no documents yet — drop a coi, license, or permit above/i),
       ).toBeInTheDocument(),
     );
     // Total counter reflects empty.
@@ -559,17 +559,19 @@ describe("DocumentsPage — state matrix (#36)", () => {
     expect(screen.getByText("coi-completed.pdf")).toBeInTheDocument();
     expect(screen.getByText("permit-failed.pdf")).toBeInTheDocument();
 
-    // Each status badge appears at least once. Using anchored regex
-    // because the Completed badge in this fixture also renders the
-    // extraction confidence as " · 94%" suffixed — `getAllByText
-    // ("Completed")` (exact) would miss it. The anchors keep the test
-    // tolerant to the optional confidence suffix while still rejecting
-    // accidental column-header substring matches.
-    expect(screen.getAllByText(/^Pending( |$)/).length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText(/^Processing( |$)/).length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText(/^Completed( |$)/).length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText(/^Failed( |$)/).length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText(/^Compliant( |$)/).length).toBeGreaterThanOrEqual(1);
+    // Each badge renders its HUMANIZED label (#188), keyed off the raw enum:
+    // extraction Pending/Processing/Completed/Failed → these phrases; compliance
+    // Compliant stays "Compliant". The confidence "· 94%" suffix is gone now.
+    expect(screen.getByText("Waiting to read")).toBeInTheDocument(); // Pending extraction
+    expect(screen.getByText("Reading…")).toBeInTheDocument(); // Processing
+    expect(screen.getByText("Read")).toBeInTheDocument(); // Completed
+    expect(screen.getByText("Couldn't read")).toBeInTheDocument(); // Failed
+    // "Compliant" is also a status-filter <option> label, so scope this to the
+    // table to assert the BADGE specifically (not the filter dropdown option).
+    const table = document.querySelector("table") as HTMLElement;
+    expect(within(table).getByText("Compliant")).toBeInTheDocument(); // compliance verdict
+    // The naked confidence percentage no longer leaks into the list badge.
+    expect(screen.queryByText(/· \d+%/)).toBeNull();
 
     // Total counter is correct.
     expect(screen.getByText(/4 total/i)).toBeInTheDocument();
@@ -625,18 +627,19 @@ describe("DocumentsPage — state matrix (#36)", () => {
 
       renderWithProviders(<DocumentsPage />, { auth: authedMe });
 
+      // Humanized extraction labels (#188): Processing → "Reading…", Completed → "Read".
       await waitFor(() =>
-        expect(screen.getByText(/^Processing$/)).toBeInTheDocument(),
+        expect(screen.getByText("Reading…")).toBeInTheDocument(),
       );
 
       const beforeAdvance = calls;
       await vi.advanceTimersByTimeAsync(5000);
 
       await waitFor(() =>
-        expect(screen.getByText(/^Completed/)).toBeInTheDocument(),
+        expect(screen.getByText("Read")).toBeInTheDocument(),
       );
       expect(calls).toBeGreaterThanOrEqual(beforeAdvance + 1);
-      expect(screen.queryByText(/^Processing$/)).toBeNull();
+      expect(screen.queryByText("Reading…")).toBeNull();
     } finally {
       vi.useRealTimers();
     }
