@@ -1,13 +1,24 @@
 "use client";
 
-import { useState, useCallback, useId } from "react";
+import { useState, useCallback, useEffect, useId } from "react";
 import Link from "next/link";
 import { useDropzone } from "react-dropzone";
 import { toast } from "sonner";
-import { UploadCloud, FileText, Trash2, AlertTriangle, RotateCw, X } from "lucide-react";
+import {
+  UploadCloud,
+  FileText,
+  Trash2,
+  AlertTriangle,
+  RotateCw,
+  X,
+  Search,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { StaleDataBanner } from "@/components/StaleDataBanner";
 import { VendorPicker, type VendorOption } from "@/components/VendorPicker";
 import { DocumentTypeSelect } from "@/components/DocumentTypeSelect";
@@ -16,10 +27,30 @@ import {
   useUploadDocument,
   useDeleteDocument,
   useUpdateDocument,
+  type DocumentListParams,
 } from "@/hooks/useDocuments";
+import { DOCUMENT_TYPES } from "@/lib/document-types";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { isAuthError } from "@/lib/query-client";
+
+const PAGE_SIZE = 25;
+
+// Compliance-status filter options. Labels stay friendly here; #188 introduces
+// the app-wide shared status-label map and will reconcile these with it.
+const STATUS_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: "Compliant", label: "Compliant" },
+  { value: "NonCompliant", label: "Not compliant" },
+  { value: "ExpiringSoon", label: "Expiring soon" },
+  { value: "Expired", label: "Expired" },
+  { value: "Pending", label: "Pending" },
+];
+
+const EXPIRY_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: "30", label: "Expiring in 30 days" },
+  { value: "60", label: "Expiring in 60 days" },
+  { value: "90", label: "Expiring in 90 days" },
+];
 
 const STATUS_HUE: Record<string, string> = {
   Pending: "bg-slate-100 text-slate-700",
@@ -37,12 +68,63 @@ const COMPLIANCE_HUE: Record<string, string> = {
   Expired: "bg-rose-100 text-rose-700",
 };
 
+const FILTER_SELECT_CLASS =
+  "h-9 rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-500/40";
+
 export default function DocumentsPage() {
-  const docs = useDocuments();
+  // --- list controls (#187) ---
+  const [page, setPage] = useState(1);
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState(""); // debounced value sent to the server
+  const [status, setStatus] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [expiresWithin, setExpiresWithin] = useState("");
+
+  // Debounce the search box so we don't fire a request per keystroke. The
+  // page-1 reset lives in the input's onChange (an event handler) — NOT here —
+  // so this effect only ever syncs the debounced value. Resetting page in this
+  // effect would also fire on mount (~300ms later) and clobber any page the user
+  // had navigated to in the meantime. (#187 review — test-quality reviewer)
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput), 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  const params: DocumentListParams = {
+    page,
+    pageSize: PAGE_SIZE,
+    search: search || undefined,
+    status: status || undefined,
+    type: typeFilter || undefined,
+    expiresWithin: expiresWithin ? Number(expiresWithin) : undefined,
+  };
+
+  const docs = useDocuments(params);
   const upload = useUploadDocument();
   const del = useDeleteDocument();
   const updateDoc = useUpdateDocument();
   const [isUploading, setIsUploading] = useState(false);
+
+  const total = docs.data?.total ?? 0;
+  const serverPageSize = docs.data?.pageSize ?? PAGE_SIZE;
+  const totalPages = Math.max(1, Math.ceil(total / serverPageSize));
+
+  // Self-heal if `page` fell out of range — e.g. another tab/user (or a backend
+  // mutation) shrank the result set while we sat on the last page. Setting state
+  // during render is React's supported "adjust state when derived data changes"
+  // path: it re-renders immediately with the corrected value, so the user never
+  // sees a stranded empty out-of-range page (and the request re-bases). This
+  // converges — once page == totalPages the guard is false. The delete onSuccess
+  // below still decrements as a same-session fast path so we skip the empty
+  // fetch. (#187 review — correctness reviewer)
+  if (page > totalPages) setPage(totalPages);
+
+  // Any filter dropdown change returns to page 1 so the new results are visible.
+  const onFilterChange = (setter: (v: string) => void) => (value: string) => {
+    setter(value);
+    setPage(1);
+  };
+  const hasActiveFilters = Boolean(search || status || typeFilter || expiresWithin);
 
   // Drop stages the files; the vendor + document-type step below must be
   // completed before they're actually uploaded — so every document lands
@@ -238,6 +320,78 @@ export default function DocumentsPage() {
         />
       )}
 
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative flex-1 min-w-[12rem]">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Input
+            aria-label="Search documents"
+            placeholder="Search by file or vendor name…"
+            value={searchInput}
+            onChange={(e) => {
+              setSearchInput(e.target.value);
+              setPage(1); // reset immediately on type so matches aren't hidden on a later page
+            }}
+            className="pl-8"
+          />
+        </div>
+        <select
+          aria-label="Filter by compliance status"
+          className={FILTER_SELECT_CLASS}
+          value={status}
+          onChange={(e) => onFilterChange(setStatus)(e.target.value)}
+        >
+          <option value="">All statuses</option>
+          {STATUS_FILTERS.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Filter by document type"
+          className={FILTER_SELECT_CLASS}
+          value={typeFilter}
+          onChange={(e) => onFilterChange(setTypeFilter)(e.target.value)}
+        >
+          <option value="">All types</option>
+          {DOCUMENT_TYPES.map((t) => (
+            <option key={t.value} value={t.value}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Filter by expiry"
+          className={FILTER_SELECT_CLASS}
+          value={expiresWithin}
+          onChange={(e) => onFilterChange(setExpiresWithin)(e.target.value)}
+        >
+          <option value="">Any expiry</option>
+          {EXPIRY_FILTERS.map((x) => (
+            <option key={x.value} value={x.value}>
+              {x.label}
+            </option>
+          ))}
+        </select>
+        {hasActiveFilters && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setSearchInput("");
+              setSearch("");
+              setStatus("");
+              setTypeFilter("");
+              setExpiresWithin("");
+              setPage(1);
+            }}
+          >
+            Clear
+          </Button>
+        )}
+      </div>
+
       <Card>
         <CardContent className="p-0 overflow-x-auto">
           <table className="stacked-table w-full text-sm">
@@ -315,7 +469,11 @@ export default function DocumentsPage() {
                 <tr>
                   <td colSpan={7} className="px-4 py-12 text-center">
                     <FileText className="w-8 h-8 mx-auto text-slate-300" />
-                    <p className="mt-2 text-sm text-slate-500">No documents yet. Drop one above to get started.</p>
+                    <p className="mt-2 text-sm text-slate-500">
+                      {hasActiveFilters
+                        ? "No documents match your filters."
+                        : "No documents yet. Drop one above to get started."}
+                    </p>
                   </td>
                 </tr>
               ) : (
@@ -404,7 +562,13 @@ export default function DocumentsPage() {
                         onClick={() => {
                           if (confirm(`Remove ${d.originalFileName}?`)) {
                             del.mutate(d.id, {
-                              onSuccess: () => toast.success("Document removed"),
+                              onSuccess: () => {
+                                toast.success("Document removed");
+                                // If that was the last row on a page past the
+                                // first, step back so we don't strand the user
+                                // on a now-empty page.
+                                if (items.length === 1 && page > 1) setPage((p) => p - 1);
+                              },
                               onError: (err) => toast.error(err instanceof Error ? err.message : "Remove failed"),
                             });
                           }
@@ -420,6 +584,34 @@ export default function DocumentsPage() {
           </table>
         </CardContent>
       </Card>
+
+      {total > 0 && (
+        <div className="flex items-center justify-between text-sm text-slate-600">
+          <span>
+            Page {page} of {totalPages} · {total} document{total === 1 ? "" : "s"}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+            >
+              <ChevronLeft className="mr-1 h-4 w-4" /> Prev
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={page >= totalPages}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            >
+              Next <ChevronRight className="ml-1 h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

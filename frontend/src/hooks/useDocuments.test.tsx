@@ -80,6 +80,101 @@ describe("useDocuments — basic query states (#36)", () => {
   });
 });
 
+describe("useDocuments — list params → query string (#187)", () => {
+  it("threads page/pageSize/search/status/type/expiresWithin into the query string", async () => {
+    let requestedUrl = "";
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        requestedUrl = request.url;
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+
+    const { Wrapper } = createTestWrapper();
+    const { result } = renderHook(
+      () =>
+        useDocuments({
+          page: 2,
+          pageSize: 10,
+          search: "acme",
+          status: "Compliant",
+          type: "coi",
+          vendorId: "v_acme_01",
+          expiresWithin: 30,
+        }),
+      { wrapper: Wrapper },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const sp = new URL(requestedUrl).searchParams;
+    expect(sp.get("page")).toBe("2");
+    expect(sp.get("pageSize")).toBe("10");
+    expect(sp.get("search")).toBe("acme");
+    expect(sp.get("status")).toBe("Compliant");
+    expect(sp.get("type")).toBe("coi");
+    expect(sp.get("vendorId")).toBe("v_acme_01");
+    expect(sp.get("expiresWithin")).toBe("30");
+  });
+
+  it("keepPreviousData: returns the previous page's data (flagged placeholder) while the next page loads (#187)", async () => {
+    // Gate created up front so it's assignable before any request lands.
+    let releaseP2: () => void = () => {};
+    const gate = new Promise<void>((r) => (releaseP2 = r));
+    server.use(
+      http.get(url("/api/documents"), async ({ request }) => {
+        const p = new URL(request.url).searchParams.get("page") ?? "1";
+        if (p === "2") await gate; // hold page 2 in flight
+        return jsonOk(
+          makeDocumentsResponse({
+            items: [makeDocument({ id: `d${p}`, originalFileName: `p${p}.pdf` })],
+            total: 30,
+            page: Number(p),
+            pageSize: 25,
+          }),
+        );
+      }),
+    );
+
+    const { Wrapper } = createTestWrapper();
+    const { result, rerender } = renderHook(
+      ({ page }: { page: number }) => useDocuments({ page, pageSize: 25 }),
+      { wrapper: Wrapper, initialProps: { page: 1 } },
+    );
+
+    await waitFor(() =>
+      expect(result.current.data?.items[0].originalFileName).toBe("p1.pdf"),
+    );
+
+    // Advance to page 2 — its fetch is gated. keepPreviousData keeps page 1's
+    // data and flags it as placeholder (rather than dropping to undefined).
+    rerender({ page: 2 });
+    await waitFor(() => expect(result.current.isPlaceholderData).toBe(true));
+    expect(result.current.data?.items[0].originalFileName).toBe("p1.pdf");
+
+    releaseP2();
+    await waitFor(() =>
+      expect(result.current.data?.items[0].originalFileName).toBe("p2.pdf"),
+    );
+    expect(result.current.isPlaceholderData).toBe(false);
+  });
+
+  it("the no-arg call sends no query params (preserves the original behavior)", async () => {
+    let requestedUrl = "";
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        requestedUrl = request.url;
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+
+    const { Wrapper } = createTestWrapper();
+    const { result } = renderHook(() => useDocuments(), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(new URL(requestedUrl).search).toBe("");
+  });
+});
+
 describe("useDocuments — 5-second polling while any row is Pending/Processing (#36)", () => {
   beforeEach(() => {
     // `shouldAdvanceTime: true` is REQUIRED because RTL's `waitFor`

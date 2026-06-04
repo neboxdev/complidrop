@@ -1,9 +1,17 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Plus, ExternalLink, AlertTriangle, RotateCw } from "lucide-react";
+import {
+  Plus,
+  ExternalLink,
+  AlertTriangle,
+  RotateCw,
+  Search,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,6 +20,8 @@ import { useVendors, useCreateVendor } from "@/hooks/useVendors";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { isAuthError } from "@/lib/query-client";
+
+const VENDOR_PAGE_SIZE = 25;
 
 export default function VendorsPage() {
   const vendors = useVendors();
@@ -22,6 +32,31 @@ export default function VendorsPage() {
   // readers announce the field context (#76).
   const nameId = useId();
   const emailId = useId();
+
+  // Client-side search + pagination over the loaded vendor list (#187).
+  // The /api/vendors endpoint returns the full array — kept that way because
+  // the #186 VendorPicker type-ahead relies on having every vendor in hand —
+  // and at SMB scale (tens of vendors) filtering/paging in the client is plenty.
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+
+  const all = useMemo(() => vendors.data ?? [], [vendors.data]);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return all;
+    return all.filter(
+      (v) =>
+        v.name.toLowerCase().includes(q) ||
+        (v.contactEmail?.toLowerCase().includes(q) ?? false),
+    );
+  }, [all, query]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / VENDOR_PAGE_SIZE));
+  // Derive the in-range page during render (no setState-in-effect): if the
+  // loaded list shrank below the current page, `safePage` clamps it for the
+  // slice + pager, and the next Prev/Next click re-bases from it.
+  const safePage = Math.min(page, totalPages);
+  const pageItems = filtered.slice((safePage - 1) * VENDOR_PAGE_SIZE, safePage * VENDOR_PAGE_SIZE);
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
@@ -59,6 +94,22 @@ export default function VendorsPage() {
         </CardContent>
       </Card>
 
+      {all.length > 0 && (
+        <div className="relative max-w-sm">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Input
+            aria-label="Search vendors"
+            placeholder="Search by name or email…"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setPage(1);
+            }}
+            className="pl-8"
+          />
+        </div>
+      )}
+
       <Card>
         <CardContent className="p-0 overflow-x-auto">
           <table className="stacked-table w-full text-sm">
@@ -74,7 +125,7 @@ export default function VendorsPage() {
             <tbody>
               {vendors.isLoading ? (
                 <tr><td colSpan={5} className="py-8 text-center text-slate-400">Loading…</td></tr>
-              ) : vendors.isError && (vendors.data ?? []).length === 0 && !isAuthError(vendors.error) ? (
+              ) : vendors.isError && all.length === 0 && !isAuthError(vendors.error) ? (
                 // Error state distinct from empty so a backend outage is
                 // not mistaken for an org with zero vendors (#80). Gate
                 // on `length === 0` so a transient failure does NOT
@@ -116,9 +167,11 @@ export default function VendorsPage() {
                     </Button>
                   </td>
                 </tr>
-              ) : (vendors.data ?? []).length === 0 ? (
+              ) : all.length === 0 ? (
                 <tr><td colSpan={5} className="py-10 text-center text-slate-500">No vendors yet.</td></tr>
-              ) : (vendors.data ?? []).map((v) => (
+              ) : filtered.length === 0 ? (
+                <tr><td colSpan={5} className="py-10 text-center text-slate-500">No vendors match your search.</td></tr>
+              ) : pageItems.map((v) => (
                 <tr key={v.id} className="border-t border-slate-100">
                   <td className="px-4 py-3">
                     <Link href={`/vendors/${v.id}`} className="text-sky-700 font-medium hover:underline">{v.name}</Link>
@@ -146,6 +199,34 @@ export default function VendorsPage() {
           </table>
         </CardContent>
       </Card>
+
+      {filtered.length > 0 && (
+        <div className="flex items-center justify-between text-sm text-slate-600">
+          <span>
+            Page {safePage} of {totalPages} · {filtered.length} vendor{filtered.length === 1 ? "" : "s"}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={safePage <= 1}
+              onClick={() => setPage(Math.max(1, safePage - 1))}
+            >
+              <ChevronLeft className="mr-1 h-4 w-4" /> Prev
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={safePage >= totalPages}
+              onClick={() => setPage(Math.min(totalPages, safePage + 1))}
+            >
+              Next <ChevronRight className="ml-1 h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
