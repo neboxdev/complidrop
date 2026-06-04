@@ -162,14 +162,12 @@ public static class DocumentEndpoints
         DocumentPatchRequest req,
         AppDbContext db,
         IComplianceCheckService compliance,
-        IAuditLogger audit,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
         if (doc is null) return NotFound();
 
-        var before = new { doc.VendorId, doc.DocumentType };
         var changed = false;
 
         if (req.VendorId is Guid vendorId)
@@ -223,9 +221,13 @@ public static class DocumentEndpoints
                 .LogError(ex, "Compliance re-evaluation failed after updating document {DocumentId}", doc.Id);
         }
 
-        await audit.LogAsync("document.updated", nameof(Document), doc.Id,
-            before: before, after: new { doc.VendorId, doc.DocumentType });
-
+        // No explicit IAuditLogger call: the vendor/type change is an ENTITY
+        // mutation, so AuditSaveChangesInterceptor already emitted a
+        // "document.updated" row (full Before/After) on the SaveChanges above —
+        // and the compliance re-eval's own SaveChanges audits the verdict change.
+        // Per CLAUDE.md, manual IAuditLogger is reserved for NON-entity events;
+        // re-emitting "document.updated" here would double the row in the
+        // customer's audit export (#186 review — architecture reviewer).
         return Results.Ok(new { data = new { message = "Document updated." }, error = (object?)null });
     }
 
@@ -273,7 +275,15 @@ public static class DocumentEndpoints
 
         Guid? vendorId = null;
         if (Guid.TryParse(form["vendorId"].ToString(), out var parsedVendorId))
+        {
+            // Validate vendor ownership the same way PATCH does — the tenant
+            // filter on AppDbContext.Vendors scopes the lookup to this org, so a
+            // cross-org or stale id can't silently associate the document with a
+            // vendor the uploader can't see (#186 review — test-quality reviewer).
+            if (!await db.Vendors.AnyAsync(v => v.Id == parsedVendorId, ct))
+                return Error(400, "vendor.not_found", "That vendor no longer exists.");
             vendorId = parsedVendorId;
+        }
         var declaredType = form["documentType"].ToString();
         if (string.IsNullOrWhiteSpace(declaredType)) declaredType = "other";
 

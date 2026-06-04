@@ -30,11 +30,23 @@ public static class UploadFixtures
 
     /// <summary>Builds a multipart/form-data body with a single "file" field.</summary>
     public static MultipartFormDataContent UploadForm(byte[] bytes, string fileName, string contentType)
+        => UploadForm(bytes, fileName, contentType, null);
+
+    /// <summary>
+    /// Builds a multipart/form-data body with a "file" field plus any extra text fields (e.g.
+    /// <c>vendorId</c> / <c>documentType</c>) — used to exercise the upload path that associates
+    /// a document with a vendor + type at creation (#186).
+    /// </summary>
+    public static MultipartFormDataContent UploadForm(
+        byte[] bytes, string fileName, string contentType, IReadOnlyDictionary<string, string>? fields)
     {
         var form = new MultipartFormDataContent();
         var file = new ByteArrayContent(bytes);
         file.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         form.Add(file, "file", fileName);
+        if (fields is not null)
+            foreach (var (key, value) in fields)
+                form.Add(new StringContent(value), key);
         return form;
     }
 }

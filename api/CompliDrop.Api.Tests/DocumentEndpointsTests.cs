@@ -2,9 +2,14 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using static CompliDrop.Api.Tests.TestHelpers.UploadFixtures;
 
 namespace CompliDrop.Api.Tests;
@@ -189,6 +194,8 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         // The forever-"Pending" verdict flips to a real answer because the
         // newly-assigned vendor's template has a rule the COI satisfies.
         updated.ComplianceStatus.Should().Be(ComplianceStatus.Compliant);
+        // A vendor-only PATCH must NOT clobber the document type (partial update).
+        updated.DocumentType.Should().Be("coi");
     }
 
     [Fact]
@@ -202,7 +209,10 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         await using var db = CreateSystemDb();
-        (await db.Documents.FirstAsync(d => d.Id == docId)).DocumentType.Should().Be("permit");
+        var updated = await db.Documents.FirstAsync(d => d.Id == docId);
+        updated.DocumentType.Should().Be("permit");
+        // A type-only PATCH must NOT touch the vendor assignment (partial update).
+        updated.VendorId.Should().BeNull();
     }
 
     [Fact]
@@ -285,5 +295,207 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         var resp = await other.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { documentType = "permit" });
 
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task Assigning_a_vendor_with_no_template_leaves_the_document_pending()
+    {
+        var auth = await RegisterAndLoginAsync();
+        Guid docId, vendorId;
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            var vendor = new Vendor
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                Name = "No-Template Vendor",
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.Vendors.Add(vendor);
+            var doc = new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "coi.pdf",
+                BlobStorageUrl = "memory://x",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed,
+                ComplianceStatus = ComplianceStatus.Pending,
+                ExpirationDate = now.AddDays(365),
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.Documents.Add(doc);
+            await db.SaveChangesAsync();
+            docId = doc.Id;
+            vendorId = vendor.Id;
+        }
+
+        var resp = await auth.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { vendorId });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var verify = CreateSystemDb();
+        var updated = await verify.Documents.FirstAsync(d => d.Id == docId);
+        updated.VendorId.Should().Be(vendorId);
+        // No requirement set → no verdict to give; the document stays Pending
+        // rather than being wrongly marked Compliant/NonCompliant.
+        updated.ComplianceStatus.Should().Be(ComplianceStatus.Pending);
+    }
+
+    [Fact]
+    public async Task A_no_op_patch_returns_ok_without_changes()
+    {
+        var auth = await RegisterAndLoginAsync();
+        // A freshly-uploaded document defaults to type "other"; re-asserting it
+        // is a no-op that must skip the save / re-eval / audit work.
+        var docId = await UploadedId(await auth.Client.PostAsync(
+            "/api/documents/upload", UploadForm(PdfBytes(), "doc.pdf", "application/pdf")));
+
+        var resp = await auth.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { documentType = "other" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("data").GetProperty("message").GetString().Should().Be("No changes.");
+    }
+
+    [Fact]
+    public async Task The_assignment_persists_even_when_compliance_re_eval_throws()
+    {
+        // Best-effort guarantee: a failing inline compliance recompute must not
+        // fail the vendor assignment the user just made. Swap in a throwing
+        // IComplianceCheckService for this one host.
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IComplianceCheckService>();
+                services.AddScoped<IComplianceCheckService, ThrowingComplianceCheckService>();
+            }));
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+
+        // Register through the derived host (shares the same test database).
+        var email = $"user-{Guid.NewGuid():N}@example.com";
+        var reg = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            email,
+            password = "Password1234",
+            fullName = "Test User",
+            companyName = "Test Co",
+            industry = (string?)null,
+            companySize = (string?)null,
+            timeZone = "America/New_York",
+        });
+        reg.EnsureSuccessStatusCode();
+        var orgId = (await reg.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("organizationId").GetGuid();
+
+        Guid docId, vendorId;
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            var vendor = new Vendor
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = orgId,
+                Name = "Acme",
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.Vendors.Add(vendor);
+            var doc = new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = orgId,
+                OriginalFileName = "coi.pdf",
+                BlobStorageUrl = "memory://x",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed,
+                ComplianceStatus = ComplianceStatus.Pending,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.Documents.Add(doc);
+            await db.SaveChangesAsync();
+            docId = doc.Id;
+            vendorId = vendor.Id;
+        }
+
+        var resp = await client.PatchAsJsonAsync($"/api/documents/{docId}", new { vendorId });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.FirstAsync(d => d.Id == docId)).VendorId.Should().Be(vendorId);
+    }
+
+    [Fact]
+    public async Task Upload_persists_a_supplied_vendor_and_document_type()
+    {
+        var auth = await RegisterAndLoginAsync();
+        Guid vendorId;
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            var vendor = new Vendor
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                Name = "Acme",
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.Vendors.Add(vendor);
+            await db.SaveChangesAsync();
+            vendorId = vendor.Id;
+        }
+
+        var resp = await auth.Client.PostAsync("/api/documents/upload",
+            UploadForm(PdfBytes(), "coi.pdf", "application/pdf", new Dictionary<string, string>
+            {
+                ["vendorId"] = vendorId.ToString(),
+                ["documentType"] = "permit",
+            }));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var id = await UploadedId(resp);
+        await using var verify = CreateSystemDb();
+        var doc = await verify.Documents.FirstAsync(d => d.Id == id);
+        doc.VendorId.Should().Be(vendorId);
+        doc.DocumentType.Should().Be("permit");
+    }
+
+    [Fact]
+    public async Task Upload_with_a_cross_org_vendor_is_rejected()
+    {
+        var owner = await RegisterAndLoginAsync();
+        var other = await RegisterAndLoginAsync();
+        Guid otherVendorId;
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            var vendor = new Vendor
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = other.OrgId,
+                Name = "Other Org Vendor",
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.Vendors.Add(vendor);
+            await db.SaveChangesAsync();
+            otherVendorId = vendor.Id;
+        }
+
+        var resp = await owner.Client.PostAsync("/api/documents/upload",
+            UploadForm(PdfBytes(), "coi.pdf", "application/pdf", new Dictionary<string, string>
+            {
+                ["vendorId"] = otherVendorId.ToString(),
+            }));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
 }

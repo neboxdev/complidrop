@@ -76,17 +76,22 @@ export default function DocumentsPage() {
 
   async function handleUpload() {
     if (!stagedVendor || staged.length === 0) return;
+    const vendorId = stagedVendor.id;
+    const documentType = stagedType;
     setIsUploading(true);
     try {
-      for (const file of staged) {
-        await upload.mutateAsync({
-          file,
-          vendorId: stagedVendor.id,
-          documentType: stagedType,
-        });
+      // Snapshot the batch, then drop each file from `staged` as soon as it
+      // uploads. A mid-batch failure therefore leaves ONLY the files that
+      // didn't succeed staged — clicking Upload again retries just those,
+      // instead of re-sending (and re-creating, since each upload mints a fresh
+      // idempotency key) the documents that already landed. (#186 review)
+      const batch = [...staged];
+      for (const file of batch) {
+        await upload.mutateAsync({ file, vendorId, documentType });
+        setStaged((prev) => prev.filter((f) => f !== file));
         toast.success(`Uploaded ${file.name}`);
       }
-      setStaged([]);
+      // Whole batch succeeded — reset the vendor/type selection for the next one.
       setStagedVendor(null);
       setStagedType("coi");
     } catch (err) {
