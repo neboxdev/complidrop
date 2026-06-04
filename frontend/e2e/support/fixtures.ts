@@ -143,6 +143,8 @@ export type DocumentDetailFixtureE2E = {
   documentType: string;
   documentSubType: string | null;
   vendorName: string | null;
+  vendorContactEmail: string | null;
+  vendorId: string | null;
   extractionStatus: string;
   extractionConfidence: number | null;
   complianceStatus: string;
@@ -162,6 +164,18 @@ export type DocumentDetailFixtureE2E = {
     isManuallyEdited: boolean;
     originalValue: string | null;
   }>;
+  complianceChecks: Array<{
+    id: string;
+    complianceRuleId: string;
+    ruleFieldName: string | null;
+    ruleOperator: string | null;
+    ruleExpectedValue: string | null;
+    ruleErrorMessage: string | null;
+    actualValue: string | null;
+    isPassed: boolean;
+    notes: string | null;
+    checkedAt: string;
+  }>;
   extractionFields: unknown;
   extractionPromptVersion: string | null;
   processingError: string | null;
@@ -175,6 +189,8 @@ const DOCUMENT_DETAIL_BASE: DocumentDetailFixtureE2E = {
   documentType: "COI",
   documentSubType: null,
   vendorName: null,
+  vendorContactEmail: null,
+  vendorId: null,
   extractionStatus: "Pending",
   extractionConfidence: null,
   complianceStatus: "NonCompliant",
@@ -186,6 +202,7 @@ const DOCUMENT_DETAIL_BASE: DocumentDetailFixtureE2E = {
   blobStorageUrl: null,
   generalLiabilityLimit: null,
   fields: [],
+  complianceChecks: [],
   extractionFields: null,
   extractionPromptVersion: null,
   processingError: null,
