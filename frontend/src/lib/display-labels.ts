@@ -184,3 +184,109 @@ export function deliveryStatusLabel(status: string | null | undefined): string {
   if (DELIVERY_STATUS_LABELS[key]) return DELIVERY_STATUS_LABELS[key];
   return key.charAt(0).toUpperCase() + key.slice(1);
 }
+
+// -------- Compliance-check failure explanations (#193) --------
+
+/**
+ * The subset of a compliance-check row the detail page needs to explain a
+ * failure. Mirrors the backend `ComplianceCheckDto` (camelCased by JSON
+ * serialization).
+ */
+export type ComplianceCheckLike = {
+  isPassed: boolean;
+  ruleErrorMessage?: string | null;
+  ruleFieldName?: string | null;
+  ruleOperator?: string | null;
+  ruleExpectedValue?: string | null;
+  actualValue?: string | null;
+};
+
+// Field names whose values are dollar amounts — rendered as US currency so the
+// failure reason reads "$1,000,000", not "1000000".
+const MONEY_FIELD = /limit|liabilit|amount|coverage/i;
+
+/**
+ * Format a stored field value for display. Money-ish fields whose value is a
+ * bare number render as whole-dollar US currency ("1000000" → "$1,000,000");
+ * everything else renders trimmed-verbatim. Returns null for an empty value so
+ * the caller can say "missing" instead of printing an empty string. (#193)
+ */
+export function formatCheckValue(
+  fieldName: string | null | undefined,
+  value: string | null | undefined,
+): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  if (fieldName && MONEY_FIELD.test(fieldName)) {
+    const n = Number(trimmed.replace(/[$,\s]/g, ""));
+    if (Number.isFinite(n) && trimmed.replace(/[$,\s]/g, "") !== "") {
+      return n.toLocaleString("en-US", {
+        style: "currency",
+        currency: "USD",
+        maximumFractionDigits: 0,
+      });
+    }
+  }
+  return trimmed;
+}
+
+/**
+ * Plain-English explanation of WHY one requirement failed, for the
+ * document-detail "Why isn't this compliant?" card. Prefers the owner-authored
+ * requirement text (`ruleErrorMessage`); otherwise synthesizes one from the
+ * operator + field + expected value. Appends what the document actually shows
+ * when a value was extracted, or a "couldn't find this" note when it's missing.
+ * Never surfaces a raw operator token or snake_case field name. (#193)
+ */
+export function complianceFailureReason(check: ComplianceCheckLike): string {
+  const expected = formatCheckValue(check.ruleFieldName, check.ruleExpectedValue);
+  const synthesized = [
+    fieldLabel(check.ruleFieldName),
+    operatorLabel(check.ruleOperator).toLowerCase(),
+    expected,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const base = (
+    check.ruleErrorMessage?.trim() ||
+    synthesized ||
+    "This requirement wasn't met."
+  ).replace(/[.\s]+$/, "");
+
+  const actual = formatCheckValue(check.ruleFieldName, check.actualValue);
+  return actual
+    ? `${base} — this document shows ${actual}.`
+    : `${base} — we couldn't find this on the document.`;
+}
+
+// -------- Document processing-error codes (#193) --------
+
+// Maps the codes ExtractionWorker.MarkFailed writes ("code: detail") to copy a
+// venue manager can act on. The raw string goes in the "Details for support"
+// disclosure, never in the headline.
+// Body copy deliberately says "this file" (never "this document") so it can sit
+// directly under the card's "We couldn't read this document" headline without a
+// duplicate-phrase clash in tests that match the headline by text.
+const PROCESSING_ERROR_LABELS: Readonly<Record<string, string>> = {
+  "extraction.too_many_attempts":
+    "We tried several times but couldn't read this file. It may be blurry, password-protected, or not a type we recognize — try uploading a clearer copy.",
+  "extraction.cost_ceiling_hit":
+    "We couldn't read this file because your account hit its monthly processing limit. It resumes next cycle, or contact support to raise the limit.",
+  "extraction.failed":
+    "Something went wrong while reading this file. Try uploading it again, or contact support if it keeps happening.",
+};
+
+/**
+ * Map a raw `processingError` — either "code: detail" from `MarkFailed` or a
+ * bare exception message from a mid-retry failure — to plain-English copy.
+ * Unknown codes and raw exceptions fall back to a generic line; the raw value
+ * is NEVER returned (it belongs in the support disclosure). (#193)
+ */
+export function processingErrorMessage(raw: string | null | undefined): string {
+  const code = raw?.split(":", 1)[0]?.trim().toLowerCase() ?? "";
+  return (
+    PROCESSING_ERROR_LABELS[code] ??
+    "We weren't able to read this file. Try uploading it again, or contact support if it keeps happening."
+  );
+}

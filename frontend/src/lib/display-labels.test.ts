@@ -11,6 +11,9 @@ import {
   actionLabel,
   operatorLabel,
   deliveryStatusLabel,
+  complianceFailureReason,
+  formatCheckValue,
+  processingErrorMessage,
 } from "./display-labels";
 
 describe("complianceStatusLabel (#188)", () => {
@@ -138,5 +141,99 @@ describe("actionLabel — every emitted audit action is curated (#188)", () => {
     expect(label).not.toContain(" · "); // the fallback's dot-join marker
     expect(label).not.toContain("_");
     expect(label[0]).toBe(label[0].toUpperCase());
+  });
+});
+
+describe("formatCheckValue (#193)", () => {
+  it("formats money-ish fields as whole-dollar USD", () => {
+    expect(formatCheckValue("general_liability_limit", "1000000")).toBe("$1,000,000");
+    expect(formatCheckValue("auto_liability_limit", "500000")).toBe("$500,000");
+    // Already-formatted input is normalized, not double-formatted.
+    expect(formatCheckValue("umbrella_limit", "$1,000,000")).toBe("$1,000,000");
+  });
+  it("leaves non-money fields and non-numeric values verbatim", () => {
+    expect(formatCheckValue("certificate_holder", "Acme LLC")).toBe("Acme LLC");
+    expect(formatCheckValue("general_liability_limit", "see attached")).toBe("see attached");
+  });
+  it("returns null for an empty / whitespace value so callers can say 'missing'", () => {
+    expect(formatCheckValue("general_liability_limit", "")).toBeNull();
+    expect(formatCheckValue("general_liability_limit", "   ")).toBeNull();
+    expect(formatCheckValue("general_liability_limit", null)).toBeNull();
+  });
+});
+
+describe("complianceFailureReason (#193)", () => {
+  it("prefers the owner-authored requirement text and appends what the document shows", () => {
+    const reason = complianceFailureReason({
+      isPassed: false,
+      ruleErrorMessage: "General liability must be at least $1,000,000",
+      ruleFieldName: "general_liability_limit",
+      ruleOperator: "min_value",
+      ruleExpectedValue: "1000000",
+      actualValue: "500000",
+    });
+    expect(reason).toBe(
+      "General liability must be at least $1,000,000 — this document shows $500,000.",
+    );
+  });
+  it("synthesizes a plain-English reason when no owner message is set — never a raw operator or snake_case field", () => {
+    const reason = complianceFailureReason({
+      isPassed: false,
+      ruleErrorMessage: null,
+      ruleFieldName: "general_liability_limit",
+      ruleOperator: "min_value",
+      ruleExpectedValue: "1000000",
+      actualValue: "500000",
+    });
+    expect(reason).toContain("General liability limit");
+    expect(reason).toContain("must be at least");
+    expect(reason).toContain("$1,000,000");
+    expect(reason).toContain("$500,000");
+    expect(reason).not.toContain("min_value");
+    expect(reason).not.toContain("general_liability_limit");
+  });
+  it("says the value couldn't be found when the document has no value for the field", () => {
+    const reason = complianceFailureReason({
+      isPassed: false,
+      ruleErrorMessage: "A workers' comp certificate is required",
+      ruleFieldName: "workers_comp_limit",
+      ruleOperator: "required",
+      ruleExpectedValue: null,
+      actualValue: null,
+    });
+    expect(reason).toBe(
+      "A workers' comp certificate is required — we couldn't find this on the document.",
+    );
+  });
+});
+
+describe("processingErrorMessage (#193)", () => {
+  it("maps known codes to plain-English copy, never echoing the raw code", () => {
+    const tooMany = processingErrorMessage(
+      "extraction.too_many_attempts: Exceeded 5 attempts (6 so far).",
+    );
+    expect(tooMany).toMatch(/tried several times/i);
+    expect(tooMany).not.toMatch(/extraction\.too_many_attempts/);
+    expect(tooMany).not.toMatch(/Exceeded 5 attempts/);
+
+    expect(processingErrorMessage("extraction.cost_ceiling_hit: Monthly extraction cost ceiling reached."))
+      .toMatch(/monthly processing limit/i);
+    expect(processingErrorMessage("extraction.failed: System.Exception boom"))
+      .toMatch(/something went wrong/i);
+  });
+  it("parses a bare code with no ': detail' suffix", () => {
+    // split(':', 1) on a colon-less string yields the whole string — the code
+    // still resolves. Pins that boundary of the parser.
+    expect(processingErrorMessage("extraction.too_many_attempts")).toMatch(
+      /tried several times/i,
+    );
+  });
+  it("falls back to a generic line for unknown codes and bare exception messages", () => {
+    expect(processingErrorMessage("System.InvalidOperationException: Document has no blob path."))
+      .toMatch(/weren't able to read this file/i);
+    expect(processingErrorMessage(null)).toMatch(/weren't able to read this file/i);
+    // Never leaks the raw exception text.
+    expect(processingErrorMessage("System.InvalidOperationException: Document has no blob path."))
+      .not.toMatch(/InvalidOperationException/);
   });
 });

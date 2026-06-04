@@ -25,6 +25,7 @@ import {
   jsonError,
   authedMe,
   makeDocumentDetail,
+  makeComplianceCheck,
   sequencedJsonOk,
   toastSuccess,
   toastError,
@@ -1262,5 +1263,304 @@ describe("DocumentDetailPage — a11y live-region announcement (#189)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("DocumentDetailPage — non-compliance explainer (#193)", () => {
+  it("explains each failed requirement in plain English with an Email-vendor CTA", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_nc_01",
+            extractionStatus: "Completed",
+            complianceStatus: "NonCompliant",
+            vendorName: "Beachfront Janitorial",
+            vendorContactEmail: "ops@beachfront.test",
+            complianceChecks: [
+              makeComplianceCheck({
+                id: "chk_fail",
+                isPassed: false,
+                ruleErrorMessage: "General liability must be at least $1,000,000",
+                ruleFieldName: "general_liability_limit",
+                actualValue: "500000",
+              }),
+              makeComplianceCheck({
+                id: "chk_pass",
+                isPassed: true,
+                ruleErrorMessage: "Certificate holder must be listed",
+              }),
+            ],
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_nc_01" },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText(/why isn't this compliant/i)).toBeInTheDocument(),
+    );
+    // The failed reason renders in plain English with money formatted.
+    expect(
+      screen.getByText(
+        /General liability must be at least \$1,000,000 — this document shows \$500,000\./i,
+      ),
+    ).toBeInTheDocument();
+    // The single passed requirement is acknowledged.
+    expect(screen.getByText(/1 other requirement met/i)).toBeInTheDocument();
+    // The primary CTA is a mailto to the vendor, pre-filled with the reason.
+    const cta = screen.getByRole("link", {
+      name: /email beachfront janitorial to fix this/i,
+    });
+    const href = cta.getAttribute("href") ?? "";
+    expect(href.startsWith("mailto:ops@beachfront.test?")).toBe(true);
+    expect(decodeURIComponent(href)).toContain(
+      "General liability must be at least $1,000,000",
+    );
+    // No raw enum / snake_case leaks into the explainer.
+    expect(screen.queryByText(/NonCompliant/)).toBeNull();
+    expect(screen.queryByText(/general_liability_limit/)).toBeNull();
+  });
+
+  it("does not render the explainer when there are no failed checks", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Completed",
+            complianceStatus: "Compliant",
+            complianceChecks: [makeComplianceCheck({ id: "ok", isPassed: true })],
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_completed_01" },
+    });
+    await waitFor(() => expect(screen.getByText("coi.pdf")).toBeInTheDocument());
+    expect(screen.queryByText(/why isn't this compliant/i)).toBeNull();
+  });
+
+  it("falls back to a no-recipient mailto + a vendor-page tip when the vendor has no email", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            extractionStatus: "Completed",
+            complianceStatus: "NonCompliant",
+            vendorName: "Acme",
+            vendorId: "v_acme_01",
+            vendorContactEmail: null,
+            complianceChecks: [makeComplianceCheck({ isPassed: false })],
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_nc_02" },
+    });
+    const cta = await waitFor(() =>
+      screen.getByRole("link", { name: /email acme to fix this/i }),
+    );
+    expect(cta.getAttribute("href")?.startsWith("mailto:?")).toBe(true);
+    expect(screen.getByText(/add an email for acme/i)).toBeInTheDocument();
+    // The tip links to the vendor's page so the missing email is one click away.
+    expect(
+      screen.getByRole("link", { name: /the vendor's page/i }),
+    ).toHaveAttribute("href", "/vendors/v_acme_01");
+  });
+
+  it("synthesizes a plain-English reason in the card when the owner set no message — no operator/snake_case leak", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_nc_03",
+            extractionStatus: "Completed",
+            complianceStatus: "NonCompliant",
+            vendorName: "Acme",
+            vendorContactEmail: "ops@acme.test",
+            complianceChecks: [
+              makeComplianceCheck({
+                isPassed: false,
+                ruleErrorMessage: null,
+                ruleFieldName: "general_liability_limit",
+                ruleOperator: "min_value",
+                ruleExpectedValue: "1000000",
+                actualValue: "500000",
+              }),
+            ],
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_nc_03" },
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/why isn't this compliant/i)).toBeInTheDocument(),
+    );
+    // Synthesized reason reads in plain English with money formatting.
+    expect(
+      screen.getByText(
+        /General liability limit must be at least \$1,000,000 — this document shows \$500,000\./i,
+      ),
+    ).toBeInTheDocument();
+    // Raw operator token / snake_case field name never reach the DOM.
+    expect(screen.queryByText(/min_value/)).toBeNull();
+    expect(screen.queryByText(/general_liability_limit/)).toBeNull();
+  });
+
+  it("lists every failed requirement and pluralizes the met-count", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_nc_04",
+            extractionStatus: "Completed",
+            complianceStatus: "NonCompliant",
+            vendorName: "Acme",
+            vendorContactEmail: "ops@acme.test",
+            complianceChecks: [
+              makeComplianceCheck({
+                id: "f1",
+                isPassed: false,
+                ruleErrorMessage: "General liability must be at least $1,000,000",
+              }),
+              makeComplianceCheck({
+                id: "f2",
+                isPassed: false,
+                ruleErrorMessage: "A current workers' comp certificate is required",
+              }),
+              makeComplianceCheck({ id: "p1", isPassed: true }),
+              makeComplianceCheck({ id: "p2", isPassed: true }),
+            ],
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_nc_04" },
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/why isn't this compliant/i)).toBeInTheDocument(),
+    );
+    // BOTH distinct failed reasons render (not just the first).
+    expect(
+      screen.getByText(/General liability must be at least \$1,000,000/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/current workers' comp certificate is required/i),
+    ).toBeInTheDocument();
+    // Two passed → plural "requirements".
+    expect(screen.getByText(/2 other requirements met/i)).toBeInTheDocument();
+  });
+});
+
+describe("DocumentDetailPage — ManualRequired review CTA (#193)", () => {
+  it("renders the amber review card, enables Save without edits, and outlines low-confidence fields", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_mr_01",
+            extractionStatus: "ManualRequired",
+            complianceStatus: "Pending",
+            fields: [
+              {
+                id: "f-low",
+                fieldName: "policy_number",
+                fieldValue: "POL-1",
+                fieldType: "string",
+                confidence: 0.5,
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_mr_01" },
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/double-check these details/i)).toBeInTheDocument(),
+    );
+    // Save is pre-emptively enabled so the user can confirm "looks right".
+    expect(
+      screen.getByRole("button", { name: /save changes/i }),
+    ).not.toBeDisabled();
+    // The low-confidence field input is outlined (amber/rose border class).
+    expect(screen.getByDisplayValue("POL-1").className).toMatch(
+      /border-(amber|rose)-400/,
+    );
+  });
+
+  it("does not render the amber card for a Completed document", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(makeDocumentDetail({ extractionStatus: "Completed" })),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_completed_01" },
+    });
+    await waitFor(() => expect(screen.getByText("coi.pdf")).toBeInTheDocument());
+    expect(screen.queryByText(/double-check these details/i)).toBeNull();
+  });
+});
+
+describe("DocumentDetailPage — humanized processing error (#193)", () => {
+  it("shows friendly copy + a support link and hides the raw code behind a disclosure", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_err_01",
+            extractionStatus: "Failed",
+            processingError:
+              "extraction.too_many_attempts: Exceeded 5 attempts (6 so far).",
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_err_01" },
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/couldn't read this document/i)).toBeInTheDocument(),
+    );
+    // Friendly mapped copy is shown (says "file", distinct from the headline).
+    const friendly = screen.getByText(
+      /tried several times but couldn't read this file/i,
+    );
+    expect(friendly).toBeInTheDocument();
+    // The raw code must NOT leak into the visible friendly body copy.
+    expect(friendly.textContent).not.toMatch(/extraction\.too_many_attempts/);
+    // The raw code appears EXACTLY ONCE, and only inside the <details> disclosure.
+    const summary = screen.getByText(/details for support/i);
+    expect(summary.tagName.toLowerCase()).toBe("summary");
+    const rawNodes = screen.getAllByText(/extraction\.too_many_attempts/i);
+    expect(rawNodes).toHaveLength(1);
+    expect(rawNodes[0].closest("details")).not.toBeNull();
+    // A support mailto link is present.
+    expect(
+      screen
+        .getByRole("link", { name: /contact support/i })
+        .getAttribute("href")
+        ?.startsWith("mailto:"),
+    ).toBe(true);
   });
 });

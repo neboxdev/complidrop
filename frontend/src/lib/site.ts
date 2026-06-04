@@ -32,6 +32,14 @@ export const SITE_URL =
 export const SITE_NAME = "CompliDrop";
 
 /**
+ * Customer-facing support inbox — the single source of truth for every "contact
+ * support" / "email us" affordance (the document-detail processing-error help
+ * link, the legal footer Contact link, the marketing header support link). One
+ * constant so the address can never drift between surfaces. (#193, #194, #195)
+ */
+export const SUPPORT_EMAIL = "support@complidrop.com";
+
+/**
  * One-line value proposition. Buyer language + the terms people actually search
  * ("certificate of insurance", "COI tracking"). Kept ≤ ~160 chars so it works
  * verbatim as a `<meta name="description">`.

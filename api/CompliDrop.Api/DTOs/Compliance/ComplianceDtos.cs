@@ -43,6 +43,10 @@ public record ComplianceCheckDto(
     string? RuleFieldName,
     string? RuleOperator,
     string? RuleExpectedValue,
+    // The owner-authored plain-English requirement text (e.g. "General liability
+    // must be at least $1,000,000"). Preferred over the machine Notes for the
+    // document-detail "why isn't this compliant?" explanation. (#193)
+    string? RuleErrorMessage,
     string? ActualValue,
     bool IsPassed,
     string? Notes,

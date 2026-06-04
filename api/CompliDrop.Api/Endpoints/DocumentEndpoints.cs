@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using CompliDrop.Api.Auth;
 using CompliDrop.Api.Data;
+using CompliDrop.Api.DTOs.Compliance;
 using CompliDrop.Api.DTOs.Documents;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
@@ -139,6 +140,14 @@ public static class DocumentEndpoints
         var doc = await db.Documents
             .Include(d => d.Vendor)
             .Include(d => d.Fields)
+            .Include(d => d.ComplianceChecks)
+                .ThenInclude(c => c.ComplianceRule)
+            // Two sibling COLLECTION includes (Fields + ComplianceChecks) on one
+            // Document would otherwise LEFT JOIN into a |Fields| × |Checks| cartesian
+            // product under EF's default single-query mode, re-shipping the fat
+            // Document row (ExtractionRawJson OCR text + ExtractionFields jsonb) on
+            // every duplicated row. Split into one query per collection. (#193 review)
+            .AsSplitQuery()
             .FirstOrDefaultAsync(d => d.Id == id, ct);
         if (doc is null) return NotFound();
 
@@ -152,6 +161,7 @@ public static class DocumentEndpoints
             doc.DocumentType,
             doc.DocumentSubType,
             doc.Vendor?.Name,
+            doc.Vendor?.ContactEmail,
             doc.VendorId,
             doc.ExtractionStatus.ToString(),
             doc.ExtractionConfidence,
@@ -167,6 +177,14 @@ public static class DocumentEndpoints
             doc.GeneralLiabilityLimit,
             doc.Fields.Select(f => new DocumentFieldDto(
                 f.Id, f.FieldName, f.FieldValue, f.FieldType, f.Confidence, f.IsManuallyEdited, f.OriginalValue)).ToArray(),
+            doc.ComplianceChecks
+                .OrderBy(c => c.CheckedAt)
+                .Select(c => new ComplianceCheckDto(
+                    c.Id, c.ComplianceRuleId,
+                    c.ComplianceRule.FieldName, c.ComplianceRule.Operator, c.ComplianceRule.ExpectedValue,
+                    c.ComplianceRule.ErrorMessage,
+                    c.ActualValue, c.IsPassed, c.Notes, c.CheckedAt))
+                .ToArray(),
             extractionFields,
             doc.ExtractionPromptVersion,
             doc.ProcessingError,
@@ -376,7 +394,14 @@ public static class DocumentEndpoints
             var field = doc.Fields.FirstOrDefault(f => f.FieldName == update.FieldName);
             if (field is null)
             {
-                doc.Fields.Add(new DocumentField
+                // Add through the DbSet, NOT doc.Fields.Add(...). DocumentField.Id
+                // is a client-set Guid key (ValueGeneratedOnAdd); DetectChanges
+                // marks a NEW entity added to a tracked navigation collection with
+                // a non-default key as Modified, which emits an UPDATE … WHERE Id=…
+                // that matches 0 rows → DbUpdateConcurrencyException (500). DbSet.Add
+                // forces the Added state. Mirrors ExtractionWorker.PersistSuccess,
+                // which has always used db.DocumentFields.Add for this reason. (#193)
+                db.DocumentFields.Add(new DocumentField
                 {
                     Id = Guid.NewGuid(),
                     DocumentId = doc.Id,
@@ -396,13 +421,20 @@ public static class DocumentEndpoints
                 field.Confidence = 1.0;
             }
         }
-        doc.IsManuallyVerified = true;
+        ResolveManualReview(doc);
         doc.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
 
         await audit.LogAsync("document.fields_edited", nameof(Document), doc.Id,
             before: before,
             after: doc.Fields.Select(f => new { f.FieldName, f.FieldValue }));
+
+        // NOTE: compliance is intentionally NOT re-evaluated here. ComplianceCheckService
+        // reads doc.ExtractionFields / the typed columns (GeneralLiabilityLimit, dates) —
+        // NOT DocumentField rows — and this endpoint only edits DocumentField rows, so a
+        // re-eval would recompute the identical verdict. Making manual edits actually
+        // affect compliance (sync edits into ExtractionFields/columns) is a data-semantics
+        // change tracked in its own ticket — see #193 PR body / the rolling bug epic. (#193 review)
 
         return Results.Ok(new { data = new { message = "Fields updated." }, error = (object?)null });
     }
@@ -415,7 +447,7 @@ public static class DocumentEndpoints
     {
         var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
         if (doc is null) return NotFound();
-        doc.IsManuallyVerified = true;
+        ResolveManualReview(doc);
         doc.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         await audit.LogAsync("document.verified", nameof(Document), doc.Id);
@@ -451,6 +483,18 @@ public static class DocumentEndpoints
         db.Documents.Remove(doc); // interceptor translates to soft delete
         await db.SaveChangesAsync(ct);
         return Results.Ok(new { data = new { message = "Document removed." }, error = (object?)null });
+    }
+
+    // A human has reviewed the extracted values (via field-save or explicit
+    // verify): mark the document verified and resolve a low-confidence
+    // "Needs your review" (ManualRequired) document to Completed so the amber
+    // review card on the detail page clears. Other statuses are left untouched —
+    // single source of truth for "what manual review resolves". (#193)
+    private static void ResolveManualReview(Document doc)
+    {
+        doc.IsManuallyVerified = true;
+        if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
+            doc.ExtractionStatus = ExtractionStatus.Completed;
     }
 
     private static string SanitizeFileName(string? name)
