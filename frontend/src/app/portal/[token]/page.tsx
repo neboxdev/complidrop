@@ -65,9 +65,14 @@ function rejectionCopy(rejections: FileRejection[]): string | null {
   const first = rejections[0].errors[0];
   switch (first?.code) {
     case "file-invalid-type":
-      return "That file type isn't accepted. Please upload a PDF, JPEG, or PNG.";
+      // Phone-aware: an iPhone photo often arrives as HEIC, which we can't read
+      // yet. Now that the portal invites "take a photo", a bare "isn't accepted"
+      // would be a dead-end — give the vendor the actual fix. (#196 review)
+      return "We can't read that file type. If you took a photo, switch your phone's camera to Most Compatible mode — or upload a PDF, JPEG, or PNG.";
     case "file-too-large":
-      return "That file is too large. The 10 MB cap is per file — try splitting it or compressing it.";
+      // Drop the desktop "split/compress" language — on a phone-photo surface
+      // the actionable fix is to reshoot from further back or send a PDF. (#196 review)
+      return "That file is over the 10 MB limit. If it's a photo, try taking it again from a bit further back, or upload a PDF.";
     case "file-too-small":
       return "That file is empty.";
     case "too-many-files":
@@ -323,7 +328,7 @@ export default function PortalPage() {
             Hi {info.vendorName}
           </h1>
           <p className="text-slate-600">
-            {info.orgName} asked for your latest compliance documents. Drop them here.
+            {info.orgName} asked for your latest compliance documents. Send them below.
           </p>
         </div>
 
@@ -336,7 +341,10 @@ export default function PortalPage() {
             <p className="text-sm font-semibold text-sky-900">
               What {info.orgName} needs from you
             </p>
-            <p className="mt-1 whitespace-pre-line text-sm text-slate-700">
+            {/* Cap the height + scroll so a long owner note can't push the
+                dropzone below the fold on a phone (the vendor must still see
+                the upload box). (#196 review) */}
+            <p className="mt-1 max-h-48 overflow-y-auto whitespace-pre-line text-sm text-slate-700">
               {info.instructions}
             </p>
           </div>
@@ -357,7 +365,10 @@ export default function PortalPage() {
               native file picker on iOS/Android surfaces "Take Photo" — a vendor
               photographing a paper certificate is the common mobile case. The
               dropzone's own onDrop still validates against PDF/JPEG/PNG + 10 MB,
-              so a stray HEIC/library pick is rejected with clear copy. (#196) */}
+              so a stray HEIC/library pick is rejected with clear copy. NOTE: the
+              explicit `accept` MUST stay AFTER the `{...getInputProps()}` spread —
+              react-dropzone injects its own narrower `accept` and last-prop-wins
+              is what lets this override take effect. (#196) */}
           <input {...getInputProps()} accept="image/*,application/pdf" />
           <UploadCloud className="w-12 h-12 mx-auto text-sky-500" />
           <p className="mt-3 text-base font-medium text-slate-800">

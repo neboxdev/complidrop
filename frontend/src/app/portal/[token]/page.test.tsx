@@ -102,11 +102,11 @@ describe("PortalPage — success state (#37)", () => {
         }),
       ).toBeInTheDocument(),
     );
-    // Org context appears in the subhead AND the "What {org} needs from you"
-    // instructions header now, so assert at least one (getAllByText).
+    // Org context appears in exactly two intended places now: the subhead
+    // ("{org} asked for…") AND the "What {org} needs from you" instructions header.
     expect(
-      screen.getAllByText(new RegExp(portalInfo.orgName)).length,
-    ).toBeGreaterThanOrEqual(1);
+      screen.getAllByText(new RegExp(portalInfo.orgName)),
+    ).toHaveLength(2);
     // The owner's instructions are now RENDERED (previously fetched but never
     // shown — the core #196 bug). Assert a unique phrase from the fixture.
     expect(
@@ -116,10 +116,16 @@ describe("PortalPage — success state (#37)", () => {
     expect(screen.getByText(/1\s*\/\s*5\s+uploads used/i)).toBeInTheDocument();
   });
 
-  it("does not render an empty instructions block when instructions are blank", async () => {
+  // Both empty AND whitespace-only must suppress the block — the production
+  // guard is `info.instructions?.trim()`, so the whitespace case specifically
+  // pins the `.trim()` (an empty string is already falsy without it).
+  it.each([
+    ["an empty string", ""],
+    ["whitespace only", "   \n\t "],
+  ])("does not render an instructions block when instructions are %s", async (_label, value) => {
     server.use(
       http.get(url(`/api/portal/${TOKEN}`), () =>
-        jsonOk(makePortalInfo({ instructions: "" })),
+        jsonOk(makePortalInfo({ instructions: value })),
       ),
     );
     ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
@@ -141,10 +147,31 @@ describe("PortalPage — success state (#37)", () => {
         screen.getByText(/tap to choose a file or take a photo/i),
       ).toBeInTheDocument(),
     );
-    // accept includes image/* so iOS/Android offer "Take Photo", plus PDF.
+    // The load-bearing assertion is the `accept` attribute (a sound proxy for
+    // "the native picker offers Take Photo"). NOTE: jsdom applies no CSS, so
+    // BOTH responsive copy spans are in the DOM regardless of viewport — the
+    // copy assertion above proves the string exists, not that it's shown only
+    // on mobile (true viewport behavior would need the Playwright tier).
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     expect(input.getAttribute("accept")).toMatch(/image\/\*/);
     expect(input.getAttribute("accept")).toMatch(/application\/pdf/);
+  });
+
+  it("a rejected phone photo (HEIC) shows actionable recovery copy, not a dead-end (#196 review)", async () => {
+    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/tap to choose a file or take a photo/i)).toBeInTheDocument(),
+    );
+    // A HEIC capture the iPhone camera produced — react-dropzone rejects it
+    // client-side (not in the JPEG/PNG/PDF accept map). The vendor must get a
+    // way forward, not just "isn't accepted".
+    dropFiles([makeFile("coi.heic", "image/heic", 2048)]);
+    await waitFor(() =>
+      expect(
+        screen.getByText(/switch your phone's camera to most compatible/i),
+      ).toBeInTheDocument(),
+    );
   });
 
   it("renders the dropzone affordance + accepted-file copy", async () => {
@@ -376,7 +403,7 @@ describe("PortalPage — file-rejected state (#37)", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText(/that file type isn't accepted/i),
+        screen.getByText(/we can't read that file type/i),
       ).toBeInTheDocument(),
     );
     // No request was attempted.
@@ -407,7 +434,7 @@ describe("PortalPage — file-rejected state (#37)", () => {
     dropFiles([oversize]);
 
     await waitFor(() =>
-      expect(screen.getByText(/that file is too large/i)).toBeInTheDocument(),
+      expect(screen.getByText(/over the 10 mb limit/i)).toBeInTheDocument(),
     );
     expect(uploadCalls).toBe(0);
     expect(screen.queryByText(/^received$/i)).toBeNull();
