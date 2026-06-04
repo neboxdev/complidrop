@@ -167,9 +167,12 @@ describe("PortalPage — success state (#37)", () => {
     // client-side (not in the JPEG/PNG/PDF accept map). The vendor must get a
     // way forward, not just "isn't accepted".
     dropFiles([makeFile("coi.heic", "image/heic", 2048)]);
+    // Recovery copy must be self-contained: the correct setting location AND a
+    // "take the photo again" step (flipping the format doesn't convert the HEIC
+    // already shot), plus the always-works "upload a PDF" escape. (#196 review v2)
     await waitFor(() =>
       expect(
-        screen.getByText(/switch your phone's camera to most compatible/i),
+        screen.getByText(/settings > camera > formats to most compatible and take the photo again/i),
       ).toBeInTheDocument(),
     );
   });

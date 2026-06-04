@@ -68,7 +68,7 @@ function rejectionCopy(rejections: FileRejection[]): string | null {
       // Phone-aware: an iPhone photo often arrives as HEIC, which we can't read
       // yet. Now that the portal invites "take a photo", a bare "isn't accepted"
       // would be a dead-end — give the vendor the actual fix. (#196 review)
-      return "We can't read that file type. If you took a photo, switch your phone's camera to Most Compatible mode — or upload a PDF, JPEG, or PNG.";
+      return "We can't read that file type. If you photographed it on an iPhone, set Settings > Camera > Formats to Most Compatible and take the photo again — or upload a PDF, JPEG, or PNG.";
     case "file-too-large":
       // Drop the desktop "split/compress" language — on a phone-photo surface
       // the actionable fix is to reshoot from further back or send a PDF. (#196 review)
