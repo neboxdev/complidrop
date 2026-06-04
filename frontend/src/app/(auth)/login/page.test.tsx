@@ -227,3 +227,17 @@ describe("LoginPage — loading state (#35)", () => {
       .toHaveAttribute("href", "/forgot-password");
   });
 });
+
+describe("LoginPage — form error a11y (#189)", () => {
+  it("wires aria-invalid + aria-describedby on a field error so a screen reader hears it", async () => {
+    const { container } = renderWithProviders(<LoginPage />, { auth: null });
+    fillByLabel(/^email$/i, "owner@acme.test");
+    // Leave password empty → "Password is required".
+    submitFormIn(container);
+
+    const err = await screen.findByText(/password is required/i);
+    const pw = screen.getByLabelText(/^password$/i);
+    expect(pw).toHaveAttribute("aria-invalid", "true");
+    expect(pw.getAttribute("aria-describedby") ?? "").toContain(err.id);
+  });
+});

@@ -397,3 +397,35 @@ describe("RulesPage — humanized rule display (#188)", () => {
     expect(within(row).queryByText("coi")).toBeNull();
   });
 });
+
+describe("RulesPage — delete-template confirm dialog (#189)", () => {
+  it("opens an accessible confirm dialog; deletes on confirm, not on cancel", async () => {
+    let deleteCalls = 0;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE_TEMPLATE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(TEMPLATE_DETAIL_INITIAL)),
+      http.delete(url("/api/compliance/templates/:id"), () => {
+        deleteCalls++;
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /custom coi template/i }));
+    await screen.findByRole("button", { name: /delete template/i });
+
+    // Cancel → no delete.
+    fireEvent.click(screen.getByRole("button", { name: /delete template/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveAccessibleName(/delete custom coi template\?/i);
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(deleteCalls).toBe(0);
+
+    // Confirm → delete fires.
+    fireEvent.click(screen.getByRole("button", { name: /delete template/i }));
+    await screen.findByRole("alertdialog");
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+    await waitFor(() => expect(deleteCalls).toBe(1));
+  });
+});

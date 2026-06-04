@@ -37,13 +37,17 @@ describe("ConfirmDialog (#189)", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
   });
 
-  it("cancel closes without calling onConfirm", async () => {
+  it("cancel closes without calling onConfirm, and returns focus to the trigger", async () => {
     const { onConfirm } = setup();
-    fireEvent.click(screen.getByRole("button", { name: /remove file\.pdf/i }));
+    const trigger = screen.getByRole("button", { name: /remove file\.pdf/i });
+    fireEvent.click(trigger);
     await screen.findByRole("alertdialog");
 
     fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
     expect(onConfirm).not.toHaveBeenCalled();
+    // Focus returns to the trigger (the native-confirm behavior hand-rolled
+    // modals forget) — Base UI restores it on close.
+    await waitFor(() => expect(trigger).toHaveFocus());
   });
 });
