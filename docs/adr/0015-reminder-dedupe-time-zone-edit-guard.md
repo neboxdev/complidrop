@@ -69,9 +69,11 @@ which is `DaysBefore` days − 8h before that window's start, *in local terms* �
 offset cancels because the same zone converts both the tick and the window). For the **same**
 document to be selected in both ticks, the document's single fixed-UTC expiration instant must lie
 inside **both** ~24h windows, so both window-starts — and therefore both ticks — fall within one 24h
-span. 26h covers that with a safety margin and is also the maximum IANA UTC-offset span
-(UTC+14 Kiritimati … UTC−12 Baker Island), the largest a zone edit can shift the org-local calendar
-day in the first place. A reminder's legitimate cadence for one document is **once** (a fixed
+span. 26h covers that **<24h tick-gap** — the operative, load-bearing bound — with a safety margin.
+(It coincidentally also equals the maximum IANA UTC-offset span, UTC+14 Kiritimati … UTC−12 Baker
+Island; that span is the most a zone edit can shift the org-local calendar day, but it is a secondary
+sanity check, not the bound the window is sized against — the tick-gap is.) A reminder's legitimate
+cadence for one document is **once** (a fixed
 expiration is `DaysBefore` away on exactly one local day; renewals create a new `Document` row with a
 new id — `Document.ExpirationDate` is written only by the extraction pipeline, never edited in
 place), so a 26h window cannot suppress a genuinely distinct future occurrence.
@@ -95,11 +97,16 @@ the column still stores the org-local calendar day for analytics.
 ### Negative
 
 - The cross-day case is enforced by a **query-time** check, not the hard unique index (which cannot
-  express "within 26h"). This is acceptable: the two qualifying ticks fire at **different UTC hours**
-  (a single UTC instant resolves to one local hour, so only one localDate qualifies per tick), and on
-  any instance the hourly loop is sequential — so the earlier send is always committed and visible to
-  the later tick's lookup before it runs. The same-day multi-replica race remains covered by the
-  advisory lock + unique index exactly as before.
+  express "within 26h"). It deliberately does **not** rely on the ADR 0008 advisory lock — the two
+  qualifying ticks derive *different* per-`(org, localDate)` lock keys (Jan 15 vs Jan 16 in the worked
+  example), so the lock never serialises them. Safety comes instead from the inter-tick **time gap**:
+  the two ticks fire at **different UTC hours** (a single UTC instant resolves to one local hour, so
+  only one localDate qualifies per tick) and are therefore ≥1h apart (in practice hours apart, since
+  both must bracket one fixed-UTC expiration instant). Under read-committed that gap guarantees the
+  earlier tick's `ReminderLog` row is committed and visible to the later tick's lookup before it runs —
+  on the same replica **or any other** — so the guard is multi-replica-safe without holding a lock
+  across the two ticks. The same-day multi-replica race (two ticks, *same* localDate, same UTC hour)
+  remains covered by the advisory lock + unique index exactly as before.
 - A pathological re-extraction that mutated an existing `Document.ExpirationDate` by ~1 day *and*
   landed inside the 26h window could be suppressed. This is not a reachable product flow today
   (expiration is set once by the pipeline; there is no in-place edit endpoint), and the pre-#205
@@ -137,14 +144,26 @@ documented-but-unfixed double-send does not satisfy it.
 
 ## Test coverage
 
-- `Editing_time_zone_around_local_08_does_not_double_send_the_same_reminder`
-  ([ReminderBackgroundServiceTests](../../api/CompliDrop.Api.Tests/ReminderBackgroundServiceTests.cs))
-  — the marquee regression: NY tick sends once (`SendDate = Jan 15`), the org switches to Tokyo, the
-  next-day Tokyo tick (`SendDate = Jan 16`) for the same document + recipient is suppressed. Fails
-  (two sends, two rows) without the guard; passes (one send, one row) with it.
-- `Time_zone_edit_dedupe_guard_is_bounded_to_recent_sends` — pins the window bound: a stale prior log
-  (`SentAt` 48h ago, an earlier `SendDate`) does **not** suppress a legitimately-due send, so the
-  guard cannot wedge a `(reminder, doc, recipient)` forever and stays a *recent*-send check.
+All in [ReminderBackgroundServiceTests](../../api/CompliDrop.Api.Tests/ReminderBackgroundServiceTests.cs):
+
+- `Editing_time_zone_around_local_08_does_not_double_send_the_same_reminder` — the marquee
+  regression: NY tick sends once (`SendDate = Jan 15`), the org switches to Tokyo, the next-day Tokyo
+  tick (`SendDate = Jan 16`) for the same document + recipient is suppressed. Verified to fail (two
+  sends, two rows) without the guard and pass (one send, one row) with it.
+- `Tz_edit_guard_suppresses_a_prior_send_only_within_the_26h_window` (theory, 25h/27h/48h) — pins the
+  window **width**: a prior send on an earlier `SendDate` (so only the new `SentAt` arm can match) is
+  suppressed iff its `SentAt` is inside the 26h window. Catches a shrink or grow of the constant, and
+  pins the lower bound (a stale send never wedges a `(reminder, doc, recipient)` forever).
+- `Tz_edit_guard_is_per_recipient_a_recent_send_to_one_does_not_suppress_another` and
+  `Tz_edit_guard_is_per_document_a_recent_send_for_one_doc_does_not_suppress_another` — the widened
+  clause stays scoped: a recent send to one recipient (or for one document) does not suppress another.
+- `Editing_time_zone_suppresses_the_re_fire_for_both_internal_and_vendor_recipients` — the
+  multi-recipient end-to-end (the vendor case is the costly one).
+- `Editing_time_zone_across_an_extreme_offset_jump_still_dedupes_a_two_day_send_date_shift` —
+  Pago_Pago → Kiritimati pushes `SendDate` **two** calendar days while the ticks stay 23h apart in
+  UTC; the `SentAt` key catches it where a ±1-day `SendDate`-adjacency guard (Option B) would miss it.
+- `Editing_time_zone_within_the_same_local_day_still_dedupes_via_the_same_day_key` — the widening is
+  additive: a same-local-day zone edit (NY → Chicago) is still deduped by the unchanged `SendDate` arm.
 
 ## References
 
