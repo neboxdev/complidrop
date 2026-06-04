@@ -25,6 +25,11 @@ export default function sitemap(): MetadataRoute.Sitemap {
     },
     { url: absoluteUrl("/faq"), lastModified, changeFrequency: "monthly", priority: 0.7 },
     { url: absoluteUrl("/glossary"), lastModified, changeFrequency: "monthly", priority: 0.6 },
+    // Legal + contact pages (#194). Low-priority but legitimate public pages —
+    // Privacy + Terms are also a Stripe Checkout prerequisite.
+    { url: absoluteUrl("/privacy"), lastModified, changeFrequency: "yearly", priority: 0.3 },
+    { url: absoluteUrl("/terms"), lastModified, changeFrequency: "yearly", priority: 0.3 },
+    { url: absoluteUrl("/contact"), lastModified, changeFrequency: "yearly", priority: 0.3 },
   ];
 
   const glossaryPages: MetadataRoute.Sitemap = GLOSSARY_TERMS.map((term) => ({

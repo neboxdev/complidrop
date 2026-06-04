@@ -39,6 +39,16 @@ const COLUMNS = [
   { heading: "Get started", links: GET_STARTED_LINKS },
 ] as const;
 
+// Legal + support row in the bottom bar. Privacy + Terms are a hard Stripe
+// Checkout prerequisite (the buyer must be able to find them before typing a
+// card number), and a Contact link is the basic trust + support path a
+// non-technical buyer scans for. (#194)
+const LEGAL_LINKS = [
+  { href: "/privacy", label: "Privacy Policy" },
+  { href: "/terms", label: "Terms of Service" },
+  { href: "/contact", label: "Contact" },
+] as const;
+
 export function MarketingFooter() {
   return (
     <footer className="border-t border-border bg-white">
@@ -73,8 +83,21 @@ export function MarketingFooter() {
           ))}
         </div>
 
-        <div className="mt-10 border-t border-border pt-6 text-sm text-muted-foreground">
-          Drop your docs. Stay compliant. &copy; {new Date().getFullYear()} CompliDrop
+        <div className="mt-10 flex flex-col gap-4 border-t border-border pt-6 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+          <p>
+            Drop your docs. Stay compliant. &copy; {new Date().getFullYear()} CompliDrop
+          </p>
+          <nav aria-label="Legal and support" className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            {LEGAL_LINKS.map((link) => (
+              <Link
+                key={link.href}
+                href={link.href}
+                className="transition-colors hover:text-foreground"
+              >
+                {link.label}
+              </Link>
+            ))}
+          </nav>
         </div>
       </div>
     </footer>

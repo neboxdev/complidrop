@@ -10,6 +10,11 @@ import GlossaryTermPage, {
   generateStaticParams,
   generateMetadata,
 } from "./glossary/[slug]/page";
+import PrivacyPolicyPage from "./privacy/page";
+import TermsOfServicePage from "./terms/page";
+import ContactPage from "./contact/page";
+import { MarketingFooter } from "@/components/marketing/site-footer";
+import { SUPPORT_EMAIL } from "@/lib/site";
 import { GLOSSARY_TERMS } from "@/lib/glossary";
 
 // Render next/link as a plain anchor and pin auth to anonymous (the shared
@@ -139,5 +144,72 @@ describe("Event venues use-case page", () => {
     const bodyHrefs = main.getAllByRole("link").map((l) => l.getAttribute("href"));
     expect(bodyHrefs).toContain("/glossary/additional-insured-vs-certificate-holder");
     expect(bodyHrefs).toContain("/register");
+  });
+});
+
+describe("Footer legal + support links (#194)", () => {
+  it("links Privacy, Terms, and Contact from the shared footer", () => {
+    render(<MarketingFooter />);
+    const legalNav = screen.getByRole("navigation", { name: /legal and support/i });
+    const hrefs = within(legalNav)
+      .getAllByRole("link")
+      .map((l) => l.getAttribute("href"));
+    expect(hrefs).toEqual(
+      expect.arrayContaining(["/privacy", "/terms", "/contact"]),
+    );
+    expect(
+      within(legalNav).getByRole("link", { name: /privacy policy/i }),
+    ).toHaveAttribute("href", "/privacy");
+    expect(
+      within(legalNav).getByRole("link", { name: /terms of service/i }),
+    ).toHaveAttribute("href", "/terms");
+  });
+});
+
+describe("Legal + contact pages (#194)", () => {
+  it("Privacy Policy renders and discloses the subprocessors + a contact path", () => {
+    render(<PrivacyPolicyPage />);
+    expect(
+      screen.getByRole("heading", { level: 1, name: /privacy policy/i }),
+    ).toBeInTheDocument();
+    // Names the third parties that receive data (a real privacy commitment, not
+    // just boilerplate) — pin a couple so a future content gut doesn't drop them.
+    // Stripe appears in both the payment + subprocessor sections, hence getAllByText.
+    expect(screen.getAllByText(/Stripe/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Document AI/i)).toBeInTheDocument();
+    // A way to reach us about the data.
+    expect(
+      screen.getByRole("link", { name: new RegExp(SUPPORT_EMAIL, "i") }),
+    ).toHaveAttribute("href", `mailto:${SUPPORT_EMAIL}`);
+  });
+
+  it("Terms of Service renders the not-advice disclaimer + cancellation terms (Stripe requirement)", () => {
+    render(<TermsOfServicePage />);
+    expect(
+      screen.getByRole("heading", { level: 1, name: /terms of service/i }),
+    ).toBeInTheDocument();
+    // The load-bearing liability clause for a compliance product: results are a
+    // head start, not legal/insurance advice. ("not" sits in a <strong>, so match
+    // the phrase that lives in a single text node.)
+    expect(
+      screen.getByText(/legal, insurance, or professional advice/i),
+    ).toBeInTheDocument();
+    // Stripe Checkout wants discoverable billing/cancellation terms.
+    expect(screen.getByText(/cancel anytime/i)).toBeInTheDocument();
+    expect(screen.getByText(/non-refundable/i)).toBeInTheDocument();
+    const main = within(screen.getByRole("main"));
+    expect(main.getAllByRole("link").map((l) => l.getAttribute("href"))).toContain("/privacy");
+  });
+
+  it("Contact page surfaces the support email as a mailto", () => {
+    render(<ContactPage />);
+    expect(
+      screen.getByRole("heading", { level: 1, name: /contact/i }),
+    ).toBeInTheDocument();
+    const mailtos = screen
+      .getAllByRole("link")
+      .map((l) => l.getAttribute("href"))
+      .filter((h) => h?.startsWith("mailto:"));
+    expect(mailtos).toContain(`mailto:${SUPPORT_EMAIL}`);
   });
 });

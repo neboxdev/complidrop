@@ -76,6 +76,24 @@ export function Lead({ children }: { children: React.ReactNode }) {
   return <p className="mt-5 text-lg leading-relaxed text-muted-foreground">{children}</p>;
 }
 
+/** A titled prose section for legal / utility pages (Privacy, Terms, Contact). (#194) */
+export function LegalSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="mt-8 border-t border-border pt-6">
+      <h2 className="text-lg font-semibold text-foreground">{title}</h2>
+      <div className="mt-3 space-y-3 text-base leading-relaxed text-muted-foreground">
+        {children}
+      </div>
+    </section>
+  );
+}
+
 const ctaClass = cn(
   buttonVariants({ size: "lg" }),
   "h-12 cursor-pointer rounded-xl bg-accent px-7 text-base font-semibold text-accent-foreground shadow-md transition-all duration-200 hover:bg-accent/90 hover:shadow-lg",
