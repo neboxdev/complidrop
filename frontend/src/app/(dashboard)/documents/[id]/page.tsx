@@ -4,16 +4,21 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, ArrowLeft, RefreshCw, RotateCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Mail, RefreshCw, RotateCw, ShieldCheck } from "lucide-react";
 import { api, ApiError, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { ComplianceBadge, ExtractionBadge } from "@/components/StatusBadges";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StaleDataBanner } from "@/components/StaleDataBanner";
 import { DocumentTypeSelect } from "@/components/DocumentTypeSelect";
 import { useUpdateDocument } from "@/hooks/useDocuments";
-import { fieldLabel } from "@/lib/display-labels";
+import {
+  complianceFailureReason,
+  fieldLabel,
+  processingErrorMessage,
+} from "@/lib/display-labels";
+import { SUPPORT_EMAIL } from "@/lib/site";
 import { cn } from "@/lib/utils";
 import { useEffect, useId, useRef, useState } from "react";
 
@@ -27,12 +32,30 @@ type DocField = {
   originalValue: string | null;
 };
 
+// Mirror of the backend ComplianceCheckDto (camelCased over JSON). Carries both
+// the machine fields and the owner-authored ruleErrorMessage so the page can
+// explain a failure in plain English. (#193)
+type ComplianceCheck = {
+  id: string;
+  complianceRuleId: string;
+  ruleFieldName: string | null;
+  ruleOperator: string | null;
+  ruleExpectedValue: string | null;
+  ruleErrorMessage: string | null;
+  actualValue: string | null;
+  isPassed: boolean;
+  notes: string | null;
+  checkedAt: string;
+};
+
 type DocDetail = {
   id: string;
   originalFileName: string;
   documentType: string;
   documentSubType: string | null;
   vendorName: string | null;
+  vendorContactEmail: string | null;
+  vendorId: string | null;
   extractionStatus: string;
   extractionConfidence: number | null;
   complianceStatus: string;
@@ -44,6 +67,7 @@ type DocDetail = {
   blobStorageUrl: string | null;
   generalLiabilityLimit: number | null;
   fields: DocField[];
+  complianceChecks: ComplianceCheck[];
   extractionFields: unknown;
   extractionPromptVersion: string | null;
   processingError: string | null;
@@ -67,6 +91,144 @@ function ConfidenceHint({ confidence }: { confidence: number }) {
   if (!hint) return null;
   return (
     <span className={cn("px-2 py-0.5 rounded font-medium", hint.className)}>{hint.text}</span>
+  );
+}
+
+// Tiers a field's input border by confidence so the eye lands on the values the
+// extractor was least sure of — amber for "double-check", rose for "please
+// verify". High-confidence fields keep the neutral default. Mirrors the
+// confidenceHint thresholds. (#193)
+function fieldBorderClass(confidence: number): string {
+  if (confidence >= 0.9) return "";
+  if (confidence >= 0.7) return "border-amber-400 focus-visible:ring-amber-400/40";
+  return "border-rose-400 focus-visible:ring-rose-400/40";
+}
+
+// Build a `mailto:` that opens the user's mail client pre-filled with the vendor
+// (when we have their email), a subject, and the failed-requirement reasons as a
+// bulleted body. Encoded with encodeURIComponent so spaces are %20 and newlines
+// %0A (URLSearchParams would emit "+" for spaces, which some mail clients show
+// literally). A missing email yields `mailto:?…` so the user just fills in the
+// recipient. (#193)
+function buildVendorMailto(doc: DocDetail, reasons: string[]): string {
+  const subject = `Action needed on your document: ${doc.originalFileName}`;
+  const body = [
+    doc.vendorName ? `Hi ${doc.vendorName},` : "Hi,",
+    "",
+    "We can't mark the document you sent as compliant yet. Here's what needs fixing:",
+    "",
+    ...reasons.map((r) => `• ${r}`),
+    "",
+    "Please send an updated copy when you can. Thank you!",
+  ].join("\n");
+  const to = doc.vendorContactEmail?.trim() ?? "";
+  return `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+// Support mailto carrying the document context (file name, id, raw error) so the
+// support team can triage without a round-trip. The raw error rides in the body,
+// NOT in any user-facing copy. (#193)
+function buildSupportMailto(doc: DocDetail): string {
+  const subject = `Help reading my document: ${doc.originalFileName}`;
+  const body = [
+    `I'm having trouble with a document in CompliDrop.`,
+    "",
+    `Document: ${doc.originalFileName}`,
+    `Reference: ${doc.id}`,
+    doc.processingError ? `Technical detail: ${doc.processingError}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+// "Why isn't this compliant?" — lists each failed requirement in plain English
+// with a primary "Email {vendor} to fix this" CTA pre-filled with the reasons.
+// Renders only when there's at least one failed check, so a compliant document
+// shows nothing. (#193)
+function NonComplianceExplainer({ doc }: { doc: DocDetail }) {
+  const failed = doc.complianceChecks.filter((c) => !c.isPassed);
+  if (failed.length === 0) return null;
+  const reasons = failed.map(complianceFailureReason);
+  const passedCount = doc.complianceChecks.length - failed.length;
+  return (
+    <Card className="border-rose-200 bg-rose-50/50">
+      <CardContent className="p-4 sm:p-6 space-y-3">
+        <div className="flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" aria-hidden />
+          <h2 className="font-semibold text-rose-900">Why isn&apos;t this compliant?</h2>
+        </div>
+        <ul className="space-y-1.5 text-sm text-slate-700">
+          {failed.map((c, i) => (
+            <li key={c.id} className="flex gap-2">
+              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-rose-500" aria-hidden />
+              <span>{reasons[i]}</span>
+            </li>
+          ))}
+        </ul>
+        {passedCount > 0 && (
+          <p className="text-xs text-emerald-700">
+            {passedCount} other requirement{passedCount === 1 ? "" : "s"} met.
+          </p>
+        )}
+        <div className="space-y-1.5 pt-1">
+          <a href={buildVendorMailto(doc, reasons)} className={cn(buttonVariants({ size: "sm" }))}>
+            <Mail className="w-4 h-4" aria-hidden />
+            {doc.vendorName ? `Email ${doc.vendorName} to fix this` : "Email the vendor to fix this"}
+          </a>
+          {!doc.vendorContactEmail && (
+            <p className="text-xs text-slate-500">
+              {doc.vendorName
+                ? `Tip: add an email for ${doc.vendorName} on the vendor page to send in one click.`
+                : "Tip: assign a vendor so we can fill in their email for you."}
+            </p>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Amber call-to-action for the ManualRequired state: tells the user exactly what
+// to do (review the amber-bordered fields, fix, Save). (#193)
+function ManualReviewCard() {
+  return (
+    <Card className="border-amber-300 bg-amber-50">
+      <CardContent className="p-4 sm:p-6 space-y-1">
+        <div className="flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" aria-hidden />
+          <h2 className="font-semibold text-amber-900">Please double-check these details</h2>
+        </div>
+        <p className="text-sm text-amber-800">
+          We weren&apos;t fully confident reading this document. Check the values below —
+          the ones outlined in amber are the least certain — fix anything that looks
+          wrong, then click <span className="font-medium">Save changes</span>.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Humanized processing-error card: friendly headline + mapped plain-English copy
+// + a support link, with the raw error tucked behind a "Details for support"
+// disclosure (never shown inline). (#193)
+function ProcessingErrorCard({ doc }: { doc: DocDetail }) {
+  return (
+    <Card className="border-rose-200">
+      <CardContent className="p-4 text-sm space-y-2">
+        <p className="font-medium text-rose-700">We couldn&apos;t read this document</p>
+        <p className="text-slate-700">{processingErrorMessage(doc.processingError)}</p>
+        <p>
+          <a href={buildSupportMailto(doc)} className="text-sky-700 hover:underline">
+            Contact support
+          </a>
+        </p>
+        <details className="text-xs text-slate-500">
+          <summary className="cursor-pointer select-none">Details for support</summary>
+          <p className="mt-1 font-mono break-words text-slate-500">{doc.processingError}</p>
+        </details>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -320,14 +482,11 @@ export default function DocumentDetailPage() {
         <SummaryCell label="Verified" value={doc.isManuallyVerified ? <span className="inline-flex items-center gap-1 text-emerald-700"><ShieldCheck className="w-3.5 h-3.5" /> Yes</span> : "—"} />
       </section>
 
-      {doc.processingError && (
-        <Card className="border-rose-200">
-          <CardContent className="p-4 text-sm text-rose-700">
-            <p className="font-medium">We couldn&apos;t read this document</p>
-            <p>{doc.processingError}</p>
-          </CardContent>
-        </Card>
-      )}
+      <NonComplianceExplainer doc={doc} />
+
+      {doc.extractionStatus === "ManualRequired" && <ManualReviewCard />}
+
+      {doc.processingError && <ProcessingErrorCard doc={doc} />}
 
       <Card>
         <CardContent className="p-6 space-y-4">
@@ -335,7 +494,14 @@ export default function DocumentDetailPage() {
             <h2 className="font-semibold text-slate-800">Extracted fields</h2>
             <Button
               size="sm"
-              disabled={!hasEdits || saveFields.isPending}
+              // In ManualRequired, allow Save even with no edits so the user can
+              // confirm "these look right" — the backend flips the doc to
+              // Completed on save, clearing the review state. Other states keep
+              // the edits-required gate. (#193)
+              disabled={
+                saveFields.isPending ||
+                (!hasEdits && doc.extractionStatus !== "ManualRequired")
+              }
               onClick={() => {
                 const fields = Object.entries(edits).map(([fieldName, fieldValue]) => ({ fieldName, fieldValue }));
                 saveFields.mutate(fields);
@@ -360,6 +526,7 @@ export default function DocumentDetailPage() {
                   <Input
                     id={`docfield-${f.id}`}
                     defaultValue={f.fieldValue ?? ""}
+                    className={fieldBorderClass(f.confidence)}
                     onChange={(e) => setEdits((prev) => ({ ...prev, [f.fieldName]: e.target.value }))}
                   />
                   <div className="flex items-center gap-2 text-xs">

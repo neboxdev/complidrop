@@ -160,12 +160,51 @@ export type DocumentDetailField = {
   originalValue: string | null;
 };
 
+/**
+ * Mirror of the backend `ComplianceCheckDto` (camelCased over JSON), as the
+ * detail page consumes it from `DocumentDetail.complianceChecks`. (#193)
+ */
+export type ComplianceCheckFixture = {
+  id: string;
+  complianceRuleId: string;
+  ruleFieldName: string | null;
+  ruleOperator: string | null;
+  ruleExpectedValue: string | null;
+  ruleErrorMessage: string | null;
+  actualValue: string | null;
+  isPassed: boolean;
+  notes: string | null;
+  checkedAt: string;
+};
+
+const COMPLIANCE_CHECK_BASE: Readonly<ComplianceCheckFixture> = {
+  id: "chk_gl_01",
+  complianceRuleId: "rule_gl_01",
+  ruleFieldName: "general_liability_limit",
+  ruleOperator: "min_value",
+  ruleExpectedValue: "1000000",
+  ruleErrorMessage: "General liability must be at least $1,000,000",
+  actualValue: "500000",
+  isPassed: false,
+  notes: "Value 500000 below required minimum 1000000.",
+  checkedAt: "2026-05-26T12:00:00Z",
+};
+
+/** A failed-by-default compliance check; pass `{ isPassed: true }` for a met one. */
+export function makeComplianceCheck(
+  overrides: Partial<ComplianceCheckFixture> = {},
+): ComplianceCheckFixture {
+  return { ...COMPLIANCE_CHECK_BASE, ...overrides };
+}
+
 export type DocumentDetailFixture = {
   id: string;
   originalFileName: string;
   documentType: string;
   documentSubType: string | null;
   vendorName: string | null;
+  vendorContactEmail: string | null;
+  vendorId: string | null;
   extractionStatus: string;
   extractionConfidence: number | null;
   complianceStatus: string;
@@ -177,6 +216,7 @@ export type DocumentDetailFixture = {
   blobStorageUrl: string | null;
   generalLiabilityLimit: number | null;
   fields: DocumentDetailField[];
+  complianceChecks: ComplianceCheckFixture[];
   extractionFields: unknown;
   extractionPromptVersion: string | null;
   processingError: string | null;
@@ -190,6 +230,8 @@ const DOCUMENT_DETAIL_BASE: Readonly<DocumentDetailFixture> = {
   documentType: "COI",
   documentSubType: null,
   vendorName: null,
+  vendorContactEmail: null,
+  vendorId: null,
   extractionStatus: "Pending",
   extractionConfidence: null,
   complianceStatus: "Pending",
@@ -201,6 +243,7 @@ const DOCUMENT_DETAIL_BASE: Readonly<DocumentDetailFixture> = {
   blobStorageUrl: null,
   generalLiabilityLimit: null,
   fields: [],
+  complianceChecks: [],
   extractionFields: null,
   extractionPromptVersion: null,
   processingError: null,
@@ -223,6 +266,7 @@ export function makeDocumentDetail(
   return {
     ...DOCUMENT_DETAIL_BASE,
     fields: DOCUMENT_DETAIL_BASE.fields.map((f) => ({ ...f })),
+    complianceChecks: DOCUMENT_DETAIL_BASE.complianceChecks.map((c) => ({ ...c })),
     ...overrides,
   };
 }
