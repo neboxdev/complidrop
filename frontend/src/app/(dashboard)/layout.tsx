@@ -17,7 +17,7 @@ const NAV = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/documents", label: "Documents", icon: FileText },
   { href: "/vendors", label: "Vendors", icon: Users },
-  { href: "/rules", label: "Requirements", icon: ClipboardList },
+  { href: "/rules", label: "Vendor requirements", icon: ClipboardList },
   { href: "/reminders", label: "Reminders", icon: Bell },
   { href: "/export", label: "Export", icon: Download },
   { href: "/settings", label: "Settings", icon: Settings },

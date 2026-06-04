@@ -1,24 +1,15 @@
 /**
- * Rules page — tier-3 smoke + the #93 double-invalidate regression pin.
+ * Vendor requirements page (rebuilt in #192) — plain-English checklist authoring.
  *
- * The page lists compliance templates and lets the user inspect /
- * edit / delete rules on a selected template. Two layers covered:
- *
- *   1. Smoke (#36): render-without-crash + populated-state surfaces
- *      a template by name, and the empty state renders the new-
- *      template input.
- *
- *   2. Cache-invalidation contract (#93): upsertRule.onSuccess and
- *      deleteRule.onSuccess each must trigger EXACTLY ONE refetch of
- *      the template-detail observer (initial fetch + one
- *      invalidate-driven refetch = 2 total calls), NOT two. The
- *      original code called `invalidateQueries(['templates',
- *      selectedId])` AND `invalidateQueries(['templates'])` —
- *      TanStack Query's default prefix-match meant the broader call
- *      already hit the detail observer, so the explicit narrow call
- *      double-fired the refetch. Pinning exact-2 catches a regression
- *      that re-adds the redundant invalidate, mirroring the #81
- *      pattern from useUpdateVendor.
+ * Covers:
+ *   - Smoke: list of checklists + empty "your checklists" state + create input.
+ *   - Plain-English authoring: "+ Add a requirement" → pick a sentence → money
+ *     input → POSTs the correct engine rule shape (the user never types a field
+ *     name, operator, or unformatted number).
+ *   - #93 cache-invalidation contract carried over: upsert + delete each fire
+ *     EXACTLY ONE detail refetch (prefix-invalidate, never the old double-fire).
+ *   - Clone a suggested checklist ("Use this") via frontend rule-replay.
+ *   - No raw machine codes leak; live compliance summary; delete-checklist confirm.
  */
 import { describe, it, expect } from "vitest";
 import { http } from "msw";
@@ -35,375 +26,371 @@ import {
   toastError,
 } from "@/test";
 
-// sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
-
-// User-editable template (NOT a system template — system templates
-// hide the New-Rule row and the rule-delete button, both of which
-// the cache-invalidation tests need to exercise).
-const EDITABLE_TEMPLATE = {
+const EDITABLE = {
   id: "t_user_01",
-  name: "Custom COI Template",
-  description: "User-editable COI checklist",
+  name: "Caterer",
+  description: "Editable caterer checklist",
   isSystemTemplate: false,
   ruleCount: 1,
-  vendorCount: 0,
+  vendorCount: 2,
 };
 
-const TEMPLATE_DETAIL_INITIAL = {
+const DETAIL = {
   id: "t_user_01",
-  name: "Custom COI Template",
-  description: "User-editable COI checklist",
+  name: "Caterer",
+  description: "Editable caterer checklist",
   isSystemTemplate: false,
   rules: [
     {
-      id: "r_existing_01",
+      id: "r_gl_01",
       documentType: "coi",
-      fieldName: "policy_number",
-      operator: "required",
-      expectedValue: null,
-      errorMessage: null,
+      fieldName: "general_liability_limit",
+      operator: "min_value",
+      expectedValue: "1000000",
+      errorMessage: "GL too low",
       sortOrder: 1,
     },
   ],
 };
 
-describe("RulesPage — smoke (#36)", () => {
-  it("renders the templates list when the API returns at least one", async () => {
-    server.use(
-      http.get(url("/api/compliance/templates"), () =>
-        jsonOk([
-          {
-            id: "t_default_01",
-            name: "Default COI",
-            description: "Built-in COI checklist",
-            isSystemTemplate: true,
-            ruleCount: 5,
-            vendorCount: 0,
-          },
-        ]),
-      ),
-    );
+const SUGGESTED = {
+  id: "t_sys_01",
+  name: "Photographer / Videographer",
+  description: "Suggested",
+  isSystemTemplate: true,
+  ruleCount: 3,
+  vendorCount: 0,
+};
 
+describe("RulesPage — smoke + reframe (#192)", () => {
+  it("renders the 'Vendor requirements' header and lists suggested checklists", async () => {
+    server.use(http.get(url("/api/compliance/templates"), () => jsonOk([SUGGESTED])));
     renderWithProviders(<RulesPage />, { auth: authedMe });
 
-    await waitFor(() =>
-      expect(screen.getByText("Default COI")).toBeInTheDocument(),
-    );
+    expect(screen.getByRole("heading", { name: /vendor requirements/i })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Photographer / Videographer")).toBeInTheDocument());
+    // The new-checklist input is wired to its label (gap #21 / #76).
+    expect(screen.getByLabelText(/new checklist/i)).toBeInstanceOf(HTMLInputElement);
   });
 
-  it("empty-state: renders the page chrome and the create-template input", async () => {
-    server.use(
-      http.get(url("/api/compliance/templates"), () => jsonOk([])),
-    );
-
-    renderWithProviders(<RulesPage />, { auth: authedMe });
-
-    // The new-template input is unconditional — a regression that
-    // hides the template editor would drop this placeholder.
-    expect(
-      screen.getByPlaceholderText(/template name/i) ??
-        screen.getByPlaceholderText(/new template/i),
-    ).toBeInTheDocument();
-  });
-});
-
-describe("RulesPage — create-template failure surfaces a toast (no more silent failure)", () => {
-  it("a failed POST /api/compliance/templates fires toast.error with the server message, not HTTP jargon", async () => {
-    // Regression pin for the reported prod bug: clicking create when the
-    // request failed used to do NOTHING — createTemplate had no onError and
-    // there was no global handler, so the rejection was swallowed. With the
-    // global mutation-error net (createTemplate now carries
-    // `meta: { errorToast: true }`, handled in lib/query-client.ts), a
-    // failure MUST surface a jargon-free toast.
+  it("create-checklist failure surfaces a jargon-free toast", async () => {
     server.use(
       http.get(url("/api/compliance/templates"), () => jsonOk([])),
       http.post(url("/api/compliance/templates"), () =>
-        jsonError("server.error", "Could not create template.", { status: 500 }),
+        jsonError("server.error", "Could not create checklist.", { status: 500 }),
       ),
     );
-
     renderWithProviders(<RulesPage />, { auth: authedMe });
 
-    const input = await screen.findByPlaceholderText(/template name/i);
-    fireEvent.change(input, { target: { value: "My COI checklist" } });
+    fireEvent.change(screen.getByLabelText(/new checklist/i), { target: { value: "Caterer" } });
+    fireEvent.click(screen.getByRole("button", { name: /create checklist/i }));
 
-    const createBtn = screen.getByRole("button", { name: /create template/i });
-    expect(createBtn).not.toBeDisabled();
-    fireEvent.click(createBtn);
-
-    await waitFor(() =>
-      expect(toastError).toHaveBeenCalledWith("Could not create template."),
-    );
-
-    // CLAUDE.md frontend error-message policy: never leak HTTP jargon /
-    // browser TypeErrors / raw status codes into toast copy.
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith("Could not create checklist."));
     const shown = String(toastError.mock.calls.at(-1)?.[0] ?? "");
     expect(shown).not.toMatch(/bad gateway|failed to fetch|typeerror|\b50\d\b/i);
-
-    // The success toast must NOT have fired on a failed create.
     expect(toastSuccess).not.toHaveBeenCalled();
   });
 });
 
-describe("RulesPage — rule mutations prefix-invalidate ['templates'] (#93)", () => {
-  it("upsertRule.onSuccess fires exactly ONE detail refetch (not two — #93 regression pin) AND surfaces the 'Rule saved' toast", async () => {
-    // Mirrors the useUpdateVendor exact-2 pattern from #81 at the
-    // page layer. The original code's `invalidateQueries(['templates',
-    // selectedId])` + `invalidateQueries(['templates'])` combo
-    // double-fired the detail refetch per save. With the fix
-    // (broader-only invalidate, prefix-match covers detail), the
-    // detail observer should refetch exactly once after Add → onSuccess.
-    //
-    // Bidirectional contract:
-    //   - detailCalls=2 catches the FORWARD regression (re-adding the
-    //     narrow ['templates', selectedId] invalidate on top would
-    //     push the count to 3).
-    //   - listCalls=2 catches the BACKWARD regression (replacing the
-    //     broader invalidate with just ['templates', selectedId]
-    //     would leave the list stale at listCalls=1). Mirrors the
-    //     useVendors.test.tsx structural cross-check from #81.
-    //
-    // Mutation request body is captured so a regression that breaks
-    // the mutation invocation entirely (e.g. dropping the
-    // upsertRule.mutate(...) call from NewRuleRow.onSave) surfaces
-    // as a "mutation never fired" assertion failure rather than an
-    // ambiguous detailCalls-timeout. Same pattern as
-    // login/page.test.tsx — observable-settlement on the mutation
-    // before teardown. (#93 review — test-quality reviewer.)
+describe("RulesPage — plain-English authoring (#192)", () => {
+  it("adds a requirement by picking a sentence + money preset, POSTing the engine rule shape", async () => {
     let detailCalls = 0;
     let listCalls = 0;
-    let upsertBody: unknown;
+    let body: Record<string, unknown> | undefined;
     server.use(
       http.get(url("/api/compliance/templates"), () => {
         listCalls++;
-        return jsonOk([EDITABLE_TEMPLATE]);
+        return jsonOk([EDITABLE]);
       }),
       http.get(url("/api/compliance/templates/:id"), () => {
         detailCalls++;
-        return jsonOk(TEMPLATE_DETAIL_INITIAL);
+        return jsonOk({ ...DETAIL, rules: [] });
       }),
-      http.post(
-        url("/api/compliance/templates/:id/rules"),
-        async ({ request }) => {
-          upsertBody = await request.json();
-          return jsonOk({ id: "r_new_01" });
-        },
-      ),
+      http.post(url("/api/compliance/templates/:id/rules"), async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return jsonOk({ id: "r_new" });
+      }),
     );
 
     renderWithProviders(<RulesPage />, { auth: authedMe });
-
-    // List loads; click the template row to set selectedId and
-    // mount the detail query. The template card is rendered as a
-    // <button> (see rules/page.tsx:124).
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: /custom coi template/i }),
-      ).toBeInTheDocument(),
-    );
-    expect(listCalls).toBe(1);
-
-    fireEvent.click(
-      screen.getByRole("button", { name: /custom coi template/i }),
-    );
-
-    // Detail mounts and resolves — assert via the detail-panel
-    // <h2> which only renders inside the detail section once
-    // detail.data lands. Co-pin cardinality so a future redesign
-    // that promotes the list-card name into a heading (giving the
-    // same accessible name twice) fails this test loudly. (#93
-    // review — test-quality reviewer.)
-    await waitFor(() =>
-      expect(
-        screen.getByRole("heading", { name: /custom coi template/i }),
-      ).toBeInTheDocument(),
-    );
-    expect(
-      screen.getAllByRole("heading", { name: /custom coi template/i }),
-    ).toHaveLength(1);
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    await screen.findByRole("heading", { name: /caterer/i });
     expect(detailCalls).toBe(1);
 
-    // Fill the NewRuleRow's required fields. The Add button is
-    // disabled until `fieldName && operator` are both truthy
-    // (page.tsx:263). The operator <select> defaults to "required"
-    // (useState init at page.tsx:225) — assert the Add button is
-    // NOT disabled BEFORE clicking so a future change to the
-    // operator default would surface as an explicit precondition
-    // failure rather than an ambiguous "click did nothing"
-    // timeout. (#93 review — test-quality reviewer.)
-    fireEvent.change(
-      screen.getByPlaceholderText(/general_liability_limit/i),
-      {
-        target: { value: "general_liability_limit" },
-      },
-    );
-    const addBtn = screen.getByRole("button", { name: /^add$/i });
-    expect(addBtn).not.toBeDisabled();
-    fireEvent.click(addBtn);
+    // Open the menu, pick "General liability", choose the $1,000,000 preset, Add.
+    fireEvent.click(screen.getByRole("button", { name: /add a requirement/i }));
+    fireEvent.click(screen.getByRole("button", { name: /general liability/i }));
+    fireEvent.click(screen.getByRole("button", { name: "$1,000,000" }));
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
 
-    // Critical assertion: AFTER onSuccess invalidates ['templates'],
-    // the detail observer refetches exactly ONCE — total detailCalls
-    // === 2 (initial mount + one invalidate-driven refetch).
-    await waitFor(() => {
-      expect(detailCalls).toBe(2);
-      expect(listCalls).toBe(2);
-    });
-
-    // toast.success('Rule saved') is part of upsertRule.onSuccess
-    // (page.tsx:84). A regression that drops the toast call leaves
-    // the user with no feedback that the save landed — pin the
-    // string match so the silent-save regression is caught. Also
-    // doubles as observable-settlement of the mutation before
-    // teardown. (#93 review — test-quality reviewer.)
-    await waitFor(() =>
-      expect(toastSuccess).toHaveBeenCalledWith("Rule saved"),
-    );
-
-    // The mutation actually fired with the expected payload —
-    // converts ambiguous "detailCalls never reached 2" timeouts
-    // into a "mutation never invoked" diagnostic.
-    expect(upsertBody).toMatchObject({
+    // The mapped rule went out with the engine tokens the user never typed.
+    await waitFor(() => expect(body).toBeDefined());
+    expect(body).toMatchObject({
+      documentType: "coi",
       fieldName: "general_liability_limit",
-      operator: "required",
+      operator: "min_value",
+      expectedValue: "1000000",
     });
-  });
+    expect(String(body!.errorMessage)).toMatch(/\$1,000,000/);
 
-  it("deleteRule.onSuccess fires exactly ONE detail refetch (not two — #93 regression pin); deliberately does NOT toast", async () => {
-    // Symmetric with the upsertRule pin above. The delete path used
-    // the same double-invalidate anti-pattern; same exact-2 contract.
-    //
-    // ASYMMETRY NOTE: deleteRule.onSuccess does NOT fire a
-    // toast.success (page.tsx:97 omits it), unlike upsertRule which
-    // toasts "Rule saved". Pin that absence here so a future
-    // contributor who "fixes the missing toast" without coordinating
-    // with the asymmetry sees a failing test that prompts the
-    // discussion. If the team later decides delete SHOULD toast,
-    // this assertion is the signal to update both the page AND
-    // this test together.
-    let detailCalls = 0;
-    let listCalls = 0;
-    let deleteRuleIdSeen: string | undefined;
-    server.use(
-      http.get(url("/api/compliance/templates"), () => {
-        listCalls++;
-        return jsonOk([EDITABLE_TEMPLATE]);
-      }),
-      http.get(url("/api/compliance/templates/:id"), () => {
-        detailCalls++;
-        return jsonOk(TEMPLATE_DETAIL_INITIAL);
-      }),
-      http.delete(
-        url("/api/compliance/templates/:id/rules/:ruleId"),
-        ({ params }) => {
-          deleteRuleIdSeen = params.ruleId as string;
-          return new Response(null, { status: 204 });
-        },
-      ),
-    );
-
-    renderWithProviders(<RulesPage />, { auth: authedMe });
-
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: /custom coi template/i }),
-      ).toBeInTheDocument(),
-    );
-    fireEvent.click(
-      screen.getByRole("button", { name: /custom coi template/i }),
-    );
-    await waitFor(() =>
-      expect(
-        screen.getByRole("heading", { name: /custom coi template/i }),
-      ).toBeInTheDocument(),
-    );
-    expect(detailCalls).toBe(1);
-    expect(listCalls).toBe(1);
-
-    // Find the delete button via its accessible name (added in #93's
-    // review: `aria-label="Delete rule"` on the icon-only Button in
-    // page.tsx). Scope to the row via the rule's field-name cell so
-    // a future page that gains multiple delete buttons (e.g. a
-    // separate row of system-template stub rules) still resolves
-    // unambiguously. (#93 review — test-quality reviewer flagged
-    // the previous closest+querySelector chain as fragile.)
-    const ruleRow = within(screen.getByRole("table"))
-      .getByText("Policy number") // humanized fieldName (#188)
-      .closest("tr");
-    expect(ruleRow).not.toBeNull();
-    const deleteBtn = within(ruleRow as HTMLElement).getByRole("button", {
-      name: /delete rule/i,
-    });
-    fireEvent.click(deleteBtn);
-
-    // After onSuccess, the detail observer refetches exactly once.
-    // Same bidirectional contract as the upsertRule test:
-    // detailCalls=2 catches double-invalidate regressions,
-    // listCalls=2 catches narrow-only regressions.
+    // #93 contract: exactly ONE detail refetch + ONE list refetch after onSuccess.
     await waitFor(() => {
       expect(detailCalls).toBe(2);
       expect(listCalls).toBe(2);
     });
-
-    // The mutation fired with the expected rule id (observable
-    // settlement + converts a mutation-never-invoked regression
-    // into a clear diagnostic).
-    expect(deleteRuleIdSeen).toBe("r_existing_01");
-
-    // Deliberate no-toast asymmetry pin — see the describe-block
-    // comment above. A future "fix" that adds toast.success to
-    // deleteRule.onSuccess MUST update this assertion in the same
-    // PR, forcing the deliberate-asymmetry conversation.
-    expect(toastSuccess).not.toHaveBeenCalled();
   });
-});
 
-describe("RulesPage — humanized rule display (#188)", () => {
-  it("renders the doc type, field, and operator as friendly labels, not raw codes", async () => {
+  it("the 'not expired' toggle POSTs the honest required-on-expiration_date rule (no value)", async () => {
+    let body: Record<string, unknown> | undefined;
     server.use(
-      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE_TEMPLATE])),
-      http.get(url("/api/compliance/templates/:id"), () =>
-        jsonOk({
-          ...TEMPLATE_DETAIL_INITIAL,
-          rules: [
-            {
-              id: "r_gll",
-              documentType: "coi",
-              fieldName: "general_liability_limit",
-              operator: "min_value",
-              expectedValue: "1000000",
-              errorMessage: "GL must be at least $1M",
-              sortOrder: 1,
-            },
-          ],
-        }),
-      ),
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk({ ...DETAIL, rules: [] })),
+      http.post(url("/api/compliance/templates/:id/rules"), async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return jsonOk({ id: "r_exp" });
+      }),
     );
 
     renderWithProviders(<RulesPage />, { auth: authedMe });
-    fireEvent.click(
-      await screen.findByRole("button", { name: /custom coi template/i }),
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    await screen.findByRole("heading", { name: /caterer/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /add a requirement/i }));
+    fireEvent.click(screen.getByRole("button", { name: /document must not be expired/i }));
+    // valueKind "none" → Add is immediately enabled (no fill-in).
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+    await waitFor(() => expect(body).toBeDefined());
+    expect(body).toMatchObject({ documentType: "coi", fieldName: "expiration_date", operator: "required" });
+    expect(body!.expectedValue).toBeNull();
+  });
+
+  it("a text requirement (additional insured) POSTs the typed value as a contains rule", async () => {
+    let body: Record<string, unknown> | undefined;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk({ ...DETAIL, rules: [] })),
+      http.post(url("/api/compliance/templates/:id/rules"), async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return jsonOk({ id: "r_ai" });
+      }),
     );
 
-    // Scope to the existing rule's row — the NewRuleRow add-form <select>
-    // options also render humanized doc-type/operator labels, so a bare
-    // getByText would be ambiguous.
-    const fieldCell = await screen.findByText("General liability limit");
-    const row = fieldCell.closest("tr") as HTMLElement;
-    expect(within(row).getByText("Certificate of Insurance")).toBeInTheDocument();
-    expect(within(row).getByText("Must be at least")).toBeInTheDocument();
-    // None of the raw machine codes leak into the requirements table.
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    await screen.findByRole("heading", { name: /caterer/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /add a requirement/i }));
+    fireEvent.click(screen.getByRole("button", { name: /names you as additional insured/i }));
+    fireEvent.change(screen.getByLabelText(/name to look for/i), {
+      target: { value: "Riverside Event Hall" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+    await waitFor(() => expect(body).toBeDefined());
+    expect(body).toMatchObject({
+      documentType: "coi",
+      fieldName: "additional_insured",
+      operator: "contains",
+      expectedValue: "Riverside Event Hall",
+    });
+  });
+
+  it("editing a money requirement pre-fills the formatted amount and upserts with the existing rule id", async () => {
+    let body: Record<string, unknown> | undefined;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL)), // has r_gl_01 @ $1,000,000
+      http.post(url("/api/compliance/templates/:id/rules"), async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return jsonOk({ id: "r_gl_01" });
+      }),
+    );
+
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /edit requirement/i }));
+
+    // The stored bare integer "1000000" pre-fills as the formatted display.
+    const amount = screen.getByLabelText(/minimum coverage amount/i) as HTMLInputElement;
+    expect(amount.value).toBe("$1,000,000");
+    fireEvent.change(amount, { target: { value: "2000000" } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(body).toBeDefined());
+    // Upsert-with-id (an EDIT, not a duplicate insert), new amount stored as bare integer.
+    expect(body).toMatchObject({
+      id: "r_gl_01",
+      fieldName: "general_liability_limit",
+      operator: "min_value",
+      expectedValue: "2000000",
+    });
+  });
+
+  it("the money field uses a numeric keyboard and disables Add until an amount is entered (gap #21)", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk({ ...DETAIL, rules: [] })),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    await screen.findByRole("heading", { name: /caterer/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /add a requirement/i }));
+    fireEvent.click(screen.getByRole("button", { name: /general liability/i }));
+
+    // Add is disabled with a stated reason until a value is entered.
+    expect(screen.getByRole("button", { name: /^add$/i })).toBeDisabled();
+    expect(screen.getByText(/enter a coverage amount/i)).toBeInTheDocument();
+
+    const amount = screen.getByLabelText(/minimum coverage amount/i) as HTMLInputElement;
+    expect(amount.inputMode).toBe("numeric");
+    fireEvent.change(amount, { target: { value: "2000000" } });
+    expect(screen.getByRole("button", { name: /^add$/i })).not.toBeDisabled();
+  });
+
+  it("renders requirements as sentences with no raw machine codes, plus a live summary", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL)),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    // The sentence appears in BOTH the requirement row and the live summary.
+    expect(
+      (await screen.findAllByText(/carries at least \$1,000,000 in general liability insurance/i)).length,
+    ).toBeGreaterThanOrEqual(2);
+    // Live summary reads back the checklist.
+    expect(screen.getByText(/a caterer is compliant when/i)).toBeInTheDocument();
+    // No raw tokens leak.
     expect(screen.queryByText("general_liability_limit")).toBeNull();
     expect(screen.queryByText("min_value")).toBeNull();
-    expect(within(row).queryByText("coi")).toBeNull();
   });
 });
 
-describe("RulesPage — delete-template confirm dialog (#189)", () => {
+describe("RulesPage — delete requirement fires one refetch (#93 carried over)", () => {
+  it("removing a requirement deletes it and refetches the detail exactly once", async () => {
+    let detailCalls = 0;
+    let listCalls = 0;
+    let deletedId: string | undefined;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => {
+        listCalls++;
+        return jsonOk([EDITABLE]);
+      }),
+      http.get(url("/api/compliance/templates/:id"), () => {
+        detailCalls++;
+        return jsonOk(DETAIL);
+      }),
+      http.delete(url("/api/compliance/templates/:id/rules/:ruleId"), ({ params }) => {
+        deletedId = params.ruleId as string;
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    const removeBtn = await screen.findByRole("button", { name: /remove requirement/i });
+    expect(detailCalls).toBe(1);
+
+    fireEvent.click(removeBtn);
+
+    await waitFor(() => {
+      expect(detailCalls).toBe(2);
+      expect(listCalls).toBe(2);
+    });
+    expect(deletedId).toBe("r_gl_01");
+  });
+});
+
+describe("RulesPage — suggested checklists clone (#192)", () => {
+  // Rules are listed OUT of sortOrder (sortOrder-2 first) on purpose, so the
+  // "in order" assertion below actually pins the cloneChecklist sortOrder sort —
+  // a dropped .sort() would replay them in array order and fail.
+  const TWO_RULE_SUGGESTED = {
+    id: "t_sys_01",
+    name: "Photographer / Videographer",
+    description: "Suggested",
+    isSystemTemplate: true,
+    rules: [
+      { id: "s2", documentType: "coi", fieldName: "expiration_date", operator: "required", expectedValue: null, errorMessage: "y", sortOrder: 2 },
+      { id: "s1", documentType: "coi", fieldName: "general_liability_limit", operator: "min_value", expectedValue: "500000", errorMessage: "x", sortOrder: 1 },
+    ],
+  };
+
+  it("'Use this' replays EVERY suggested rule in order into a new editable checklist and selects it", async () => {
+    let created = 0;
+    const replayed: string[] = [];
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([SUGGESTED])),
+      http.get(url("/api/compliance/templates/t_sys_01"), () => jsonOk(TWO_RULE_SUGGESTED)),
+      http.post(url("/api/compliance/templates"), () => {
+        created++;
+        return jsonOk({ id: "t_clone_01" });
+      }),
+      http.post(url("/api/compliance/templates/t_clone_01/rules"), async ({ request }) => {
+        const b = (await request.json()) as { fieldName: string };
+        replayed.push(b.fieldName);
+        return jsonOk({ id: "r_clone" });
+      }),
+      http.get(url("/api/compliance/templates/t_clone_01"), () =>
+        jsonOk({ ...DETAIL, id: "t_clone_01", isSystemTemplate: false }),
+      ),
+    );
+
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /use this/i }));
+
+    await waitFor(() => {
+      expect(created).toBe(1);
+      // BOTH rules replayed, in sortOrder.
+      expect(replayed).toEqual(["general_liability_limit", "expiration_date"]);
+    });
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith("Checklist added — edit it to fit your vendors"),
+    );
+  });
+
+  it("rolls back the new checklist (and surfaces a friendly toast) if a rule fails mid-replay", async () => {
+    let ruleCalls = 0;
+    let rolledBack = false;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([SUGGESTED])),
+      http.get(url("/api/compliance/templates/t_sys_01"), () => jsonOk(TWO_RULE_SUGGESTED)),
+      http.post(url("/api/compliance/templates"), () => jsonOk({ id: "t_clone_01" })),
+      http.post(url("/api/compliance/templates/t_clone_01/rules"), () => {
+        ruleCalls++;
+        // First rule succeeds, second fails mid-replay.
+        return ruleCalls === 1
+          ? jsonOk({ id: "r_clone" })
+          : jsonError("server.error", "Couldn't copy a requirement.", { status: 500 });
+      }),
+      http.delete(url("/api/compliance/templates/t_clone_01"), () => {
+        rolledBack = true;
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /use this/i }));
+
+    // The half-created checklist is deleted (no orphan)...
+    await waitFor(() => expect(rolledBack).toBe(true));
+    // ...and the failure is surfaced jargon-free, not as a silent success.
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    const msg = String(toastError.mock.calls.at(-1)?.[0] ?? "");
+    expect(msg).not.toMatch(/typeerror|failed to fetch|\b50\d\b/i);
+    expect(toastSuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe("RulesPage — delete-checklist confirm dialog (#189 carried over)", () => {
   it("opens an accessible confirm dialog; deletes on confirm, not on cancel", async () => {
     let deleteCalls = 0;
     server.use(
-      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE_TEMPLATE])),
-      http.get(url("/api/compliance/templates/:id"), () => jsonOk(TEMPLATE_DETAIL_INITIAL)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL)),
       http.delete(url("/api/compliance/templates/:id"), () => {
         deleteCalls++;
         return new Response(null, { status: 204 });
@@ -411,21 +398,21 @@ describe("RulesPage — delete-template confirm dialog (#189)", () => {
     );
 
     renderWithProviders(<RulesPage />, { auth: authedMe });
-    fireEvent.click(await screen.findByRole("button", { name: /custom coi template/i }));
-    await screen.findByRole("button", { name: /delete template/i });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    await screen.findByRole("button", { name: /delete checklist/i });
 
     // Cancel → no delete.
-    fireEvent.click(screen.getByRole("button", { name: /delete template/i }));
+    fireEvent.click(screen.getByRole("button", { name: /delete checklist/i }));
     const dialog = await screen.findByRole("alertdialog");
-    expect(dialog).toHaveAccessibleName(/delete custom coi template\?/i);
-    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(dialog).toHaveAccessibleName(/delete caterer\?/i);
+    fireEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
     expect(deleteCalls).toBe(0);
 
     // Confirm → delete fires.
-    fireEvent.click(screen.getByRole("button", { name: /delete template/i }));
-    await screen.findByRole("alertdialog");
-    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /delete checklist/i }));
+    const dialog2 = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog2).getByRole("button", { name: /^delete$/i }));
     await waitFor(() => expect(deleteCalls).toBe(1));
   });
 });
