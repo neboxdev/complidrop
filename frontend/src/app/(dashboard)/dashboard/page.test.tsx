@@ -121,7 +121,7 @@ describe("DashboardPage — state matrix (#36)", () => {
 
     // Activity panel surfaces a single entry's pretty-printed action.
     expect(
-      screen.getByText(/document · uploaded/i),
+      screen.getByText(/document uploaded/i),
     ).toBeInTheDocument();
 
     // Responsive (#181): the 5-bucket expiry pipeline stacks to 2 columns on a
@@ -155,10 +155,10 @@ describe("DashboardPage — state matrix (#36)", () => {
     );
     // Activity panel populated normally.
     await waitFor(() =>
-      expect(screen.getByText(/document · uploaded/i)).toBeInTheDocument(),
+      expect(screen.getByText(/document uploaded/i)).toBeInTheDocument(),
     );
     // Pipeline panel populated normally.
-    expect(screen.getByText(/expiry pipeline/i)).toBeInTheDocument();
+    expect(screen.getByText(/when documents expire/i)).toBeInTheDocument();
     // Stats panel falls back to zeroes (no crash). The page renders
     // exactly SIX cards bound to `stats.data?.xxx ?? 0`: Total documents,
     // Compliant, Expiring ≤ 30d, Non-compliant, Vendors tracked, Awaiting

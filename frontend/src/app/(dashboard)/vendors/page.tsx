@@ -62,18 +62,18 @@ export default function VendorsPage() {
     <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
       <header>
         <h1 className="text-2xl font-semibold text-sky-900">Vendors</h1>
-        <p className="text-slate-500">Manage subcontractors and their compliance documents.</p>
+        <p className="text-slate-500">Manage your vendors and their compliance documents.</p>
       </header>
 
       <Card>
         <CardContent className="p-5 flex flex-col sm:flex-row gap-3 sm:items-end">
           <div className="flex-1">
             <label htmlFor={nameId} className="text-xs text-slate-500">Name</label>
-            <Input id={nameId} value={name} onChange={(e) => setName(e.target.value)} placeholder="Mike's Electrical" />
+            <Input id={nameId} value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme Catering" />
           </div>
           <div className="flex-1">
             <label htmlFor={emailId} className="text-xs text-slate-500">Contact email</label>
-            <Input id={emailId} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="mike@acme.com" />
+            <Input id={emailId} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="ops@acmecatering.com" />
           </div>
           <Button
             className="w-full sm:w-auto"
@@ -116,7 +116,7 @@ export default function VendorsPage() {
             <thead className="bg-slate-50 text-xs uppercase text-slate-500">
               <tr>
                 <th className="px-4 py-3 text-left">Vendor</th>
-                <th className="px-4 py-3 text-left">Template</th>
+                <th className="px-4 py-3 text-left">Requirements</th>
                 <th className="px-4 py-3 text-left">Docs</th>
                 <th className="px-4 py-3 text-left">Active links</th>
                 <th />
@@ -168,7 +168,7 @@ export default function VendorsPage() {
                   </td>
                 </tr>
               ) : all.length === 0 ? (
-                <tr><td colSpan={5} className="py-10 text-center text-slate-500">No vendors yet.</td></tr>
+                <tr><td colSpan={5} className="py-10 text-center text-slate-500">No vendors yet — add your first one above to start tracking their COIs and licenses.</td></tr>
               ) : filtered.length === 0 ? (
                 <tr><td colSpan={5} className="py-10 text-center text-slate-500">No vendors match your search.</td></tr>
               ) : pageItems.map((v) => (
@@ -177,7 +177,7 @@ export default function VendorsPage() {
                     <Link href={`/vendors/${v.id}`} className="text-sky-700 font-medium hover:underline">{v.name}</Link>
                     {v.contactEmail && <p className="text-xs text-slate-500">{v.contactEmail}</p>}
                   </td>
-                  <td data-label="Template" className="px-4 py-3 text-slate-600">{v.complianceTemplateName ?? "—"}</td>
+                  <td data-label="Requirements" className="px-4 py-3 text-slate-600">{v.complianceTemplateName ?? "—"}</td>
                   <td data-label="Docs" className="px-4 py-3 text-slate-600">{v.documentCount}</td>
                   <td data-label="Active links" className="px-4 py-3">
                     {v.activePortalLinks > 0 ? (

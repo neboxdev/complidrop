@@ -211,8 +211,10 @@ describe("form labels wired via htmlFor + id (#76)", () => {
     await waitFor(() =>
       expect(screen.getByText("coi.pdf")).toBeInTheDocument(),
     );
-    const policy = screen.getByLabelText(/^PolicyNumber$/);
-    const expiration = screen.getByLabelText(/^ExpirationDate$/);
+    // Field names are humanized for display (#188): the camelCase fixture
+    // names "PolicyNumber"/"ExpirationDate" render as "Policy Number"/"Expiration Date".
+    const policy = screen.getByLabelText(/^Policy Number$/);
+    const expiration = screen.getByLabelText(/^Expiration Date$/);
     expect(policy).toBeInstanceOf(HTMLInputElement);
     expect(expiration).toBeInstanceOf(HTMLInputElement);
     // Per-row id uniqueness: the two field inputs must resolve to

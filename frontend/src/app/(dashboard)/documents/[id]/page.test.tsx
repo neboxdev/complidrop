@@ -190,7 +190,7 @@ describe("DocumentDetailPage — basic states (#36)", () => {
       expect(screen.getByText("coi.pdf")).toBeInTheDocument(),
     );
     expect(screen.getByTestId("extraction-status")).toHaveTextContent(
-      "Completed",
+      "Read",
     );
     expect(screen.queryByText(/couldn't load document/i)).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
@@ -234,10 +234,10 @@ describe("DocumentDetailPage — basic states (#36)", () => {
     // (fast-tier coverage of the testid contract; the E2E spec depends
     // on these attributes existing, and a regression that removed them
     // would otherwise surface only at the slow Playwright tier).
-    expect(screen.getByTestId("extraction-status")).toHaveTextContent("Completed");
+    expect(screen.getByTestId("extraction-status")).toHaveTextContent("Read");
     expect(screen.getByTestId("compliance-status")).toHaveTextContent("Compliant");
     // Field row rendered.
-    expect(screen.getByText("PolicyNumber")).toBeInTheDocument();
+    expect(screen.getByText("Policy Number")).toBeInTheDocument();
     // RTL idiom for "input is rendered with this value" — better than
     // `document.querySelector('input[value=…]')` because it's
     // container-scoped and won't pick up an input from a stray portal.
@@ -265,7 +265,7 @@ describe("DocumentDetailPage — extraction-error card (#36 AC #3)", () => {
     });
 
     await waitFor(() =>
-      expect(screen.getByText(/extraction error/i)).toBeInTheDocument(),
+      expect(screen.getByText(/couldn't read this document/i)).toBeInTheDocument(),
     );
     expect(
       screen.getByText(/OCR confidence below threshold/i),
@@ -287,7 +287,7 @@ describe("DocumentDetailPage — extraction-error card (#36 AC #3)", () => {
     await waitFor(() =>
       expect(screen.getByText("coi.pdf")).toBeInTheDocument(),
     );
-    expect(screen.queryByText(/extraction error/i)).toBeNull();
+    expect(screen.queryByText(/couldn't read this document/i)).toBeNull();
   });
 });
 
@@ -337,12 +337,13 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
       params: { id: "d_x_01" },
     });
 
-    // First render: Pending. The "Extraction in progress…" copy fires
-    // when fields are empty and the status is Pending/Processing.
+    // First render: Pending → the badge reads "Waiting to read" (#188). The
+    // "Reading the document…" copy fires when fields are empty and the
+    // document is still Pending/Processing.
     await waitFor(() =>
-      expect(screen.getByText("Pending")).toBeInTheDocument(),
+      expect(screen.getByText("Waiting to read")).toBeInTheDocument(),
     );
-    expect(screen.getByText(/extraction in progress/i)).toBeInTheDocument();
+    expect(screen.getByText(/reading the document/i)).toBeInTheDocument();
     expect(calls).toBeGreaterThanOrEqual(1);
 
     // Snapshot pre-advance count so the assertion is delta-based: the
@@ -354,7 +355,7 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
     await vi.advanceTimersByTimeAsync(3000);
 
     await waitFor(() =>
-      expect(screen.getByText("Completed")).toBeInTheDocument(),
+      expect(screen.getByText("Read")).toBeInTheDocument(),
     );
     expect(calls).toBeGreaterThanOrEqual(beforeAdvance + 1);
     // Pin the negative assertion via the #92 testid rather than the
@@ -365,10 +366,10 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
     // future DOM reshuffles and is the canonical "ambiguous-by-design
     // surface" rule from CLAUDE.md.
     expect(screen.getByTestId("extraction-status")).not.toHaveTextContent(
-      "Pending",
+      "Waiting to read",
     );
     expect(screen.getByTestId("extraction-status")).toHaveTextContent(
-      "Completed",
+      "Read",
     );
 
     // Completed is terminal — refetchInterval returns false, no more
@@ -434,7 +435,7 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
     );
     expect(screen.getByDisplayValue("POL-PRE-ERR")).toBeInTheDocument();
     expect(screen.getByTestId("extraction-status")).toHaveTextContent(
-      "Processing",
+      "Reading…",
     );
     expect(calls).toBe(1);
 
@@ -456,7 +457,7 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
     expect(screen.getByText("coi.pdf")).toBeInTheDocument();
     expect(screen.getByDisplayValue("POL-PRE-ERR")).toBeInTheDocument();
     expect(screen.getByTestId("extraction-status")).toHaveTextContent(
-      "Processing",
+      "Reading…",
     );
     // The "Document not found" copy is the unloaded-data branch, NOT
     // the poll-failure branch — must NOT appear when cached data
@@ -543,11 +544,11 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
     // reviewer)
     await waitFor(() =>
       expect(screen.getByTestId("extraction-status")).toHaveTextContent(
-        "Completed",
+        "Read",
       ),
     );
     expect(screen.getByTestId("extraction-status")).not.toHaveTextContent(
-      "Processing",
+      "Reading…",
     );
     expect(screen.queryByRole("status")).toBeNull();
     expect(screen.queryByText(/couldn't refresh document/i)).toBeNull();
@@ -648,10 +649,10 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
     });
 
     await waitFor(() =>
-      expect(screen.getByText("Processing")).toBeInTheDocument(),
+      expect(screen.getByText("Reading…")).toBeInTheDocument(),
     );
     // The error card should NOT be visible while Processing.
-    expect(screen.queryByText(/extraction error/i)).toBeNull();
+    expect(screen.queryByText(/couldn't read this document/i)).toBeNull();
     expect(calls).toBeGreaterThanOrEqual(1);
 
     const beforeAdvance = calls;
@@ -659,10 +660,10 @@ describe("DocumentDetailPage — polling transitions (#36 AC #2)", () => {
 
     // Failed badge appears AND the processingError card pops in.
     await waitFor(() =>
-      expect(screen.getByText("Failed")).toBeInTheDocument(),
+      expect(screen.getByText("Couldn't read")).toBeInTheDocument(),
     );
     expect(calls).toBeGreaterThanOrEqual(beforeAdvance + 1);
-    expect(screen.getByText(/extraction error/i)).toBeInTheDocument();
+    expect(screen.getByText(/couldn't read this document/i)).toBeInTheDocument();
     expect(
       screen.getByText(/OCR engine timed out after 30 seconds/i),
     ).toBeInTheDocument();
@@ -678,7 +679,7 @@ describe("DocumentDetailPage — reextract mutation toasts (#122 / #74 followup)
   it("reextract success: toast.success fires with the documented queued copy", async () => {
     // The detail page renders a Re-extract button in the header; clicking it
     // POSTs /api/documents/:id/reextract. On 200 the mutation's onSuccess
-    // fires `toast.success("Re-extraction queued")` — copy that the support
+    // fires `toast.success("Reading the file again…")` — copy that the support
     // team has been trained to spot in screenshots when triaging COI/permit
     // extraction failures. Pin the EXACT copy so a future contributor who
     // "tones down" the message ("Queued.") breaks this test deliberately
@@ -706,12 +707,12 @@ describe("DocumentDetailPage — reextract mutation toasts (#122 / #74 followup)
     // alongside the loaded header (the loading / 404 / 5xx branches all
     // return early above the header).
     const button = await waitFor(() =>
-      screen.getByRole("button", { name: /re-extract/i }),
+      screen.getByRole("button", { name: /read again/i }),
     );
     fireEvent.click(button);
 
     await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
-    expect(toastSuccess).toHaveBeenCalledWith("Re-extraction queued");
+    expect(toastSuccess).toHaveBeenCalledWith("Reading the file again…");
     // Negative — the error toast spy stays untouched on the success path.
     expect(toastError).not.toHaveBeenCalled();
   });
@@ -748,7 +749,7 @@ describe("DocumentDetailPage — reextract mutation toasts (#122 / #74 followup)
     });
 
     const button = await waitFor(() =>
-      screen.getByRole("button", { name: /re-extract/i }),
+      screen.getByRole("button", { name: /read again/i }),
     );
     fireEvent.click(button);
 
@@ -811,7 +812,7 @@ describe("DocumentDetailPage — reextract mutation toasts (#122 / #74 followup)
     });
 
     const button = await waitFor(() =>
-      screen.getByRole("button", { name: /re-extract/i }),
+      screen.getByRole("button", { name: /read again/i }),
     );
     fireEvent.click(button);
 
@@ -850,7 +851,7 @@ describe("DocumentDetailPage — reextract mutation toasts (#122 / #74 followup)
     });
 
     const button = await waitFor(() =>
-      screen.getByRole("button", { name: /re-extract/i }),
+      screen.getByRole("button", { name: /read again/i }),
     );
     fireEvent.click(button);
 

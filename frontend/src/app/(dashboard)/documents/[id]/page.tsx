@@ -13,6 +13,11 @@ import { Input } from "@/components/ui/input";
 import { StaleDataBanner } from "@/components/StaleDataBanner";
 import { DocumentTypeSelect } from "@/components/DocumentTypeSelect";
 import { useUpdateDocument } from "@/hooks/useDocuments";
+import {
+  complianceStatusLabel,
+  extractionStatusLabel,
+  fieldLabel,
+} from "@/lib/display-labels";
 import { cn } from "@/lib/utils";
 import { useId, useState } from "react";
 
@@ -50,10 +55,23 @@ type DocDetail = {
   updatedAt: string;
 };
 
-function confidenceHue(c: number) {
-  if (c >= 0.9) return "text-emerald-700 bg-emerald-50";
-  if (c >= 0.7) return "text-amber-700 bg-amber-50";
-  return "text-rose-700 bg-rose-50";
+// A tiered "you may want to look at this" hint instead of a raw confidence
+// percentage — "87% confident" means nothing to a venue manager, but "Double-
+// check this" / "Please verify" tells them what to DO. High-confidence fields
+// get no hint at all (no clutter). (#188)
+function confidenceHint(c: number): { text: string; className: string } | null {
+  if (c >= 0.9) return null;
+  if (c >= 0.7) return { text: "Double-check this", className: "text-amber-700 bg-amber-50" };
+  return { text: "Please verify", className: "text-rose-700 bg-rose-50" };
+}
+
+// Module-scope per the static-components rule (#73).
+function ConfidenceHint({ confidence }: { confidence: number }) {
+  const hint = confidenceHint(confidence);
+  if (!hint) return null;
+  return (
+    <span className={cn("px-2 py-0.5 rounded font-medium", hint.className)}>{hint.text}</span>
+  );
 }
 
 export default function DocumentDetailPage() {
@@ -86,7 +104,7 @@ export default function DocumentDetailPage() {
     mutationFn: () => api.post<void>(`/api/documents/${params.id}/reextract`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["documents", params.id] });
-      toast.success("Re-extraction queued");
+      toast.success("Reading the file again…");
     },
     onError: (err) => {
       // Mirror the established mutation-error pattern across this
@@ -196,6 +214,8 @@ export default function DocumentDetailPage() {
 
   const doc = detail.data;
   const hasEdits = Object.keys(edits).length > 0;
+  const isProcessing =
+    doc.extractionStatus === "Pending" || doc.extractionStatus === "Processing";
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
@@ -230,8 +250,14 @@ export default function DocumentDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <Button variant="outline" size="sm" onClick={() => reextract.mutate()} disabled={reextract.isPending}>
-            <RefreshCw className={cn("w-4 h-4 mr-1", reextract.isPending && "animate-spin")} /> Re-extract
+          <Button
+            variant="outline"
+            size="sm"
+            title="Reads the file again from scratch — this replaces any edits you've made."
+            onClick={() => reextract.mutate()}
+            disabled={reextract.isPending || isProcessing}
+          >
+            <RefreshCw className={cn("w-4 h-4 mr-1", reextract.isPending && "animate-spin")} /> Read again
           </Button>
           {doc.blobStorageUrl && (
             <a
@@ -264,7 +290,7 @@ export default function DocumentDetailPage() {
       )}
 
       <section className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-        <SummaryCell label="Extraction" value={
+        <SummaryCell label="Reading" value={
           <Badge
             data-testid="extraction-status"
             className={cn("border-transparent",
@@ -272,7 +298,7 @@ export default function DocumentDetailPage() {
                 : doc.extractionStatus === "Failed" ? "bg-rose-100 text-rose-700"
                 : "bg-sky-100 text-sky-700")}
           >
-            {doc.extractionStatus}
+            {extractionStatusLabel(doc.extractionStatus)}
           </Badge>
         } />
         <SummaryCell label="Compliance" value={
@@ -283,7 +309,7 @@ export default function DocumentDetailPage() {
                 : doc.complianceStatus === "NonCompliant" ? "bg-rose-100 text-rose-700"
                 : "bg-slate-100 text-slate-700")}
           >
-            {doc.complianceStatus}
+            {complianceStatusLabel(doc.complianceStatus)}
           </Badge>
         } />
         <SummaryCell label="Expires" value={doc.expirationDate ? new Date(doc.expirationDate).toLocaleDateString() : "—"} />
@@ -293,7 +319,7 @@ export default function DocumentDetailPage() {
       {doc.processingError && (
         <Card className="border-rose-200">
           <CardContent className="p-4 text-sm text-rose-700">
-            <p className="font-medium">Extraction error</p>
+            <p className="font-medium">We couldn&apos;t read this document</p>
             <p>{doc.processingError}</p>
           </CardContent>
         </Card>
@@ -317,8 +343,8 @@ export default function DocumentDetailPage() {
           {doc.fields.length === 0 ? (
             <p className="text-sm text-slate-500">
               {doc.extractionStatus === "Pending" || doc.extractionStatus === "Processing"
-                ? "Extraction in progress…"
-                : "No fields extracted yet."}
+                ? "Reading the document…"
+                : "No details read yet."}
             </p>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -326,16 +352,14 @@ export default function DocumentDetailPage() {
                 <div key={f.id} className="space-y-1">
                   {/* a11y: scope id to the field row so screen readers
                       announce each input with its field-name context (#76). */}
-                  <label htmlFor={`docfield-${f.id}`} className="text-xs uppercase tracking-wide text-slate-500">{f.fieldName}</label>
+                  <label htmlFor={`docfield-${f.id}`} className="text-xs font-medium tracking-wide text-slate-500">{fieldLabel(f.fieldName)}</label>
                   <Input
                     id={`docfield-${f.id}`}
                     defaultValue={f.fieldValue ?? ""}
                     onChange={(e) => setEdits((prev) => ({ ...prev, [f.fieldName]: e.target.value }))}
                   />
                   <div className="flex items-center gap-2 text-xs">
-                    <span className={cn("px-2 py-0.5 rounded font-medium", confidenceHue(f.confidence))}>
-                      {Math.round(f.confidence * 100)}% confident
-                    </span>
+                    <ConfidenceHint confidence={f.confidence} />
                     {f.isManuallyEdited && <span className="text-sky-700">✎ Manually edited</span>}
                     {f.originalValue && f.originalValue !== f.fieldValue && (
                       <span className="text-slate-400">was: {f.originalValue}</span>

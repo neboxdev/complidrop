@@ -29,7 +29,8 @@ import {
   useUpdateDocument,
   type DocumentListParams,
 } from "@/hooks/useDocuments";
-import { DOCUMENT_TYPES } from "@/lib/document-types";
+import { DOCUMENT_TYPES, documentTypeLabel } from "@/lib/document-types";
+import { complianceStatusLabel, extractionStatusLabel } from "@/lib/display-labels";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { isAuthError } from "@/lib/query-client";
@@ -472,7 +473,7 @@ export default function DocumentsPage() {
                     <p className="mt-2 text-sm text-slate-500">
                       {hasActiveFilters
                         ? "No documents match your filters."
-                        : "No documents yet. Drop one above to get started."}
+                        : "No documents yet — drop a COI, license, or permit above and we'll read it and track its expiry for you."}
                     </p>
                   </td>
                 </tr>
@@ -484,7 +485,7 @@ export default function DocumentsPage() {
                         {d.originalFileName}
                       </Link>
                     </td>
-                    <td data-label="Type" className="px-4 py-3 text-slate-600 uppercase text-xs">{d.documentType}</td>
+                    <td data-label="Type" className="px-4 py-3 text-slate-600 text-xs">{documentTypeLabel(d.documentType)}</td>
                     <td data-label="Vendor" className="px-4 py-3 text-slate-600">
                       {d.vendorName ? (
                         d.vendorName
@@ -536,13 +537,12 @@ export default function DocumentsPage() {
                     </td>
                     <td data-label="Extraction" className="px-4 py-3">
                       <Badge className={cn("border-transparent font-medium", STATUS_HUE[d.extractionStatus] ?? STATUS_HUE.Pending)}>
-                        {d.extractionStatus}
-                        {d.extractionConfidence != null && ` · ${Math.round(d.extractionConfidence * 100)}%`}
+                        {extractionStatusLabel(d.extractionStatus)}
                       </Badge>
                     </td>
                     <td data-label="Compliance" className="px-4 py-3">
                       <Badge className={cn("border-transparent", COMPLIANCE_HUE[d.complianceStatus] ?? COMPLIANCE_HUE.Pending)}>
-                        {d.complianceStatus}
+                        {complianceStatusLabel(d.complianceStatus)}
                       </Badge>
                     </td>
                     <td data-label="Expires" className="px-4 py-3 text-slate-600">
