@@ -23,25 +23,12 @@ import {
   makeMe,
 } from "@/test";
 
-// The dashboard now also fans out to /api/vendors (the #191 "Get started"
-// checklist). A vendor row shaped just enough for the checklist's two derived
-// steps (count + has-a-requirement-checklist).
-function vendorRow(id: string, complianceTemplateId: string | null) {
-  return {
-    id,
-    name: `Vendor ${id}`,
-    contactEmail: null,
-    contactPhone: null,
-    category: null,
-    complianceTemplateId,
-    complianceTemplateName: complianceTemplateId ? "Caterer" : null,
-    documentCount: 0,
-    activePortalLinks: 0,
-  };
-}
-
 // sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
 
+// All four "Get started" checklist signals (#191) now come from /api/dashboard/stats
+// — vendor count, the server-derived anyVendorWithRequirements, and document count —
+// so the dashboard no longer fans out to /api/vendors. This fully-populated STATS
+// completes every step, so the checklist auto-hides.
 const STATS = {
   totalDocuments: 12,
   compliant: 8,
@@ -50,6 +37,7 @@ const STATS = {
   expired: 1,
   pendingExtraction: 3,
   totalVendors: 4,
+  anyVendorWithRequirements: true,
   complianceRate: 67,
 };
 const PIPELINE = { expired: 1, bucket30: 2, bucket60: 1, bucket90: 3, beyond: 5 };
@@ -80,7 +68,6 @@ describe("DashboardPage — state matrix (#36)", () => {
         await settled;
         return jsonOk(ACTIVITY);
       }),
-      http.get(url("/api/vendors"), () => jsonOk([])),
     );
 
     renderWithProviders(<DashboardPage />, { auth: authedMe });
@@ -104,6 +91,7 @@ describe("DashboardPage — state matrix (#36)", () => {
           expired: 0,
           pendingExtraction: 0,
           totalVendors: 0,
+          anyVendorWithRequirements: false,
           complianceRate: 0,
         }),
       ),
@@ -111,7 +99,6 @@ describe("DashboardPage — state matrix (#36)", () => {
         jsonOk({ expired: 0, bucket30: 0, bucket60: 0, bucket90: 0, beyond: 0 }),
       ),
       http.get(url("/api/dashboard/recent-activity"), () => jsonOk([])),
-      http.get(url("/api/vendors"), () => jsonOk([])),
     );
 
     renderWithProviders(<DashboardPage />, { auth: authedMe });
@@ -132,14 +119,11 @@ describe("DashboardPage — state matrix (#36)", () => {
       http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
       http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
       http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
-      // A fully-configured vendor + 12 docs ⇒ every checklist step is done, so the
-      // "Get started" card auto-hides and this stays a focused stats render.
-      http.get(url("/api/vendors"), () => jsonOk([vendorRow("v1", "t1")])),
     );
 
     renderWithProviders(<DashboardPage />, { auth: authedMe });
 
-    // Stats panel:
+    // Stats panel (STATS completes every checklist step, so the card is hidden):
     await waitFor(() => expect(screen.getByText("12")).toBeInTheDocument());
     expect(screen.getByText("8")).toBeInTheDocument(); // compliant
     expect(screen.getByText("67%")).toBeInTheDocument(); // compliance rate
@@ -176,7 +160,6 @@ describe("DashboardPage — state matrix (#36)", () => {
       ),
       http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
       http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
-      http.get(url("/api/vendors"), () => jsonOk([])),
     );
 
     renderWithProviders(<DashboardPage />, { auth: authedMe });
@@ -208,14 +191,15 @@ describe("DashboardPage — first-run welcome modal (#191)", () => {
 
   function seedDashboard() {
     server.use(
-      http.get(url("/api/dashboard/stats"), () => jsonOk({ ...STATS, totalDocuments: 0 })),
+      http.get(url("/api/dashboard/stats"), () =>
+        jsonOk({ ...STATS, totalDocuments: 0, totalVendors: 0, anyVendorWithRequirements: false }),
+      ),
       http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
       http.get(url("/api/dashboard/recent-activity"), () => jsonOk([])),
-      http.get(url("/api/vendors"), () => jsonOk([])),
     );
   }
 
-  it("auto-opens for a never-onboarded user and persists completion when closed", async () => {
+  it("auto-opens for a never-onboarded user, hides on close, and persists completion", async () => {
     seedDashboard();
     let completed = 0;
     server.use(
@@ -230,7 +214,11 @@ describe("DashboardPage — first-run welcome modal (#191)", () => {
     expect(await screen.findByText(/stay audit-ready without the chase/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /skip the tour/i }));
 
-    // Closing flips the server flag exactly once (idempotent persistence).
+    // The dismissal hides the modal within this mount (tourDismissed)...
+    await waitFor(() =>
+      expect(screen.queryByText(/stay audit-ready without the chase/i)).toBeNull(),
+    );
+    // ...and flips the server flag exactly once (idempotent persistence).
     await waitFor(() => expect(completed).toBe(1));
   });
 
@@ -240,5 +228,23 @@ describe("DashboardPage — first-run welcome modal (#191)", () => {
 
     await screen.findByRole("heading", { name: /welcome, acme/i });
     expect(screen.queryByText(/stay audit-ready without the chase/i)).toBeNull();
+  });
+
+  it("'Restart tour' hand-off re-opens the modal even for an onboarded user, then clears the flag", async () => {
+    seedDashboard();
+    server.use(
+      http.post(url("/api/auth/complete-onboarding"), () =>
+        jsonOk(makeMe({ hasCompletedOnboarding: true })),
+      ),
+    );
+    localStorage.setItem("cd_restart_tour", "1"); // Settings handed off via this flag
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe }); // already onboarded
+
+    // The modal replays despite hasCompletedOnboarding === true...
+    expect(await screen.findByText(/stay audit-ready without the chase/i)).toBeInTheDocument();
+    // ...and the one-shot flag is consumed so a refresh doesn't re-trigger it.
+    fireEvent.click(screen.getByRole("button", { name: /skip the tour/i }));
+    await waitFor(() => expect(localStorage.getItem("cd_restart_tour")).toBeNull());
   });
 });

@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { Check, ChevronRight } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
-import { useVendors } from "@/hooks/useVendors";
 import { useDashboardStats } from "@/hooks/useDashboard";
 
 export type ChecklistStep = {
@@ -25,33 +24,37 @@ export type OnboardingChecklist = {
  * Derives the "Get started" checklist (#191) from REAL data, so steps tick off as
  * the user actually does them rather than from a stored flag. Step 4 (reminders)
  * is pre-checked: the default expiry reminders are seeded at registration.
+ *
+ * All four signals come from /api/dashboard/stats (already fetched by the
+ * dashboard) — vendor count, the server-derived `anyVendorWithRequirements`
+ * boolean, and document count — so the dashboard never has to pull the full
+ * vendor list just to render this card.
  */
 export function useOnboardingChecklist(): OnboardingChecklist {
-  const vendors = useVendors();
   const stats = useDashboardStats();
+  const s = stats.data;
 
-  const vendorList = vendors.data ?? [];
   const steps: ChecklistStep[] = [
     {
       key: "vendor",
       label: "Add your first vendor",
       hint: "The business whose documents you track.",
       href: "/vendors",
-      done: vendorList.length > 0,
+      done: (s?.totalVendors ?? 0) > 0,
     },
     {
       key: "requirements",
       label: "Choose what they must prove",
       hint: "Pick a requirement checklist for the vendor.",
       href: "/vendors",
-      done: vendorList.some((v) => v.complianceTemplateId != null),
+      done: s?.anyVendorWithRequirements ?? false,
     },
     {
       key: "document",
       label: "Collect a document",
       hint: "Upload a COI, or send the vendor an upload link.",
       href: "/documents",
-      done: (stats.data?.totalDocuments ?? 0) > 0,
+      done: (s?.totalDocuments ?? 0) > 0,
     },
     {
       key: "reminders",
@@ -62,22 +65,24 @@ export function useOnboardingChecklist(): OnboardingChecklist {
     },
   ];
 
-  const completedCount = steps.filter((s) => s.done).length;
+  const completedCount = steps.filter((step) => step.done).length;
   return {
     steps,
     completedCount,
     isComplete: completedCount === steps.length,
-    isLoading: vendors.isLoading || stats.isLoading,
+    isLoading: stats.isLoading,
   };
 }
 
 /**
  * The dashboard "Get started" card. Owns its own visibility — renders nothing once
- * every step is done — so the dashboard can mount it unconditionally.
+ * every step is done, OR while stats are still loading (so a returning, fully-
+ * onboarded user never flashes an all-incomplete checklist on a cold cache) — so
+ * the dashboard can mount it unconditionally.
  */
 export function GetStartedChecklist({ checklist }: { checklist: OnboardingChecklist }) {
-  const { steps, completedCount, isComplete } = checklist;
-  if (isComplete) return null;
+  const { steps, completedCount, isComplete, isLoading } = checklist;
+  if (isLoading || isComplete) return null;
 
   return (
     <Card>

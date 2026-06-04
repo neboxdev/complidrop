@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 
 namespace CompliDrop.Api.Tests;
 
@@ -47,16 +48,32 @@ public sealed class OnboardingEndpointTests(IntegrationTestFixture fixture) : In
     }
 
     [Fact]
-    public async Task Complete_onboarding_is_idempotent()
+    public async Task Complete_onboarding_is_idempotent_and_writes_no_second_audit_row()
     {
         var auth = await RegisterAndLoginAsync();
 
         (await auth.Client.PostAsync("/api/auth/complete-onboarding", null)).StatusCode.Should().Be(HttpStatusCode.OK);
-        var second = await auth.Client.PostAsync("/api/auth/complete-onboarding", null);
 
+        // The first completion flips the flag → exactly one User-update audit row.
+        await using (var db = CreateSystemDb())
+        {
+            (await db.AuditLogs.CountAsync(a => a.EntityId == auth.UserId && a.Action == "user.updated"))
+                .Should().Be(1);
+        }
+
+        // The second call is a no-op (the `if (!HasCompletedOnboarding)` guard skips
+        // the write) — still 200 + flag true, but it must NOT emit a duplicate audit row.
+        var second = await auth.Client.PostAsync("/api/auth/complete-onboarding", null);
         second.StatusCode.Should().Be(HttpStatusCode.OK);
         (await second.Content.ReadFromJsonAsync<JsonElement>())
             .GetProperty("data").GetProperty("hasCompletedOnboarding").GetBoolean().Should().BeTrue();
+
+        await using (var db2 = CreateSystemDb())
+        {
+            (await db2.AuditLogs.CountAsync(a => a.EntityId == auth.UserId && a.Action == "user.updated"))
+                .Should().Be(1, "the idempotent replay must not write a duplicate audit row");
+        }
+
         (await HasCompletedOnboarding(auth.Client)).Should().BeTrue();
     }
 

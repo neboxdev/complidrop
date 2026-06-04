@@ -34,6 +34,10 @@ public static class DashboardEndpoints
             d.ExtractionStatus == Entities.ExtractionStatus.Pending
             || d.ExtractionStatus == Entities.ExtractionStatus.Processing, ct);
         var vendors = await db.Vendors.CountAsync(ct);
+        // Cheap boolean for the #191 "Get started" checklist — lets the dashboard
+        // derive the "choose requirements" step from /api/dashboard/stats (already
+        // fetched) instead of pulling the full vendor list on every load.
+        var anyVendorWithRequirements = await db.Vendors.AnyAsync(v => v.ComplianceTemplateId != null, ct);
 
         return Results.Ok(new
         {
@@ -46,6 +50,7 @@ public static class DashboardEndpoints
                 expired,
                 pendingExtraction,
                 totalVendors = vendors,
+                anyVendorWithRequirements,
                 complianceRate = totalDocs == 0 ? 0 : Math.Round((double)compliant / totalDocs * 100, 1)
             },
             error = (object?)null
