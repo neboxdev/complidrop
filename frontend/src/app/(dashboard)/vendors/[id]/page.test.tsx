@@ -7,15 +7,17 @@
  *   - Loading copy while the detail fetch is in flight.
  *   - Populated render: name, contact, portal link list.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import VendorDetailPage from "./page";
+import type { VendorDetail } from "@/hooks/useVendors";
 import {
   renderWithProviders,
   server,
   url,
   jsonOk,
+  jsonError,
   authedMe,
   toastSuccess,
   toastError,
@@ -128,5 +130,141 @@ describe("VendorDetailPage — smoke (#36)", () => {
     const revoke = screen.getByRole("button", { name: /revoke link/i });
     expect(revoke).toBeInTheDocument();
     expect(revoke.className).toContain("pointer-coarse:min-h-11");
+  });
+});
+
+describe("VendorDetailPage — requirement UX + email link (#190)", () => {
+  function mountWith(vendor: VendorDetail, templates: { id: string; name: string; isSystemTemplate: boolean }[] = []) {
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(vendor)),
+      http.get(url("/api/compliance/templates"), () => jsonOk(templates)),
+    );
+    return renderWithProviders(<VendorDetailPage />, {
+      auth: authedMe,
+      params: { id: vendor.id },
+    });
+  }
+
+  it("relabels the template control to plain English with helper copy", async () => {
+    mountWith(VENDOR_DETAIL);
+    // The select is wired to the new label, not the old "Compliance template".
+    const select = await screen.findByLabelText(/what this vendor must prove/i);
+    expect(select).toBeInTheDocument();
+    expect(screen.queryByText(/compliance template/i)).toBeNull();
+    expect(
+      screen.getByText(/we check every document against it/i),
+    ).toBeInTheDocument();
+  });
+
+  it("warns when no requirement checklist is assigned", async () => {
+    mountWith(VENDOR_DETAIL); // complianceTemplateId is null in the fixture
+    expect(
+      await screen.findByText(/won't be marked covered or not until you choose one/i),
+    ).toBeInTheDocument();
+  });
+
+  it("links to /rules to create a checklist when the org has none", async () => {
+    mountWith(VENDOR_DETAIL, []); // zero templates available
+    const link = await screen.findByRole("link", { name: /create a requirement checklist/i });
+    expect(link).toHaveAttribute("href", "/rules");
+  });
+
+  it("emails the upload link to the vendor in one click", async () => {
+    let generated = 0;
+    let emailedLinkId: string | null = null;
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+      http.post(url("/api/vendors/:id/portal-link"), () => {
+        generated++;
+        return jsonOk({ id: "pl_new_01", token: "tok", url: "http://example.test/portal/tok", maxUploads: 20 });
+      }),
+      http.post(url("/api/vendors/:id/portal-link/:linkId/email"), ({ params }) => {
+        emailedLinkId = params.linkId as string;
+        return jsonOk({ sentTo: "ops@acme.test" });
+      }),
+    );
+
+    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
+
+    const emailBtn = await screen.findByRole("button", {
+      name: /email link to acme subcontractor/i,
+    });
+    expect(emailBtn).not.toBeDisabled();
+    fireEvent.click(emailBtn);
+
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith("Upload link emailed to ops@acme.test"),
+    );
+    // It generated a fresh link and emailed THAT link's id.
+    expect(generated).toBe(1);
+    expect(emailedLinkId).toBe("pl_new_01");
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("disables the email button (with a nudge) when the vendor has no contact email", async () => {
+    mountWith({ ...VENDOR_DETAIL, contactEmail: null });
+    const emailBtn = await screen.findByRole("button", {
+      name: /email link to acme subcontractor/i,
+    });
+    expect(emailBtn).toBeDisabled();
+    expect(
+      screen.getByText(/add a contact email above and save to email the upload link/i),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a friendly toast (no HTTP jargon) when emailing fails", async () => {
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+      http.post(url("/api/vendors/:id/portal-link"), () =>
+        jsonOk({ id: "pl_new_01", token: "tok", url: "http://example.test/portal/tok", maxUploads: 20 }),
+      ),
+      http.post(url("/api/vendors/:id/portal-link/:linkId/email"), () =>
+        jsonError("email.send_failed", "We couldn't send the email just now. Copy the link and try again, or send it yourself.", { status: 502 }),
+      ),
+    );
+
+    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /email link to acme subcontractor/i }),
+    );
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith(
+        "We couldn't send the email just now. Copy the link and try again, or send it yourself.",
+      ),
+    );
+    const toastArg = toastError.mock.calls.at(-1)?.[0] as string;
+    expect(toastArg).not.toMatch(/bad gateway/i);
+    expect(toastArg).not.toMatch(/502/);
+  });
+
+  it("copy link nudges the user to paste it into an email", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+      writable: true,
+    });
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+      http.post(url("/api/vendors/:id/portal-link"), () =>
+        jsonOk({ id: "pl_new_01", token: "tok", url: "http://example.test/portal/tok", maxUploads: 20 }),
+      ),
+    );
+
+    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
+
+    fireEvent.click(await screen.findByRole("button", { name: /^copy link$/i }));
+
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith("http://example.test/portal/tok"),
+    );
+    expect(toastSuccess).toHaveBeenCalledWith(
+      "Link copied — now paste it into an email to Acme Subcontractor.",
+    );
   });
 });

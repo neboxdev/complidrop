@@ -177,6 +177,26 @@ describe("VendorsPage — state matrix (#36)", () => {
     expect(table?.querySelector('td[data-label="Requirements"]')).not.toBeNull();
     expect(table?.querySelector('td[data-label="Active links"]')).not.toBeNull();
   });
+
+  it("empty requirements render a Set-requirements link to the vendor, not a silent dash (#190)", async () => {
+    server.use(
+      http.get(url("/api/vendors"), () =>
+        jsonOk([
+          { ...VENDORS[0], id: "v_set", name: "Needs Reqs LLC", complianceTemplateId: null, complianceTemplateName: null },
+        ]),
+      ),
+    );
+
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: /needs reqs llc/i })).toBeInTheDocument(),
+    );
+
+    const setLink = screen.getByRole("link", { name: /set requirements/i });
+    expect(setLink).toHaveAttribute("href", "/vendors/v_set");
+    // The old silent placeholder must be gone.
+    expect(screen.queryByText(/^—$/)).toBeNull();
+  });
 });
 
 describe("VendorsPage — add-vendor mutation (#36)", () => {

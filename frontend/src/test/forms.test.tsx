@@ -136,10 +136,11 @@ describe("form labels wired via htmlFor + id (#76)", () => {
     expect(screen.getByLabelText(/^category$/i)).toBeInstanceOf(
       HTMLInputElement,
     );
-    // The one non-Input control: a native <select>. Type-checked
+    // The one non-Input control: a native <select>, relabeled to the
+    // plain-English "What this vendor must prove" in #190. Type-checked
     // explicitly so a regression that swapped it for an Input (or
     // vice versa) fails here.
-    expect(screen.getByLabelText(/^compliance template$/i)).toBeInstanceOf(
+    expect(screen.getByLabelText(/^what this vendor must prove$/i)).toBeInstanceOf(
       HTMLSelectElement,
     );
   });

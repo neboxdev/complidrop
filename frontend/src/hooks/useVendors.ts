@@ -114,6 +114,17 @@ export function useGeneratePortalLink(vendorId: string) {
   });
 }
 
+export function useEmailPortalLink(vendorId: string) {
+  // Emails an existing portal link to the vendor's captured contact email (#190).
+  // No cache invalidation: sending a link doesn't change any list/detail state
+  // (it neither creates nor revokes a link). Callers chain this after
+  // useGeneratePortalLink to "generate + email in one click".
+  return useMutation({
+    mutationFn: (linkId: string) =>
+      api.post<{ sentTo: string }>(`/api/vendors/${vendorId}/portal-link/${linkId}/email`),
+  });
+}
+
 export function useRevokePortalLink(vendorId: string) {
   const qc = useQueryClient();
   return useMutation({
