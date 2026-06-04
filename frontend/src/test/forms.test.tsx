@@ -21,6 +21,7 @@ import LoginPage from "@/app/(auth)/login/page";
 import RegisterForm from "@/app/(auth)/register/register-form";
 import VendorsPage from "@/app/(dashboard)/vendors/page";
 import VendorDetailPage from "@/app/(dashboard)/vendors/[id]/page";
+import RulesPage from "@/app/(dashboard)/rules/page";
 import DocumentsPage from "@/app/(dashboard)/documents/page";
 import DocumentDetailPage from "@/app/(dashboard)/documents/[id]/page";
 import ExportPage from "@/app/(dashboard)/export/page";
@@ -143,6 +144,18 @@ describe("form labels wired via htmlFor + id (#76)", () => {
     expect(screen.getByLabelText(/^what this vendor must prove$/i)).toBeInstanceOf(
       HTMLSelectElement,
     );
+  });
+
+  it("RulesPage new-checklist form: the name input resolves via getByLabelText (#192)", async () => {
+    // The rebuilt Vendor-requirements page (#192) replaced the unlabeled
+    // NewRuleRow (gap #21) with labeled controls. The always-visible
+    // new-checklist input is wired via htmlFor/id; the per-requirement money/
+    // text inputs (which appear after picking from the menu) are pinned in
+    // rules/page.test.tsx.
+    server.use(http.get(url("/api/compliance/templates"), () => jsonOk([])));
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+
+    expect(screen.getByLabelText(/new checklist/i)).toBeInstanceOf(HTMLInputElement);
   });
 
   it("DocumentsPage upload staging card: Vendor + Document type labels resolve their controls (#186)", async () => {
