@@ -67,14 +67,20 @@ describe("PortalPage — loading state (#37)", () => {
 
     ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
-    expect(screen.getByText(/^loading…$/i)).toBeInTheDocument();
+    // Branded skeleton (role=status), not a bare "Loading…" text. (#196)
+    expect(
+      screen.getByRole("status", { name: /loading your upload page/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^loading…$/i)).toBeNull();
 
     // Drain the held promise inside the test boundary so the post-
     // release setState doesn't fire during afterEach. Mirrors the
     // uploading-in-flight pattern.
     release();
     await waitFor(() =>
-      expect(screen.queryByText(/^loading…$/i)).toBeNull(),
+      expect(
+        screen.queryByRole("status", { name: /loading your upload page/i }),
+      ).toBeNull(),
     );
   });
 });
@@ -96,10 +102,79 @@ describe("PortalPage — success state (#37)", () => {
         }),
       ).toBeInTheDocument(),
     );
-    // Org context — "{orgName} asked for your latest compliance documents."
-    expect(screen.getByText(new RegExp(portalInfo.orgName))).toBeInTheDocument();
+    // Org context appears in exactly two intended places now: the subhead
+    // ("{org} asked for…") AND the "What {org} needs from you" instructions header.
+    expect(
+      screen.getAllByText(new RegExp(portalInfo.orgName)),
+    ).toHaveLength(2);
+    // The owner's instructions are now RENDERED (previously fetched but never
+    // shown — the core #196 bug). Assert a unique phrase from the fixture.
+    expect(
+      screen.getByText(/please upload your current COI and any state license/i),
+    ).toBeInTheDocument();
     // Quota counter reflects 1/5 used (the wording is "X / Y uploads used").
     expect(screen.getByText(/1\s*\/\s*5\s+uploads used/i)).toBeInTheDocument();
+  });
+
+  // Both empty AND whitespace-only must suppress the block — the production
+  // guard is `info.instructions?.trim()`, so the whitespace case specifically
+  // pins the `.trim()` (an empty string is already falsy without it).
+  it.each([
+    ["an empty string", ""],
+    ["whitespace only", "   \n\t "],
+  ])("does not render an instructions block when instructions are %s", async (_label, value) => {
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () =>
+        jsonOk(makePortalInfo({ instructions: value })),
+      ),
+    );
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: new RegExp(`hi ${portalInfo.vendorName}`, "i") }),
+      ).toBeInTheDocument(),
+    );
+    // No "What … needs from you" header when there are no instructions.
+    expect(screen.queryByText(/needs from you/i)).toBeNull();
+  });
+
+  it("surfaces the camera on mobile: the file input accepts images + the copy mentions a photo (#196)", async () => {
+    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/tap to choose a file or take a photo/i),
+      ).toBeInTheDocument(),
+    );
+    // The load-bearing assertion is the `accept` attribute (a sound proxy for
+    // "the native picker offers Take Photo"). NOTE: jsdom applies no CSS, so
+    // BOTH responsive copy spans are in the DOM regardless of viewport — the
+    // copy assertion above proves the string exists, not that it's shown only
+    // on mobile (true viewport behavior would need the Playwright tier).
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(input.getAttribute("accept")).toMatch(/image\/\*/);
+    expect(input.getAttribute("accept")).toMatch(/application\/pdf/);
+  });
+
+  it("a rejected phone photo (HEIC) shows actionable recovery copy, not a dead-end (#196 review)", async () => {
+    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/tap to choose a file or take a photo/i)).toBeInTheDocument(),
+    );
+    // A HEIC capture the iPhone camera produced — react-dropzone rejects it
+    // client-side (not in the JPEG/PNG/PDF accept map). The vendor must get a
+    // way forward, not just "isn't accepted".
+    dropFiles([makeFile("coi.heic", "image/heic", 2048)]);
+    // Recovery copy must be self-contained: the correct setting location AND a
+    // "take the photo again" step (flipping the format doesn't convert the HEIC
+    // already shot), plus the always-works "upload a PDF" escape. (#196 review v2)
+    await waitFor(() =>
+      expect(
+        screen.getByText(/settings > camera > formats to most compatible and take the photo again/i),
+      ).toBeInTheDocument(),
+    );
   });
 
   it("renders the dropzone affordance + accepted-file copy", async () => {
@@ -331,7 +406,7 @@ describe("PortalPage — file-rejected state (#37)", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText(/that file type isn't accepted/i),
+        screen.getByText(/we can't read that file type/i),
       ).toBeInTheDocument(),
     );
     // No request was attempted.
@@ -362,7 +437,7 @@ describe("PortalPage — file-rejected state (#37)", () => {
     dropFiles([oversize]);
 
     await waitFor(() =>
-      expect(screen.getByText(/that file is too large/i)).toBeInTheDocument(),
+      expect(screen.getByText(/over the 10 mb limit/i)).toBeInTheDocument(),
     );
     expect(uploadCalls).toBe(0);
     expect(screen.queryByText(/^received$/i)).toBeNull();
