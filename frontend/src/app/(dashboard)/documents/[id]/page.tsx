@@ -11,8 +11,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StaleDataBanner } from "@/components/StaleDataBanner";
+import { DocumentTypeSelect } from "@/components/DocumentTypeSelect";
+import { useUpdateDocument } from "@/hooks/useDocuments";
 import { cn } from "@/lib/utils";
-import { useState } from "react";
+import { useId, useState } from "react";
 
 type DocField = {
   id: string;
@@ -58,6 +60,8 @@ export default function DocumentDetailPage() {
   const params = useParams<{ id: string }>();
   const qc = useQueryClient();
   const [edits, setEdits] = useState<Record<string, string>>({});
+  const updateDoc = useUpdateDocument();
+  const typeSelectId = useId();
 
   const detail = useQuery<DocDetail, ApiError>({
     queryKey: ["documents", params.id],
@@ -200,9 +204,30 @@ export default function DocumentDetailPage() {
       </Link>
 
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
+        <div className="space-y-1.5">
           <h1 className="text-xl font-semibold text-sky-900 break-words">{doc.originalFileName}</h1>
-          <p className="text-sm text-slate-500 uppercase tracking-wide">{doc.documentType}</p>
+          <div className="flex items-center gap-2">
+            <label htmlFor={typeSelectId} className="text-xs font-medium text-slate-500">
+              Type
+            </label>
+            <DocumentTypeSelect
+              id={typeSelectId}
+              value={doc.documentType}
+              disabled={updateDoc.isPending}
+              onChange={(type) =>
+                updateDoc.mutate(
+                  { id: doc.id, documentType: type },
+                  {
+                    onSuccess: () => toast.success("Document type updated"),
+                    onError: (err) =>
+                      toast.error(
+                        err instanceof Error ? err.message : "Couldn't update the type.",
+                      ),
+                  },
+                )
+              }
+            />
+          </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <Button variant="outline" size="sm" onClick={() => reextract.mutate()} disabled={reextract.isPending}>

@@ -80,6 +80,34 @@ export function useUploadDocument() {
   });
 }
 
+export function useUpdateDocument() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      vendorId,
+      documentType,
+    }: {
+      id: string;
+      vendorId?: string;
+      documentType?: string;
+    }) => {
+      // Only include the keys the caller actually wants to change so the PATCH
+      // stays a true partial update — omitting vendorId leaves the assignment
+      // untouched server-side rather than nulling it.
+      const payload: { vendorId?: string; documentType?: string } = {};
+      if (vendorId !== undefined) payload.vendorId = vendorId;
+      if (documentType !== undefined) payload.documentType = documentType;
+      return api.patch<void>(`/api/documents/${id}`, payload);
+    },
+    // Prefix-match invalidates BOTH the list (['documents','list']) and any open
+    // detail observer (['documents', id]) so the assigned vendor / changed type
+    // AND the recomputed compliance verdict refresh together. Call sites own
+    // their own success/error toasts (no meta.errorToast) for precise copy.
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["documents"] }),
+  });
+}
+
 export function useDeleteDocument() {
   const qc = useQueryClient();
   return useMutation({

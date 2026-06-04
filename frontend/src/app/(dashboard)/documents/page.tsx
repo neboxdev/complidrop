@@ -1,15 +1,22 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useId } from "react";
 import Link from "next/link";
 import { useDropzone } from "react-dropzone";
 import { toast } from "sonner";
-import { UploadCloud, FileText, Trash2, AlertTriangle, RotateCw } from "lucide-react";
+import { UploadCloud, FileText, Trash2, AlertTriangle, RotateCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { StaleDataBanner } from "@/components/StaleDataBanner";
-import { useDocuments, useUploadDocument, useDeleteDocument } from "@/hooks/useDocuments";
+import { VendorPicker, type VendorOption } from "@/components/VendorPicker";
+import { DocumentTypeSelect } from "@/components/DocumentTypeSelect";
+import {
+  useDocuments,
+  useUploadDocument,
+  useDeleteDocument,
+  useUpdateDocument,
+} from "@/hooks/useDocuments";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { isAuthError } from "@/lib/query-client";
@@ -34,26 +41,28 @@ export default function DocumentsPage() {
   const docs = useDocuments();
   const upload = useUploadDocument();
   const del = useDeleteDocument();
+  const updateDoc = useUpdateDocument();
   const [isUploading, setIsUploading] = useState(false);
 
-  const onDrop = useCallback(
-    async (accepted: File[]) => {
-      if (accepted.length === 0) return;
-      setIsUploading(true);
-      try {
-        for (const file of accepted) {
-          await upload.mutateAsync({ file });
-          toast.success(`Uploaded ${file.name}`);
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Upload failed.";
-        toast.error(message);
-      } finally {
-        setIsUploading(false);
-      }
-    },
-    [upload],
-  );
+  // Drop stages the files; the vendor + document-type step below must be
+  // completed before they're actually uploaded — so every document lands
+  // associated with a vendor instead of orphaned-and-Pending-forever (#186).
+  const [staged, setStaged] = useState<File[]>([]);
+  const [stagedVendor, setStagedVendor] = useState<VendorOption | null>(null);
+  const [stagedType, setStagedType] = useState<string>("coi");
+
+  // Which orphaned row currently has its inline "assign a vendor" picker open.
+  const [assigningId, setAssigningId] = useState<string | null>(null);
+
+  const vendorInputId = useId();
+  const typeSelectId = useId();
+
+  const onDrop = useCallback((accepted: File[]) => {
+    if (accepted.length === 0) return;
+    // Append rather than replace so a second drop adds to the batch instead of
+    // discarding the first; the staging card lets the user remove any file.
+    setStaged((prev) => [...prev, ...accepted]);
+  }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -64,6 +73,34 @@ export default function DocumentsPage() {
     },
     maxSize: 10 * 1024 * 1024,
   });
+
+  async function handleUpload() {
+    if (!stagedVendor || staged.length === 0) return;
+    setIsUploading(true);
+    try {
+      for (const file of staged) {
+        await upload.mutateAsync({
+          file,
+          vendorId: stagedVendor.id,
+          documentType: stagedType,
+        });
+        toast.success(`Uploaded ${file.name}`);
+      }
+      setStaged([]);
+      setStagedVendor(null);
+      setStagedType("coi");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Upload failed.");
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+  function cancelStaging() {
+    setStaged([]);
+    setStagedVendor(null);
+    setStagedType("coi");
+  }
 
   const items = docs.data?.items ?? [];
 
@@ -89,13 +126,93 @@ export default function DocumentsPage() {
             <input {...getInputProps()} />
             <UploadCloud className="w-10 h-10 mx-auto text-sky-500" />
             <p className="mt-3 text-sm font-medium text-slate-700">
-              {isDragActive ? "Drop to upload…" : "Drag a file here or click to browse"}
+              {isDragActive ? "Drop to add…" : "Drag a file here or click to browse"}
             </p>
             <p className="text-xs text-slate-500">PDF, JPEG, PNG · 10 MB max</p>
-            {isUploading && <p className="text-xs text-sky-600 mt-2">Uploading…</p>}
           </div>
         </CardContent>
       </Card>
+
+      {staged.length > 0 && (
+        <Card>
+          <CardContent className="p-6 space-y-4">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-800">
+                Add details before uploading
+              </h2>
+              <p className="text-xs text-slate-500">
+                Pick the vendor this is for so we can check it against their requirements.
+              </p>
+            </div>
+
+            <ul className="space-y-1.5">
+              {staged.map((file, i) => (
+                <li
+                  key={`${file.name}-${file.size}-${i}`}
+                  className="flex items-center justify-between rounded-md bg-slate-50 px-3 py-2 text-sm"
+                >
+                  <span className="flex items-center gap-2 text-slate-700">
+                    <FileText className="h-4 w-4 text-slate-400" /> {file.name}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    aria-label={`Remove ${file.name} from this upload`}
+                    disabled={isUploading}
+                    onClick={() => setStaged((prev) => prev.filter((_, idx) => idx !== i))}
+                  >
+                    <X className="h-4 w-4 text-slate-400 hover:text-rose-600" />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <label htmlFor={vendorInputId} className="text-xs font-medium text-slate-600">
+                  Vendor
+                </label>
+                <VendorPicker
+                  inputId={vendorInputId}
+                  value={stagedVendor}
+                  onChange={setStagedVendor}
+                  disabled={isUploading}
+                  onCreateError={(message) => toast.error(message)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label htmlFor={typeSelectId} className="text-xs font-medium text-slate-600">
+                  Document type
+                </label>
+                <div>
+                  <DocumentTypeSelect
+                    id={typeSelectId}
+                    value={stagedType}
+                    onChange={setStagedType}
+                    disabled={isUploading}
+                    className="w-full"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <Button type="button" onClick={handleUpload} disabled={!stagedVendor || isUploading}>
+                {isUploading
+                  ? "Uploading…"
+                  : `Upload ${staged.length} file${staged.length === 1 ? "" : "s"}`}
+              </Button>
+              <Button type="button" variant="ghost" onClick={cancelStaging} disabled={isUploading}>
+                Cancel
+              </Button>
+              {!stagedVendor && (
+                <span className="text-xs text-slate-500">Choose a vendor to continue.</span>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {docs.isError && items.length > 0 && (
         // Discreet "couldn't refresh" indicator when the polling
@@ -205,7 +322,55 @@ export default function DocumentsPage() {
                       </Link>
                     </td>
                     <td data-label="Type" className="px-4 py-3 text-slate-600 uppercase text-xs">{d.documentType}</td>
-                    <td data-label="Vendor" className="px-4 py-3 text-slate-600">{d.vendorName ?? "—"}</td>
+                    <td data-label="Vendor" className="px-4 py-3 text-slate-600">
+                      {d.vendorName ? (
+                        d.vendorName
+                      ) : assigningId === d.id ? (
+                        <div className="min-w-[15rem]">
+                          <VendorPicker
+                            autoFocus
+                            value={null}
+                            disabled={updateDoc.isPending}
+                            onChange={(vendor) => {
+                              if (!vendor) {
+                                setAssigningId(null);
+                                return;
+                              }
+                              updateDoc.mutate(
+                                { id: d.id, vendorId: vendor.id },
+                                {
+                                  onSuccess: () => {
+                                    toast.success(`Assigned to ${vendor.name}`);
+                                    setAssigningId(null);
+                                  },
+                                  onError: (err) =>
+                                    toast.error(
+                                      err instanceof Error ? err.message : "Couldn't assign vendor.",
+                                    ),
+                                },
+                              );
+                            }}
+                            onCreateError={(message) => toast.error(message)}
+                          />
+                          <button
+                            type="button"
+                            className="mt-1 text-xs text-slate-500 hover:underline"
+                            onClick={() => setAssigningId(null)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setAssigningId(d.id)}
+                        >
+                          Assign vendor
+                        </Button>
+                      )}
+                    </td>
                     <td data-label="Extraction" className="px-4 py-3">
                       <Badge className={cn("border-transparent font-medium", STATUS_HUE[d.extractionStatus] ?? STATUS_HUE.Pending)}>
                         {d.extractionStatus}
