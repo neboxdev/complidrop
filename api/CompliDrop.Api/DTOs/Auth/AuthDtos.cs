@@ -31,4 +31,5 @@ public record AuthMeResponse(
     string Plan,
     string OrganizationName,
     string TimeZone,
-    bool EmailVerified);
+    bool EmailVerified,
+    bool HasCompletedOnboarding);

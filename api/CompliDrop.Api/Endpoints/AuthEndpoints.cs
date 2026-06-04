@@ -58,6 +58,10 @@ public static class AuthEndpoints
         // throttling logged users out behind Railway's proxy.
         group.MapPost("/refresh", Refresh).RequireRateLimiting("auth-refresh");
         group.MapGet("/me", Me).RequireAuthorization();
+        // First-run onboarding (#191): the welcome flow flips this once, then the
+        // server flag suppresses it on every device. Idempotent; default-authed limiter.
+        group.MapPost("/complete-onboarding", CompleteOnboarding)
+            .RequireAuthorization().RequireRateLimiting("default-authed");
     }
 
     private static async Task<IResult> Register(
@@ -312,6 +316,39 @@ public static class AuthEndpoints
 
         var org = await db.Organizations.FirstAsync(o => o.Id == user.OrganizationId);
         var sub = await db.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == user.OrganizationId);
+        return Results.Ok(new { data = ToMeResponse(user, org, sub?.Plan ?? "free"), error = (object?)null });
+    }
+
+    /// <summary>
+    /// Marks the first-run onboarding (#191) complete for the caller. Idempotent — a
+    /// repeat call (e.g. two tabs finishing the welcome flow) is a no-op that still
+    /// returns 200 + the refreshed <see cref="AuthMeResponse"/>, so the client can
+    /// write the updated flag into its session cache. AppDbContext scopes the user +
+    /// org lookups to the caller's tenant.
+    /// </summary>
+    private static async Task<IResult> CompleteOnboarding(
+        HttpContext http,
+        AppDbContext db)
+    {
+        var userIdStr = http.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userIdStr, out var userId))
+            return Error(401, "auth.unauthorized", "Not authenticated.");
+
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        if (user is null) return Error(401, "auth.unauthorized", "Not authenticated.");
+
+        var org = await db.Organizations.FirstOrDefaultAsync();
+        if (org is null) return Error(404, "org.not_found", "Organization not found.");
+
+        // Only write (and emit the interceptor audit row) when it actually flips —
+        // a repeat call from another device/tab must stay a cheap idempotent no-op.
+        if (!user.HasCompletedOnboarding)
+        {
+            user.HasCompletedOnboarding = true;
+            await db.SaveChangesAsync();
+        }
+
+        var sub = await db.Subscriptions.FirstOrDefaultAsync();
         return Results.Ok(new { data = ToMeResponse(user, org, sub?.Plan ?? "free"), error = (object?)null });
     }
 
@@ -983,7 +1020,8 @@ public static class AuthEndpoints
 
     private static AuthMeResponse ToMeResponse(User user, Organization org, string plan) =>
         new(user.Id, user.OrganizationId, user.Email, user.FullName, user.Role, plan, org.Name, org.TimeZone,
-            EmailVerified: user.EmailVerifiedAt is not null);
+            EmailVerified: user.EmailVerifiedAt is not null,
+            HasCompletedOnboarding: user.HasCompletedOnboarding);
 
     private static bool IsValidEmail(string? email) =>
         !string.IsNullOrWhiteSpace(email)

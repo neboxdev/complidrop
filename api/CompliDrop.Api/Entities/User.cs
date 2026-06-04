@@ -29,6 +29,15 @@ public class User
     /// </summary>
     public DateTime? EmailVerifiedAt { get; set; }
 
+    /// <summary>
+    /// False until the user finishes (or skips) the first-run onboarding flow (#191).
+    /// Gates the one-time welcome modal so it fires exactly once and persists across
+    /// devices. The #191 migration backfills every pre-existing user to true (they're
+    /// already oriented); new signups default to false. Flipped via
+    /// POST /api/auth/complete-onboarding.
+    /// </summary>
+    public bool HasCompletedOnboarding { get; set; }
+
     public DateTime CreatedAt { get; set; }
     public DateTime? LastLoginAt { get; set; }
     public DateTime? DeletedAt { get; set; }
