@@ -11,6 +11,10 @@ export type DashboardStats = {
   expired: number;
   pendingExtraction: number;
   totalVendors: number;
+  /** True when at least one vendor has a requirement checklist assigned (#191
+   * "Get started" checklist step 2) — derived server-side so the dashboard
+   * doesn't have to pull the full vendor list. */
+  anyVendorWithRequirements: boolean;
   complianceRate: number;
 };
 

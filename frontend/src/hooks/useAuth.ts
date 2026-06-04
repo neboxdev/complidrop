@@ -16,6 +16,9 @@ export type Me = {
   /** True once the user has confirmed their signup email via the #184 link.
    * Gates the persistent "confirm your email" dashboard banner. */
   emailVerified: boolean;
+  /** True once the user has finished (or skipped) the first-run onboarding (#191).
+   * Server-persisted so the welcome modal fires exactly once, across devices. */
+  hasCompletedOnboarding: boolean;
 };
 
 export type UseMeOptions = {
@@ -181,6 +184,20 @@ export function useVerifyEmail() {
       qc.invalidateQueries({ queryKey: ME_KEY });
       qc.invalidateQueries({ queryKey: ME_PROBE_KEY });
     },
+  });
+}
+
+/**
+ * Marks first-run onboarding complete (#191). The server flips the persisted flag
+ * and returns the refreshed Me, which we write straight into the session cache so
+ * the welcome modal closes and never re-fires (on this or any other device).
+ * Idempotent server-side, so a double-call (two tabs) is harmless.
+ */
+export function useCompleteOnboarding() {
+  const qc = useQueryClient();
+  return useMutation<Me, ApiError, void>({
+    mutationFn: () => api.post<Me>("/api/auth/complete-onboarding"),
+    onSuccess: (me) => setMeCache(qc, me),
   });
 }
 

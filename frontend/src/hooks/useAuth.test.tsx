@@ -20,7 +20,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { hasSessionHint, SESSION_HINT_COOKIE, useMe, type Me } from "./useAuth";
+import {
+  hasSessionHint,
+  SESSION_HINT_COOKIE,
+  useMe,
+  useCompleteOnboarding,
+  ME_KEY,
+  ME_PROBE_KEY,
+  type Me,
+} from "./useAuth";
 import { ApiError } from "@/lib/api";
 
 /**
@@ -84,6 +92,7 @@ const ME: Me = {
   organizationName: "Acme",
   timeZone: "UTC",
   emailVerified: true,
+  hasCompletedOnboarding: true,
 };
 
 describe("hasSessionHint() — gate primitive (#69)", () => {
@@ -450,5 +459,50 @@ describe("useMe() — authenticated routes (dashboard layout, settings)", () => 
     // above — proof that the no-opts branch is exempt from #69's gate.
     expect(calls).toHaveLength(3);
     expect(calls[1].url).toMatch(/\/api\/auth\/refresh$/);
+  });
+});
+
+describe("useCompleteOnboarding() — persist + cache write-through (#191)", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("POSTs /complete-onboarding and writes the refreshed Me into BOTH session caches", async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.endsWith("/api/auth/complete-onboarding") && method === "POST") {
+        return jsonResponse(200, envelope({ ...ME, hasCompletedOnboarding: true }));
+      }
+      return jsonResponse(404, errorEnvelope("not_found", "unexpected request"));
+    });
+
+    // A non-zero gcTime so the setQueryData'd cache entries (no observer in this
+    // hook-only test) survive long enough to assert on — makeWrapper uses gcTime:0,
+    // which would GC them the instant they're written.
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
+    function Wrapper({ children }: { children: ReactNode }) {
+      return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+    }
+    // Seed an un-onboarded session, as the dashboard would have on first login.
+    qc.setQueryData([...ME_KEY], { ...ME, hasCompletedOnboarding: false });
+    qc.setQueryData([...ME_PROBE_KEY], { ...ME, hasCompletedOnboarding: false });
+
+    const { result } = renderHook(() => useCompleteOnboarding(), { wrapper: Wrapper });
+    result.current.mutate();
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    // setMeCache wrote the server's refreshed Me into both keys, so the welcome
+    // modal (which reads useMe → ME_KEY) never re-fires.
+    expect((qc.getQueryData([...ME_KEY]) as Me).hasCompletedOnboarding).toBe(true);
+    expect((qc.getQueryData([...ME_PROBE_KEY]) as Me).hasCompletedOnboarding).toBe(true);
   });
 });

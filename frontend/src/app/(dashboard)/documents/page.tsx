@@ -35,6 +35,8 @@ import { complianceStatusLabel } from "@/lib/display-labels";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { isAuthError } from "@/lib/query-client";
+import { PageTip } from "@/components/onboarding/PageTip";
+import { TIP_IDS } from "@/lib/onboarding";
 
 const PAGE_SIZE = 25;
 
@@ -219,6 +221,11 @@ export default function DocumentsPage() {
         </div>
         <p className="text-xs text-slate-500">{docs.data?.total ?? 0} total</p>
       </header>
+
+      <PageTip id={TIP_IDS.documents} title="This is where documents land">
+        Drag a COI, license, or permit here — or send a vendor an upload link from their page.
+        We read each one and check it against that vendor&apos;s requirements automatically.
+      </PageTip>
 
       <Card>
         <CardContent className="p-6">

@@ -9,9 +9,9 @@
  * gracefully via fallback values), and the partial-success path (one
  * hook fails, two resolve).
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import DashboardPage from "./page";
 import {
   renderWithProviders,
@@ -20,10 +20,15 @@ import {
   jsonOk,
   jsonError,
   authedMe,
+  makeMe,
 } from "@/test";
 
 // sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
 
+// All four "Get started" checklist signals (#191) now come from /api/dashboard/stats
+// — vendor count, the server-derived anyVendorWithRequirements, and document count —
+// so the dashboard no longer fans out to /api/vendors. This fully-populated STATS
+// completes every step, so the checklist auto-hides.
 const STATS = {
   totalDocuments: 12,
   compliant: 8,
@@ -32,6 +37,7 @@ const STATS = {
   expired: 1,
   pendingExtraction: 3,
   totalVendors: 4,
+  anyVendorWithRequirements: true,
   complianceRate: 67,
 };
 const PIPELINE = { expired: 1, bucket30: 2, bucket60: 1, bucket90: 3, beyond: 5 };
@@ -74,7 +80,7 @@ describe("DashboardPage — state matrix (#36)", () => {
     expect(screen.getByText(/^loading…$/i)).toBeInTheDocument();
   });
 
-  it("empty (zero-state org): all stats default to 0, recent-activity shows 'No recent activity'", async () => {
+  it("empty (zero-state org): the Get started checklist REPLACES the all-zeros stat grid (#191/#3)", async () => {
     server.use(
       http.get(url("/api/dashboard/stats"), () =>
         jsonOk({
@@ -85,6 +91,7 @@ describe("DashboardPage — state matrix (#36)", () => {
           expired: 0,
           pendingExtraction: 0,
           totalVendors: 0,
+          anyVendorWithRequirements: false,
           complianceRate: 0,
         }),
       ),
@@ -96,13 +103,15 @@ describe("DashboardPage — state matrix (#36)", () => {
 
     renderWithProviders(<DashboardPage />, { auth: authedMe });
 
-    await waitFor(() =>
-      expect(
-        screen.getByText(/no recent activity yet/i),
-      ).toBeInTheDocument(),
-    );
-    // Compliance rate label is "0%".
-    expect(screen.getByText(/^0%$/)).toBeInTheDocument();
+    // The guided checklist appears...
+    expect(await screen.findByText("Get started")).toBeInTheDocument();
+    // ...and once stats resolve to a real zero, the all-zeros stat grid + compliance
+    // card are replaced (waitFor: the grid shows its `?? 0` fallbacks until stats
+    // loads, then `hasData` flips false and it's removed).
+    await waitFor(() => expect(screen.queryByText(/total documents/i)).toBeNull());
+    expect(screen.queryByText(/^0%$/)).toBeNull();
+    // Recent activity still renders its empty copy.
+    expect(screen.getByText(/no recent activity yet/i)).toBeInTheDocument();
   });
 
   it("populated: stats + pipeline + activity all render with their values", async () => {
@@ -114,7 +123,7 @@ describe("DashboardPage — state matrix (#36)", () => {
 
     renderWithProviders(<DashboardPage />, { auth: authedMe });
 
-    // Stats panel:
+    // Stats panel (STATS completes every checklist step, so the card is hidden):
     await waitFor(() => expect(screen.getByText("12")).toBeInTheDocument());
     expect(screen.getByText("8")).toBeInTheDocument(); // compliant
     expect(screen.getByText("67%")).toBeInTheDocument(); // compliance rate
@@ -174,5 +183,68 @@ describe("DashboardPage — state matrix (#36)", () => {
     // match `^0$`). Requiring ≥6 means a regression that drops the
     // fallback on most stats — but leaves one intact — still fails.
     expect(screen.getAllByText(/^0$/).length).toBeGreaterThanOrEqual(6);
+  });
+});
+
+describe("DashboardPage — first-run welcome modal (#191)", () => {
+  beforeEach(() => localStorage.clear());
+
+  function seedDashboard() {
+    server.use(
+      http.get(url("/api/dashboard/stats"), () =>
+        jsonOk({ ...STATS, totalDocuments: 0, totalVendors: 0, anyVendorWithRequirements: false }),
+      ),
+      http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk([])),
+    );
+  }
+
+  it("auto-opens for a never-onboarded user, hides on close, and persists completion", async () => {
+    seedDashboard();
+    let completed = 0;
+    server.use(
+      http.post(url("/api/auth/complete-onboarding"), () => {
+        completed++;
+        return jsonOk(makeMe({ hasCompletedOnboarding: true }));
+      }),
+    );
+
+    renderWithProviders(<DashboardPage />, { auth: makeMe({ hasCompletedOnboarding: false }) });
+
+    expect(await screen.findByText(/stay audit-ready without the chase/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /skip the tour/i }));
+
+    // The dismissal hides the modal within this mount (tourDismissed)...
+    await waitFor(() =>
+      expect(screen.queryByText(/stay audit-ready without the chase/i)).toBeNull(),
+    );
+    // ...and flips the server flag exactly once (idempotent persistence).
+    await waitFor(() => expect(completed).toBe(1));
+  });
+
+  it("does NOT auto-open once onboarding is already complete", async () => {
+    seedDashboard();
+    renderWithProviders(<DashboardPage />, { auth: authedMe }); // hasCompletedOnboarding: true
+
+    await screen.findByRole("heading", { name: /welcome, acme/i });
+    expect(screen.queryByText(/stay audit-ready without the chase/i)).toBeNull();
+  });
+
+  it("'Restart tour' hand-off re-opens the modal even for an onboarded user, then clears the flag", async () => {
+    seedDashboard();
+    server.use(
+      http.post(url("/api/auth/complete-onboarding"), () =>
+        jsonOk(makeMe({ hasCompletedOnboarding: true })),
+      ),
+    );
+    localStorage.setItem("cd_restart_tour", "1"); // Settings handed off via this flag
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe }); // already onboarded
+
+    // The modal replays despite hasCompletedOnboarding === true...
+    expect(await screen.findByText(/stay audit-ready without the chase/i)).toBeInTheDocument();
+    // ...and the one-shot flag is consumed so a refresh doesn't re-trigger it.
+    fireEvent.click(screen.getByRole("button", { name: /skip the tour/i }));
+    await waitFor(() => expect(localStorage.getItem("cd_restart_tour")).toBeNull());
   });
 });

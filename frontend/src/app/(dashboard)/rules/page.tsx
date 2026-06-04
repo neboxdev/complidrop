@@ -12,6 +12,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { PageTip } from "@/components/onboarding/PageTip";
+import { TIP_IDS } from "@/lib/onboarding";
 
 type TemplateSummary = {
   id: string;
@@ -116,7 +118,13 @@ export default function RulesPage() {
   });
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-8 grid grid-cols-1 md:grid-cols-[300px_1fr] gap-6">
+    <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
+      <PageTip id={TIP_IDS.rules} title="Reusable requirement checklists">
+        Each template is a checklist of what a kind of vendor must prove. Assign one to a vendor
+        and we&apos;ll check their documents against it automatically.
+      </PageTip>
+
+      <div className="grid grid-cols-1 md:grid-cols-[300px_1fr] gap-6">
       <aside className="space-y-4">
         <div>
           <h1 className="text-2xl font-semibold text-sky-900">Templates</h1>
@@ -256,6 +264,7 @@ export default function RulesPage() {
           </>
         )}
       </section>
+      </div>
     </div>
   );
 }

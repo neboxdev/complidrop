@@ -20,6 +20,8 @@ import { useVendors, useCreateVendor } from "@/hooks/useVendors";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { isAuthError } from "@/lib/query-client";
+import { PageTip } from "@/components/onboarding/PageTip";
+import { TIP_IDS } from "@/lib/onboarding";
 
 const VENDOR_PAGE_SIZE = 25;
 
@@ -64,6 +66,11 @@ export default function VendorsPage() {
         <h1 className="text-2xl font-semibold text-sky-900">Vendors</h1>
         <p className="text-slate-500">Manage your vendors and their compliance documents.</p>
       </header>
+
+      <PageTip id={TIP_IDS.vendors} title="Start with a vendor">
+        Add each business you work with, then open it to pick what it must prove. We check every
+        document it sends against that checklist.
+      </PageTip>
 
       <Card>
         <CardContent className="p-5 flex flex-col sm:flex-row gap-3 sm:items-end">

@@ -40,6 +40,7 @@ const STATS: DashboardStats = {
   expired: 1,
   pendingExtraction: 3,
   totalVendors: 4,
+  anyVendorWithRequirements: true,
   complianceRate: 67,
 };
 

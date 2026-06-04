@@ -30,6 +30,7 @@ import {
   makeMe,
   toastSuccess,
   resetSonner,
+  navState,
 } from "@/test";
 
 // sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
@@ -299,5 +300,25 @@ describe("SettingsPage — editable organization (#185)", () => {
       target: { value: "Acme Inc 2" },
     });
     expect(save).not.toBeDisabled();
+  });
+});
+
+describe("SettingsPage — restart tour (#191)", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("re-arms the welcome modal + per-page tips and routes to the dashboard", async () => {
+    mockFreePlanSubscription();
+    localStorage.setItem("cd_tip_documents_v1", "1"); // a previously dismissed tip
+
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    fireEvent.click(await screen.findByRole("button", { name: /restart tour/i }));
+
+    // Flags the dashboard to replay the welcome modal...
+    expect(localStorage.getItem("cd_restart_tour")).toBe("1");
+    // ...clears dismissed tips so they re-show...
+    expect(localStorage.getItem("cd_tip_documents_v1")).toBeNull();
+    // ...and navigates to where the tour plays.
+    expect(navState.router.push).toHaveBeenCalledWith("/dashboard");
   });
 });

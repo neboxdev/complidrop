@@ -16,8 +16,9 @@ import {
   PLANS,
   type CheckoutPlanId,
 } from "@/lib/plans";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useId, useMemo, useState } from "react";
+import { requestTourRestart, resetOnboardingTips } from "@/lib/onboarding";
 
 type SubscriptionInfo = {
   plan: string;
@@ -213,10 +214,42 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      <OnboardingResetCard />
+
       {/* Account & access management (#183). */}
       <SecuritySection />
       <DangerZone />
     </div>
+  );
+}
+
+// Hoisted per the react-hooks/static-components rule. "Restart tour" re-arms the
+// first-run experience (#191): it re-shows every dismissed per-page tip and flags
+// the dashboard to replay the welcome modal, then navigates there.
+function OnboardingResetCard() {
+  const router = useRouter();
+  return (
+    <Card>
+      <CardContent className="p-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-slate-800">Product tour</h2>
+          <p className="text-sm text-slate-500">
+            Replay the welcome walkthrough and bring back the first-visit tips.
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          className="sm:w-auto"
+          onClick={() => {
+            resetOnboardingTips();
+            requestTourRestart();
+            router.push("/dashboard");
+          }}
+        >
+          Restart tour
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
