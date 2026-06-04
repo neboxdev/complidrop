@@ -768,6 +768,111 @@ describe("DocumentsPage — capture vendor + type at upload (#186)", () => {
     }
   });
 
+  it("paginates: Next requests page 2 and the pager reflects the new page (#187)", async () => {
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        const p = new URL(request.url).searchParams.get("page") ?? "1";
+        const item =
+          p === "2"
+            ? makeDocument({ id: "d_p2", originalFileName: "page2.pdf" })
+            : makeDocument({ id: "d_p1", originalFileName: "page1.pdf" });
+        return jsonOk(
+          makeDocumentsResponse({ items: [item], total: 30, page: Number(p), pageSize: 25 }),
+        );
+      }),
+    );
+
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText("page1.pdf")).toBeInTheDocument());
+    expect(screen.getByText(/page 1 of 2/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /prev/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+
+    await waitFor(() => expect(screen.getByText("page2.pdf")).toBeInTheDocument());
+    expect(screen.getByText(/page 2 of 2/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /next/i })).toBeDisabled();
+  });
+
+  it("status filter adds the status query param and resets to page 1 (#187)", async () => {
+    let lastUrl = "";
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        lastUrl = request.url;
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText(/filter by compliance status/i), {
+      target: { value: "NonCompliant" },
+    });
+
+    await waitFor(() => {
+      const sp = new URL(lastUrl).searchParams;
+      expect(sp.get("status")).toBe("NonCompliant");
+      expect(sp.get("page")).toBe("1");
+    });
+  });
+
+  it("type filter adds the type query param (#187)", async () => {
+    let lastUrl = "";
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        lastUrl = request.url;
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText(/filter by document type/i), {
+      target: { value: "permit" },
+    });
+
+    await waitFor(() => expect(new URL(lastUrl).searchParams.get("type")).toBe("permit"));
+  });
+
+  it("search box adds the (debounced) search query param (#187)", async () => {
+    let lastUrl = "";
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        lastUrl = request.url;
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText(/search documents/i), {
+      target: { value: "acme" },
+    });
+
+    await waitFor(() => expect(new URL(lastUrl).searchParams.get("search")).toBe("acme"));
+  });
+
+  it("filter-aware empty state when filters match nothing (#187)", async () => {
+    server.use(
+      http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))),
+    );
+
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText(/filter by document type/i), {
+      target: { value: "permit" },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText(/no documents match your filters/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/no documents yet/i)).toBeNull();
+  });
+
   it("a mid-batch upload failure keeps only the un-uploaded files staged — no duplicate re-upload on retry", async () => {
     let uploadCalls = 0;
     server.use(

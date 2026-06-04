@@ -259,3 +259,67 @@ describe("VendorsPage — add-vendor mutation (#36)", () => {
     expect(toastSuccess).not.toHaveBeenCalled();
   });
 });
+
+function makeVendorRow(i: number) {
+  return {
+    id: `v_${i}`,
+    name: `Vendor ${String(i).padStart(2, "0")}`,
+    contactEmail: `vendor${i}@acme.test`,
+    contactPhone: null,
+    category: null,
+    complianceTemplateId: null,
+    complianceTemplateName: null,
+    documentCount: 0,
+    activePortalLinks: 0,
+  };
+}
+
+describe("VendorsPage — client-side search + pagination (#187)", () => {
+  it("search narrows the list by name and shows a no-match state", async () => {
+    server.use(
+      http.get(url("/api/vendors"), () =>
+        jsonOk([makeVendorRow(1), { ...makeVendorRow(2), name: "Beachfront Janitorial" }]),
+      ),
+    );
+
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Vendor 01" })).toBeInTheDocument(),
+    );
+
+    fireEvent.change(screen.getByLabelText(/search vendors/i), {
+      target: { value: "beachfront" },
+    });
+
+    expect(screen.getByRole("link", { name: "Beachfront Janitorial" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Vendor 01" })).toBeNull();
+
+    fireEvent.change(screen.getByLabelText(/search vendors/i), {
+      target: { value: "zzz-nomatch" },
+    });
+    expect(screen.getByText(/no vendors match your search/i)).toBeInTheDocument();
+  });
+
+  it("paginates client-side at 25 per page; Next reveals the rest (#187)", async () => {
+    const many = Array.from({ length: 30 }, (_, i) => makeVendorRow(i + 1));
+    server.use(http.get(url("/api/vendors"), () => jsonOk(many)));
+
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "Vendor 01" })).toBeInTheDocument(),
+    );
+
+    // Page 1: the 25th vendor is visible, the 26th is not.
+    expect(screen.getByRole("link", { name: "Vendor 25" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Vendor 26" })).toBeNull();
+    expect(screen.getByText(/page 1 of 2/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+
+    // Page 2: the overflow vendors appear, page-1 ones are gone.
+    expect(screen.getByRole("link", { name: "Vendor 26" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Vendor 30" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Vendor 01" })).toBeNull();
+    expect(screen.getByText(/page 2 of 2/i)).toBeInTheDocument();
+  });
+});

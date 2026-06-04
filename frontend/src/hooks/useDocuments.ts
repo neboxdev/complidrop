@@ -1,8 +1,41 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api";
 import { track } from "@/lib/analytics";
+
+/**
+ * Server-side list controls for the documents query. Every field is optional so
+ * `useDocuments()` (no args) keeps its original "first page, no filters" behavior
+ * — the backend defaults page=1/pageSize=25. (#187)
+ */
+export type DocumentListParams = {
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  status?: string;
+  type?: string;
+  vendorId?: string;
+  expiresWithin?: number;
+};
+
+function buildDocumentsQuery(params: DocumentListParams): string {
+  const sp = new URLSearchParams();
+  if (params.page != null) sp.set("page", String(params.page));
+  if (params.pageSize != null) sp.set("pageSize", String(params.pageSize));
+  if (params.search?.trim()) sp.set("search", params.search.trim());
+  if (params.status) sp.set("status", params.status);
+  if (params.type) sp.set("type", params.type);
+  if (params.vendorId) sp.set("vendorId", params.vendorId);
+  if (params.expiresWithin != null) sp.set("expiresWithin", String(params.expiresWithin));
+  const qs = sp.toString();
+  return qs ? `?${qs}` : "";
+}
 
 export type DocumentListItem = {
   id: string;
@@ -30,7 +63,7 @@ export type DocumentListResponse = {
   pageSize: number;
 };
 
-export function useDocuments() {
+export function useDocuments(params: DocumentListParams = {}) {
   // Tightened TError to ApiError so consumers (page error UIs, the
   // StaleDataBanner) can access `.status` / `.code` / `.correlationId`
   // off the error object without an `instanceof ApiError` guard. The
@@ -40,8 +73,15 @@ export function useDocuments() {
   // future regression that swapped a request through a path that throws
   // a bare Error. (#97 review — correctness reviewer)
   return useQuery<DocumentListResponse, ApiError>({
-    queryKey: ["documents", "list"],
-    queryFn: () => api.get<DocumentListResponse>("/api/documents"),
+    // params is part of the key so each page/filter combination caches
+    // independently; mutations invalidate the ["documents"] prefix, which
+    // still covers every combination. (#187)
+    queryKey: ["documents", "list", params],
+    queryFn: () => api.get<DocumentListResponse>(`/api/documents${buildDocumentsQuery(params)}`),
+    // Keep the current page visible while the next page / a filter change is
+    // fetching, instead of flashing the loading row. Initial load has no
+    // previous data, so the loading state still shows then. (#187)
+    placeholderData: keepPreviousData,
     refetchInterval: (q) => {
       // Short-circuit polling when the query is in an error state, even
       // if the cached `data?.items` still has Pending/Processing rows —
