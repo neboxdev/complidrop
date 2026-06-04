@@ -19,6 +19,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PageTip } from "@/components/onboarding/PageTip";
 import { TIP_IDS } from "@/lib/onboarding";
 import { Card, CardContent } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -230,7 +231,12 @@ export default function RulesPage() {
             </Card>
           ) : detail.isLoading || !detail.data ? (
             <Card>
-              <CardContent className="p-8 text-sm text-slate-500">Loading…</CardContent>
+              <CardContent className="p-8 space-y-3" role="status" aria-label="Loading checklist">
+                <Skeleton className="h-5 w-48" />
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-4 w-3/4" />
+                <Skeleton className="h-9 w-full" />
+              </CardContent>
             </Card>
           ) : (
             <ChecklistEditor

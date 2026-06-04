@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useMe, useCompleteOnboarding } from "@/hooks/useAuth";
 import { useDashboardStats, useExpiryPipeline, useRecentActivity } from "@/hooks/useDashboard";
 import { actionLabel } from "@/lib/display-labels";
@@ -149,7 +150,16 @@ export default function DashboardPage() {
           <CardContent className="p-6 space-y-3">
             <h2 className="text-base font-semibold text-slate-800">Recent activity</h2>
             {activity.isLoading ? (
-              <p className="text-sm text-slate-500">Loading…</p>
+              // Skeleton rows mirror the activity list's shape so the card
+              // reserves its space (no layout shift when the data lands). (#197)
+              <ul role="status" aria-label="Loading recent activity" className="divide-y divide-slate-100">
+                {[0, 1, 2, 3].map((i) => (
+                  <li key={i} className="py-2 flex items-center justify-between">
+                    <Skeleton className="h-4 w-32" />
+                    <Skeleton className="h-3 w-20" />
+                  </li>
+                ))}
+              </ul>
             ) : (activity.data ?? []).length === 0 ? (
               <p className="text-sm text-slate-500">No recent activity yet.</p>
             ) : (

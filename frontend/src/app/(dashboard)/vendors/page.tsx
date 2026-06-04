@@ -16,6 +16,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useVendors, useCreateVendor } from "@/hooks/useVendors";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
@@ -131,7 +132,21 @@ export default function VendorsPage() {
             </thead>
             <tbody>
               {vendors.isLoading ? (
-                <tr><td colSpan={5} className="py-8 text-center text-slate-500">Loading…</td></tr>
+                // Skeleton rows that mirror the table layout so the page reserves
+                // its height instead of shifting when vendors land. (#197)
+                [0, 1, 2].map((i) => (
+                  <tr
+                    key={i}
+                    data-testid={i === 0 ? "vendors-loading" : undefined}
+                    className="border-t border-slate-100"
+                  >
+                    <td className="px-4 py-4"><Skeleton className="h-4 w-40" /></td>
+                    <td className="px-4 py-4"><Skeleton className="h-4 w-28" /></td>
+                    <td className="px-4 py-4"><Skeleton className="h-4 w-8" /></td>
+                    <td className="px-4 py-4"><Skeleton className="h-4 w-8" /></td>
+                    <td className="px-4 py-4"><Skeleton className="h-4 w-16" /></td>
+                  </tr>
+                ))
               ) : vendors.isError && all.length === 0 && !isAuthError(vendors.error) ? (
                 // Error state distinct from empty so a backend outage is
                 // not mistaken for an org with zero vendors (#80). Gate

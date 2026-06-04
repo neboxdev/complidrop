@@ -90,6 +90,13 @@ export default function ExportPage() {
               <Input id={toId} type="date" value={to} onChange={(e) => setTo(e.target.value)} className="mt-1" />
             </div>
           </div>
+          {/* Scope clarification (#197): the date range only bounds the audit/
+              activity-log section. The documents table in the PDF always lists
+              every active document regardless of these dates. */}
+          <p className="text-xs text-slate-500">
+            The date range filters the <strong className="font-medium">activity log</strong> only —
+            the documents table always lists all of your active documents.
+          </p>
           <Button
             disabled={busy}
             onClick={() =>

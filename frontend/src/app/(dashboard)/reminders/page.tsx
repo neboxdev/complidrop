@@ -3,6 +3,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { ToggleSwitch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { deliveryStatusLabel } from "@/lib/display-labels";
@@ -111,7 +112,11 @@ export default function RemindersPage() {
         <CardContent className="p-6 space-y-4">
           <h2 className="font-semibold text-slate-800">Recent deliveries</h2>
           {history.isLoading ? (
-            <p className="text-sm text-slate-500">Loading…</p>
+            <div role="status" aria-label="Loading recent deliveries" className="space-y-2">
+              {[0, 1, 2].map((i) => (
+                <Skeleton key={i} className="h-9 w-full" />
+              ))}
+            </div>
           ) : (history.data ?? []).length === 0 ? (
             <p className="text-sm text-slate-500">No reminders sent yet.</p>
           ) : (

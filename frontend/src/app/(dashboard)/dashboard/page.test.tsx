@@ -75,9 +75,12 @@ describe("DashboardPage — state matrix (#36)", () => {
     expect(
       screen.getByRole("heading", { name: /welcome, acme/i }),
     ).toBeInTheDocument();
-    // Recent activity has an explicit "Loading…" copy until activity
-    // resolves; that's the most direct loading-state signal on the page.
-    expect(screen.getByText(/^loading…$/i)).toBeInTheDocument();
+    // Recent activity shows a branded skeleton (role=status) until activity
+    // resolves — replaced the bare "Loading…" to kill layout shift. (#197)
+    expect(
+      screen.getByRole("status", { name: /loading recent activity/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^loading…$/i)).toBeNull();
   });
 
   it("empty (zero-state org): the Get started checklist REPLACES the all-zeros stat grid (#191/#3)", async () => {

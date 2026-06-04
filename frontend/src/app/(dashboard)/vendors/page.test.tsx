@@ -45,7 +45,9 @@ describe("VendorsPage — state matrix (#36)", () => {
 
     renderWithProviders(<VendorsPage />, { auth: authedMe });
 
-    expect(screen.getByText(/^loading…$/i)).toBeInTheDocument();
+    // Skeleton rows (no bare "Loading…") to avoid layout shift when vendors land. (#197)
+    expect(screen.getByTestId("vendors-loading")).toBeInTheDocument();
+    expect(screen.queryByText(/^loading…$/i)).toBeNull();
   });
 
   it("empty: renders the no-vendors-yet copy", async () => {

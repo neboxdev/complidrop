@@ -1,5 +1,7 @@
 using System.Net;
+using System.Text;
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 
@@ -50,5 +52,40 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
         csv.Should().NotContain("NonCompliant");
         // The raw lower-case "coi" type code must not leak as a standalone field.
         csv.Should().NotContain(",coi,");
+    }
+
+    [Fact]
+    public void UserLabel_renders_a_name_or_System_never_a_guid()
+    {
+        // The audit report must show WHO acted, not a raw GUID. (#197)
+        var id = Guid.NewGuid();
+        var map = new Dictionary<Guid, string> { [id] = "Jane Doe" };
+
+        ExportService.UserLabel(id, map).Should().Be("Jane Doe"); // known user → name
+        ExportService.UserLabel(null, map).Should().Be("System"); // system event → capitalized System
+
+        // Unknown id (e.g. a hard-deleted user) falls back to "System", NEVER the GUID.
+        var unknown = Guid.NewGuid();
+        ExportService.UserLabel(unknown, map).Should().Be("System");
+        ExportService.UserLabel(unknown, map).Should().NotContain(unknown.ToString());
+    }
+
+    [Fact]
+    public async Task Audit_report_generates_a_pdf_and_resolves_the_actor_join()
+    {
+        // Registration emits audit rows tagged with the real UserId; generating
+        // the report exercises the new user-name join + the cap-detection query.
+        // A valid %PDF proves both ran without throwing (the PDF text stream is
+        // compressed, so we smoke the generation rather than grep its bytes). (#197)
+        var auth = await RegisterAndLoginAsync();
+        var from = DateTime.UtcNow.AddDays(-1).ToString("yyyy-MM-dd");
+        var to = DateTime.UtcNow.AddDays(1).ToString("yyyy-MM-dd");
+
+        var resp = await auth.Client.GetAsync($"/api/export/audit-report?from={from}&to={to}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var bytes = await resp.Content.ReadAsByteArrayAsync();
+        bytes.Length.Should().BeGreaterThan(0);
+        Encoding.ASCII.GetString(bytes, 0, 4).Should().Be("%PDF");
     }
 }
