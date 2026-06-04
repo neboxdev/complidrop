@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using CompliDrop.Api.Auth;
 using CompliDrop.Api.Data;
+using CompliDrop.Api.DTOs.Compliance;
 using CompliDrop.Api.DTOs.Documents;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
@@ -139,6 +140,8 @@ public static class DocumentEndpoints
         var doc = await db.Documents
             .Include(d => d.Vendor)
             .Include(d => d.Fields)
+            .Include(d => d.ComplianceChecks)
+                .ThenInclude(c => c.ComplianceRule)
             .FirstOrDefaultAsync(d => d.Id == id, ct);
         if (doc is null) return NotFound();
 
@@ -152,6 +155,7 @@ public static class DocumentEndpoints
             doc.DocumentType,
             doc.DocumentSubType,
             doc.Vendor?.Name,
+            doc.Vendor?.ContactEmail,
             doc.VendorId,
             doc.ExtractionStatus.ToString(),
             doc.ExtractionConfidence,
@@ -167,6 +171,14 @@ public static class DocumentEndpoints
             doc.GeneralLiabilityLimit,
             doc.Fields.Select(f => new DocumentFieldDto(
                 f.Id, f.FieldName, f.FieldValue, f.FieldType, f.Confidence, f.IsManuallyEdited, f.OriginalValue)).ToArray(),
+            doc.ComplianceChecks
+                .OrderBy(c => c.CheckedAt)
+                .Select(c => new ComplianceCheckDto(
+                    c.Id, c.ComplianceRuleId,
+                    c.ComplianceRule.FieldName, c.ComplianceRule.Operator, c.ComplianceRule.ExpectedValue,
+                    c.ComplianceRule.ErrorMessage,
+                    c.ActualValue, c.IsPassed, c.Notes, c.CheckedAt))
+                .ToArray(),
             extractionFields,
             doc.ExtractionPromptVersion,
             doc.ProcessingError,
@@ -376,7 +388,14 @@ public static class DocumentEndpoints
             var field = doc.Fields.FirstOrDefault(f => f.FieldName == update.FieldName);
             if (field is null)
             {
-                doc.Fields.Add(new DocumentField
+                // Add through the DbSet, NOT doc.Fields.Add(...). DocumentField.Id
+                // is a client-set Guid key (ValueGeneratedOnAdd); DetectChanges
+                // marks a NEW entity added to a tracked navigation collection with
+                // a non-default key as Modified, which emits an UPDATE … WHERE Id=…
+                // that matches 0 rows → DbUpdateConcurrencyException (500). DbSet.Add
+                // forces the Added state. Mirrors ExtractionWorker.PersistSuccess,
+                // which has always used db.DocumentFields.Add for this reason. (#193)
+                db.DocumentFields.Add(new DocumentField
                 {
                     Id = Guid.NewGuid(),
                     DocumentId = doc.Id,
@@ -397,6 +416,12 @@ public static class DocumentEndpoints
             }
         }
         doc.IsManuallyVerified = true;
+        // A human has now reviewed the extracted values, so a low-confidence
+        // "Needs your review" (ManualRequired) document is resolved — flip it to
+        // Completed so the amber review card on the detail page clears and the
+        // status stops nagging. Other statuses are left untouched. (#193)
+        if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
+            doc.ExtractionStatus = ExtractionStatus.Completed;
         doc.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
 
@@ -416,6 +441,10 @@ public static class DocumentEndpoints
         var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
         if (doc is null) return NotFound();
         doc.IsManuallyVerified = true;
+        // Manual verification resolves a low-confidence "Needs your review"
+        // document — mirror the UpdateFields transition. (#193)
+        if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
+            doc.ExtractionStatus = ExtractionStatus.Completed;
         doc.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         await audit.LogAsync("document.verified", nameof(Document), doc.Id);

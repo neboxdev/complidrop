@@ -1,3 +1,5 @@
+using CompliDrop.Api.DTOs.Compliance;
+
 namespace CompliDrop.Api.DTOs.Documents;
 
 public record DocumentListItem(
@@ -20,6 +22,10 @@ public record DocumentDetail(
     string DocumentType,
     string? DocumentSubType,
     string? VendorName,
+    // The vendor's saved contact email, surfaced so the detail page can offer a
+    // one-click "Email {vendor} to fix this" mailto pre-filled with the failed
+    // requirements. Null when the vendor is unassigned or has no email. (#193)
+    string? VendorContactEmail,
     Guid? VendorId,
     string ExtractionStatus,
     double? ExtractionConfidence,
@@ -32,6 +38,10 @@ public record DocumentDetail(
     string? BlobStorageUrl,
     decimal? GeneralLiabilityLimit,
     DocumentFieldDto[] Fields,
+    // The per-requirement evaluation rows (passed + failed) so the detail page
+    // can explain non-compliance in plain English. Empty when the document has
+    // no requirement set or hasn't been evaluated yet. (#193)
+    ComplianceCheckDto[] ComplianceChecks,
     object? ExtractionFields,
     string? ExtractionPromptVersion,
     string? ProcessingError,

@@ -185,6 +185,16 @@ public static class ComplianceEndpoints
         AppDbContext db,
         CancellationToken ct)
     {
+        // Tenant guard: ComplianceCheck carries no OrganizationId and therefore
+        // has NO global query filter (see AppDbContext.OnModelCreating). Querying
+        // it directly by documentId would return ANOTHER org's checks for any
+        // GUID an authenticated caller supplies — an IDOR / tenant-isolation
+        // leak. Gate on the Document being visible first: db.Documents IS
+        // tenant-filtered, so a cross-org or missing id resolves to 404, never a
+        // data leak. Mirrors the vendor-ownership guard in DocumentEndpoints. (#193)
+        if (!await db.Documents.AnyAsync(d => d.Id == documentId, ct))
+            return NotFound();
+
         var checks = await db.ComplianceChecks
             .Where(c => c.DocumentId == documentId)
             .Include(c => c.ComplianceRule)
@@ -192,6 +202,7 @@ public static class ComplianceEndpoints
             .Select(c => new ComplianceCheckDto(
                 c.Id, c.ComplianceRuleId,
                 c.ComplianceRule.FieldName, c.ComplianceRule.Operator, c.ComplianceRule.ExpectedValue,
+                c.ComplianceRule.ErrorMessage,
                 c.ActualValue, c.IsPassed, c.Notes, c.CheckedAt))
             .ToListAsync(ct);
         return Results.Ok(new { data = checks, error = (object?)null });
