@@ -52,9 +52,7 @@ public class ExportService(SystemDbContext db) : IExportService
                 .Where(u => userIds.Contains(u.Id))
                 .Select(u => new { u.Id, u.FullName, u.Email })
                 .ToListAsync(ct))
-            .ToDictionary(
-                u => u.Id,
-                u => string.IsNullOrWhiteSpace(u.FullName) ? u.Email : u.FullName);
+            .ToDictionary(u => u.Id, u => DisplayName(u.FullName, u.Email));
 
         var reportDate = DateTime.UtcNow.ToString("MMMM d, yyyy");
 
@@ -143,6 +141,12 @@ public class ExportService(SystemDbContext db) : IExportService
     // testing (InternalsVisibleTo → CompliDrop.Api.Tests). (#197)
     internal static string UserLabel(Guid? userId, IReadOnlyDictionary<Guid, string> userDisplay) =>
         userId is Guid id && userDisplay.TryGetValue(id, out var name) ? name : "System";
+
+    // The display name for an audit actor: their full name, or their email when
+    // the name is blank/whitespace (e.g. a vendor-portal-era account). internal
+    // for unit testing. (#197 review)
+    internal static string DisplayName(string? fullName, string email) =>
+        string.IsNullOrWhiteSpace(fullName) ? email : fullName;
 
     public async Task<byte[]> BuildCsvAsync(Guid organizationId, CancellationToken ct)
     {
