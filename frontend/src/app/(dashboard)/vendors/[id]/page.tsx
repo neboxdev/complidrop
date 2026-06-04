@@ -54,10 +54,22 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
   const hasContactEmail = savedEmail.length > 0;
   const linkActionPending = generate.isPending || emailLink.isPending;
 
-  // "Email link to {vendor}" = generate a fresh link, then email it in one click.
+  // Resolve the link to act on: reuse the vendor's most recent ACTIVE link if one exists
+  // (portalLinks is ordered newest-first by the server), otherwise mint a fresh one. Reusing
+  // avoids spawning a throwaway link on every Email/Copy click, and an active link always has
+  // remaining quota — the portal auto-deactivates a link once it hits MaxUploads, so a still-
+  // active link is never exhausted.
+  async function resolveLink(): Promise<{ id: string; url: string }> {
+    const active = vendor.portalLinks.find((l) => l.isActive);
+    if (active) return { id: active.id, url: active.fullUrl };
+    const created = await generate.mutateAsync();
+    return { id: created.id, url: created.url };
+  }
+
+  // "Email link to {vendor}" = resolve the upload link, then email it in one click.
   async function emailLinkToVendor() {
     try {
-      const link = await generate.mutateAsync();
+      const link = await resolveLink();
       await emailLink.mutateAsync(link.id);
       toast.success(`Upload link emailed to ${savedEmail}`);
     } catch (err) {
@@ -65,15 +77,24 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
     }
   }
 
-  // Secondary path: generate + copy. Pat lives in email, so the toast nudges
-  // them to paste it into a message rather than implying the job is done (#190).
+  // Secondary path: copy. Pat lives in email, so the toast nudges them to paste it into a
+  // message rather than implying the job is done (#190).
   async function copyLinkToClipboard() {
+    let link: { id: string; url: string };
     try {
-      const link = await generate.mutateAsync();
-      await navigator.clipboard.writeText(link.url);
-      toast.success(`Link copied — now paste it into an email to ${vendor.name}.`);
+      link = await resolveLink(); // API error → friendly server message (api.ts guarantees it)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : GENERIC_FALLBACK_MESSAGE);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(link.url);
+      toast.success(`Link copied — now paste it into an email to ${vendor.name}.`);
+    } catch {
+      // Clipboard rejections are raw browser errors (TypeError "not focused", denied
+      // permission) — never user-friendly — so emit the generic fallback rather than the
+      // raw message, per the CLAUDE.md frontend error-message policy.
+      toast.error(GENERIC_FALLBACK_MESSAGE);
     }
   }
 

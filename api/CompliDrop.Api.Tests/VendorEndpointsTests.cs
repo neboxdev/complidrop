@@ -101,7 +101,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     }
 
     [Fact]
-    public async Task Email_portal_link_when_delivery_fails_is_502()
+    public async Task Email_portal_link_when_delivery_returns_null_is_502()
     {
         var auth = await RegisterAndLoginAsync();
         var vendorId = await CreateVendorAsync(auth.Client, "Acme", "ops@acme.test");
@@ -113,6 +113,42 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
         (await ErrorCode(resp)).Should().Be("email.send_failed");
+    }
+
+    [Fact]
+    public async Task Email_portal_link_when_send_throws_timeout_is_502_not_500()
+    {
+        // The "resend" HttpClient has a 30s timeout → a hung send throws TaskCanceledException
+        // (an OperationCanceledException whose token is the client's internal timeout, NOT the
+        // request ct). The endpoint must catch it and return the friendly 502, not let it escape
+        // as an unhandled 500. Gating the catch on `!ct.IsCancellationRequested` (rather than
+        // `ex is not OperationCanceledException`) is what makes this pass.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Acme", "ops@acme.test");
+        var (linkId, _, _) = await GenerateLinkAsync(auth.Client, vendorId);
+        Email.Reset();
+        Email.NextSendThrows = new TaskCanceledException("simulated 30s Resend timeout");
+
+        var resp = await auth.Client.PostAsync($"/api/vendors/{vendorId}/portal-link/{linkId}/email", null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        (await ErrorCode(resp)).Should().Be("email.send_failed");
+    }
+
+    [Fact]
+    public async Task Email_portal_link_when_email_not_configured_is_503_and_sends_nothing()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Acme", "ops@acme.test");
+        var (linkId, _, _) = await GenerateLinkAsync(auth.Client, vendorId);
+        Email.Reset();
+        Email.IsEnabled = false; // Resend not configured (no API key / from-email)
+
+        var resp = await auth.Client.PostAsync($"/api/vendors/{vendorId}/portal-link/{linkId}/email", null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        (await ErrorCode(resp)).Should().Be("email.not_configured");
+        Email.Sends.Should().BeEmpty();
     }
 
     [Fact]

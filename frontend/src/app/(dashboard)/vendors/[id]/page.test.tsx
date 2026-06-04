@@ -169,11 +169,11 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
     expect(link).toHaveAttribute("href", "/rules");
   });
 
-  it("emails the upload link to the vendor in one click", async () => {
+  it("emails the vendor's existing active link in one click without minting a new one", async () => {
     let generated = 0;
     let emailedLinkId: string | null = null;
     server.use(
-      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
+      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)), // already has active pl_01
       http.get(url("/api/compliance/templates"), () => jsonOk([])),
       http.post(url("/api/vendors/:id/portal-link"), () => {
         generated++;
@@ -196,10 +196,52 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
     await waitFor(() =>
       expect(toastSuccess).toHaveBeenCalledWith("Upload link emailed to ops@acme.test"),
     );
-    // It generated a fresh link and emailed THAT link's id.
+    // Reused the existing active link (pl_01) — no new link minted.
+    expect(emailedLinkId).toBe("pl_01");
+    expect(generated).toBe(0);
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("mints a link then emails it when the vendor has no active link", async () => {
+    let generated = 0;
+    let emailedLinkId: string | null = null;
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk({ ...VENDOR_DETAIL, portalLinks: [] })),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+      http.post(url("/api/vendors/:id/portal-link"), () => {
+        generated++;
+        return jsonOk({ id: "pl_new_01", token: "tok", url: "http://example.test/portal/tok", maxUploads: 20 });
+      }),
+      http.post(url("/api/vendors/:id/portal-link/:linkId/email"), ({ params }) => {
+        emailedLinkId = params.linkId as string;
+        return jsonOk({ sentTo: "ops@acme.test" });
+      }),
+    );
+
+    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /email link to acme subcontractor/i }),
+    );
+
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith("Upload link emailed to ops@acme.test"),
+    );
+    // No active link existed → generated one, emailed THAT link's id.
     expect(generated).toBe(1);
     expect(emailedLinkId).toBe("pl_new_01");
-    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("does not warn once a requirement checklist is assigned", async () => {
+    mountWith(
+      { ...VENDOR_DETAIL, complianceTemplateId: "t1", complianceTemplateName: "Caterer" },
+      [{ id: "t1", name: "Caterer", isSystemTemplate: true }],
+    );
+    // Wait for the page to settle on its loaded state.
+    await screen.findByRole("heading", { name: /acme subcontractor/i });
+    expect(
+      screen.queryByText(/won't be marked covered or not until you choose one/i),
+    ).toBeNull();
   });
 
   it("disables the email button (with a nudge) when the vendor has no contact email", async () => {
@@ -249,11 +291,8 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
       writable: true,
     });
     server.use(
-      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
+      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)), // reuses active pl_01
       http.get(url("/api/compliance/templates"), () => jsonOk([])),
-      http.post(url("/api/vendors/:id/portal-link"), () =>
-        jsonOk({ id: "pl_new_01", token: "tok", url: "http://example.test/portal/tok", maxUploads: 20 }),
-      ),
     );
 
     renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
@@ -261,10 +300,34 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
     fireEvent.click(await screen.findByRole("button", { name: /^copy link$/i }));
 
     await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith("http://example.test/portal/tok"),
+      expect(writeText).toHaveBeenCalledWith("http://example.test/portal/abc"),
     );
     expect(toastSuccess).toHaveBeenCalledWith(
       "Link copied — now paste it into an email to Acme Subcontractor.",
     );
+  });
+
+  it("copy link surfaces a friendly toast (no browser jargon) when the clipboard write fails", async () => {
+    const writeText = vi.fn().mockRejectedValue(new TypeError("Document is not focused"));
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+      writable: true,
+    });
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+    );
+
+    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
+
+    fireEvent.click(await screen.findByRole("button", { name: /^copy link$/i }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    const toastArg = toastError.mock.calls.at(-1)?.[0] as string;
+    // A raw browser TypeError must never reach the user (CLAUDE.md error-message policy).
+    expect(toastArg).not.toMatch(/typeerror/i);
+    expect(toastArg).toBe("Something went wrong. Try again.");
+    expect(toastSuccess).not.toHaveBeenCalled();
   });
 });

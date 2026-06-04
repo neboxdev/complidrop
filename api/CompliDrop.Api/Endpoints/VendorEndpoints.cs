@@ -225,14 +225,19 @@ public static class VendorEndpoints
         {
             messageId = await email.SendAsync(vendor.ContactEmail, subject, body, ct);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // Transport-level failure (DNS/socket/TLS). SendAsync already swallows non-2xx Resend
-            // responses to null; this catch covers the throw paths so the caller gets a friendly
-            // 502 instead of a 500. A client abort (OperationCanceledException) is rethrown — there
-            // is no one left to receive a response.
+            // Any send failure EXCEPT a genuine caller abort is surfaced as a friendly 502.
+            // SendAsync swallows non-2xx Resend responses to null; this catch covers the throw
+            // paths: a transport failure (DNS/socket/TLS → HttpRequestException) AND the 30s
+            // "resend" HttpClient timeout — which surfaces as a TaskCanceledException, itself an
+            // OperationCanceledException, but tied to the client's internal timeout token, NOT our
+            // `ct`. Both are real delivery failures. We gate on `!ct.IsCancellationRequested` (not
+            // `ex is not OperationCanceledException`) so the 30s timeout is still caught → 502,
+            // while a true client abort (our `ct` signalled) propagates — there is no one left to
+            // receive a response.
             loggerFactory.CreateLogger("VendorEndpoints")
-                .LogWarning(ex, "Portal-link email send threw for vendor {VendorId}", id);
+                .LogWarning(ex, "Portal-link email send failed for vendor {VendorId}", id);
             messageId = null;
         }
 
