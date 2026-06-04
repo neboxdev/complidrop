@@ -800,49 +800,10 @@ describe("DocumentsPage — capture vendor + type at upload (#186)", () => {
     expect(screen.getByRole("button", { name: /prev/i })).toBeDisabled();
   });
 
-  it("keepPreviousData: the current page stays visible while the next page loads (#187)", async () => {
-    // Gate created UP FRONT so `releasePage2` is assigned before any request
-    // reaches the handler. `page2Entered` lets the test wait until the page-2
-    // request is actually IN FLIGHT — that's the moment the loading transition
-    // would flush WITHOUT keepPreviousData, so the mid-flight assertion below
-    // genuinely distinguishes the two. (#187 review — test-quality reviewer)
-    let releasePage2: () => void = () => {};
-    const page2Gate = new Promise<void>((r) => (releasePage2 = r));
-    let signalPage2Entered: () => void = () => {};
-    const page2Entered = new Promise<void>((r) => (signalPage2Entered = r));
-    server.use(
-      http.get(url("/api/documents"), async ({ request }) => {
-        const p = new URL(request.url).searchParams.get("page") ?? "1";
-        if (p === "2") {
-          // Hold page 2 so we can observe page 1 still rendered meanwhile.
-          signalPage2Entered();
-          await page2Gate;
-        }
-        return jsonOk(
-          makeDocumentsResponse({
-            items: [makeDocument({ id: `d_${p}`, originalFileName: `row-p${p}.pdf` })],
-            total: 30,
-            page: Number(p),
-            pageSize: 25,
-          }),
-        );
-      }),
-    );
-
-    renderWithProviders(<DocumentsPage />, { auth: authedMe });
-    await waitFor(() => expect(screen.getByText("row-p1.pdf")).toBeInTheDocument());
-
-    fireEvent.click(screen.getByRole("button", { name: /next/i }));
-    // Wait until the page-2 request is in flight (React has flushed the
-    // fetching transition). WITHOUT keepPreviousData the table would now show
-    // the loading row; WITH it, page 1's row stays put.
-    await page2Entered;
-    expect(screen.getByText("row-p1.pdf")).toBeInTheDocument();
-    expect(screen.queryByText(/loading documents/i)).toBeNull();
-
-    releasePage2();
-    await waitFor(() => expect(screen.getByText("row-p2.pdf")).toBeInTheDocument());
-  });
+  // keepPreviousData is pinned at the hook level (useDocuments.test.tsx) rather
+  // than here: at the page level the self-heal clamp + nulled data interact when
+  // the placeholder is removed, so a page-level test would only fail as a slow
+  // timeout. The hook test fails fast at the intended assertion. (#187 review)
 
   it("deleting the last row on a later page steps back to the previous page (#187)", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
