@@ -113,4 +113,177 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
 
         (await other.Client.GetAsync($"/api/documents/{id}")).StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
+
+    // ---- PATCH /api/documents/{id} : assign vendor / change type (#186) ----
+
+    /// <summary>
+    /// Seeds a vendor carrying a one-rule "expiration_date required" COI template
+    /// plus an orphaned, fully-extracted COI document with a far-future expiry.
+    /// Returns the new document and vendor ids.
+    /// </summary>
+    private async Task<(Guid DocId, Guid VendorId)> SeedOrphanDocAndVendorWithTemplate(Guid orgId)
+    {
+        await using var db = CreateSystemDb();
+        var now = DateTime.UtcNow;
+
+        var template = new ComplianceTemplate
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            Name = "Venue COI",
+            CreatedAt = now
+        };
+        db.ComplianceTemplates.Add(template);
+        db.ComplianceRules.Add(new ComplianceRule
+        {
+            Id = Guid.NewGuid(),
+            ComplianceTemplateId = template.Id,
+            DocumentType = "coi",
+            FieldName = "expiration_date",
+            Operator = "required",
+            SortOrder = 1
+        });
+        var vendor = new Vendor
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            Name = "Acme Catering",
+            ComplianceTemplateId = template.Id,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.Vendors.Add(vendor);
+        var doc = new Document
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            VendorId = null,
+            OriginalFileName = "coi.pdf",
+            BlobStorageUrl = "memory://x",
+            FileSizeBytes = 1,
+            ContentType = "application/pdf",
+            DocumentType = "coi",
+            ExtractionStatus = ExtractionStatus.Completed,
+            ComplianceStatus = ComplianceStatus.Pending,
+            ExpirationDate = now.AddDays(365),
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.Documents.Add(doc);
+        await db.SaveChangesAsync();
+        return (doc.Id, vendor.Id);
+    }
+
+    [Fact]
+    public async Task Assigning_a_vendor_with_a_requirement_set_produces_a_compliance_verdict()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var (docId, vendorId) = await SeedOrphanDocAndVendorWithTemplate(auth.OrgId);
+
+        var resp = await auth.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { vendorId });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        var updated = await db.Documents.FirstAsync(d => d.Id == docId);
+        updated.VendorId.Should().Be(vendorId);
+        // The forever-"Pending" verdict flips to a real answer because the
+        // newly-assigned vendor's template has a rule the COI satisfies.
+        updated.ComplianceStatus.Should().Be(ComplianceStatus.Compliant);
+    }
+
+    [Fact]
+    public async Task Changing_the_document_type_persists_the_new_type()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var docId = await UploadedId(await auth.Client.PostAsync(
+            "/api/documents/upload", UploadForm(PdfBytes(), "doc.pdf", "application/pdf")));
+
+        var resp = await auth.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { documentType = "permit" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.Documents.FirstAsync(d => d.Id == docId)).DocumentType.Should().Be("permit");
+    }
+
+    [Fact]
+    public async Task An_unrecognized_document_type_is_rejected()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var docId = await UploadedId(await auth.Client.PostAsync(
+            "/api/documents/upload", UploadForm(PdfBytes(), "doc.pdf", "application/pdf")));
+
+        var resp = await auth.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { documentType = "banana" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task Assigning_a_vendor_that_does_not_exist_is_rejected()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var docId = await UploadedId(await auth.Client.PostAsync(
+            "/api/documents/upload", UploadForm(PdfBytes(), "doc.pdf", "application/pdf")));
+
+        var resp = await auth.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { vendorId = Guid.NewGuid() });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task A_vendor_from_another_org_cannot_be_assigned()
+    {
+        var owner = await RegisterAndLoginAsync();
+        var docId = await UploadedId(await owner.Client.PostAsync(
+            "/api/documents/upload", UploadForm(PdfBytes(), "doc.pdf", "application/pdf")));
+
+        // A vendor that genuinely exists, but in a DIFFERENT org — the tenant
+        // filter must make it invisible to the owner's PATCH.
+        var other = await RegisterAndLoginAsync();
+        Guid otherVendorId;
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            var vendor = new Vendor
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = other.OrgId,
+                Name = "Other Org Vendor",
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.Vendors.Add(vendor);
+            await db.SaveChangesAsync();
+            otherVendorId = vendor.Id;
+        }
+
+        var resp = await owner.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { vendorId = otherVendorId });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.FirstAsync(d => d.Id == docId)).VendorId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Patching_a_nonexistent_document_is_404()
+    {
+        var auth = await RegisterAndLoginAsync();
+
+        var resp = await auth.Client.PatchAsJsonAsync($"/api/documents/{Guid.NewGuid()}", new { documentType = "coi" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task A_document_cannot_be_patched_by_another_org()
+    {
+        var owner = await RegisterAndLoginAsync();
+        var docId = await UploadedId(await owner.Client.PostAsync(
+            "/api/documents/upload", UploadForm(PdfBytes(), "doc.pdf", "application/pdf")));
+
+        var other = await RegisterAndLoginAsync();
+
+        var resp = await other.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { documentType = "permit" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
 }

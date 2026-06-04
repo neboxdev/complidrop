@@ -1115,3 +1115,57 @@ describe("DocumentDetailPage — responsive header (#181)", () => {
     expect(header?.className).toContain("sm:flex-row");
   });
 });
+
+describe("DocumentDetailPage — editable document type (#186)", () => {
+  it("renders the current type and PATCHes the new value on change", async () => {
+    let patchBody: unknown = null;
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(makeDocumentDetail({ id: "d_type_01", documentType: "coi", extractionStatus: "Completed" })),
+      ),
+      http.patch(url("/api/documents/:id"), async ({ request }) => {
+        patchBody = await request.json();
+        return jsonOk({ message: "Document updated." });
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_type_01" },
+    });
+
+    const select = (await waitFor(() =>
+      screen.getByRole("combobox", { name: /type/i }),
+    )) as HTMLSelectElement;
+    // Reflects the stored type via its human label.
+    expect(select.value).toBe("coi");
+
+    fireEvent.change(select, { target: { value: "permit" } });
+
+    await waitFor(() => expect(patchBody).toEqual({ documentType: "permit" }));
+    expect(toastSuccess).toHaveBeenCalledWith("Document type updated");
+  });
+
+  it("surfaces a friendly toast when the type update fails", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(makeDocumentDetail({ id: "d_type_02", documentType: "coi", extractionStatus: "Completed" })),
+      ),
+      http.patch(url("/api/documents/:id"), () =>
+        jsonError("document.invalid_type", "That document type isn't recognized.", { status: 400 }),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_type_02" },
+    });
+
+    const select = await waitFor(() => screen.getByRole("combobox", { name: /type/i }));
+    fireEvent.change(select, { target: { value: "license" } });
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith("That document type isn't recognized."),
+    );
+  });
+});
