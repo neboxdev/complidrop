@@ -56,6 +56,9 @@ export const authedMe: Readonly<Me> = {
   // Verified by default so the "confirm your email" banner (#184) stays hidden
   // in the bulk of tests; use makeMe({ emailVerified: false }) to exercise it.
   emailVerified: true,
+  // Onboarded by default so the first-run welcome modal (#191) stays closed in
+  // the bulk of tests; use makeMe({ hasCompletedOnboarding: false }) to exercise it.
+  hasCompletedOnboarding: true,
 };
 
 export function makeMe(overrides: Partial<Me> = {}): Me {

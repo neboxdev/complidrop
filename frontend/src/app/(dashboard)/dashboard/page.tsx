@@ -1,9 +1,13 @@
 "use client";
 
+import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
-import { useMe } from "@/hooks/useAuth";
+import { useMe, useCompleteOnboarding } from "@/hooks/useAuth";
 import { useDashboardStats, useExpiryPipeline, useRecentActivity } from "@/hooks/useDashboard";
 import { actionLabel } from "@/lib/display-labels";
+import { peekTourRestart, clearTourRestart } from "@/lib/onboarding";
+import { WelcomeModal } from "@/components/onboarding/WelcomeModal";
+import { GetStartedChecklist, useOnboardingChecklist } from "@/components/onboarding/GetStartedChecklist";
 import Link from "next/link";
 import { FileText, Clock, AlertTriangle, ShieldCheck, Users, Zap } from "lucide-react";
 
@@ -12,6 +16,34 @@ export default function DashboardPage() {
   const stats = useDashboardStats();
   const pipeline = useExpiryPipeline();
   const activity = useRecentActivity();
+  const onboarding = useOnboardingChecklist();
+  const completeOnboarding = useCompleteOnboarding();
+
+  // First-run welcome modal (#191). Auto-opens for a never-onboarded user, or when
+  // "Restart tour" in Settings hands off via a one-shot localStorage flag (read once
+  // here at mount — the dashboard is client-only so this lazy read is hydration-safe).
+  // Every close persists completion (idempotent) and won't re-fire on this mount.
+  const [tourDismissed, setTourDismissed] = useState(false);
+  const [wantsTourRestart] = useState(() => peekTourRestart());
+
+  const showWelcome =
+    !tourDismissed && (wantsTourRestart || me.data?.hasCompletedOnboarding === false);
+
+  function closeWelcome() {
+    setTourDismissed(true);
+    clearTourRestart();
+    if (me.data && !me.data.hasCompletedOnboarding) {
+      completeOnboarding.mutate();
+    }
+  }
+
+  // Until the org has real documents, the stat grid + pipeline are an all-zeros
+  // dead-end (#3) — replace them with the "Get started" checklist until then. We
+  // gate on a SUCCESSFUL zero read, not `?? 0`: while stats is loading or errored
+  // (stats.data undefined) we keep the grid (with its `?? 0` fallbacks) so a
+  // transient stats outage never hides an existing user's dashboard behind the
+  // first-run checklist.
+  const hasData = stats.data ? stats.data.totalDocuments > 0 : true;
 
   // Scale the bars to the BIGGEST bucket (min 1 to avoid /0), so a single
   // bucket of 11+ documents isn't visually flattened by a hardcoded max. (#188)
@@ -34,6 +66,15 @@ export default function DashboardPage() {
         <p className="text-slate-500">Here&apos;s a snapshot of where your vendors stand.</p>
       </header>
 
+      <WelcomeModal open={showWelcome} onClose={closeWelcome} />
+
+      {/* Auto-hides once every step is done. */}
+      <GetStartedChecklist checklist={onboarding} />
+
+      {/* Hidden until there's real data, so a brand-new account never lands on an
+          all-zeros stat grid (#3) — the checklist above guides them instead. */}
+      {hasData && (
+        <>
       <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <StatCard icon={FileText} label="Total documents" value={stats.data?.totalDocuments ?? 0} hue="sky" />
         <StatCard icon={ShieldCheck} label="Compliant" value={stats.data?.compliant ?? 0} hue="emerald" />
@@ -91,6 +132,8 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       </section>
+        </>
+      )}
 
       <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Card>

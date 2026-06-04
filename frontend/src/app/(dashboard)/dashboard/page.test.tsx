@@ -9,9 +9,9 @@
  * gracefully via fallback values), and the partial-success path (one
  * hook fails, two resolve).
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import DashboardPage from "./page";
 import {
   renderWithProviders,
@@ -20,7 +20,25 @@ import {
   jsonOk,
   jsonError,
   authedMe,
+  makeMe,
 } from "@/test";
+
+// The dashboard now also fans out to /api/vendors (the #191 "Get started"
+// checklist). A vendor row shaped just enough for the checklist's two derived
+// steps (count + has-a-requirement-checklist).
+function vendorRow(id: string, complianceTemplateId: string | null) {
+  return {
+    id,
+    name: `Vendor ${id}`,
+    contactEmail: null,
+    contactPhone: null,
+    category: null,
+    complianceTemplateId,
+    complianceTemplateName: complianceTemplateId ? "Caterer" : null,
+    documentCount: 0,
+    activePortalLinks: 0,
+  };
+}
 
 // sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
 
@@ -62,6 +80,7 @@ describe("DashboardPage — state matrix (#36)", () => {
         await settled;
         return jsonOk(ACTIVITY);
       }),
+      http.get(url("/api/vendors"), () => jsonOk([])),
     );
 
     renderWithProviders(<DashboardPage />, { auth: authedMe });
@@ -74,7 +93,7 @@ describe("DashboardPage — state matrix (#36)", () => {
     expect(screen.getByText(/^loading…$/i)).toBeInTheDocument();
   });
 
-  it("empty (zero-state org): all stats default to 0, recent-activity shows 'No recent activity'", async () => {
+  it("empty (zero-state org): the Get started checklist REPLACES the all-zeros stat grid (#191/#3)", async () => {
     server.use(
       http.get(url("/api/dashboard/stats"), () =>
         jsonOk({
@@ -92,17 +111,20 @@ describe("DashboardPage — state matrix (#36)", () => {
         jsonOk({ expired: 0, bucket30: 0, bucket60: 0, bucket90: 0, beyond: 0 }),
       ),
       http.get(url("/api/dashboard/recent-activity"), () => jsonOk([])),
+      http.get(url("/api/vendors"), () => jsonOk([])),
     );
 
     renderWithProviders(<DashboardPage />, { auth: authedMe });
 
-    await waitFor(() =>
-      expect(
-        screen.getByText(/no recent activity yet/i),
-      ).toBeInTheDocument(),
-    );
-    // Compliance rate label is "0%".
-    expect(screen.getByText(/^0%$/)).toBeInTheDocument();
+    // The guided checklist appears...
+    expect(await screen.findByText("Get started")).toBeInTheDocument();
+    // ...and once stats resolve to a real zero, the all-zeros stat grid + compliance
+    // card are replaced (waitFor: the grid shows its `?? 0` fallbacks until stats
+    // loads, then `hasData` flips false and it's removed).
+    await waitFor(() => expect(screen.queryByText(/total documents/i)).toBeNull());
+    expect(screen.queryByText(/^0%$/)).toBeNull();
+    // Recent activity still renders its empty copy.
+    expect(screen.getByText(/no recent activity yet/i)).toBeInTheDocument();
   });
 
   it("populated: stats + pipeline + activity all render with their values", async () => {
@@ -110,6 +132,9 @@ describe("DashboardPage — state matrix (#36)", () => {
       http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
       http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
       http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+      // A fully-configured vendor + 12 docs ⇒ every checklist step is done, so the
+      // "Get started" card auto-hides and this stays a focused stats render.
+      http.get(url("/api/vendors"), () => jsonOk([vendorRow("v1", "t1")])),
     );
 
     renderWithProviders(<DashboardPage />, { auth: authedMe });
@@ -151,6 +176,7 @@ describe("DashboardPage — state matrix (#36)", () => {
       ),
       http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
       http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+      http.get(url("/api/vendors"), () => jsonOk([])),
     );
 
     renderWithProviders(<DashboardPage />, { auth: authedMe });
@@ -174,5 +200,45 @@ describe("DashboardPage — state matrix (#36)", () => {
     // match `^0$`). Requiring ≥6 means a regression that drops the
     // fallback on most stats — but leaves one intact — still fails.
     expect(screen.getAllByText(/^0$/).length).toBeGreaterThanOrEqual(6);
+  });
+});
+
+describe("DashboardPage — first-run welcome modal (#191)", () => {
+  beforeEach(() => localStorage.clear());
+
+  function seedDashboard() {
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk({ ...STATS, totalDocuments: 0 })),
+      http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk([])),
+      http.get(url("/api/vendors"), () => jsonOk([])),
+    );
+  }
+
+  it("auto-opens for a never-onboarded user and persists completion when closed", async () => {
+    seedDashboard();
+    let completed = 0;
+    server.use(
+      http.post(url("/api/auth/complete-onboarding"), () => {
+        completed++;
+        return jsonOk(makeMe({ hasCompletedOnboarding: true }));
+      }),
+    );
+
+    renderWithProviders(<DashboardPage />, { auth: makeMe({ hasCompletedOnboarding: false }) });
+
+    expect(await screen.findByText(/stay audit-ready without the chase/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /skip the tour/i }));
+
+    // Closing flips the server flag exactly once (idempotent persistence).
+    await waitFor(() => expect(completed).toBe(1));
+  });
+
+  it("does NOT auto-open once onboarding is already complete", async () => {
+    seedDashboard();
+    renderWithProviders(<DashboardPage />, { auth: authedMe }); // hasCompletedOnboarding: true
+
+    await screen.findByRole("heading", { name: /welcome, acme/i });
+    expect(screen.queryByText(/stay audit-ready without the chase/i)).toBeNull();
   });
 });
