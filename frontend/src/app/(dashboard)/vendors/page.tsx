@@ -177,7 +177,13 @@ export default function VendorsPage() {
                     <Link href={`/vendors/${v.id}`} className="text-sky-700 font-medium hover:underline">{v.name}</Link>
                     {v.contactEmail && <p className="text-xs text-slate-500">{v.contactEmail}</p>}
                   </td>
-                  <td data-label="Requirements" className="px-4 py-3 text-slate-600">{v.complianceTemplateName ?? "—"}</td>
+                  <td data-label="Requirements" className="px-4 py-3 text-slate-600">
+                    {v.complianceTemplateName ?? (
+                      <Link href={`/vendors/${v.id}`} className="text-sky-700 hover:underline">
+                        Set requirements
+                      </Link>
+                    )}
+                  </td>
                   <td data-label="Docs" className="px-4 py-3 text-slate-600">{v.documentCount}</td>
                   <td data-label="Active links" className="px-4 py-3">
                     {v.activePortalLinks > 0 ? (

@@ -21,6 +21,7 @@ public static class VendorEndpoints
         group.MapPut("/{id:guid}", UpdateVendor);
         group.MapDelete("/{id:guid}", DeleteVendor);
         group.MapPost("/{id:guid}/portal-link", GeneratePortalLink);
+        group.MapPost("/{id:guid}/portal-link/{linkId:guid}/email", EmailPortalLink);
         group.MapDelete("/{id:guid}/portal-link/{linkId:guid}", RevokePortalLink);
     }
 
@@ -179,6 +180,96 @@ public static class VendorEndpoints
         return Results.Ok(new { data = new { id = linkId }, error = (object?)null });
     }
 
+    // Emails an EXISTING portal link to the vendor's captured contact email (#190). The vendor is
+    // looked up through the tenant-filtered db.Vendors set first, so a vendor/link pair belonging to
+    // another org resolves to null → 404 (no cross-tenant send). The send is the whole point of this
+    // request, so — unlike the fire-and-forget reminder/verification sends — a delivery failure is
+    // surfaced to the caller (502) rather than swallowed, so Pat knows to fall back to copy-paste.
+    private static async Task<IResult> EmailPortalLink(
+        Guid id,
+        Guid linkId,
+        AppDbContext db,
+        IEmailService email,
+        IOptions<FrontendSettings> frontend,
+        IAuditLogger audit,
+        ILoggerFactory loggerFactory,
+        CancellationToken ct)
+    {
+        var vendor = await db.Vendors
+            .Include(v => v.Organization)
+            .FirstOrDefaultAsync(v => v.Id == id, ct);
+        if (vendor is null) return NotFound();
+
+        var link = await db.VendorPortalLinks.FirstOrDefaultAsync(l => l.Id == linkId && l.VendorId == id, ct);
+        if (link is null) return NotFoundLink();
+
+        if (string.IsNullOrWhiteSpace(vendor.ContactEmail))
+            return Error(400, "vendor.no_contact_email",
+                "Add a contact email for this vendor first, then you can email them the upload link.");
+
+        if (!link.IsActive)
+            return Error(400, "vendorPortalLink.inactive",
+                "This upload link has been revoked. Generate a new one to email it.");
+
+        if (!email.IsEnabled)
+            return Error(503, "email.not_configured",
+                "Email isn't set up yet, so we couldn't send it. Copy the link and send it to your vendor instead.");
+
+        var url = PortalUrl(frontend.Value, link.Token);
+        var orgName = vendor.Organization?.Name ?? "A business you work with";
+        var subject = $"{orgName} needs your compliance documents";
+        var body = BuildPortalInviteEmail(orgName, vendor.Name, url);
+
+        string? messageId;
+        try
+        {
+            messageId = await email.SendAsync(vendor.ContactEmail, subject, body, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // Any send failure EXCEPT a genuine caller abort is surfaced as a friendly 502.
+            // SendAsync swallows non-2xx Resend responses to null; this catch covers the throw
+            // paths: a transport failure (DNS/socket/TLS → HttpRequestException) AND the 30s
+            // "resend" HttpClient timeout — which surfaces as a TaskCanceledException, itself an
+            // OperationCanceledException, but tied to the client's internal timeout token, NOT our
+            // `ct`. Both are real delivery failures. We gate on `!ct.IsCancellationRequested` (not
+            // `ex is not OperationCanceledException`) so the 30s timeout is still caught → 502,
+            // while a true client abort (our `ct` signalled) propagates — there is no one left to
+            // receive a response.
+            loggerFactory.CreateLogger("VendorEndpoints")
+                .LogWarning(ex, "Portal-link email send failed for vendor {VendorId}", id);
+            messageId = null;
+        }
+
+        if (messageId is null)
+            return Error(502, "email.send_failed",
+                "We couldn't send the email just now. Copy the link and try again, or send it yourself.");
+
+        await audit.LogAsync("vendorPortalLink.emailed", nameof(VendorPortalLink), link.Id,
+            after: new { recipient = vendor.ContactEmail });
+
+        return Results.Ok(new { data = new { sentTo = vendor.ContactEmail }, error = (object?)null });
+    }
+
+    // Org name + vendor name are user-controlled free text rendered into the email HTML, so they
+    // MUST be HTML-encoded to avoid injecting markup/script into the recipient's inbox. The portal
+    // URL is built from config BaseUrl + a base64url token (no HTML-significant chars), matching the
+    // existing auth-email pattern.
+    private static string BuildPortalInviteEmail(string orgName, string vendorName, string url)
+    {
+        var safeOrg = System.Net.WebUtility.HtmlEncode(orgName);
+        var safeVendor = System.Net.WebUtility.HtmlEncode(vendorName);
+        return $"""
+            <div style="font-family: system-ui, sans-serif; color: #0c4a6e;">
+              <h2 style="color: #0284c7;">Upload your documents</h2>
+              <p>Hi {safeVendor},</p>
+              <p>{safeOrg} uses CompliDrop to keep vendor compliance documents — COIs, licenses, and permits — current. Please upload yours using the secure link below. No account or password needed.</p>
+              <p><a href="{url}" style="display:inline-block;background:#0284c7;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;">Upload my documents</a></p>
+              <p style="color: #64748b; font-size: 12px;">Or paste this link into your browser:<br>{url}</p>
+            </div>
+            """;
+    }
+
     private static string GenerateToken()
     {
         Span<byte> bytes = stackalloc byte[24];
@@ -194,6 +285,9 @@ public static class VendorEndpoints
 
     private static IResult NotFound() =>
         Results.Json(new { data = (object?)null, error = new { code = "vendor.not_found", message = "Vendor not found." } }, statusCode: 404);
+
+    private static IResult NotFoundLink() =>
+        Results.Json(new { data = (object?)null, error = new { code = "vendorPortalLink.not_found", message = "Upload link not found." } }, statusCode: 404);
 
     private static IResult Error(int status, string code, string message) =>
         Results.Json(new { data = (object?)null, error = new { code, message } }, statusCode: status);

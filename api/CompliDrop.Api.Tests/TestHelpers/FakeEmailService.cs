@@ -21,6 +21,12 @@ public sealed class FakeEmailService : IEmailService
     /// "messageId is null → log status 'failed'" branch without leaking into later sends.</summary>
     public bool NextSendReturnsNull { get; set; }
 
+    /// <summary>When set, the next <see cref="SendAsync"/> call faults with this exception instead
+    /// of sending — simulating a transport failure or the 30s "resend" HttpClient timeout
+    /// (TaskCanceledException). Resets after one use. Lets tests exercise an endpoint's
+    /// catch-the-throw path (e.g. VendorEndpoints' email → 502).</summary>
+    public Exception? NextSendThrows { get; set; }
+
     public IReadOnlyList<Sent> Sends => _sends.ToArray();
 
     /// <summary>Clears captured sends and restores <see cref="IsEnabled"/> to its default true.
@@ -32,11 +38,18 @@ public sealed class FakeEmailService : IEmailService
         Interlocked.Exchange(ref _counter, 0);
         IsEnabled = true;
         NextSendReturnsNull = false;
+        NextSendThrows = null;
     }
 
     public Task<string?> SendAsync(string toEmail, string subject, string htmlBody, CancellationToken ct)
     {
         if (!IsEnabled) return Task.FromResult<string?>(null);
+
+        if (NextSendThrows is { } boom)
+        {
+            NextSendThrows = null;
+            return Task.FromException<string?>(boom);
+        }
 
         if (NextSendReturnsNull)
         {
