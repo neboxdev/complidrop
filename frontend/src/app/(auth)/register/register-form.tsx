@@ -15,7 +15,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { useRegister } from "@/hooks/useAuth";
 import { cn } from "@/lib/utils";
 
-const schema = z.object({
+export const schema = z.object({
   fullName: z.string().min(2, "Your full name is required"),
   companyName: z.string().min(2, "Company name is required"),
   email: z.string().email("Enter a valid email"),
@@ -68,7 +68,7 @@ const PLAN_HEADINGS: Record<
 // Live password-criteria checklist — each rule turns green as the user satisfies
 // it, so the 12-char minimum reads as guidance instead of a post-submit rejection.
 // Rules mirror the zod schema above. Module scope per the static-components rule (#73). (#195)
-const PASSWORD_RULES: ReadonlyArray<{ label: string; test: (v: string) => boolean }> = [
+export const PASSWORD_RULES: ReadonlyArray<{ label: string; test: (v: string) => boolean }> = [
   { label: "At least 12 characters", test: (v) => v.length >= 12 },
   { label: "A letter", test: (v) => /[A-Za-z]/.test(v) },
   { label: "A number", test: (v) => /[0-9]/.test(v) },
@@ -82,6 +82,7 @@ function PasswordChecklist({ value, id }: { value: string; id: string }) {
         return (
           <li
             key={rule.label}
+            data-met={ok ? "true" : "false"}
             className={cn(
               "flex items-center gap-1.5 text-xs",
               ok ? "text-emerald-700" : "text-slate-500",
@@ -208,7 +209,7 @@ export default function RegisterForm() {
             </div>
           </div>
           <div>
-            <label htmlFor={emailId} className="text-sm font-medium text-slate-700">Work email</label>
+            <label htmlFor={emailId} className="text-sm font-medium text-slate-700">Email</label>
             <Input
               {...r("email")}
               id={emailId}
@@ -250,9 +251,13 @@ export default function RegisterForm() {
           <Button type="submit" className="w-full" disabled={register.isPending}>
             {register.isPending ? "Creating account…" : "Create my account"}
           </Button>
-          {/* Repeat the risk-free reassurance right at the commit point (#195). */}
+          {/* Plan-aware reassurance at the commit point — must not promise "free,
+              no card" when a paid plan is selected (that contradicts the banner
+              above). Free/default → risk-free framing; paid → cancel-anytime. (#195) */}
           <p className="text-center text-xs text-slate-500">
-            Free for your first 5 documents. No credit card required.
+            {plan === "free"
+              ? "Free for your first 5 documents. No credit card required."
+              : "Cancel anytime. No long-term contract."}
           </p>
           {/* Affirmative assent so the Terms + Privacy Policy actually bind the
               user (clickwrap-style), with both links discoverable at signup. (#194) */}

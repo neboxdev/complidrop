@@ -61,16 +61,18 @@ describe("form labels wired via htmlFor + id (#76)", () => {
     expect(screen.getByLabelText(/^company$/i)).toBeInstanceOf(
       HTMLInputElement,
     );
-    expect(screen.getByLabelText(/^work email$/i)).toBeInstanceOf(
+    expect(screen.getByLabelText(/^email$/i)).toBeInstanceOf(
       HTMLInputElement,
     );
     expect(screen.getByLabelText(/^password$/i)).toBeInstanceOf(
       HTMLInputElement,
     );
-    expect(screen.getByLabelText(/^industry$/i)).toBeInstanceOf(
+    // Prefix-match (not anchored) — the labels carry a trailing "(optional)"
+    // span (#195); the wire-up contract is that the label still resolves its input.
+    expect(screen.getByLabelText(/^industry/i)).toBeInstanceOf(
       HTMLInputElement,
     );
-    expect(screen.getByLabelText(/^size$/i)).toBeInstanceOf(HTMLInputElement);
+    expect(screen.getByLabelText(/^size/i)).toBeInstanceOf(HTMLInputElement);
   });
 
   it("VendorsPage create form: every visible label resolves an input via getByLabelText", async () => {

@@ -57,11 +57,15 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
    Compliant badge + an expiry countdown) so a cold-email visitor SEES the
    product in the hero. Built in markup rather than a binary screenshot so it
    stays crisp, responsive, theme-synced, and never goes stale. (#195) */
+// No expiration-date row here on purpose: the "Expires in 23 days" chip already
+// carries the expiry story, and a far-future date next to a 23-day countdown
+// would read as a sloppy fake. "Additional insured" shows the product checking a
+// real requirement (the #1 thing a venue needs), not just reading text. (#195 review)
 const PREVIEW_FIELDS = [
   { label: "Policyholder", value: "Acme Catering LLC" },
   { label: "Policy number", value: "GL-4471902" },
   { label: "General liability", value: "$2,000,000" },
-  { label: "Expiration date", value: "Mar 14, 2027" },
+  { label: "Additional insured", value: "Your venue" },
 ] as const;
 
 function ProductPreview() {
@@ -86,6 +90,10 @@ function ProductPreview() {
               <p className="mt-1 text-lg font-semibold text-foreground">Acme Catering LLC</p>
             </div>
             <div className="flex flex-wrap items-center gap-2.5">
+              {/* Inline badge by design — NOT the shared <ComplianceBadge>, which is a
+                  "use client" component; importing it would pull a client island into
+                  this server-rendered marketing page (ADR 0012). This is a static mock,
+                  not live status. */}
               <Badge className="inline-flex items-center gap-1 border-transparent bg-emerald-100 text-emerald-700">
                 <ShieldCheck className="h-3.5 w-3.5" aria-hidden /> Compliant
               </Badge>
@@ -126,7 +134,7 @@ function SocialProof() {
   return (
     <section className="bg-white py-20 sm:py-28">
       <div className="mx-auto max-w-4xl px-4 text-center sm:px-6">
-        <SectionLabel>Why teams switch</SectionLabel>
+        <SectionLabel>A note from the team</SectionLabel>
         <h2 className="mt-3 text-3xl font-bold tracking-tight text-foreground sm:text-4xl">
           Built by people who&rsquo;ve chased a certificate at 4&nbsp;a.m.
         </h2>
@@ -190,7 +198,7 @@ const STEPS = [
     step: "3",
     icon: BellRing,
     title: "Forget it",
-    body: "Reminders go out at 60, 30, and 7 days before expiration — to you and straight to your vendor. They get a simple upload link (no login, no account) and send the new document themselves. You stop being the bad guy.",
+    body: "Reminders go out at 60, 30, 14, and 7 days before expiration — to you and straight to your vendor. They get a simple upload link (no login, no account) and send the new document themselves. You stop being the bad guy.",
   },
 ] as const;
 
@@ -409,7 +417,7 @@ export default function Home() {
                   </p>
                   <p className="mt-5 flex-1 text-sm leading-relaxed text-muted-foreground">
                     Unlimited documents. A no-login link your vendors use to send their
-                    own certificates. Email reminders at 60, 30, and 7 days. Automatic
+                    own certificates. Email reminders at 60, 30, 14, and 7 days. Automatic
                     checks against the coverage you require. One-click reports for audits.
                     Everything you need, nothing you don&rsquo;t.
                   </p>

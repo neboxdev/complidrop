@@ -27,7 +27,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import type { ReactNode } from "react";
-import RegisterForm from "./register-form";
+import RegisterForm, { PASSWORD_RULES, schema } from "./register-form";
 import { fillByLabel, submitFormIn } from "@/test";
 
 vi.mock("next/link", () => ({
@@ -172,7 +172,7 @@ describe("RegisterForm — submission payload (#31 Non-goals: no billing)", () =
 
     fillByLabel(/^full name$/i, "Owner Name");
     fillByLabel(/^company$/i, "Acme Inc");
-    fillByLabel(/^work email$/i, "owner@example.com");
+    fillByLabel(/^email$/i, "owner@example.com");
     fillByLabel(/^password$/i, "verystrong1pass");
 
     submitFormIn(container);
@@ -185,9 +185,9 @@ describe("RegisterForm — submission payload (#31 Non-goals: no billing)", () =
 
     // The fields the backend actually accepts (matches RegisterRequest DTO).
     // Migrating to getByLabelText means the EMAIL field comes from the
-    // "Work email" label — pin that the form key is still `email` (the
-    // backend DTO), so a future label rename can't silently change the
-    // wire payload shape.
+    // "Email" label — pin that the form key is still `email` (the backend
+    // DTO), so a future label rename can't silently change the wire payload
+    // shape.
     expect(payload).toMatchObject({
       fullName: "Owner Name",
       companyName: "Acme Inc",
@@ -213,14 +213,22 @@ describe("RegisterForm — signup-friction reducers (#195)", () => {
     expect(screen.getByText(/^size/i).textContent).toMatch(/optional/i);
   });
 
-  it("repeats the free / no-card reassurance at the commit point", () => {
-    render(<RegisterForm />);
+  it("reassures free/no-card on the free default but never on a paid plan", () => {
+    setPlanParam(null); // default → free
+    const { rerender } = render(<RegisterForm />);
     expect(
       screen.getByText(/free for your first 5 documents\. no credit card/i),
     ).toBeInTheDocument();
+
+    // A paid plan must NOT promise "free, no card" — that would contradict the
+    // "$49/month" banner above it. (#195 review — user-empathy)
+    setPlanParam("pro");
+    rerender(<RegisterForm />);
+    expect(screen.queryByText(/no credit card/i)).toBeNull();
+    expect(screen.getByText(/cancel anytime\. no long-term contract/i)).toBeInTheDocument();
   });
 
-  it("shows a live password checklist that turns each rule green as it's met", () => {
+  it("shows a live password checklist that flips each rule's met-state as it's satisfied", () => {
     render(<RegisterForm />);
     // All three rules are visible up-front — guidance, not a post-submit rejection.
     expect(screen.getByText(/at least 12 characters/i)).toBeInTheDocument();
@@ -228,16 +236,35 @@ describe("RegisterForm — signup-friction reducers (#195)", () => {
     expect(screen.getByText(/^a number$/i)).toBeInTheDocument();
 
     const pw = screen.getByLabelText(/^password$/i);
-    // Letters only, too short: "a letter" met (green), length + number not.
+    // Assert on the refactor-stable data-met attribute, not the color class.
+    // Letters only, too short: "a letter" met, length + number not.
     fireEvent.change(pw, { target: { value: "abc" } });
-    expect(screen.getByText(/^a letter$/i).className).toMatch(/emerald/);
-    expect(screen.getByText(/at least 12 characters/i).className).not.toMatch(/emerald/);
-    expect(screen.getByText(/^a number$/i).className).not.toMatch(/emerald/);
+    expect(screen.getByText(/^a letter$/i)).toHaveAttribute("data-met", "true");
+    expect(screen.getByText(/at least 12 characters/i)).toHaveAttribute("data-met", "false");
+    expect(screen.getByText(/^a number$/i)).toHaveAttribute("data-met", "false");
 
-    // A fully-valid password turns all three green.
+    // A fully-valid password turns all three met.
     fireEvent.change(pw, { target: { value: "abcdefgh1234" } });
-    expect(screen.getByText(/at least 12 characters/i).className).toMatch(/emerald/);
-    expect(screen.getByText(/^a letter$/i).className).toMatch(/emerald/);
-    expect(screen.getByText(/^a number$/i).className).toMatch(/emerald/);
+    expect(screen.getByText(/at least 12 characters/i)).toHaveAttribute("data-met", "true");
+    expect(screen.getByText(/^a letter$/i)).toHaveAttribute("data-met", "true");
+    expect(screen.getByText(/^a number$/i)).toHaveAttribute("data-met", "true");
+  });
+
+  it("keeps the checklist rules aligned with the zod schema (drift guard)", () => {
+    // The checklist (PASSWORD_RULES) and the zod schema are two copies of the
+    // same constraints; this fails CI if one drifts so the checklist can never
+    // show all-green for a password the schema then rejects. (#195 review)
+    const allRulesPass = (v: string) => PASSWORD_RULES.every((r) => r.test(v));
+    const zodPasses = (v: string) => schema.shape.password.safeParse(v).success;
+    for (const v of [
+      "abcdefgh1234", // valid: 12 + letter + digit
+      "abcdefghijk", //  11 chars → too short
+      "abcdefghijkl", // 12 letters, no digit
+      "123456789012", // 12 digits, no letter
+      "abc1", //         too short
+      "", //             empty
+    ]) {
+      expect(allRulesPass(v)).toBe(zodPasses(v));
+    }
   });
 });

@@ -20,6 +20,15 @@ describe("MarketingHeader — mobile menu (#181)", () => {
     fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
 
     const menu = await waitFor(() => screen.getByRole("dialog"));
+    // Pricing + Support must be reachable in the drawer — a phone is the primary
+    // surface for a cold-email visitor, and price + a human are what they scan
+    // for before signing up. (#195)
+    expect(
+      within(menu).getByRole("link", { name: /pricing/i }),
+    ).toHaveAttribute("href", "/#pricing");
+    expect(
+      within(menu).getByRole("link", { name: /support/i }),
+    ).toHaveAttribute("href", "/contact");
     expect(
       within(menu).getByRole("link", { name: /event venues/i }),
     ).toBeInTheDocument();
