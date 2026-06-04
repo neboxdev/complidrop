@@ -164,14 +164,23 @@ export function operatorLabel(op: string | null | undefined): string {
 const DELIVERY_STATUS_LABELS: Readonly<Record<string, string>> = {
   sent: "Sent",
   delivered: "Delivered",
+  opened: "Opened",
+  clicked: "Clicked",
   failed: "Couldn't send",
   bounced: "Bounced — bad address",
   complained: "Marked as spam",
 };
 
-/** Human label for a Resend delivery status (e.g. "bounced" → "Bounced — bad address"). */
+/**
+ * Human label for a Resend delivery status (e.g. "bounced" → "Bounced — bad
+ * address"). The status set is driven by the Resend webhook + the precedence
+ * ladder (sent < delivered < opened < clicked), so cover all of them — and
+ * sentence-case any future token as a fallback so a new status can never leak
+ * as a raw lowercase code. (#188)
+ */
 export function deliveryStatusLabel(status: string | null | undefined): string {
   if (!status) return "";
   const key = status.trim().toLowerCase();
-  return DELIVERY_STATUS_LABELS[key] ?? status;
+  if (DELIVERY_STATUS_LABELS[key]) return DELIVERY_STATUS_LABELS[key];
+  return key.charAt(0).toUpperCase() + key.slice(1);
 }

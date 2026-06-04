@@ -100,12 +100,43 @@ describe("operatorLabel (#188)", () => {
 });
 
 describe("deliveryStatusLabel (#188)", () => {
-  it("humanizes reminder delivery statuses", () => {
+  it("humanizes reminder delivery statuses (incl. the engagement ones)", () => {
     expect(deliveryStatusLabel("delivered")).toBe("Delivered");
     expect(deliveryStatusLabel("bounced")).toBe("Bounced — bad address");
     expect(deliveryStatusLabel("complained")).toBe("Marked as spam");
+    // opened/clicked are real ReminderLog.Status values (ranked above
+    // "delivered") that previously leaked raw.
+    expect(deliveryStatusLabel("opened")).toBe("Opened");
+    expect(deliveryStatusLabel("clicked")).toBe("Clicked");
   });
-  it("never leaks the raw lowercase token for a known status", () => {
-    expect(deliveryStatusLabel("complained")).not.toBe("complained");
+  it("sentence-cases an unknown token instead of leaking it raw", () => {
+    expect(deliveryStatusLabel("some_future_status")).toBe("Some_future_status");
+    expect(deliveryStatusLabel("queued")).toBe("Queued");
+  });
+});
+
+// Drift / coverage guard (#188 review): every audit action the backend
+// actually emits must resolve to a CURATED label, never the regex fallback
+// (which inserts " · "). Mirrored by DisplayLabelsTests.Action_curates_every_
+// emitted_action on the C# side so a one-sided map edit is caught.
+const REAL_AUDIT_ACTIONS = [
+  "document.created", "document.uploaded", "document.updated", "document.deleted",
+  "document.verified", "document.fields_edited", "document.reextract_queued",
+  "documentfield.created", "documentfield.updated",
+  "vendor.created", "vendor.updated", "vendor.deleted",
+  "vendorPortalLink.created", "vendorPortalLink.revoked",
+  "complianceTemplate.created", "complianceTemplate.updated", "complianceTemplate.deleted",
+  "complianceRule.created", "complianceRule.updated", "complianceRule.upserted", "complianceRule.deleted",
+  "user.registered", "user.logged_in", "user.login_failed", "user.password_changed",
+  "user.password_reset", "user.password_reset_requested", "user.email_verified",
+  "user.email_changed", "user.email_change_requested", "user.account_deleted",
+];
+
+describe("actionLabel — every emitted audit action is curated (#188)", () => {
+  it.each(REAL_AUDIT_ACTIONS)("%s resolves to a curated label (no raw fallback)", (action) => {
+    const label = actionLabel(action);
+    expect(label).not.toContain(" · "); // the fallback's dot-join marker
+    expect(label).not.toContain("_");
+    expect(label[0]).toBe(label[0].toUpperCase());
   });
 });

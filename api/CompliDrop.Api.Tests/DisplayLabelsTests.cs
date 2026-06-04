@@ -75,4 +75,25 @@ public class DisplayLabelsTests
     [InlineData("Document", "Document")]
     public void EntityType_humanizes_the_raw_entity_class_name(string entity, string expected)
         => DisplayLabels.EntityType(entity).Should().Be(expected);
+
+    // Drift / coverage guard mirroring display-labels.test.ts: every audit
+    // action the backend actually emits must resolve to a CURATED label in the
+    // export, never the regex fallback (which inserts " · ").
+    [Theory]
+    [InlineData("document.created")]
+    [InlineData("document.deleted")]
+    [InlineData("documentfield.updated")]
+    [InlineData("vendor.updated")]
+    [InlineData("vendorPortalLink.revoked")]
+    [InlineData("complianceTemplate.created")]
+    [InlineData("complianceRule.upserted")]
+    [InlineData("user.logged_in")]
+    [InlineData("user.password_changed")]
+    [InlineData("user.account_deleted")]
+    public void Action_curates_every_emitted_action(string action)
+    {
+        var label = DisplayLabels.Action(action);
+        label.Should().NotContain(" · ");
+        label.Should().NotContain("_");
+    }
 }
