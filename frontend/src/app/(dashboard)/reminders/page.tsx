@@ -3,6 +3,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { ToggleSwitch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { deliveryStatusLabel } from "@/lib/display-labels";
 
@@ -79,21 +80,24 @@ export default function RemindersPage() {
                 <tr key={r.id} className="border-t border-slate-100">
                   <td className="py-3 font-medium">{r.daysBefore} days before</td>
                   <td className="py-3">
-                    <Toggle
-                      on={r.notifyInternalUser}
-                      onToggle={() => update.mutate({ id: r.id, patch: { notifyInternalUser: !r.notifyInternalUser } })}
+                    <ToggleSwitch
+                      checked={r.notifyInternalUser}
+                      aria-label={`Notify team ${r.daysBefore} days before expiry`}
+                      onCheckedChange={(checked) => update.mutate({ id: r.id, patch: { notifyInternalUser: checked } })}
                     />
                   </td>
                   <td className="py-3">
-                    <Toggle
-                      on={r.notifyVendor}
-                      onToggle={() => update.mutate({ id: r.id, patch: { notifyVendor: !r.notifyVendor } })}
+                    <ToggleSwitch
+                      checked={r.notifyVendor}
+                      aria-label={`Notify vendor ${r.daysBefore} days before expiry`}
+                      onCheckedChange={(checked) => update.mutate({ id: r.id, patch: { notifyVendor: checked } })}
                     />
                   </td>
                   <td className="py-3">
-                    <Toggle
-                      on={r.isActive}
-                      onToggle={() => update.mutate({ id: r.id, patch: { isActive: !r.isActive } })}
+                    <ToggleSwitch
+                      checked={r.isActive}
+                      aria-label={`Reminder ${r.daysBefore} days before expiry active`}
+                      onCheckedChange={(checked) => update.mutate({ id: r.id, patch: { isActive: checked } })}
                     />
                   </td>
                 </tr>
@@ -107,7 +111,7 @@ export default function RemindersPage() {
         <CardContent className="p-6 space-y-4">
           <h2 className="font-semibold text-slate-800">Recent deliveries</h2>
           {history.isLoading ? (
-            <p className="text-sm text-slate-400">Loading…</p>
+            <p className="text-sm text-slate-500">Loading…</p>
           ) : (history.data ?? []).length === 0 ? (
             <p className="text-sm text-slate-500">No reminders sent yet.</p>
           ) : (
@@ -149,29 +153,3 @@ function statusHue(status: string): string {
   }
 }
 
-function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
-  // The clickable button carries a ≥44px hit area on touch
-  // (`pointer-coarse:min-h-11/min-w-11`, WCAG 2.5.5) while the visual track
-  // stays compact — the track is an inner span so enlarging the target doesn't
-  // enlarge the pill. Switch SEMANTICS (role="switch" / aria-checked /
-  // aria-label / focus ring / non-color cue) are intentionally left to the
-  // accessibility-hardening ticket #189; #181 owns the touch-target only.
-  return (
-    <button
-      onClick={onToggle}
-      className="inline-flex items-center justify-center pointer-coarse:min-h-11 pointer-coarse:min-w-11"
-    >
-      <span
-        className={`relative inline-flex h-5 w-9 items-center rounded-full transition ${
-          on ? "bg-sky-500" : "bg-slate-200"
-        }`}
-      >
-        <span
-          className={`inline-block h-3 w-3 transform rounded-full bg-white transition ${
-            on ? "translate-x-5" : "translate-x-1"
-          }`}
-        />
-      </span>
-    </button>
-  );
-}

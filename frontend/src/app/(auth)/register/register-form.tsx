@@ -9,6 +9,7 @@ import { z } from "zod";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/PasswordInput";
 import { Card, CardContent } from "@/components/ui/card";
 import { useRegister } from "@/hooks/useAuth";
 
@@ -79,13 +80,26 @@ export default function RegisterForm() {
   const companyNameId = useId();
   const emailId = useId();
   const passwordId = useId();
+  const passwordHintId = useId();
   const industryId = useId();
   const companySizeId = useId();
+  // One error-message id per field so the input can point at it via
+  // aria-describedby — without this a screen reader never hears the error (#189).
+  const fullNameErrId = useId();
+  const companyNameErrId = useId();
+  const emailErrId = useId();
+  const passwordErrId = useId();
   const {
     register: r,
     handleSubmit,
     formState: { errors },
-  } = useForm<RegisterForm>({ resolver: zodResolver(schema) });
+  } = useForm<RegisterForm>({
+    resolver: zodResolver(schema),
+    // Validate (and surface errors) after the field is touched, not only on
+    // submit, so SR users hear the problem as they move through the form. RHF's
+    // default shouldFocusError moves focus to the first invalid field on submit.
+    mode: "onTouched",
+  });
 
   const onSubmit = async (values: RegisterForm) => {
     try {
@@ -131,25 +145,52 @@ export default function RegisterForm() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label htmlFor={fullNameId} className="text-sm font-medium text-slate-700">Full name</label>
-              <Input {...r("fullName")} id={fullNameId} className="mt-1" />
-              {errors.fullName && <p className="text-xs text-red-600 mt-1">{errors.fullName.message}</p>}
+              <Input
+                {...r("fullName")}
+                id={fullNameId}
+                className="mt-1"
+                aria-invalid={errors.fullName ? true : undefined}
+                aria-describedby={errors.fullName ? fullNameErrId : undefined}
+              />
+              {errors.fullName && <p id={fullNameErrId} className="text-xs text-red-600 mt-1">{errors.fullName.message}</p>}
             </div>
             <div>
               <label htmlFor={companyNameId} className="text-sm font-medium text-slate-700">Company</label>
-              <Input {...r("companyName")} id={companyNameId} className="mt-1" />
-              {errors.companyName && <p className="text-xs text-red-600 mt-1">{errors.companyName.message}</p>}
+              <Input
+                {...r("companyName")}
+                id={companyNameId}
+                className="mt-1"
+                aria-invalid={errors.companyName ? true : undefined}
+                aria-describedby={errors.companyName ? companyNameErrId : undefined}
+              />
+              {errors.companyName && <p id={companyNameErrId} className="text-xs text-red-600 mt-1">{errors.companyName.message}</p>}
             </div>
           </div>
           <div>
             <label htmlFor={emailId} className="text-sm font-medium text-slate-700">Work email</label>
-            <Input {...r("email")} id={emailId} type="email" autoComplete="email" className="mt-1" />
-            {errors.email && <p className="text-xs text-red-600 mt-1">{errors.email.message}</p>}
+            <Input
+              {...r("email")}
+              id={emailId}
+              type="email"
+              autoComplete="email"
+              className="mt-1"
+              aria-invalid={errors.email ? true : undefined}
+              aria-describedby={errors.email ? emailErrId : undefined}
+            />
+            {errors.email && <p id={emailErrId} className="text-xs text-red-600 mt-1">{errors.email.message}</p>}
           </div>
           <div>
             <label htmlFor={passwordId} className="text-sm font-medium text-slate-700">Password</label>
-            <Input {...r("password")} id={passwordId} type="password" autoComplete="new-password" className="mt-1" />
-            {errors.password && <p className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
-            <p className="text-xs text-slate-500 mt-1">Min 12 chars, with a letter and a digit.</p>
+            <PasswordInput
+              {...r("password")}
+              id={passwordId}
+              autoComplete="new-password"
+              className="mt-1"
+              aria-invalid={errors.password ? true : undefined}
+              aria-describedby={`${errors.password ? `${passwordErrId} ` : ""}${passwordHintId}`}
+            />
+            {errors.password && <p id={passwordErrId} className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
+            <p id={passwordHintId} className="text-xs text-slate-500 mt-1">Min 12 chars, with a letter and a digit.</p>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>

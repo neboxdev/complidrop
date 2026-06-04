@@ -198,3 +198,17 @@
     color: #64748b; /* slate-500 — ≥AA on white */
   }
 }
+
+/* Respect prefers-reduced-motion: neutralize animations/transitions app-wide
+   for users who ask for it — covers Tailwind animate-pulse / animate-spin and
+   every transition in one place (#189). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

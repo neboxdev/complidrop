@@ -25,6 +25,25 @@ const NAV_LABELS = [
   "Settings",
 ];
 
+describe("DashboardLayout — shell a11y (#189)", () => {
+  it("has a skip-to-content link targeting the focusable <main id='main-content'>", () => {
+    renderWithProviders(
+      <DashboardLayout>
+        <div>child content</div>
+      </DashboardLayout>,
+      { auth: authedMe, pathname: "/dashboard" },
+    );
+
+    const skip = screen.getByRole("link", { name: /skip to content/i });
+    expect(skip).toHaveAttribute("href", "#main-content");
+
+    const main = document.getElementById("main-content");
+    expect(main?.tagName).toBe("MAIN");
+    // tabIndex=-1 so the skip link can move focus into it programmatically.
+    expect(main).toHaveAttribute("tabindex", "-1");
+  });
+});
+
 describe("DashboardLayout — responsive shell (#181)", () => {
   it("opens a mobile nav drawer with every nav item + org context reachable", async () => {
     renderWithProviders(

@@ -276,7 +276,7 @@ export default function PortalPage() {
             Ask your customer for a fresh upload link.
           </p>
           {error && error.message !== "This link is no longer available." && (
-            <p className="text-xs text-slate-400 mt-3">{error.message}</p>
+            <p className="text-xs text-slate-500 mt-3">{error.message}</p>
           )}
         </div>
       </main>
@@ -319,7 +319,7 @@ export default function PortalPage() {
                 : "Drag a file here or click to select"}
           </p>
           <p className="text-sm text-slate-500 mt-1">PDF, JPEG, or PNG · 10 MB max</p>
-          <p className="text-xs text-slate-400 mt-2">
+          <p className="text-xs text-slate-500 mt-2">
             {info.uploadCount} / {info.maxUploads} uploads used on this link
           </p>
           {uploading && <p className="text-xs text-sky-600 mt-2">Uploading…</p>}
@@ -400,14 +400,14 @@ export default function PortalPage() {
               {uploaded.map((u) => (
                 <li key={u.id} className="flex justify-between">
                   <span>{u.name}</span>
-                  <span className="text-xs text-slate-400">Processing…</span>
+                  <span className="text-xs text-slate-500">Processing…</span>
                 </li>
               ))}
             </ul>
           </div>
         )}
 
-        <p className="text-center text-xs text-slate-400">
+        <p className="text-center text-xs text-slate-500">
           Powered by <span className="font-semibold text-sky-700">CompliDrop</span>
         </p>
       </div>

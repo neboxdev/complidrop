@@ -8,7 +8,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/PasswordInput";
 import { Card, CardContent } from "@/components/ui/card";
 import { useResetPassword } from "@/hooks/useAuth";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
@@ -93,12 +93,12 @@ export function ResetPasswordClient() {
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div>
             <label htmlFor={passwordId} className="text-sm font-medium text-slate-700">New password</label>
-            <Input {...register("password")} id={passwordId} type="password" autoComplete="new-password" className="mt-1" />
+            <PasswordInput {...register("password")} id={passwordId} autoComplete="new-password" className="mt-1" />
             {errors.password && <p className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
           </div>
           <div>
             <label htmlFor={confirmId} className="text-sm font-medium text-slate-700">Confirm new password</label>
-            <Input {...register("confirm")} id={confirmId} type="password" autoComplete="new-password" className="mt-1" />
+            <PasswordInput {...register("confirm")} id={confirmId} autoComplete="new-password" className="mt-1" />
             {errors.confirm && <p className="text-xs text-red-600 mt-1">{errors.confirm.message}</p>}
           </div>
           <Button type="submit" className="w-full" disabled={reset.isPending}>

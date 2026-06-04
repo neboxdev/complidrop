@@ -26,7 +26,7 @@ export default function VendorDetailPage() {
   const vendor = useVendor(params.id);
 
   if (vendor.isLoading || !vendor.data) {
-    return <div className="p-8 text-sm text-slate-400">Loading vendor…</div>;
+    return <div className="p-8 text-sm text-slate-500">Loading vendor…</div>;
   }
 
   // Re-keying on id resets child useState when navigating between vendors, so

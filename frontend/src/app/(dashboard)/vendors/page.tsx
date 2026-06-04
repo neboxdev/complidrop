@@ -124,7 +124,7 @@ export default function VendorsPage() {
             </thead>
             <tbody>
               {vendors.isLoading ? (
-                <tr><td colSpan={5} className="py-8 text-center text-slate-400">Loading…</td></tr>
+                <tr><td colSpan={5} className="py-8 text-center text-slate-500">Loading…</td></tr>
               ) : vendors.isError && all.length === 0 && !isAuthError(vendors.error) ? (
                 // Error state distinct from empty so a backend outage is
                 // not mistaken for an org with zero vendors (#80). Gate
@@ -185,7 +185,7 @@ export default function VendorsPage() {
                         {v.activePortalLinks} active
                       </Badge>
                     ) : (
-                      <span className="text-xs text-slate-400">None</span>
+                      <span className="text-xs text-slate-500">None</span>
                     )}
                   </td>
                   <td className="px-4 py-3 text-right">

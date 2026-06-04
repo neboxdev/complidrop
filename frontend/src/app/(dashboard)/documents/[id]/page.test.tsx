@@ -1227,3 +1227,40 @@ describe("DocumentDetailPage — confidence hints instead of raw % (#188)", () =
     expect(screen.getAllByText(/double-check this|please verify/i)).toHaveLength(2);
   });
 });
+
+describe("DocumentDetailPage — a11y live-region announcement (#189)", () => {
+  it("announces in a polite live region when the document finishes reading on a poll", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      server.use(
+        http.get(url("/api/documents/:id"), () => {
+          calls++;
+          return jsonOk(
+            makeDocumentDetail({
+              id: "d_live",
+              extractionStatus: calls === 1 ? "Processing" : "Completed",
+              complianceStatus: "Compliant",
+            }),
+          );
+        }),
+      );
+
+      const { container } = renderWithProviders(<DocumentDetailPage />, {
+        auth: authedMe,
+        params: { id: "d_live" },
+      });
+      await waitFor(() =>
+        expect(screen.getByTestId("extraction-status")).toHaveTextContent("Reading…"),
+      );
+
+      const live = container.querySelector('[aria-live="polite"]') as HTMLElement;
+      expect(live.textContent).toBe("");
+
+      await vi.advanceTimersByTimeAsync(3000);
+      await waitFor(() => expect(live.textContent).toMatch(/finished processing/i));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
