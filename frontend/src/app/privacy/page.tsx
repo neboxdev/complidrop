@@ -96,19 +96,27 @@ export default function PrivacyPolicyPage() {
           <li><strong className="text-foreground">Microsoft Azure</strong> — encrypted storage of your uploaded files.</li>
           <li><strong className="text-foreground">Neon</strong> — our application database.</li>
           <li><strong className="text-foreground">Resend</strong> — sending reminder and notification emails.</li>
+          <li><strong className="text-foreground">PostHog</strong> — product analytics that help us understand and improve how the app is used.</li>
           <li><strong className="text-foreground">Sentry</strong> — error monitoring so we can fix problems quickly.</li>
         </ul>
+        <p>
+          We process and store data primarily in the United States. We work only with
+          providers that commit to protecting it, and we share only what each provider
+          needs to perform its function.
+        </p>
         <p>
           We may also disclose information if required by law, or to protect the
           rights, safety, and security of {SITE_NAME}, our customers, or the public.
         </p>
       </LegalSection>
 
-      <LegalSection title="Cookies">
+      <LegalSection title="Cookies and analytics">
         <p>
-          We use a small number of essential, first-party cookies to keep you signed
-          in securely. They are not used for advertising or cross-site tracking, and
-          we do not run third-party ad trackers.
+          We use essential, first-party cookies to keep you signed in securely. We
+          also use a product-analytics tool (PostHog) that sets a cookie and records
+          how the app is used — such as pages viewed and features used — so we can
+          understand and improve it. We do not use cookies for advertising, we do not
+          run third-party ad trackers, and we do not sell your data.
         </p>
       </LegalSection>
 
@@ -133,17 +141,26 @@ export default function PrivacyPolicyPage() {
 
       <LegalSection title="Your choices and rights">
         <p>
-          You can access and update most of your information from within the app, and
-          you can request a copy or deletion of your data by contacting us. Depending
-          on where you live, you may have additional rights over your personal
-          information; we honor those rights as required by applicable law.
+          You can access and update most of your information from within the app. You
+          can also ask us to provide a copy of your data, correct it, or delete it.
+          Depending on where you live, you may have additional rights — to know what
+          we collect, to access or correct it, to delete it, and to opt out of any
+          &quot;sale&quot; or &quot;sharing&quot; of personal information (we don&apos;t
+          sell or share it). We honor these rights as required by applicable law and
+          aim to respond within 30 days.
+        </p>
+        <p>
+          If your information appears inside a document that one of our customers
+          uploaded — for example, a certificate naming you — that business controls
+          that record. Contact them directly, or email us and we&apos;ll help route
+          your request.
         </p>
       </LegalSection>
 
       <LegalSection title="Children">
         <p>
-          {SITE_NAME} is a business tool and is not directed to children under 16. We
-          do not knowingly collect personal information from children.
+          {SITE_NAME} is a business tool, not intended for individual consumers or
+          minors, and we do not knowingly collect personal information from children.
         </p>
       </LegalSection>
 

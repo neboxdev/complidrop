@@ -91,8 +91,10 @@ export default function TermsOfServicePage() {
         </p>
         <p>
           You are responsible for reviewing and confirming the results and for your
-          own compliance decisions. Don&apos;t rely on {SITE_NAME} as your only
-          safeguard against a missed expiration or an insufficient policy.
+          own compliance decisions. We also can&apos;t guarantee that reminder emails
+          are delivered, so treat reminders as a helpful nudge, not a guaranteed
+          notice. Don&apos;t rely on {SITE_NAME} as your only safeguard against a
+          missed expiration or an insufficient policy.
         </p>
       </LegalSection>
 
@@ -103,16 +105,18 @@ export default function TermsOfServicePage() {
           <Link href="/#pricing" className="text-primary hover:underline">
             pricing page
           </Link>{" "}
-          and at checkout. Paid plans renew automatically each billing period (monthly
-          or annual) until you cancel, and you authorize us to charge your payment
-          method through our payment processor, Stripe.
+          and at checkout. The free tier never requires a card and is never charged.
+          Paid plans renew automatically each billing period (monthly or annual) until
+          you cancel, and you authorize us to charge your payment method through our
+          payment processor, Stripe.
         </p>
         <p>
           You can cancel anytime from your account settings. Cancellation takes effect
           at the end of your current paid period, and you keep access until then.
           Except where required by law, fees already paid are non-refundable, and we
           don&apos;t provide partial-period refunds. If a price changes, we&apos;ll
-          give you notice before it applies to your next renewal.
+          give you notice before it applies to your next renewal, and for annual plans
+          we&apos;ll email you a reminder before the term renews.
         </p>
       </LegalSection>
 
@@ -139,8 +143,9 @@ export default function TermsOfServicePage() {
           To the fullest extent permitted by law, {SITE_NAME} will not be liable for
           any indirect, incidental, special, consequential, or punitive damages, or
           for lost profits, lost data, or compliance failures. Our total liability for
-          any claim relating to the service is limited to the amount you paid us for
-          the service in the twelve months before the claim.
+          any claim relating to the service is limited to the greater of the amount
+          you paid us for the service in the twelve months before the claim or
+          US$100.
         </p>
       </LegalSection>
 

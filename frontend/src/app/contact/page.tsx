@@ -3,6 +3,7 @@ import Link from "next/link";
 import {
   ArticleShell,
   Breadcrumbs,
+  ContentCta,
   ContentH1,
   Lead,
   LegalSection,
@@ -72,6 +73,8 @@ export default function ContactPage() {
           us find you faster.
         </p>
       </LegalSection>
+
+      <ContentCta />
     </ArticleShell>
   );
 }

@@ -205,6 +205,19 @@ export default function RegisterForm() {
           <Button type="submit" className="w-full" disabled={register.isPending}>
             {register.isPending ? "Creating account…" : "Create my account"}
           </Button>
+          {/* Affirmative assent so the Terms + Privacy Policy actually bind the
+              user (clickwrap-style), with both links discoverable at signup. (#194) */}
+          <p className="mt-3 text-center text-xs text-slate-500">
+            By creating an account, you agree to our{" "}
+            <Link href="/terms" className="text-sky-700 hover:underline">
+              Terms of Service
+            </Link>{" "}
+            and{" "}
+            <Link href="/privacy" className="text-sky-700 hover:underline">
+              Privacy Policy
+            </Link>
+            .
+          </p>
         </form>
 
         <p className="text-sm text-center text-slate-500">

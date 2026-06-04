@@ -10,9 +10,9 @@ import GlossaryTermPage, {
   generateStaticParams,
   generateMetadata,
 } from "./glossary/[slug]/page";
-import PrivacyPolicyPage from "./privacy/page";
-import TermsOfServicePage from "./terms/page";
-import ContactPage from "./contact/page";
+import PrivacyPolicyPage, { metadata as privacyMeta } from "./privacy/page";
+import TermsOfServicePage, { metadata as termsMeta } from "./terms/page";
+import ContactPage, { metadata as contactMeta } from "./contact/page";
 import { MarketingFooter } from "@/components/marketing/site-footer";
 import { SUPPORT_EMAIL } from "@/lib/site";
 import { GLOSSARY_TERMS } from "@/lib/glossary";
@@ -167,20 +167,31 @@ describe("Footer legal + support links (#194)", () => {
 });
 
 describe("Legal + contact pages (#194)", () => {
-  it("Privacy Policy renders and discloses the subprocessors + a contact path", () => {
+  it("Privacy Policy discloses every named subprocessor, the no-sell/no-train promise, and a contact path", () => {
     render(<PrivacyPolicyPage />);
     expect(
       screen.getByRole("heading", { level: 1, name: /privacy policy/i }),
     ).toBeInTheDocument();
-    // Names the third parties that receive data (a real privacy commitment, not
-    // just boilerplate) — pin a couple so a future content gut doesn't drop them.
-    // Stripe appears in both the payment + subprocessor sections, hence getAllByText.
+    // The named third parties that receive data ARE the privacy commitment — pin
+    // each so a content edit can't silently drop "we share your files with X".
+    // Stripe + PostHog each appear twice (payment/cookies + subprocessor list).
     expect(screen.getAllByText(/Stripe/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/Document AI/i)).toBeInTheDocument();
-    // A way to reach us about the data.
+    expect(screen.getByText(/Microsoft Azure/i)).toBeInTheDocument();
+    expect(screen.getByText(/Resend/)).toBeInTheDocument();
+    // PostHog MUST be disclosed — the app actually runs it (analytics.ts), so the
+    // policy claiming "essential cookies only" without it would be false. (#194 legal review)
+    expect(screen.getAllByText(/PostHog/i).length).toBeGreaterThan(0);
+    // Load-bearing promise: no sale, no training on uploaded documents.
+    expect(
+      screen.getByText(/do not use the documents you upload to train/i),
+    ).toBeInTheDocument();
+    // Contact paths: the support mailto AND the /contact page link.
     expect(
       screen.getByRole("link", { name: new RegExp(SUPPORT_EMAIL, "i") }),
     ).toHaveAttribute("href", `mailto:${SUPPORT_EMAIL}`);
+    const main = within(screen.getByRole("main"));
+    expect(main.getAllByRole("link").map((l) => l.getAttribute("href"))).toContain("/contact");
   });
 
   it("Terms of Service renders the not-advice disclaimer + cancellation terms (Stripe requirement)", () => {
@@ -197,8 +208,20 @@ describe("Legal + contact pages (#194)", () => {
     // Stripe Checkout wants discoverable billing/cancellation terms.
     expect(screen.getByText(/cancel anytime/i)).toBeInTheDocument();
     expect(screen.getByText(/non-refundable/i)).toBeInTheDocument();
+    // The cross-links to the sibling legal pages both resolve.
     const main = within(screen.getByRole("main"));
-    expect(main.getAllByRole("link").map((l) => l.getAttribute("href"))).toContain("/privacy");
+    const mainHrefs = main.getAllByRole("link").map((l) => l.getAttribute("href"));
+    expect(mainHrefs).toContain("/privacy");
+    expect(mainHrefs).toContain("/contact");
+  });
+
+  it("each legal/contact page sets a self-canonical and a descriptive title", () => {
+    expect(privacyMeta.alternates?.canonical).toBe("/privacy");
+    expect(String(privacyMeta.title)).toMatch(/privacy policy/i);
+    expect(termsMeta.alternates?.canonical).toBe("/terms");
+    expect(String(termsMeta.title)).toMatch(/terms of service/i);
+    expect(contactMeta.alternates?.canonical).toBe("/contact");
+    expect(String(contactMeta.title)).toMatch(/contact/i);
   });
 
   it("Contact page surfaces the support email as a mailto", () => {
