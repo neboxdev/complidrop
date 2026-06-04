@@ -218,6 +218,15 @@ describe("processingErrorMessage (#193)", () => {
 
     expect(processingErrorMessage("extraction.cost_ceiling_hit: Monthly extraction cost ceiling reached."))
       .toMatch(/monthly processing limit/i);
+    expect(processingErrorMessage("extraction.failed: System.Exception boom"))
+      .toMatch(/something went wrong/i);
+  });
+  it("parses a bare code with no ': detail' suffix", () => {
+    // split(':', 1) on a colon-less string yields the whole string — the code
+    // still resolves. Pins that boundary of the parser.
+    expect(processingErrorMessage("extraction.too_many_attempts")).toMatch(
+      /tried several times/i,
+    );
   });
   it("falls back to a generic line for unknown codes and bare exception messages", () => {
     expect(processingErrorMessage("System.InvalidOperationException: Document has no blob path."))

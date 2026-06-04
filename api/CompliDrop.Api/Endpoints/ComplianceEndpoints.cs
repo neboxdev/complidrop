@@ -197,7 +197,9 @@ public static class ComplianceEndpoints
 
         var checks = await db.ComplianceChecks
             .Where(c => c.DocumentId == documentId)
-            .Include(c => c.ComplianceRule)
+            // No .Include(c => c.ComplianceRule): the projection below pulls the rule
+            // columns directly, so EF joins ComplianceRule from the Select — an
+            // explicit Include would be silently dropped (and log a warning). (#193 review)
             .OrderBy(c => c.CheckedAt)
             .Select(c => new ComplianceCheckDto(
                 c.Id, c.ComplianceRuleId,

@@ -178,9 +178,24 @@ function NonComplianceExplainer({ doc }: { doc: DocDetail }) {
           </a>
           {!doc.vendorContactEmail && (
             <p className="text-xs text-slate-500">
-              {doc.vendorName
-                ? `Tip: add an email for ${doc.vendorName} on the vendor page to send in one click.`
-                : "Tip: assign a vendor so we can fill in their email for you."}
+              {doc.vendorName ? (
+                <>
+                  Tip: add an email for {doc.vendorName} on{" "}
+                  {doc.vendorId ? (
+                    <Link
+                      href={`/vendors/${doc.vendorId}`}
+                      className="text-sky-700 hover:underline"
+                    >
+                      the vendor&apos;s page
+                    </Link>
+                  ) : (
+                    "the vendor's page"
+                  )}{" "}
+                  to send in one click.
+                </>
+              ) : (
+                "Tip: assign a vendor so we can fill in their email for you."
+              )}
             </p>
           )}
         </div>

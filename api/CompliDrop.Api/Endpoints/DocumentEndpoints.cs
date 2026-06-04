@@ -142,6 +142,12 @@ public static class DocumentEndpoints
             .Include(d => d.Fields)
             .Include(d => d.ComplianceChecks)
                 .ThenInclude(c => c.ComplianceRule)
+            // Two sibling COLLECTION includes (Fields + ComplianceChecks) on one
+            // Document would otherwise LEFT JOIN into a |Fields| × |Checks| cartesian
+            // product under EF's default single-query mode, re-shipping the fat
+            // Document row (ExtractionRawJson OCR text + ExtractionFields jsonb) on
+            // every duplicated row. Split into one query per collection. (#193 review)
+            .AsSplitQuery()
             .FirstOrDefaultAsync(d => d.Id == id, ct);
         if (doc is null) return NotFound();
 
@@ -415,19 +421,20 @@ public static class DocumentEndpoints
                 field.Confidence = 1.0;
             }
         }
-        doc.IsManuallyVerified = true;
-        // A human has now reviewed the extracted values, so a low-confidence
-        // "Needs your review" (ManualRequired) document is resolved — flip it to
-        // Completed so the amber review card on the detail page clears and the
-        // status stops nagging. Other statuses are left untouched. (#193)
-        if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
-            doc.ExtractionStatus = ExtractionStatus.Completed;
+        ResolveManualReview(doc);
         doc.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
 
         await audit.LogAsync("document.fields_edited", nameof(Document), doc.Id,
             before: before,
             after: doc.Fields.Select(f => new { f.FieldName, f.FieldValue }));
+
+        // NOTE: compliance is intentionally NOT re-evaluated here. ComplianceCheckService
+        // reads doc.ExtractionFields / the typed columns (GeneralLiabilityLimit, dates) —
+        // NOT DocumentField rows — and this endpoint only edits DocumentField rows, so a
+        // re-eval would recompute the identical verdict. Making manual edits actually
+        // affect compliance (sync edits into ExtractionFields/columns) is a data-semantics
+        // change tracked in its own ticket — see #193 PR body / the rolling bug epic. (#193 review)
 
         return Results.Ok(new { data = new { message = "Fields updated." }, error = (object?)null });
     }
@@ -440,11 +447,7 @@ public static class DocumentEndpoints
     {
         var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
         if (doc is null) return NotFound();
-        doc.IsManuallyVerified = true;
-        // Manual verification resolves a low-confidence "Needs your review"
-        // document — mirror the UpdateFields transition. (#193)
-        if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
-            doc.ExtractionStatus = ExtractionStatus.Completed;
+        ResolveManualReview(doc);
         doc.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         await audit.LogAsync("document.verified", nameof(Document), doc.Id);
@@ -480,6 +483,18 @@ public static class DocumentEndpoints
         db.Documents.Remove(doc); // interceptor translates to soft delete
         await db.SaveChangesAsync(ct);
         return Results.Ok(new { data = new { message = "Document removed." }, error = (object?)null });
+    }
+
+    // A human has reviewed the extracted values (via field-save or explicit
+    // verify): mark the document verified and resolve a low-confidence
+    // "Needs your review" (ManualRequired) document to Completed so the amber
+    // review card on the detail page clears. Other statuses are left untouched —
+    // single source of truth for "what manual review resolves". (#193)
+    private static void ResolveManualReview(Document doc)
+    {
+        doc.IsManuallyVerified = true;
+        if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
+            doc.ExtractionStatus = ExtractionStatus.Completed;
     }
 
     private static string SanitizeFileName(string? name)
