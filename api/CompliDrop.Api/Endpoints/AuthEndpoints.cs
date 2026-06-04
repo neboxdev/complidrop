@@ -105,6 +105,11 @@ public static class AuthEndpoints
             PasswordHash = hasher.Hash(req.Password),
             FullName = req.FullName.Trim(),
             Role = "admin",
+            // Explicit so the in-memory user (used by IssueCookies below) carries
+            // the SAME stamp as the row — otherwise the issued token's stamp would
+            // be Guid.Empty while the DB default assigns a random one, and the
+            // brand-new session would be evicted on its first request (#202).
+            SecurityStamp = Guid.NewGuid(),
             CreatedAt = now,
             LastLoginAt = now
         };
@@ -275,6 +280,17 @@ public static class AuthEndpoints
 
         var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
         if (user is null) return Error(401, "auth.token_expired", "Session expired.");
+
+        // The refresh path validates the token manually (it bypasses the
+        // OnTokenValidated middleware hook), so re-check the security stamp here
+        // too: a refresh token minted before a password reset/change carries the
+        // OLD stamp and must NOT be allowed to mint a fresh session (#202).
+        // Grandfather pre-#202 refresh tokens (no stamp claim) — reject only on a
+        // present-but-mismatched stamp.
+        var stamp = principal.FindFirstValue("stamp");
+        if (!string.IsNullOrEmpty(stamp)
+            && !string.Equals(stamp, user.SecurityStamp.ToString(), StringComparison.Ordinal))
+            return Error(401, "auth.token_expired", "Session expired. Please log in again.");
 
         var sub = await db.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == user.OrganizationId);
         var plan = sub?.Plan ?? "free";
@@ -573,6 +589,12 @@ public static class AuthEndpoints
 
         var now = DateTime.UtcNow;
         token.User.PasswordHash = hasher.Hash(req.NewPassword);
+        // Rotate the security stamp so EVERY existing session/refresh token for
+        // this user stops validating (#202) — a reset is the account-takeover
+        // recovery path, so a stolen token must not survive it. The user signs in
+        // fresh afterwards (this endpoint is anonymous, so there's no current
+        // session to re-issue).
+        token.User.SecurityStamp = Guid.NewGuid();
         // A successful reset is also the lockout escape hatch (#183).
         token.User.FailedLoginAttempts = 0;
         token.User.LockedUntil = null;
@@ -603,6 +625,9 @@ public static class AuthEndpoints
         HttpContext http,
         SystemDbContext db,
         IPasswordHasher hasher,
+        ITokenService tokens,
+        IOptions<CookieSettings> cookieOpts,
+        IOptions<JwtSettings> jwtOpts,
         IAuditLogger audit)
     {
         if (GetUserId(http) is not { } userId)
@@ -617,7 +642,15 @@ public static class AuthEndpoints
             return Error(400, "auth.invalid_password", "Your current password is incorrect.");
 
         user.PasswordHash = hasher.Hash(req.NewPassword);
+        // Rotate the stamp so OTHER outstanding sessions/refresh tokens are evicted
+        // on next use (#202). The current session would be evicted too, so we
+        // re-issue THIS caller's cookies below with the new stamp — changing your
+        // own password must not log you out of the tab you're using.
+        user.SecurityStamp = Guid.NewGuid();
         await db.SaveChangesAsync();
+
+        var sub = await db.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == user.OrganizationId);
+        IssueCookies(http, user, sub?.Plan ?? "free", tokens, cookieOpts.Value, jwtOpts.Value);
 
         await audit.LogAsync(
             "user.password_changed",

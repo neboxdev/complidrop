@@ -12,6 +12,16 @@ public class User
     public DateTime? LockedUntil { get; set; }
 
     /// <summary>
+    /// Rotated on every credential change (password reset / change) — see #202.
+    /// Embedded as the `stamp` claim in issued session + refresh tokens and
+    /// re-checked per authenticated request (OnTokenValidated) + on refresh, so a
+    /// stolen/old token stops validating the moment the credential changes
+    /// (stateless JWTs otherwise have no revocation). Defaults to a fresh GUID for
+    /// every row (DB default gen_random_uuid()).
+    /// </summary>
+    public Guid SecurityStamp { get; set; }
+
+    /// <summary>
     /// When the user confirmed ownership of <see cref="Email"/> via the #184
     /// verification link. Null = unverified. Reminders + audit emails go to this
     /// address, so an unverified value flags a possible silent dead-letter (a

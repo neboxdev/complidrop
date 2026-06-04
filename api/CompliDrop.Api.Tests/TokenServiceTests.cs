@@ -31,7 +31,8 @@ public class TokenServiceTests
         Id = Guid.NewGuid(),
         OrganizationId = Guid.NewGuid(),
         Email = "user@example.com",
-        PasswordHash = "x"
+        PasswordHash = "x",
+        SecurityStamp = Guid.NewGuid()
     };
 
     [Fact]
@@ -46,15 +47,22 @@ public class TokenServiceTests
         principal.FindFirstValue(ClaimTypes.NameIdentifier).Should().Be(user.Id.ToString());
         principal.FindFirstValue("org_id").Should().Be(user.OrganizationId.ToString());
         principal.FindFirstValue("plan").Should().Be("pro");
+        // #202: the security stamp rides the session token so it can be re-checked
+        // per request and rotated on credential change.
+        principal.FindFirstValue("stamp").Should().Be(user.SecurityStamp.ToString());
     }
 
     [Fact]
     public void Refresh_token_round_trips()
     {
-        var principal = Sut.ValidateToken(Sut.IssueRefreshToken(NewUser()), isRefresh: true);
+        var user = NewUser();
+        var principal = Sut.ValidateToken(Sut.IssueRefreshToken(user), isRefresh: true);
 
         principal.Should().NotBeNull();
         principal!.FindFirstValue("typ").Should().Be("refresh");
+        // #202: the refresh token carries the stamp too — Refresh() re-checks it.
+        principal.FindFirstValue("stamp").Should().Be(user.SecurityStamp.ToString());
+        principal.FindFirstValue(ClaimTypes.NameIdentifier).Should().Be(user.Id.ToString());
     }
 
     [Fact]

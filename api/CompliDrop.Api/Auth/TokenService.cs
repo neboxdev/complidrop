@@ -29,6 +29,9 @@ public class TokenService(IOptions<JwtSettings> settings) : ITokenService
             new(ClaimTypes.Email, user.Email),
             new("org_id", user.OrganizationId.ToString()),
             new("plan", plan),
+            // Rotated on credential change (#202); re-checked per request so an old
+            // token stops validating once the password changes.
+            new("stamp", user.SecurityStamp.ToString()),
             new("typ", "session")
         };
         return WriteToken(claims, TimeSpan.FromMinutes(_cfg.SessionExpiryMinutes));
@@ -39,7 +42,9 @@ public class TokenService(IOptions<JwtSettings> settings) : ITokenService
         var claims = new Claim[]
         {
             new(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
+            new(ClaimTypes.NameIdentifier, user.Id.ToString()),
             new("org_id", user.OrganizationId.ToString()),
+            new("stamp", user.SecurityStamp.ToString()),
             new("typ", "refresh")
         };
         return WriteToken(claims, TimeSpan.FromDays(_cfg.RefreshExpiryDays));

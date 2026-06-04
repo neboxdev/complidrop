@@ -44,6 +44,42 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
+    public async Task Change_password_keeps_the_current_session_and_evicts_others()
+    {
+        // #202: changing your password evicts OTHER sessions but must NOT log you
+        // out of the tab you're using (ChangePassword re-issues the caller's
+        // cookies with the new stamp).
+        var a = await RegisterAndLoginAsync();       // session A (the active tab)
+        var b = await LoginAsync(a.Email);           // session B (another tab, same user)
+        (await b.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        (await a.Client.PostAsJsonAsync("/api/auth/change-password",
+            new { currentPassword = "Password1234", newPassword = "ChangedPass5678" }))
+            .EnsureSuccessStatusCode();
+
+        // A was re-issued (new stamp) → still in. B's old token (old stamp) → 401.
+        (await a.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.OK);
+        (await b.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Deleted_account_is_rejected_on_an_org_claim_tenant_endpoint()
+    {
+        // #202 / ADR 0014: per-request principal re-validation rejects a deleted
+        // account's still-valid session on EVERY authed endpoint — including the
+        // tenant endpoints that authorize on the org_id claim alone (which the
+        // #183 soft-delete-on-user-lookup did NOT cover).
+        var a = await RegisterAndLoginAsync();
+        var b = await LoginAsync(a.Email);
+        (await b.Client.GetAsync("/api/documents/")).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        (await a.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" }))
+            .EnsureSuccessStatusCode();
+
+        (await b.Client.GetAsync("/api/documents/")).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
     public async Task Change_password_with_a_wrong_current_password_is_rejected()
     {
         var auth = await RegisterAndLoginAsync();
