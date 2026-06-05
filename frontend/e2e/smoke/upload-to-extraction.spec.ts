@@ -36,6 +36,14 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
     page,
   }) => {
     let detailCalls = 0;
+    // The detail page polls every 3s. In dev/StrictMode the FIRST load fires two near-instant
+    // requests: now that the queryFn consumes the AbortSignal (#222), StrictMode's
+    // mount → cleanup → remount aborts the first in-flight fetch and immediately refetches.
+    // Advance the extraction state by logical POLL (requests ≥1.5s apart) rather than by raw
+    // request count, so the dev double-fetch can't skip the Pending state. Production has no
+    // StrictMode double-mount, so this only hardens the dev-mode e2e harness. (#222)
+    let detailPoll = 0;
+    let lastDetailAt = 0;
     let didUpload = false;
 
     await mockApi(page, [
@@ -125,6 +133,10 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
         path: "/api/documents/:id",
         handler: async (route) => {
           detailCalls++;
+          // Coalesce the StrictMode initial double-fetch into one logical poll (see above).
+          const nowMs = Date.now();
+          if (nowMs - lastDetailAt > 1_500) detailPoll++;
+          lastDetailAt = nowMs;
           const pending = makeDocumentDetail({
             id: DOC_ID,
             extractionStatus: "Pending",
@@ -154,7 +166,7 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
             ],
           });
           const payload =
-            detailCalls === 1 ? pending : detailCalls === 2 ? processing : completed;
+            detailPoll <= 1 ? pending : detailPoll === 2 ? processing : completed;
           await route.fulfill({
             status: 200,
             contentType: "application/json",

@@ -122,9 +122,9 @@ export function useMe(opts: UseMeOptions = {}) {
   const enabled = opts.skipRefresh ? hasSessionHint() : true;
   return useQuery<Me | null>({
     queryKey: [...queryKey],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       try {
-        return await api.get<Me>("/api/auth/me", { skipRefresh: opts.skipRefresh });
+        return await api.get<Me>("/api/auth/me", { skipRefresh: opts.skipRefresh, signal });
       } catch (err) {
         if (err instanceof ApiError && (err.status === 401 || err.code === "auth.unauthorized")) {
           return null;

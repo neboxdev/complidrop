@@ -30,6 +30,7 @@ import {
   toastSuccess,
   toastError,
 } from "@/test";
+import { api } from "@/lib/api";
 
 // sonner mock is provided by the harness (vitest.setup.ts +
 // src/test/sonner.ts). The toastSuccess / toastError spy references
@@ -56,6 +57,34 @@ describe("DocumentDetailPage — basic states (#36)", () => {
 
     expect(screen.getByText(/loading document/i)).toBeInTheDocument();
     release();
+  });
+
+  it("threads an AbortSignal into the detail poll query (#222)", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () => jsonOk(makeDocumentDetail({ id: "d_x_01" }))),
+    );
+    const getSpy = vi.spyOn(api, "get"); // call-through; just record the calls
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_x_01" },
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByText(/loading document/i)).not.toBeInTheDocument(),
+    );
+
+    // The detail query is the 3s poll #222 names explicitly: it must thread a real
+    // AbortSignal so an unmount mid-poll cancels it. If the queryFn dropped `{ signal }`,
+    // opts.signal is undefined and this fails.
+    const detailCall = getSpy.mock.calls.find(
+      ([path]) => typeof path === "string" && path.includes("/api/documents/d_x_01"),
+    );
+    expect(detailCall).toBeDefined();
+    expect(
+      (detailCall?.[1] as { signal?: AbortSignal } | undefined)?.signal,
+    ).toBeInstanceOf(AbortSignal);
+    getSpy.mockRestore();
   });
 
   it("error (404): renders the not-found fallback with a link back", async () => {

@@ -69,7 +69,7 @@ export default function SettingsPage() {
   const params = useSearchParams();
   const subscription = useQuery<SubscriptionInfo>({
     queryKey: ["billing", "subscription"],
-    queryFn: () => api.get<SubscriptionInfo>("/api/billing/subscription"),
+    queryFn: ({ signal }) => api.get<SubscriptionInfo>("/api/billing/subscription", { signal }),
   });
 
   const checkout = useMutation({

@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { afterAll, afterEach, beforeAll, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { server } from "./src/test/server";
+import { installAbortSignalBridge } from "./src/test/abort-signal-bridge";
 import { navState, resetNavigation } from "./src/test/navigation";
 import {
   toastSuccess,
@@ -71,7 +72,13 @@ vi.mock("sonner", () => ({
 //   - `resetHandlers()` drops per-test `server.use(...)` overrides so the
 //     next test starts from `defaultHandlers`.
 //   - `close()` releases the interceptor on suite teardown.
-beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
+beforeAll(() => {
+  server.listen({ onUnhandledRequest: "error" });
+  // Wrap MSW's fetch so a TanStack `queryFn({ signal })` works under jsdom — the test
+  // realm's AbortSignal is incompatible with the undici Request MSW constructs. Must run
+  // AFTER listen() so it wraps the interceptor as the outermost layer. See the module doc.
+  installAbortSignalBridge();
+});
 
 // With `globals: false`, RTL can't auto-register its cleanup on the global
 // afterEach, so unmount between tests explicitly — otherwise renders

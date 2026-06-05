@@ -70,12 +70,12 @@ export default function RulesPage() {
 
   const templates = useQuery<TemplateSummary[]>({
     queryKey: ["templates"],
-    queryFn: () => api.get<TemplateSummary[]>("/api/compliance/templates"),
+    queryFn: ({ signal }) => api.get<TemplateSummary[]>("/api/compliance/templates", { signal }),
   });
 
   const detail = useQuery<TemplateDetail>({
     queryKey: ["templates", selectedId],
-    queryFn: () => api.get<TemplateDetail>(`/api/compliance/templates/${selectedId}`),
+    queryFn: ({ signal }) => api.get<TemplateDetail>(`/api/compliance/templates/${selectedId}`, { signal }),
     enabled: !!selectedId,
   });
 
