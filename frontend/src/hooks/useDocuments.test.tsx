@@ -35,7 +35,7 @@ import {
   makeDocumentsResponse,
   sequencedJsonOk,
 } from "@/test";
-import { ApiError } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 
 // Analytics module is imported by useUploadDocument's onSuccess.
 const { track } = vi.hoisted(() => ({ track: vi.fn() }));
@@ -64,30 +64,37 @@ describe("useDocuments — basic query states (#36)", () => {
     expect(result.current.data?.items[0].extractionStatus).toBe("Completed");
   });
 
-  it("cancelling an in-flight query stops the fetch without error or data (#222)", async () => {
-    // AC #3: the queryFn threads { signal }, so cancelling the query — exactly what an
-    // unmount / navigation / a superseding refetch does internally — aborts the in-flight
-    // fetch. It resolves to neither data nor an error; it is simply cancelled.
-    let release: () => void = () => {};
-    const held = new Promise<void>((r) => (release = r));
-    server.use(
-      http.get(url("/api/documents"), async () => {
-        await held;
-        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
-      }),
-    );
+  it("threads the query's AbortSignal into api.get and aborts it on cancel (#222)", async () => {
+    // AC #1 + #3: the queryFn must hand api.get a real AbortSignal, and cancelling the query
+    // — the same abort path an unmount / navigation / superseding refetch uses internally —
+    // must abort THAT signal. Spying api.get is what makes this DISCRIMINATE: with `{ signal }`
+    // dropped from the queryFn, `captured` is undefined and the instanceof assertion fails. A
+    // plain state-transition assertion would pass either way (it's cancelQueries reverting
+    // fetchStatus, not the threading, that flips isFetching).
+    let captured: AbortSignal | undefined;
+    const spy = vi.spyOn(api, "get").mockImplementation((_path, opts = {}) => {
+      captured = (opts as { signal?: AbortSignal }).signal;
+      return new Promise<never>(() => {}); // never resolves → the query stays in-flight
+    });
+    try {
+      const { qc, Wrapper } = createTestWrapper();
+      const { result } = renderHook(() => useDocuments(), { wrapper: Wrapper });
 
-    const { qc, Wrapper } = createTestWrapper();
-    const { result } = renderHook(() => useDocuments(), { wrapper: Wrapper });
+      await waitFor(() => expect(result.current.isFetching).toBe(true));
+      expect(captured).toBeInstanceOf(AbortSignal);
+      expect(captured!.aborted).toBe(false);
 
-    await waitFor(() => expect(result.current.isFetching).toBe(true));
-    await qc.cancelQueries({ queryKey: ["documents"] });
+      await qc.cancelQueries({ queryKey: ["documents"] });
 
-    await waitFor(() => expect(result.current.isFetching).toBe(false));
-    expect(result.current.data).toBeUndefined();
-    expect(result.current.isError).toBe(false);
-
-    release(); // drain the held handler inside the test boundary
+      // The signal the queryFn handed api.get is the one cancellation aborts...
+      expect(captured!.aborted).toBe(true);
+      // ...and the query reverts to a non-fetching, no-data, non-error state.
+      await waitFor(() => expect(result.current.isFetching).toBe(false));
+      expect(result.current.data).toBeUndefined();
+      expect(result.current.isError).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("isError on 500 with the server's human message", async () => {

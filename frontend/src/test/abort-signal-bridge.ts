@@ -39,6 +39,10 @@
  * This is a TEST-ONLY adaptation: production `api.ts` is unchanged and passes the real,
  * realm-correct signal in browsers. It keeps cancellation testable (an aborted signal
  * still rejects the fetch with an `AbortError`) without papering over behavior.
+ *
+ * See docs/adr/0019-test-harness-bridges-abortsignal.md for the decision record, the
+ * rejected alternatives (happy-dom env swap, recovering Node's AbortController, MSW config),
+ * and the accepted limitation that MSW handlers cannot observe `request.signal`.
  */
 
 let installed = false;
@@ -56,6 +60,13 @@ function abortError(reason: unknown): Error {
  * Wrap the current `globalThis.fetch` so a passed `AbortSignal` is honored at the harness
  * layer instead of being handed to the realm-incompatible undici `Request`. Call AFTER
  * `server.listen()` so this wraps MSW's interceptor (the outermost layer). Idempotent.
+ *
+ * Install-once for the whole run, by design — there is intentionally NO `reset`/`uninstall`
+ * companion like `resetNavigation` / `resetSonner`. Those reset PER-TEST state; this wraps the
+ * persistent MSW interceptor (itself installed once in `beforeAll`), so a per-test teardown
+ * would be wrong. Files that replace `globalThis.fetch` wholesale (`api.test.ts` /
+ * `useAuth.test.tsx` via `vi.stubGlobal`) simply bypass this wrapper for their scope, which is
+ * fine — they assert the api client's own fetch contract and don't pass signals through MSW.
  */
 export function installAbortSignalBridge(): void {
   if (installed) return;
