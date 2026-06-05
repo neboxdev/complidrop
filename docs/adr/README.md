@@ -23,3 +23,4 @@ Use `/adr <title>` to scaffold a new one.
 - [0013](0013-account-deletion-is-soft-delete-plus-pii-scrub.md) — Account deletion is soft-delete + PII scrub, not hard delete
 - [0014](0014-per-request-principal-revalidation-and-security-stamp.md) — Per-request principal re-validation + a rotating security stamp
 - [0015](0015-reminder-dedupe-time-zone-edit-guard.md) — Reminder dedupe carries a trailing-window guard for editable-time-zone re-fires (extends 0002 / 0007)
+- [0016](0016-apply-ef-migrations-on-startup.md) — Apply EF migrations on API startup (auto-migrate by default) with a boot-time drift guard
