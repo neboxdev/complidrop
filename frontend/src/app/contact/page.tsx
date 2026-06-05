@@ -13,7 +13,7 @@ import { breadcrumbLd } from "@/lib/structured-data";
 import { pageMetadata } from "@/lib/seo";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { SITE_NAME, SUPPORT_EMAIL } from "@/lib/site";
+import { LEGAL_ADDRESS, LEGAL_ENTITY, SITE_NAME, SUPPORT_EMAIL } from "@/lib/site";
 
 export const metadata: Metadata = pageMetadata({
   title: "Contact & Support",
@@ -72,6 +72,15 @@ export default function ContactPage() {
           . For account-specific questions, mentioning the email on your account helps
           us find you faster.
         </p>
+      </LegalSection>
+
+      <LegalSection title="Mailing address">
+        <p>{SITE_NAME} is operated by {LEGAL_ENTITY}.</p>
+        <address className="not-italic">
+          {LEGAL_ENTITY}
+          <br />
+          {LEGAL_ADDRESS}
+        </address>
       </LegalSection>
 
       <ContentCta />

@@ -40,6 +40,16 @@ export const SITE_NAME = "CompliDrop";
 export const SUPPORT_EMAIL = "support@complidrop.com";
 
 /**
+ * The legal entity that operates CompliDrop, and its business mailing address —
+ * the single source of truth for the binding-contract identity surfaced on the
+ * Terms, Privacy, and Contact pages. A consumer contract (and Stripe / card-
+ * network expectations) needs the real legal person + a reachable address, not
+ * just the brand. (#194)
+ */
+export const LEGAL_ENTITY = "Nebox Dev LLC";
+export const LEGAL_ADDRESS = "407 Lincoln Road, Suite 708, Miami Beach, FL 33139, USA";
+
+/**
  * One-line value proposition. Buyer language + the terms people actually search
  * ("certificate of insurance", "COI tracking"). Kept ≤ ~160 chars so it works
  * verbatim as a `<meta name="description">`.

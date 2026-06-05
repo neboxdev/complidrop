@@ -10,7 +10,7 @@ import {
 import { JsonLd } from "@/components/JsonLd";
 import { breadcrumbLd } from "@/lib/structured-data";
 import { pageMetadata } from "@/lib/seo";
-import { SITE_NAME, SUPPORT_EMAIL } from "@/lib/site";
+import { LEGAL_ADDRESS, LEGAL_ENTITY, SITE_NAME, SUPPORT_EMAIL } from "@/lib/site";
 
 export const metadata: Metadata = pageMetadata({
   title: "Terms of Service",
@@ -34,10 +34,11 @@ export default function TermsOfServicePage() {
 
       <ContentH1>Terms of Service</ContentH1>
       <Lead>
-        These terms are the agreement between you and {SITE_NAME} for using our
-        service. By creating an account or using {SITE_NAME}, you agree to them.
-        Please read them — especially the sections on the limits of automatic
-        document reading and on liability.
+        These terms are the agreement between you and {LEGAL_ENTITY} (&ldquo;{SITE_NAME}
+        &rdquo;, &ldquo;we&rdquo;, &ldquo;us&rdquo;) for using our service. By creating
+        an account or using {SITE_NAME}, you agree to them. Please read them —
+        especially the sections on the limits of automatic document reading and on
+        liability.
       </Lead>
       <p className="mt-4 text-sm text-muted-foreground">Last updated {EFFECTIVE_DATE}.</p>
 
@@ -161,10 +162,10 @@ export default function TermsOfServicePage() {
 
       <LegalSection title="Governing law">
         <p>
-          These terms are governed by the laws of the State of Texas, USA, without
-          regard to its conflict-of-laws rules. The courts located in Texas will have
-          jurisdiction over disputes, except where applicable law gives you the right
-          to bring a claim elsewhere.
+          These terms are governed by the laws of the State of Florida, USA, without
+          regard to its conflict-of-laws rules. The state and federal courts located in
+          Miami-Dade County, Florida will have jurisdiction over disputes, except where
+          applicable law gives you the right to bring a claim elsewhere.
         </p>
       </LegalSection>
 
@@ -188,6 +189,9 @@ export default function TermsOfServicePage() {
             contact page
           </Link>
           .
+        </p>
+        <p>
+          {SITE_NAME} is operated by {LEGAL_ENTITY}, {LEGAL_ADDRESS}.
         </p>
       </LegalSection>
     </ArticleShell>

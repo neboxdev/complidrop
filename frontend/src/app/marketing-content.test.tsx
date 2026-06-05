@@ -14,7 +14,7 @@ import PrivacyPolicyPage, { metadata as privacyMeta } from "./privacy/page";
 import TermsOfServicePage, { metadata as termsMeta } from "./terms/page";
 import ContactPage, { metadata as contactMeta } from "./contact/page";
 import { MarketingFooter } from "@/components/marketing/site-footer";
-import { SUPPORT_EMAIL } from "@/lib/site";
+import { LEGAL_ADDRESS, LEGAL_ENTITY, SUPPORT_EMAIL } from "@/lib/site";
 import { GLOSSARY_TERMS } from "@/lib/glossary";
 
 // Render next/link as a plain anchor and pin auth to anonymous (the shared
@@ -190,6 +190,9 @@ describe("Legal + contact pages (#194)", () => {
     expect(
       screen.getByRole("link", { name: new RegExp(SUPPORT_EMAIL, "i") }),
     ).toHaveAttribute("href", `mailto:${SUPPORT_EMAIL}`);
+    // The operating entity + business address are disclosed (data-controller identity). (#194)
+    expect(screen.getAllByText(new RegExp(LEGAL_ENTITY)).length).toBeGreaterThan(0);
+    expect(screen.getByText(new RegExp(LEGAL_ADDRESS))).toBeInTheDocument();
     const main = within(screen.getByRole("main"));
     expect(main.getAllByRole("link").map((l) => l.getAttribute("href"))).toContain("/contact");
   });
@@ -208,6 +211,13 @@ describe("Legal + contact pages (#194)", () => {
     // Stripe Checkout wants discoverable billing/cancellation terms.
     expect(screen.getByText(/cancel anytime/i)).toBeInTheDocument();
     expect(screen.getByText(/non-refundable/i)).toBeInTheDocument();
+    // The binding-contract identity: the real legal entity + address + the
+    // correct governing-law state (Florida, NOT the old placeholder Texas). (#194)
+    expect(screen.getAllByText(new RegExp(LEGAL_ENTITY)).length).toBeGreaterThan(0);
+    expect(screen.getByText(new RegExp(LEGAL_ADDRESS))).toBeInTheDocument();
+    expect(screen.getByText(/State of Florida/i)).toBeInTheDocument();
+    expect(screen.getByText(/Miami-Dade County/i)).toBeInTheDocument();
+    expect(screen.queryByText(/State of Texas/i)).toBeNull();
     // The cross-links to the sibling legal pages both resolve.
     const main = within(screen.getByRole("main"));
     const mainHrefs = main.getAllByRole("link").map((l) => l.getAttribute("href"));
@@ -234,5 +244,14 @@ describe("Legal + contact pages (#194)", () => {
       .map((l) => l.getAttribute("href"))
       .filter((h) => h?.startsWith("mailto:"));
     expect(mailtos).toContain(`mailto:${SUPPORT_EMAIL}`);
+  });
+
+  it("Contact page lists the operating entity + mailing address in a semantic <address> (#194)", () => {
+    const { container } = render(<ContactPage />);
+    expect(screen.getAllByText(new RegExp(LEGAL_ENTITY)).length).toBeGreaterThan(0);
+    const address = container.querySelector("address");
+    expect(address).not.toBeNull();
+    expect(address?.textContent).toContain(LEGAL_ENTITY);
+    expect(address?.textContent).toContain(LEGAL_ADDRESS);
   });
 });

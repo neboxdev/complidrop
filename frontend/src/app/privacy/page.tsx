@@ -10,7 +10,7 @@ import {
 import { JsonLd } from "@/components/JsonLd";
 import { breadcrumbLd } from "@/lib/structured-data";
 import { pageMetadata } from "@/lib/seo";
-import { SITE_NAME, SUPPORT_EMAIL } from "@/lib/site";
+import { LEGAL_ADDRESS, LEGAL_ENTITY, SITE_NAME, SUPPORT_EMAIL } from "@/lib/site";
 
 export const metadata: Metadata = pageMetadata({
   title: "Privacy Policy",
@@ -36,10 +36,10 @@ export default function PrivacyPolicyPage() {
 
       <ContentH1>Privacy Policy</ContentH1>
       <Lead>
-        {SITE_NAME} helps small businesses track certificates of insurance,
-        licenses, and permits. This policy explains what we collect, why, who we
-        share it with, and the choices you have. We keep it in plain English on
-        purpose.
+        {SITE_NAME}, operated by {LEGAL_ENTITY}, helps small businesses track
+        certificates of insurance, licenses, and permits. This policy explains what we
+        collect, why, who we share it with, and the choices you have. We keep it in
+        plain English on purpose.
       </Lead>
       <p className="mt-4 text-sm text-muted-foreground">Last updated {EFFECTIVE_DATE}.</p>
 
@@ -183,6 +183,9 @@ export default function PrivacyPolicyPage() {
             contact page
           </Link>
           .
+        </p>
+        <p>
+          {SITE_NAME} is operated by {LEGAL_ENTITY}, {LEGAL_ADDRESS}.
         </p>
       </LegalSection>
     </ArticleShell>
