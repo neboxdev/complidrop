@@ -25,3 +25,4 @@ Use `/adr <title>` to scaffold a new one.
 - [0015](0015-reminder-dedupe-time-zone-edit-guard.md) — Reminder dedupe carries a trailing-window guard for editable-time-zone re-fires (extends 0002 / 0007)
 - [0016](0016-apply-ef-migrations-on-startup.md) — Apply EF migrations on API startup (auto-migrate by default) with a boot-time drift guard
 - [0017](0017-manual-field-edits-sync-compliance-inputs.md) — Manual field edits sync the canonical compliance inputs (`ExtractionFields` + typed columns); re-extraction overwrites manual edits
+- [0018](0018-heic-heif-transcode-to-jpeg-on-ingest.md) — HEIC/HEIF uploads are transcoded to JPEG on ingest (Magick.NET) so OCR, any LLM provider, and the browser preview all see a supported format

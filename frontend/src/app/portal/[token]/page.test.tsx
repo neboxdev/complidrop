@@ -157,24 +157,28 @@ describe("PortalPage — success state (#37)", () => {
     expect(input.getAttribute("accept")).toMatch(/application\/pdf/);
   });
 
-  it("a rejected phone photo (HEIC) shows actionable recovery copy, not a dead-end (#196 review)", async () => {
-    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+  it("a phone photo (HEIC) is now accepted and uploads — no 'Most Compatible' dead-end (#220)", async () => {
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () =>
+        jsonOk({ uploadId: "u_heic", extractionStatus: "Pending", message: "Received" }),
+      ),
+    );
     ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
     await waitFor(() =>
       expect(screen.getByText(/tap to choose a file or take a photo/i)).toBeInTheDocument(),
     );
-    // A HEIC capture the iPhone camera produced — react-dropzone rejects it
-    // client-side (not in the JPEG/PNG/PDF accept map). The vendor must get a
-    // way forward, not just "isn't accepted".
+    // An iPhone HEIC capture is now in the dropzone's accept map (transcoded to
+    // JPEG server-side on ingest, #220), so it uploads instead of being rejected
+    // client-side with the old "switch to Most Compatible" dead-end.
     dropFiles([makeFile("coi.heic", "image/heic", 2048)]);
-    // Recovery copy must be self-contained: the correct setting location AND a
-    // "take the photo again" step (flipping the format doesn't convert the HEIC
-    // already shot), plus the always-works "upload a PDF" escape. (#196 review v2)
-    await waitFor(() =>
-      expect(
-        screen.getByText(/settings > camera > formats to most compatible and take the photo again/i),
-      ).toBeInTheDocument(),
-    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/^received$/i)).toBeInTheDocument();
+      expect(screen.getByText("coi.heic")).toBeInTheDocument();
+    });
+    // The #196 stopgap copy is gone now that HEIC just works.
+    expect(screen.queryByText(/most compatible/i)).toBeNull();
   });
 
   it("renders the dropzone affordance + accepted-file copy", async () => {

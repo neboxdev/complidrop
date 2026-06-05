@@ -276,6 +276,7 @@ public static class DocumentEndpoints
         SystemDbContext sysDb,
         IBlobStorageService blobs,
         IFileValidationService validator,
+        IImageTranscoder transcoder,
         IIdempotencyService idem,
         ICurrentUser currentUser,
         IAuditLogger audit,
@@ -334,9 +335,14 @@ public static class DocumentEndpoints
         if (!validation.IsValid)
             return Error(400, validation.ErrorCode ?? "document.unsupported_format", validation.ErrorMessage ?? "Invalid file.");
 
-        buffer.Position = 0;
+        // Normalize HEIC/HEIF (iPhone photos) to JPEG on ingest so OCR, the LLM, and the browser
+        // preview all see a supported format; PDF/JPEG/PNG pass through untouched. (#220 / ADR 0018)
+        var (storedStream, storedContentType) = transcoder.NormalizeForStorage(buffer, validation.DetectedContentType!);
+        if (storedStream is null)
+            return Error(400, "document.unreadable_image", ImageTranscoderExtensions.UnreadableImageMessage);
+
         var blobName = $"{orgId}/{DateTime.UtcNow:yyyy-MM}/{Guid.NewGuid()}-{SanitizeFileName(file.FileName)}";
-        var upload = await blobs.UploadAsync(blobName, buffer, validation.DetectedContentType!, ct);
+        var upload = await blobs.UploadAsync(blobName, storedStream, storedContentType, ct);
 
         var doc = new Document
         {
@@ -346,8 +352,8 @@ public static class DocumentEndpoints
             OriginalFileName = file.FileName,
             BlobStorageUrl = upload.Url,
             BlobStoragePath = blobName,
-            FileSizeBytes = file.Length,
-            ContentType = validation.DetectedContentType!,
+            FileSizeBytes = storedStream.Length,
+            ContentType = storedContentType,
             DocumentType = declaredType,
             ExtractionStatus = ExtractionStatus.Pending,
             ComplianceStatus = ComplianceStatus.Pending,

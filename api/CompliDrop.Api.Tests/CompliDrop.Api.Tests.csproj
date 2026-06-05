@@ -33,6 +33,9 @@
        robust to the test-host launch layout (not just the default bin/<cfg>/<tfw> nesting). -->
   <ItemGroup>
     <None Update="ExtractionFixtures\**\expected.yaml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Binary upload fixtures (e.g. the real HEIC photo for the #220 transcode tests), copied next
+         to the test assembly so they're discoverable via AppContext.BaseDirectory. -->
+    <None Update="TestFixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
