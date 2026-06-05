@@ -269,18 +269,11 @@ public class ExtractionWorker(
         doc.ExtractionRawJson = JsonSerializer.Serialize(rawPayload);
         doc.ExtractionPromptVersion = ExtractionPrompts.Version;
 
+        // Map the date/amount fields onto the typed columns ComplianceCheckService reads.
+        // Shared with the manual-edit path (DocumentEndpoints.UpdateFields) via
+        // CanonicalDocumentFields so both parse identically — see ADR 0017.
         foreach (var f in extraction.Fields)
-        {
-            if (string.Equals(f.Name, "effective_date", StringComparison.OrdinalIgnoreCase)
-                && DateTime.TryParse(f.Value, out var eff))
-                doc.EffectiveDate = DateTime.SpecifyKind(eff, DateTimeKind.Utc);
-            else if (string.Equals(f.Name, "expiration_date", StringComparison.OrdinalIgnoreCase)
-                && DateTime.TryParse(f.Value, out var exp))
-                doc.ExpirationDate = DateTime.SpecifyKind(exp, DateTimeKind.Utc);
-            else if (string.Equals(f.Name, "general_liability_limit", StringComparison.OrdinalIgnoreCase)
-                && decimal.TryParse(f.Value, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var gll))
-                doc.GeneralLiabilityLimit = gll;
-        }
+            CanonicalDocumentFields.ApplyToTypedColumn(doc, f.Name, f.Value);
 
         db.DocumentFields.RemoveRange(db.DocumentFields.Where(df => df.DocumentId == doc.Id));
         foreach (var f in extraction.Fields)

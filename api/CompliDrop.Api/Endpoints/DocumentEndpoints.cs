@@ -1,4 +1,6 @@
 using System.Security.Claims;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using CompliDrop.Api.Auth;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.DTOs.Compliance;
@@ -380,7 +382,9 @@ public static class DocumentEndpoints
         Guid id,
         FieldsUpdateRequest req,
         AppDbContext db,
+        IComplianceCheckService compliance,
         IAuditLogger audit,
+        ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         var doc = await db.Documents
@@ -389,7 +393,19 @@ public static class DocumentEndpoints
         if (doc is null) return NotFound();
 
         var before = doc.Fields.Select(f => new { f.FieldName, f.FieldValue }).ToList();
-        foreach (var update in req.Fields)
+
+        // The canonical compliance inputs are doc.ExtractionFields (JSON) + the typed columns
+        // (GeneralLiabilityLimit / EffectiveDate / ExpirationDate), NOT the DocumentField rows that
+        // this endpoint writes — so before #216 a correction never moved the verdict. Build the JSON
+        // mirror starting from the existing object so untouched keys keep their original value/type.
+        var fields = doc.ExtractionFields?.RootElement.ValueKind == JsonValueKind.Object
+            ? (JsonObject)JsonNode.Parse(doc.ExtractionFields.RootElement.GetRawText())!
+            : new JsonObject();
+
+        // De-dupe by field name (last value wins): a request that lists the same field twice must
+        // not create two DocumentField rows for a not-yet-existing field, nor leave the row out of
+        // sync with the JSON mirror / typed column (which are themselves last-wins).
+        foreach (var update in req.Fields.GroupBy(u => u.FieldName).Select(g => g.Last()))
         {
             var field = doc.Fields.FirstOrDefault(f => f.FieldName == update.FieldName);
             if (field is null)
@@ -420,7 +436,15 @@ public static class DocumentEndpoints
                 field.IsManuallyEdited = true;
                 field.Confidence = 1.0;
             }
+
+            // Mirror the edit into the canonical compliance inputs (#216): the JSON dict (every
+            // field) and, for the three date/amount fields, the typed columns. The shared
+            // CanonicalDocumentFields helper keeps this parse identical to the extraction worker.
+            fields[update.FieldName] = update.FieldValue;
+            CanonicalDocumentFields.ApplyToTypedColumn(doc, update.FieldName, update.FieldValue);
         }
+
+        doc.ExtractionFields = JsonDocument.Parse(fields.ToJsonString());
         ResolveManualReview(doc);
         doc.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -429,12 +453,20 @@ public static class DocumentEndpoints
             before: before,
             after: doc.Fields.Select(f => new { f.FieldName, f.FieldValue }));
 
-        // NOTE: compliance is intentionally NOT re-evaluated here. ComplianceCheckService
-        // reads doc.ExtractionFields / the typed columns (GeneralLiabilityLimit, dates) —
-        // NOT DocumentField rows — and this endpoint only edits DocumentField rows, so a
-        // re-eval would recompute the identical verdict. Making manual edits actually
-        // affect compliance (sync edits into ExtractionFields/columns) is a data-semantics
-        // change tracked in its own ticket — see #193 PR body / the rolling bug epic. (#193 review)
+        // Now that the edits reached doc.ExtractionFields / the typed columns, re-run compliance so a
+        // correction (e.g. a misread GL limit fixed above the required minimum) flips the verdict and
+        // refreshes the detail-page explainer. Best-effort, mirroring UpdateDocument: a recompute
+        // failure must NOT fail the save the user just made — it recomputes on the next edit/re-extract.
+        // Re-extraction re-reads the source and overwrites manual edits by design; see ADR 0017.
+        try
+        {
+            await compliance.EvaluateAsync(doc.Id, ct);
+        }
+        catch (Exception ex)
+        {
+            loggerFactory.CreateLogger("DocumentEndpoints")
+                .LogError(ex, "Compliance re-evaluation failed after editing fields on document {DocumentId}", doc.Id);
+        }
 
         return Results.Ok(new { data = new { message = "Fields updated." }, error = (object?)null });
     }

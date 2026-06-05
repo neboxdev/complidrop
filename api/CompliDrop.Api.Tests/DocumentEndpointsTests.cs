@@ -848,7 +848,11 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         field.FieldValue.Should().Be("NEW-456");
         field.OriginalValue.Should().Be("OLD-123");
         field.IsManuallyEdited.Should().BeTrue();
-        (await verify.Documents.FirstAsync(d => d.Id == docId)).IsManuallyVerified.Should().BeTrue();
+        var editedDoc = await verify.Documents.FirstAsync(d => d.Id == docId);
+        editedDoc.IsManuallyVerified.Should().BeTrue();
+        // The doc has no vendor/template, so the best-effort re-eval (#216) returns Pending without
+        // throwing — the edit must not wrongly flip the verdict for a doc with no requirement set.
+        editedDoc.ComplianceStatus.Should().Be(ComplianceStatus.Pending);
     }
 
     [Fact]
@@ -878,5 +882,338 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         var resp = await other.Client.GetAsync($"/api/compliance/checks/{docId}");
 
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    // ---- #216: manual field edits sync the compliance inputs + re-evaluate the verdict ----
+
+    /// <summary>
+    /// Seeds a vendor carrying a "general liability ≥ $1,000,000" COI template and a COI document
+    /// with the supplied starting GL limit + compliance status (no pre-seeded check rows). Returns
+    /// the document id. Used to drive a manual GL-limit edit and assert the verdict moves.
+    /// </summary>
+    private async Task<Guid> SeedDocWithGlRuleAndLimit(Guid orgId, decimal? glLimit, ComplianceStatus status)
+    {
+        await using var db = CreateSystemDb();
+        var now = DateTime.UtcNow;
+        var template = new ComplianceTemplate
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            Name = "Venue COI",
+            CreatedAt = now
+        };
+        db.ComplianceTemplates.Add(template);
+        db.ComplianceRules.Add(new ComplianceRule
+        {
+            Id = Guid.NewGuid(),
+            ComplianceTemplateId = template.Id,
+            DocumentType = "coi",
+            FieldName = "general_liability_limit",
+            Operator = "min_value",
+            ExpectedValue = "1000000",
+            ErrorMessage = "General liability must be at least $1,000,000",
+            SortOrder = 1
+        });
+        var vendor = new Vendor
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            Name = "Acme Catering",
+            ComplianceTemplateId = template.Id,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.Vendors.Add(vendor);
+        var doc = new Document
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            VendorId = vendor.Id,
+            OriginalFileName = "coi.pdf",
+            BlobStorageUrl = "memory://x",
+            FileSizeBytes = 1,
+            ContentType = "application/pdf",
+            DocumentType = "coi",
+            ExtractionStatus = ExtractionStatus.Completed,
+            ComplianceStatus = status,
+            GeneralLiabilityLimit = glLimit,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.Documents.Add(doc);
+        await db.SaveChangesAsync();
+        return doc.Id;
+    }
+
+    [Fact]
+    public async Task Editing_general_liability_limit_above_the_minimum_flips_noncompliant_to_compliant()
+    {
+        // The marquee #216 regression: correcting a misread GL limit above the required minimum
+        // must move the verdict, not recompute the identical NonCompliant answer. SeedDocWithFailedCheck
+        // gives a NonCompliant COI with a stale "$500,000 below minimum" check in front of the user.
+        var auth = await RegisterAndLoginAsync();
+        var (docId, _) = await SeedDocWithFailedCheck(auth.OrgId, null);
+
+        var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "general_liability_limit", fieldValue = "1500000" } }
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant);
+        // The edit reached the typed column compliance reads, not just the DocumentField row.
+        doc.GeneralLiabilityLimit.Should().Be(1_500_000m);
+    }
+
+    [Fact]
+    public async Task Editing_a_field_refreshes_the_compliance_checks_on_the_detail_payload()
+    {
+        // AC #2: the detail-page explainer (complianceStatus + per-rule check rows) reflects the
+        // corrected verdict after Save — the old failing row is replaced with a passing one.
+        var auth = await RegisterAndLoginAsync();
+        var (docId, _) = await SeedDocWithFailedCheck(auth.OrgId, null);
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "general_liability_limit", fieldValue = "1500000" } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        var data = body.GetProperty("data");
+        data.GetProperty("complianceStatus").GetString().Should().Be("Compliant");
+        data.GetProperty("generalLiabilityLimit").GetDecimal().Should().Be(1_500_000m);
+        var checks = data.GetProperty("complianceChecks");
+        checks.GetArrayLength().Should().Be(1);
+        checks[0].GetProperty("isPassed").GetBoolean().Should().BeTrue();
+        checks[0].GetProperty("actualValue").GetString().Should().Be("1500000");
+    }
+
+    [Fact]
+    public async Task Editing_a_json_field_that_feeds_a_required_rule_updates_the_verdict()
+    {
+        // Proves the JSON mirror (not only the typed columns) reaches compliance: a non-typed field
+        // with a `required` rule starts missing (NonCompliant) and the edit supplies it.
+        var auth = await RegisterAndLoginAsync();
+        Guid docId;
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            var template = new ComplianceTemplate
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                Name = "Venue COI",
+                CreatedAt = now
+            };
+            db.ComplianceTemplates.Add(template);
+            db.ComplianceRules.Add(new ComplianceRule
+            {
+                Id = Guid.NewGuid(),
+                ComplianceTemplateId = template.Id,
+                DocumentType = "coi",
+                FieldName = "additional_insured",
+                Operator = "required",
+                SortOrder = 1
+            });
+            var vendor = new Vendor
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                Name = "Acme Catering",
+                ComplianceTemplateId = template.Id,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.Vendors.Add(vendor);
+            var doc = new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                VendorId = vendor.Id,
+                OriginalFileName = "coi.pdf",
+                BlobStorageUrl = "memory://x",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed,
+                ComplianceStatus = ComplianceStatus.NonCompliant,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.Documents.Add(doc);
+            await db.SaveChangesAsync();
+            docId = doc.Id;
+        }
+
+        var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "additional_insured", fieldValue = "Acme Property LLC" } }
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.FirstAsync(d => d.Id == docId)).ComplianceStatus
+            .Should().Be(ComplianceStatus.Compliant);
+    }
+
+    [Fact]
+    public async Task Editing_a_correct_value_down_below_the_minimum_flips_compliant_to_noncompliant()
+    {
+        // Symmetry: the input sync moves the verdict in both directions, so an edit that makes a
+        // document worse is reflected too (not just corrections that help).
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithGlRuleAndLimit(auth.OrgId, 1_500_000m, ComplianceStatus.Compliant);
+
+        var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "general_liability_limit", fieldValue = "500000" } }
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant);
+        doc.GeneralLiabilityLimit.Should().Be(500_000m);
+    }
+
+    [Fact]
+    public async Task Editing_a_typed_field_to_an_unparseable_value_clears_the_column_and_fails_the_rule()
+    {
+        // ADR 0017: an unparseable correction nulls the typed column so it can't silently contradict
+        // the field the user now sees. LookupValue then falls back to the raw string in the JSON, and
+        // min_value reports it can't parse — the recomputed check carries the raw value, not a stale one.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithGlRuleAndLimit(auth.OrgId, 1_500_000m, ComplianceStatus.Compliant);
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "general_liability_limit", fieldValue = "approximately $1M" } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.GeneralLiabilityLimit.Should().BeNull();
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant);
+
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        var check = body.GetProperty("data").GetProperty("complianceChecks")[0];
+        check.GetProperty("isPassed").GetBoolean().Should().BeFalse();
+        check.GetProperty("actualValue").GetString().Should().Be("approximately $1M");
+    }
+
+    [Fact]
+    public async Task Editing_expiration_date_to_a_past_value_flips_the_verdict_to_expired()
+    {
+        // The date typed-column path through the endpoint: a past expiration is evaluated directly
+        // from doc.ExpirationDate (ahead of the rule checks) and makes the document Expired.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithGlRuleAndLimit(auth.OrgId, 1_500_000m, ComplianceStatus.Compliant);
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "expiration_date", fieldValue = "2020-06-15" } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExpirationDate.Should().Be(new DateTime(2020, 6, 15, 0, 0, 0, DateTimeKind.Utc));
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.Expired);
+    }
+
+    [Fact]
+    public async Task Editing_the_same_field_twice_in_one_request_keeps_one_row_last_wins()
+    {
+        // De-dupe guard: a request listing the same field name twice must not create two rows; the
+        // last value wins and the row stays in sync with the JSON mirror / typed column.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithGlRuleAndLimit(auth.OrgId, null, ComplianceStatus.NonCompliant);
+
+        var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[]
+            {
+                new { fieldName = "general_liability_limit", fieldValue = "500000" },
+                new { fieldName = "general_liability_limit", fieldValue = "1500000" },
+            }
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.DocumentFields.CountAsync(f => f.DocumentId == docId && f.FieldName == "general_liability_limit"))
+            .Should().Be(1);
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.GeneralLiabilityLimit.Should().Be(1_500_000m); // last value wins
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant);
+    }
+
+    [Fact]
+    public async Task Editing_fields_persists_even_when_compliance_re_eval_throws()
+    {
+        // Best-effort guarantee for the field-edit path (#216), mirroring the PATCH counterpart: a
+        // throwing inline re-eval must not fail the save the user just made.
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IComplianceCheckService>();
+                services.AddScoped<IComplianceCheckService, ThrowingComplianceCheckService>();
+            }));
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+
+        var email = $"user-{Guid.NewGuid():N}@example.com";
+        var reg = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            email,
+            password = "Password1234",
+            fullName = "Test User",
+            companyName = "Test Co",
+            industry = (string?)null,
+            companySize = (string?)null,
+            timeZone = "America/New_York",
+        });
+        reg.EnsureSuccessStatusCode();
+        var orgId = (await reg.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("organizationId").GetGuid();
+
+        Guid docId;
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            var doc = new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = orgId,
+                OriginalFileName = "coi.pdf",
+                BlobStorageUrl = "memory://x",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.ManualRequired,
+                ComplianceStatus = ComplianceStatus.Pending,
+                CreatedAt = now,
+                UpdatedAt = now
+            };
+            db.Documents.Add(doc);
+            await db.SaveChangesAsync();
+            docId = doc.Id;
+        }
+
+        var resp = await client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "general_liability_limit", fieldValue = "1500000" } }
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var verify = CreateSystemDb();
+        var saved = await verify.Documents.FirstAsync(d => d.Id == docId);
+        // The edit persisted (typed column written, ManualRequired resolved) despite the throwing re-eval.
+        saved.GeneralLiabilityLimit.Should().Be(1_500_000m);
+        saved.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        (await verify.DocumentFields.FirstAsync(f => f.DocumentId == docId && f.FieldName == "general_liability_limit"))
+            .FieldValue.Should().Be("1500000");
     }
 }
