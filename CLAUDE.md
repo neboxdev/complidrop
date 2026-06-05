@@ -39,6 +39,14 @@ cd api/CompliDrop.Api && dotnet ef migrations add <Name> --context AppDbContext
 cd api/CompliDrop.Api && dotnet ef database update --context AppDbContext
 ```
 
+**Migrations apply automatically on deploy** — the API runs pending migrations at
+startup before serving traffic (`Database:AutoMigrate`, default on; fail-fast on a
+bad migration; boot-time drift guard refuses to start if migrations are pending and
+auto-migrate is off). So a migration-adding merge updates the prod schema on the
+next Railway deploy with no manual `dotnet ef database update`. The CLI commands
+above are still how you create migrations locally and apply them to your dev DB.
+See [ADR 0016](docs/adr/0016-apply-ef-migrations-on-startup.md) and [#226](https://github.com/neboxdev/complidrop/issues/226).
+
 ## Secrets (user-secrets in Development, env vars in prod)
 
 `ConnectionStrings:Database`, `Jwt:Secret`, `AzureStorage:ConnectionString`, `AzureStorage:ContainerName`, `Sentry:Dsn`, `DocumentAi:ProjectId`, `DocumentAi:Location`, `DocumentAi:ProcessorId`, `DocumentAi:CredentialsPath` (or `CredentialsJson`), `Gemini:ApiKey` (when Endpoint=aistudio), `Anthropic:ApiKey` (optional), `Stripe:SecretKey`, `Stripe:PublishableKey`, `Stripe:WebhookSecret`, `Stripe:MonthlyPriceId`, `Stripe:AnnualPriceId`, `Stripe:FoundingPriceId`, `Resend:ApiKey`, `Resend:FromEmail`, `Resend:WebhookSecret` (Svix `whsec_…` signing secret for the inbound delivery-status webhook; if unset the webhook is rejected in production and allowed-with-warning only in Development).

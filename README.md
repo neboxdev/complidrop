@@ -57,6 +57,25 @@ push.
   cold-start auto-suspend).
 - Blob → Azure Blob Storage account.
 
+### Database migrations on deploy
+
+**The deploy applies migrations automatically — there is no manual migration
+step.** On startup the API brings the schema to the assembly's migration set
+before serving traffic (`Database:AutoMigrate`, default `true`). A
+migration-adding merge therefore updates the prod schema on the next Railway
+deploy with no human action. A failed migration **aborts boot** (fail-fast), so
+Railway keeps the old container serving instead of the new one returning 500s on
+a half-applied schema. See [ADR 0016](docs/adr/0016-apply-ef-migrations-on-startup.md)
+and [#226](https://github.com/neboxdev/complidrop/issues/226) (the outage that
+prompted this).
+
+If you ever prefer to run migrations as an external release step instead
+(`dotnet ef database update --context AppDbContext` before the container takes
+traffic), set `Database__AutoMigrate=false` — the boot-time **drift guard** still
+refuses to start if migrations are pending, so a skipped release step can't serve
+a stale schema. Scale past one instance and EF's migration lock (a Postgres
+advisory lock) still serializes concurrent migrations.
+
 ## Monorepo layout
 
 ```

@@ -374,12 +374,26 @@ app.MapBillingEndpoints();
 app.MapExportEndpoints();
 
 // ============================================================
-// Startup: seed system templates
+// Startup: apply EF migrations, then seed system templates
 // ============================================================
 using (var scope = app.Services.CreateScope())
 {
-    var env = scope.ServiceProvider.GetRequiredService<IHostEnvironment>();
     var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+
+    // Schema first: bring the database to the assembly's migration set (or fail-fast on drift)
+    // BEFORE anything queries it. Migrations belong to AppDbContext (generated with
+    // --context AppDbContext). This is deliberately NOT wrapped in a swallowing try/catch — a
+    // schema that can't be brought current must abort boot rather than serve 500s on every query
+    // that touches a missing column (#226: a deploy left prod 9 migrations behind and every Users
+    // SELECT threw 42703, 500'ing login). MigrateAsync is pure DDL, so the tenant query filter and
+    // audit interceptor on AppDbContext never engage here.
+    var appDb = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    await DatabaseMigrator.MigrateAndGuardAsync(
+        appDb.Database,
+        DatabaseMigrator.ShouldAutoMigrate(app.Configuration),
+        logger);
+
+    // Seed: best-effort system compliance templates, after the schema is guaranteed current.
     var sysDb = scope.ServiceProvider.GetRequiredService<SystemDbContext>();
 
     try
