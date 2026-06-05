@@ -46,6 +46,20 @@ public class CanonicalDocumentFieldsTests
     }
 
     [Fact]
+    public void Parses_an_offset_bearing_date_to_utc()
+    {
+        // AssumeUniversal|AdjustToUniversal shifts an offset-bearing value to the equivalent UTC
+        // instant (vs. the old SpecifyKind, which would have mislabeled it). The extraction prompt
+        // emits bare yyyy-MM-dd, but a manual edit could carry an offset — pin the conversion.
+        var doc = new Document();
+
+        CanonicalDocumentFields.ApplyToTypedColumn(doc, "expiration_date", "2026-01-15T00:00:00+05:00");
+
+        doc.ExpirationDate.Should().Be(new DateTime(2026, 1, 14, 19, 0, 0, DateTimeKind.Utc));
+        doc.ExpirationDate!.Value.Kind.Should().Be(DateTimeKind.Utc);
+    }
+
+    [Fact]
     public void Matches_the_field_name_case_insensitively()
     {
         var doc = new Document();

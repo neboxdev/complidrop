@@ -223,6 +223,12 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         done.ProcessingError.Should().BeNull();
         Extraction.ExtractCallCount.Should().Be(1);
 
+        // The extraction -> typed-column write goes through the shared CanonicalDocumentFields helper
+        // (#216): the fake's "expiration_date" field must land in the typed column as UTC, since
+        // ComplianceCheckService reads that column, not the DocumentField rows.
+        done.ExpirationDate.Should().Be(new DateTime(2026, 12, 31, 0, 0, 0, DateTimeKind.Utc));
+        done.ExpirationDate!.Value.Kind.Should().Be(DateTimeKind.Utc);
+
         // Token usage/cost recorded against the org subscription. OCR is disabled, so the recorded
         // spend is exactly the fake's LLM usage cost — asserted against the fake's own result so the
         // fake stays the single source of truth (no duplicated magic literal).

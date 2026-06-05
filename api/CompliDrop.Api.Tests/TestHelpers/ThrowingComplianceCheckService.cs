@@ -5,9 +5,10 @@ namespace CompliDrop.Api.Tests.TestHelpers;
 
 /// <summary>
 /// An <see cref="IComplianceCheckService"/> that always throws — swapped in via
-/// <c>WithWebHostBuilder</c> to prove the PATCH endpoint's best-effort re-eval guarantee:
-/// a vendor assignment must still succeed (200 + persisted VendorId) even when the inline
-/// compliance recompute blows up. See DocumentEndpoints.UpdateDocument (#186).
+/// <c>WithWebHostBuilder</c> to prove the best-effort re-eval guarantee shared by the
+/// document mutation endpoints: a vendor assignment (DocumentEndpoints.UpdateDocument, #186)
+/// or a field edit (DocumentEndpoints.UpdateFields, #216) must still succeed (200 + persisted
+/// change) even when the inline compliance recompute blows up.
 /// </summary>
 public sealed class ThrowingComplianceCheckService : IComplianceCheckService
 {

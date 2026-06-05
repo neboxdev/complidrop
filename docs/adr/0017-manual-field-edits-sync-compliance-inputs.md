@@ -53,8 +53,11 @@ correction parse dates and amounts **identically** (UTC dates via
 `AssumeUniversal | AdjustToUniversal`; amounts via `NumberStyles.Any` + `InvariantCulture`). A value
 that fails to parse **clears the column to null** rather than leaving a stale value that would
 contradict the field the user can see — `LookupValue` then falls back to the raw string now sitting
-in `ExtractionFields`. (For the extraction path the columns start null, so clear-on-failure and the
-old leave-unchanged behavior coincide; this is a behavior-preserving refactor there.)
+in `ExtractionFields`. (For a *first* extraction the columns start null, so clear-on-failure and the
+old leave-unchanged behavior coincide. On *re-extraction* the typed columns may already hold the
+prior read's values — `Reextract` resets only the processing/status fields, not the columns — so
+there clear-on-failure intentionally overwrites a now-unparseable prior value rather than leaving it
+stale; that is the desired last-write-wins behavior of item 3, not a regression.)
 
 **3. Re-extraction wins over manual edits.** `POST /api/documents/{id}/reextract` re-queues the
 document; `PersistSuccess` then **overwrites** `ExtractionFields`, the typed columns, and *all*

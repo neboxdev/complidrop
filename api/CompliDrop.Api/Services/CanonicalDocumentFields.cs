@@ -30,8 +30,11 @@ internal static class CanonicalDocumentFields
     /// value, so the typed column can never silently contradict the field the user sees: when the
     /// column is null, <see cref="ComplianceCheckService.LookupValue"/> falls back to the raw string
     /// in <see cref="Document.ExtractionFields"/>. This matters for manual corrections; for the
-    /// extraction pipeline the document's columns start null, so clear-on-failure and the previous
-    /// leave-unchanged behavior coincide.
+    /// extraction pipeline a <i>first</i> extraction starts from null columns, so clear-on-failure
+    /// and the previous leave-unchanged behavior coincide. On <i>re-extraction</i> the columns may
+    /// already hold the prior read's values (<c>Reextract</c> resets only status/processing fields),
+    /// so clear-on-failure intentionally overwrites a now-unparseable prior value rather than leaving
+    /// it stale — the desired last-write-wins behavior per ADR 0017, not a regression.
     ///
     /// Dates parse as UTC (<see cref="DateTimeStyles.AssumeUniversal"/> +
     /// <see cref="DateTimeStyles.AdjustToUniversal"/> ⇒ <see cref="DateTimeKind.Utc"/>) so the value

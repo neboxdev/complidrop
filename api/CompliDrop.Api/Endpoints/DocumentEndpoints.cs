@@ -402,7 +402,10 @@ public static class DocumentEndpoints
             ? (JsonObject)JsonNode.Parse(doc.ExtractionFields.RootElement.GetRawText())!
             : new JsonObject();
 
-        foreach (var update in req.Fields)
+        // De-dupe by field name (last value wins): a request that lists the same field twice must
+        // not create two DocumentField rows for a not-yet-existing field, nor leave the row out of
+        // sync with the JSON mirror / typed column (which are themselves last-wins).
+        foreach (var update in req.Fields.GroupBy(u => u.FieldName).Select(g => g.Last()))
         {
             var field = doc.Fields.FirstOrDefault(f => f.FieldName == update.FieldName);
             if (field is null)
