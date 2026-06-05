@@ -50,14 +50,14 @@ export type VendorUpsert = {
 export function useVendors() {
   return useQuery<VendorSummary[]>({
     queryKey: ["vendors"],
-    queryFn: () => api.get<VendorSummary[]>("/api/vendors"),
+    queryFn: ({ signal }) => api.get<VendorSummary[]>("/api/vendors", { signal }),
   });
 }
 
 export function useVendor(id: string | null) {
   return useQuery<VendorDetail>({
     queryKey: ["vendors", id],
-    queryFn: () => api.get<VendorDetail>(`/api/vendors/${id}`),
+    queryFn: ({ signal }) => api.get<VendorDetail>(`/api/vendors/${id}`, { signal }),
     enabled: !!id,
   });
 }

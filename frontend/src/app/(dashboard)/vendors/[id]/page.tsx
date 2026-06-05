@@ -43,7 +43,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
 
   const templates = useQuery<TemplateSummary[]>({
     queryKey: ["templates"],
-    queryFn: () => api.get<TemplateSummary[]>("/api/compliance/templates"),
+    queryFn: ({ signal }) => api.get<TemplateSummary[]>("/api/compliance/templates", { signal }),
   });
 
   // Gate the "Email link" button on the SAVED contact email (vendor.contactEmail),

@@ -260,7 +260,7 @@ export default function DocumentDetailPage() {
 
   const detail = useQuery<DocDetail, ApiError>({
     queryKey: ["documents", params.id],
-    queryFn: () => api.get<DocDetail>(`/api/documents/${params.id}`),
+    queryFn: ({ signal }) => api.get<DocDetail>(`/api/documents/${params.id}`, { signal }),
     refetchInterval: (q) => {
       // Short-circuit polling when the query is in an error state, even
       // if `state.data?.extractionStatus` is still Pending/Processing on

@@ -77,7 +77,7 @@ export function useDocuments(params: DocumentListParams = {}) {
     // independently; mutations invalidate the ["documents"] prefix, which
     // still covers every combination. (#187)
     queryKey: ["documents", "list", params],
-    queryFn: () => api.get<DocumentListResponse>(`/api/documents${buildDocumentsQuery(params)}`),
+    queryFn: ({ signal }) => api.get<DocumentListResponse>(`/api/documents${buildDocumentsQuery(params)}`, { signal }),
     // Keep the current page visible while the next page / a filter change is
     // fetching, instead of flashing the loading row. Initial load has no
     // previous data, so the loading state still shows then. (#187)

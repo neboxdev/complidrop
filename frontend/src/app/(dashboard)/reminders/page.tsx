@@ -32,11 +32,11 @@ export default function RemindersPage() {
   const qc = useQueryClient();
   const reminders = useQuery<Reminder[]>({
     queryKey: ["reminders"],
-    queryFn: () => api.get<Reminder[]>("/api/reminders"),
+    queryFn: ({ signal }) => api.get<Reminder[]>("/api/reminders", { signal }),
   });
   const history = useQuery<ReminderHistoryEntry[]>({
     queryKey: ["reminders", "history"],
-    queryFn: () => api.get<ReminderHistoryEntry[]>("/api/reminders/history"),
+    queryFn: ({ signal }) => api.get<ReminderHistoryEntry[]>("/api/reminders/history", { signal }),
   });
 
   const update = useMutation({

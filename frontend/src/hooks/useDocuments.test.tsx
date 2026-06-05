@@ -64,6 +64,32 @@ describe("useDocuments — basic query states (#36)", () => {
     expect(result.current.data?.items[0].extractionStatus).toBe("Completed");
   });
 
+  it("cancelling an in-flight query stops the fetch without error or data (#222)", async () => {
+    // AC #3: the queryFn threads { signal }, so cancelling the query — exactly what an
+    // unmount / navigation / a superseding refetch does internally — aborts the in-flight
+    // fetch. It resolves to neither data nor an error; it is simply cancelled.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    server.use(
+      http.get(url("/api/documents"), async () => {
+        await held;
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+
+    const { qc, Wrapper } = createTestWrapper();
+    const { result } = renderHook(() => useDocuments(), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isFetching).toBe(true));
+    await qc.cancelQueries({ queryKey: ["documents"] });
+
+    await waitFor(() => expect(result.current.isFetching).toBe(false));
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.isError).toBe(false);
+
+    release(); // drain the held handler inside the test boundary
+  });
+
   it("isError on 500 with the server's human message", async () => {
     server.use(
       http.get(url("/api/documents"), () =>

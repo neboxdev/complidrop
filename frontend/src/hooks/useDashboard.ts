@@ -37,7 +37,7 @@ export type ActivityEntry = {
 export function useDashboardStats() {
   return useQuery<DashboardStats>({
     queryKey: ["dashboard", "stats"],
-    queryFn: () => api.get<DashboardStats>("/api/dashboard/stats"),
+    queryFn: ({ signal }) => api.get<DashboardStats>("/api/dashboard/stats", { signal }),
     staleTime: 30_000,
   });
 }
@@ -45,7 +45,7 @@ export function useDashboardStats() {
 export function useExpiryPipeline() {
   return useQuery<ExpiryPipeline>({
     queryKey: ["dashboard", "expiry"],
-    queryFn: () => api.get<ExpiryPipeline>("/api/dashboard/expiry-pipeline"),
+    queryFn: ({ signal }) => api.get<ExpiryPipeline>("/api/dashboard/expiry-pipeline", { signal }),
     staleTime: 30_000,
   });
 }
@@ -53,7 +53,7 @@ export function useExpiryPipeline() {
 export function useRecentActivity() {
   return useQuery<ActivityEntry[]>({
     queryKey: ["dashboard", "activity"],
-    queryFn: () => api.get<ActivityEntry[]>("/api/dashboard/recent-activity"),
+    queryFn: ({ signal }) => api.get<ActivityEntry[]>("/api/dashboard/recent-activity", { signal }),
     staleTime: 30_000,
   });
 }
