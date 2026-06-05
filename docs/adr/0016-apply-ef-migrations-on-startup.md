@@ -22,7 +22,7 @@ The API **brings its own schema current at boot** before serving traffic, via a 
 
 Net invariant: **once startup completes, the running schema matches the code — or the process never started.**
 
-EF Core 10 takes an exclusive `__EFMigrationsHistory` advisory lock during `Migrate()`, so auto-migrate is safe even if Railway briefly overlaps two containers during a deploy: one applies, the other waits and then sees nothing pending.
+EF Core acquires a migration lock (a Postgres advisory lock, via Npgsql) before applying, and records applied migrations in `__EFMigrationsHistory`, so auto-migrate is safe even if Railway briefly overlaps two containers during a deploy: one applies, the other waits and then sees nothing pending.
 
 ## Consequences
 
@@ -38,7 +38,7 @@ EF Core 10 takes an exclusive `__EFMigrationsHistory` advisory lock during `Migr
 - A DB outage *at boot* now prevents startup (migrate can't connect) rather than starting a degraded host. This is acceptable/desirable — the app can't function without its DB anyway — and matches the fail-fast intent.
 
 ### Neutral
-- Multi-instance scale-out is not a concern today (Railway runs ~1). If we ever scale past one instance, the EF history lock still serializes migrations; the external-release-command shape remains available as a cleaner separation.
+- Multi-instance scale-out is not a concern today (Railway runs ~1). If we ever scale past one instance, EF's migration lock still serializes concurrent migrations; the external-release-command shape remains available as a cleaner separation.
 - The startup seed (`ComplianceTemplateSeed`) stays best-effort and unchanged; it now runs after the schema is guaranteed current.
 
 ## Alternatives considered

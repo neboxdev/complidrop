@@ -73,8 +73,8 @@ If you ever prefer to run migrations as an external release step instead
 (`dotnet ef database update --context AppDbContext` before the container takes
 traffic), set `Database__AutoMigrate=false` — the boot-time **drift guard** still
 refuses to start if migrations are pending, so a skipped release step can't serve
-a stale schema. Scale past one instance and the EF history lock still serializes
-concurrent migrations.
+a stale schema. Scale past one instance and EF's migration lock (a Postgres
+advisory lock) still serializes concurrent migrations.
 
 ## Monorepo layout
 

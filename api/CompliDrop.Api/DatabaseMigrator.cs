@@ -19,10 +19,11 @@ namespace CompliDrop.Api;
 /// Two supported deploy shapes, both made safe here:
 /// <list type="number">
 ///   <item><b>Auto-migrate (default).</b> <c>Database:AutoMigrate=true</c> → the booting container
-///   applies pending migrations itself. EF 10 takes an exclusive <c>__EFMigrationsHistory</c> lock,
-///   so this is safe even if Railway briefly overlaps two containers during a deploy. A bad
-///   migration throws → boot aborts (fail-fast) → the old container keeps serving instead of the
-///   new one serving 500s.</item>
+///   applies pending migrations itself. EF Core acquires a migration lock (a Postgres advisory
+///   lock, via Npgsql) before applying and records applied migrations in <c>__EFMigrationsHistory</c>,
+///   so this is safe even if Railway briefly overlaps two containers during a deploy: one applies,
+///   the other waits and then sees nothing pending. A bad migration throws → boot aborts
+///   (fail-fast) → the old container keeps serving instead of the new one serving 500s.</item>
 ///   <item><b>External release command.</b> <c>Database:AutoMigrate=false</c> → a Railway
 ///   pre-deploy step runs <c>dotnet ef database update</c> before the container takes traffic. The
 ///   <em>drift guard</em> below is the safety net: if that step was skipped/failed and migrations
