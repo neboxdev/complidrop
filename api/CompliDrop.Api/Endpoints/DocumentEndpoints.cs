@@ -337,11 +337,10 @@ public static class DocumentEndpoints
 
         // Normalize HEIC/HEIF (iPhone photos) to JPEG on ingest so OCR, the LLM, and the browser
         // preview all see a supported format; PDF/JPEG/PNG pass through untouched. (#220 / ADR 0018)
-        var (storedBytes, storedContentType) = transcoder.NormalizeForStorage(buffer.ToArray(), validation.DetectedContentType!);
-        if (storedBytes is null)
+        var (storedStream, storedContentType) = transcoder.NormalizeForStorage(buffer, validation.DetectedContentType!);
+        if (storedStream is null)
             return Error(400, "document.unreadable_image", ImageTranscoderExtensions.UnreadableImageMessage);
 
-        using var storedStream = new MemoryStream(storedBytes);
         var blobName = $"{orgId}/{DateTime.UtcNow:yyyy-MM}/{Guid.NewGuid()}-{SanitizeFileName(file.FileName)}";
         var upload = await blobs.UploadAsync(blobName, storedStream, storedContentType, ct);
 
@@ -353,7 +352,7 @@ public static class DocumentEndpoints
             OriginalFileName = file.FileName,
             BlobStorageUrl = upload.Url,
             BlobStoragePath = blobName,
-            FileSizeBytes = storedBytes.Length,
+            FileSizeBytes = storedStream.Length,
             ContentType = storedContentType,
             DocumentType = declaredType,
             ExtractionStatus = ExtractionStatus.Pending,

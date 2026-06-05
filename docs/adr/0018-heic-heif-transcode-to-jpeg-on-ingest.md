@@ -58,12 +58,26 @@ Concretely:
 4. **The transcoder bakes in EXIF orientation and strips metadata.** iPhones store photos upright
    plus an orientation tag; `AutoOrient()` applies it before `Strip()` so the JPEG isn't sideways,
    and stripping drops EXIF/GPS so a vendor's location never lands in our blob store.
+6. **The decode is hardened against a hostile file on the public surface** (the portal is
+   unauthenticated). Two guards, added in the #220 review:
+   - **Decompression-bomb guard.** HEIC/HEVC compresses so well that a sub-10 MB file (the Kestrel
+     cap) can declare enormous pixel dimensions that decode to gigabytes of bitmap. `ToJpeg` reads the
+     header cheaply first (`MagickImageInfo`) and rejects anything over ~50 MP (`MaxPixels` — above a
+     48 MP iPhone Pro photo, far below a bomb) **before** allocating pixels, turning a bomb into a
+     clean 400 instead of an OOM. Process-wide `ResourceLimits` (width/height/area) back this up as
+     defense-in-depth.
+   - **Coder pinning.** `MagickImage` is constructed with `MagickReadSettings { Format = Heic }` so a
+     crafted file that slipped past the `ftyp` gate can't steer ImageMagick into an unexpected delegate
+     (SVG/MSL/URL/PS/…); libheif reads every HEIF brand through that one coder.
 
 **Library: Magick.NET (`Magick.NET-Q8-AnyCPU`).** HEIC decoding requires an HEVC decoder; there is no
 pure-managed option. Magick.NET bundles its own ImageMagick + libheif natives per-RID (no separate
 ImageMagick install), so the only extra container dependency is the OpenMP runtime `libgomp1`, added
-to the Dockerfile's runtime stage. The integration tests decode a real HEIC fixture, so **Linux CI
-proves the bundled delegate decodes HEIC on the same platform as the prod container.**
+to the Dockerfile's runtime stage. The integration tests decode a real HEIC fixture on Linux x64 CI
+(proving the bundled libheif delegate works on that platform), and the prod image itself was verified
+during #220: the Dockerfile builds with `libgomp1`, and `ldd Magick.Native-Q8-x64.dll.so` inside the
+built `aspnet:10.0` image resolves every dependency — so the decode that CI exercises also has its
+native deps satisfied in the deployed container.
 
 5. **The #196 stopgap copy is relaxed.** The portal dropzone now accepts `image/heic`/`image/heif`,
    and the "switch to Most Compatible and re-shoot" message is replaced with a simple unsupported-type
@@ -135,14 +149,19 @@ native dependency — they just decode fewer formats than Magick.NET.
 
 - `FileValidationServiceTests` — a real HEIC fixture is accepted as `image/heic`; each HEIF-family
   brand maps to the right type; an `ftyp` box with a non-HEIF brand (MP4 `isom`) is rejected; a
-  spoofed `image/heic` Content-Type on non-HEIC bytes is still rejected (magic bytes win).
+  spoofed `image/heic` Content-Type on non-HEIC bytes is still rejected (magic bytes win); a truncated
+  `ftyp` header too short to read the brand falls through to unsupported.
 - `ImageTranscoderTests` — `NeedsTranscodeToJpeg` matches only HEIC/HEIF (case-insensitive); a real
-  HEIC decodes to a valid, re-decodable JPEG (**this runs on Linux CI, proving the bundled libheif
-  delegate works on the prod platform**); undecodable bytes throw `ImageTranscodeException`;
-  `NormalizeForStorage` passes non-HEIC through unchanged and returns null on an undecodable HEIC.
+  HEIC decodes to a valid, re-decodable JPEG (**runs on Linux CI, proving the bundled libheif delegate
+  works on the prod platform**); an oriented+GPS fixture transcodes to an **upright** JPEG with **all
+  EXIF/GPS stripped**; an over-large-dimension header is **rejected before decode** (bomb guard);
+  undecodable bytes throw `ImageTranscodeException`; `NormalizeForStorage` passes non-HEIC through as
+  the same (rewound) stream, transcodes both `image/heic` and `image/heif`, and returns null on an
+  undecodable HEIC.
 - `DocumentEndpointsTests` / `VendorPortalEndpointsTests` — uploading the real HEIC fixture yields a
   stored `image/jpeg` document that reaches the extraction queue with the original filename preserved;
-  an undecodable HEIC returns a clean 400 and (portal) consumes no quota or storage.
+  JPEG/PNG pass through unchanged; an undecodable HEIC returns a clean 400 and (portal) consumes no
+  quota or storage.
 - `portal/[token]/page.test.tsx` — a dropped HEIC now uploads to "Received" instead of showing the
   retired "Most Compatible" dead-end.
 

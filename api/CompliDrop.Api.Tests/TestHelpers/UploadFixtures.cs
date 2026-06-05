@@ -29,6 +29,13 @@ public static class UploadFixtures
     public static byte[] HeicPhotoBytes() =>
         File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "TestFixtures", "sample-photo.heic"));
 
+    /// <summary>
+    /// A HEIC photo carrying EXIF orientation (90° rotate) + GPS coordinates, for asserting the
+    /// transcode produces an upright JPEG with all EXIF/GPS stripped (#220). Fresh buffer per call.
+    /// </summary>
+    public static byte[] OrientedHeicPhotoBytes() =>
+        File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "TestFixtures", "sample-photo-oriented.heic"));
+
     /// <summary>Builds a 64-byte buffer prefixed with the given magic-byte header.</summary>
     public static byte[] FileWith(params byte[] header)
     {

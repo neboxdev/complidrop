@@ -24,7 +24,9 @@ public class FileValidationService : IFileValidationService
 
         Span<byte> header = stackalloc byte[16];
         content.Position = 0;
-        var read = content.Read(header);
+        // ReadAtLeast (not a single Read) so a non-MemoryStream caller that returns a short read can't
+        // make a genuine HEIC look truncated (read < 12) and get wrongly rejected.
+        var read = content.ReadAtLeast(header, header.Length, throwOnEndOfStream: false);
         content.Position = 0;
 
         if (read < 4) return new(false, null, "document.unsupported_format", "Unable to read file header.");

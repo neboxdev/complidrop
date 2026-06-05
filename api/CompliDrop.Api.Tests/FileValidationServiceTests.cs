@@ -108,6 +108,17 @@ public class FileValidationServiceTests
         r.IsValid.Should().BeFalse();
     }
 
+    [Fact]
+    public void Rejects_a_truncated_ftyp_header_too_short_to_read_the_brand()
+    {
+        // 11 bytes: an "ftyp" box but one byte short of the 12 needed to read the brand at offset 8-11.
+        // The `read >= 12` guard must make this fall through to unsupported, not misread a partial brand.
+        var bytes = new byte[] { 0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69 };
+        var r = _validator.Validate(new MemoryStream(bytes), "image/heic", "x.heic");
+        r.IsValid.Should().BeFalse();
+        r.ErrorCode.Should().Be("document.unsupported_format");
+    }
+
     // A minimal ISO-BMFF "ftyp" box: [size=0x18]["ftyp"][major brand], padded by WithHeader.
     private static MemoryStream Ftyp(string brand) => WithHeader(
         0x00, 0x00, 0x00, 0x18,

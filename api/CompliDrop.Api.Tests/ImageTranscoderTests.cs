@@ -44,6 +44,45 @@ public class ImageTranscoderTests
     }
 
     [Fact]
+    public void ToJpeg_strips_exif_and_gps_metadata()
+    {
+        // Privacy guarantee (ADR 0018): the source HEIC carries EXIF (orientation) + GPS; the output
+        // JPEG must carry no EXIF profile, so a vendor's photo location never lands in our blob store.
+        var jpeg = _sut.ToJpeg(UploadFixtures.OrientedHeicPhotoBytes());
+
+        using var img = new MagickImage(jpeg);
+        img.GetExifProfile().Should().BeNull();
+    }
+
+    [Fact]
+    public void ToJpeg_yields_an_upright_image_with_no_residual_orientation()
+    {
+        // The source is a landscape 240x160 capture flagged for 90-degree display rotation. The
+        // transcode must produce an upright (portrait) image with the orientation normalized away
+        // (libheif applies the rotation on decode; AutoOrient backs up decoders that don't; Strip
+        // drops the now-stale tag) — so no viewer re-rotates it sideways. Dropping both AutoOrient
+        // and Strip would leave a stale orientation tag and this would fail.
+        var jpeg = _sut.ToJpeg(UploadFixtures.OrientedHeicPhotoBytes());
+
+        using var img = new MagickImage(jpeg);
+        img.Height.Should().BeGreaterThan(img.Width); // upright/portrait, not the raw landscape
+        img.Orientation.Should().BeOneOf(OrientationType.Undefined, OrientationType.TopLeft);
+    }
+
+    [Fact]
+    public void ToJpeg_rejects_an_oversized_image_before_decoding_it()
+    {
+        // Decompression-bomb guard: a header that declares more than MaxPixels must be rejected via
+        // the cheap MagickImageInfo pre-check, not decoded into a giant bitmap. We synthesize a tiny
+        // PNG and rewrite its IHDR width/height to a huge value, so the header lies about its size.
+        var bomb = OversizedImageHeader();
+
+        var act = () => _sut.ToJpeg(bomb);
+
+        act.Should().Throw<ImageTranscodeException>();
+    }
+
+    [Fact]
     public void ToJpeg_throws_ImageTranscodeException_on_undecodable_bytes()
     {
         // A valid HEIC magic-byte header but a garbage body the decoder can't read.
@@ -59,25 +98,32 @@ public class ImageTranscoderTests
     }
 
     [Fact]
-    public void NormalizeForStorage_passes_non_heic_through_unchanged()
+    public void NormalizeForStorage_passes_non_heic_through_as_the_same_buffer()
     {
-        var pdf = UploadFixtures.PdfBytes();
+        using var buffer = new MemoryStream(UploadFixtures.PdfBytes());
 
-        var (content, contentType) = _sut.NormalizeForStorage(pdf, "application/pdf");
+        var (content, contentType) = _sut.NormalizeForStorage(buffer, "application/pdf");
 
-        content.Should().BeSameAs(pdf); // no copy, no transcode
+        content.Should().BeSameAs(buffer); // no copy, no transcode — the same stream, rewound
+        content!.Position.Should().Be(0);
         contentType.Should().Be("application/pdf");
     }
 
-    [Fact]
-    public void NormalizeForStorage_transcodes_heic_to_jpeg()
+    [Theory]
+    [InlineData("image/heic")]
+    [InlineData("image/heif")] // the heif-branded path routes through the same pinned HEIC coder
+    public void NormalizeForStorage_transcodes_heic_to_a_jpeg_stream(string detectedContentType)
     {
-        var (content, contentType) = _sut.NormalizeForStorage(UploadFixtures.HeicPhotoBytes(), "image/heic");
+        using var buffer = new MemoryStream(UploadFixtures.HeicPhotoBytes());
+
+        var (content, contentType) = _sut.NormalizeForStorage(buffer, detectedContentType);
 
         content.Should().NotBeNull();
         contentType.Should().Be("image/jpeg");
-        content![0].Should().Be(0xFF);
-        content[1].Should().Be(0xD8);
+        content!.Position.Should().Be(0);
+        var bytes = ((MemoryStream)content).ToArray();
+        bytes[0].Should().Be(0xFF);
+        bytes[1].Should().Be(0xD8);
     }
 
     [Fact]
@@ -88,10 +134,25 @@ public class ImageTranscoderTests
             0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63,
             0x09, 0x09, 0x09, 0x09,
         };
+        using var buffer = new MemoryStream(garbage);
 
-        var (content, contentType) = _sut.NormalizeForStorage(garbage, "image/heic");
+        var (content, contentType) = _sut.NormalizeForStorage(buffer, "image/heic");
 
         content.Should().BeNull();
         contentType.Should().Be("");
+    }
+
+    // A 1x1 PNG whose IHDR width/height are rewritten to 60000x60000 (> MaxPixels) — the header lies,
+    // so the dimension pre-check fires before any pixel allocation. (The CRC is now wrong, which is
+    // fine: we assert it's rejected, and either the size guard or the corrupt-header path throws.)
+    private static byte[] OversizedImageHeader()
+    {
+        // Minimal valid 1x1 PNG.
+        var png = Convert.FromBase64String(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
+        // IHDR width is bytes 16-19, height 20-23 (big-endian). 60000 = 0x0000EA60.
+        png[16] = 0x00; png[17] = 0x00; png[18] = 0xEA; png[19] = 0x60;
+        png[20] = 0x00; png[21] = 0x00; png[22] = 0xEA; png[23] = 0x60;
+        return png;
     }
 }

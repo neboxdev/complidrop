@@ -78,6 +78,28 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
+    public async Task Upload_passes_jpeg_and_png_through_unchanged_after_the_heic_refactor()
+    {
+        // The #220 ingest refactor routes every upload through transcoder.NormalizeForStorage; a
+        // non-HEIC type must pass through with its content type intact (not transcoded) and reach the
+        // queue. Guards the passthrough end-to-end through the refactored endpoint.
+        var auth = await RegisterAndLoginAsync();
+
+        var jpegId = await UploadedId(await auth.Client.PostAsync("/api/documents/upload",
+            UploadForm(FileWith(0xFF, 0xD8, 0xFF, 0xE0), "p.jpg", "image/jpeg")));
+        var pngId = await UploadedId(await auth.Client.PostAsync("/api/documents/upload",
+            UploadForm(FileWith(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A), "p.png", "image/png")));
+
+        await using var db = CreateSystemDb();
+        var jpeg = await db.Documents.FirstAsync(d => d.Id == jpegId);
+        var png = await db.Documents.FirstAsync(d => d.Id == pngId);
+        jpeg.ContentType.Should().Be("image/jpeg");
+        png.ContentType.Should().Be("image/png");
+        jpeg.ExtractionStatus.Should().Be(ExtractionStatus.Pending);
+        png.ExtractionStatus.Should().Be(ExtractionStatus.Pending);
+    }
+
+    [Fact]
     public async Task Upload_is_refused_once_the_free_plan_limit_is_reached()
     {
         var auth = await RegisterAndLoginAsync();
