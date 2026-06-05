@@ -1,4 +1,5 @@
 using CompliDrop.Api.Services;
+using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 
 namespace CompliDrop.Api.Tests;
@@ -65,4 +66,51 @@ public class FileValidationServiceTests
         r.IsValid.Should().BeFalse();
         r.ErrorCode.Should().Be("document.unsupported_format");
     }
+
+    // ---- #220: HEIC / HEIF (iPhone "High Efficiency" photos) ----
+
+    [Fact]
+    public void Accepts_a_real_heic_photo_by_magic_bytes()
+    {
+        var r = _validator.Validate(new MemoryStream(UploadFixtures.HeicPhotoBytes()), "application/octet-stream", "coi.heic");
+        r.IsValid.Should().BeTrue();
+        r.DetectedContentType.Should().Be("image/heic");
+    }
+
+    [Theory]
+    [InlineData("heic", "image/heic")]
+    [InlineData("heix", "image/heic")]
+    [InlineData("hevc", "image/heic")]
+    [InlineData("mif1", "image/heif")]
+    [InlineData("msf1", "image/heif")]
+    public void Accepts_each_heif_family_brand(string brand, string expectedType)
+    {
+        var r = _validator.Validate(Ftyp(brand), "application/octet-stream", $"x.{brand}");
+        r.IsValid.Should().BeTrue();
+        r.DetectedContentType.Should().Be(expectedType);
+    }
+
+    [Fact]
+    public void Rejects_an_ftyp_box_whose_brand_is_not_a_heif_family()
+    {
+        // An MP4/QuickTime container also opens with an "ftyp" box (brand "isom"/"mp42"), so the
+        // brand check must gate acceptance — a video must not be stored as an image.
+        var r = _validator.Validate(Ftyp("isom"), "video/mp4", "movie.mp4");
+        r.IsValid.Should().BeFalse();
+        r.ErrorCode.Should().Be("document.unsupported_format");
+    }
+
+    [Fact]
+    public void Rejects_a_heic_content_type_on_non_heic_bytes()
+    {
+        // Magic bytes win over the declared Content-Type: a spoofed "image/heic" header on plain text.
+        var r = _validator.Validate(WithHeader(0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x77, 0x64), "image/heic", "fake.heic");
+        r.IsValid.Should().BeFalse();
+    }
+
+    // A minimal ISO-BMFF "ftyp" box: [size=0x18]["ftyp"][major brand], padded by WithHeader.
+    private static MemoryStream Ftyp(string brand) => WithHeader(
+        0x00, 0x00, 0x00, 0x18,
+        0x66, 0x74, 0x79, 0x70, // "ftyp"
+        (byte)brand[0], (byte)brand[1], (byte)brand[2], (byte)brand[3]);
 }

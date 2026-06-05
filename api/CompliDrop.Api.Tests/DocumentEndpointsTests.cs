@@ -44,6 +44,40 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
+    public async Task Upload_accepts_a_heic_photo_and_stores_it_as_jpeg()
+    {
+        var auth = await RegisterAndLoginAsync();
+
+        var resp = await auth.Client.PostAsync("/api/documents/upload",
+            UploadForm(HeicPhotoBytes(), "coi.heic", "image/heic"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var id = await UploadedId(resp);
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == id);
+        // Transcoded to JPEG on ingest (#220) so OCR/LLM/preview all see a supported format, and it
+        // reaches the extraction queue. The original filename is preserved for provenance.
+        doc.ContentType.Should().Be("image/jpeg");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending);
+        doc.OriginalFileName.Should().Be("coi.heic");
+    }
+
+    [Fact]
+    public async Task Upload_rejects_an_undecodable_heic_with_a_clean_400()
+    {
+        var auth = await RegisterAndLoginAsync();
+        // A valid HEIC magic-byte header (so validation accepts it) but a body the decoder can't read.
+        var brokenHeic = FileWith(0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63);
+
+        var resp = await auth.Client.PostAsync("/api/documents/upload",
+            UploadForm(brokenHeic, "broken.heic", "image/heic"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("document.unreadable_image");
+    }
+
+    [Fact]
     public async Task Upload_is_refused_once_the_free_plan_limit_is_reached()
     {
         var auth = await RegisterAndLoginAsync();

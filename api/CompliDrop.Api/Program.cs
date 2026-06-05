@@ -72,6 +72,7 @@ builder.Services.AddSingleton<IPasswordHasher, BCryptPasswordHasher>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
 builder.Services.AddSingleton<IBlobStorageService, BlobStorageService>();
 builder.Services.AddSingleton<IFileValidationService, FileValidationService>();
+builder.Services.AddSingleton<IImageTranscoder, MagickImageTranscoder>();
 builder.Services.AddScoped<IIdempotencyService, IdempotencyService>();
 builder.Services.AddScoped<IAuditLogger, AuditLogger>();
 builder.Services.AddScoped<ICostTrackingService, CostTrackingService>();

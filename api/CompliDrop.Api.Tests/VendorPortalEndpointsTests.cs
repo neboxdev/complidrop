@@ -264,6 +264,45 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     }
 
     [Fact]
+    public async Task Upload_accepts_a_heic_photo_and_stores_it_as_jpeg()
+    {
+        // The iPhone vendor case (#220): a HEIC capture uploads through the portal, is transcoded to
+        // JPEG on ingest, and reaches the extraction queue scoped to the link's org.
+        var seeded = await SeedLinkAsync();
+        var client = CreateClient();
+
+        var resp = await UploadAsync(client, seeded.Token, HeicPhotoBytes(), "coi.heic", "image/heic");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var uploadId = (await Data(resp)).GetProperty("uploadId").GetGuid();
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.IgnoreQueryFilters().SingleAsync(d => d.Id == uploadId);
+        doc.OrganizationId.Should().Be(seeded.OrgId);
+        doc.ContentType.Should().Be("image/jpeg");
+        doc.OriginalFileName.Should().Be("coi.heic");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending);
+    }
+
+    [Fact]
+    public async Task Upload_of_an_undecodable_heic_is_400_and_consumes_no_quota_or_storage()
+    {
+        // Transcode runs BEFORE the blob upload + quota reservation, so a photo we can't decode
+        // costs the vendor no permit and leaves no orphaned blob/document. (#220)
+        var seeded = await SeedLinkAsync(maxUploads: 3, uploadCount: 0);
+        var client = CreateClient();
+        // A valid HEIC magic-byte header (passes validation) but a body the decoder can't read.
+        var brokenHeic = FileWith(0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63);
+
+        var resp = await UploadAsync(client, seeded.Token, brokenHeic, "broken.heic", "image/heic");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(resp)).Should().Be("document.unreadable_image");
+        await using var db = CreateSystemDb();
+        (await db.VendorPortalLinks.SingleAsync(l => l.Id == seeded.LinkId)).UploadCount.Should().Be(0);
+        (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId)).Should().Be(0);
+    }
+
+    [Fact]
     public async Task Status_is_scoped_to_the_uploads_link_and_not_exposed_via_another_link()
     {
         var a = await SeedLinkAsync();

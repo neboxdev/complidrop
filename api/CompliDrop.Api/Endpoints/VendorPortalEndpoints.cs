@@ -55,6 +55,7 @@ public static class VendorPortalEndpoints
         SystemDbContext db,
         IBlobStorageService blobs,
         IFileValidationService validator,
+        IImageTranscoder transcoder,
         IAuditLogger audit,
         ILogger<VendorPortalLink> logger,
         CancellationToken ct)
@@ -89,10 +90,17 @@ public static class VendorPortalEndpoints
         if (!validation.IsValid)
             return Error(400, validation.ErrorCode ?? "document.unsupported_format", validation.ErrorMessage ?? "Invalid file.");
 
-        buffer.Position = 0;
+        // Normalize HEIC/HEIF (iPhone photos) to JPEG on ingest so OCR, the LLM, and the browser
+        // preview all see a supported format; PDF/JPEG/PNG pass through untouched. Runs BEFORE the
+        // blob upload + quota transaction so a bad photo costs no storage or permit. (#220 / ADR 0018)
+        var (storedBytes, storedContentType) = transcoder.NormalizeForStorage(buffer.ToArray(), validation.DetectedContentType!);
+        if (storedBytes is null)
+            return Error(400, "document.unreadable_image", ImageTranscoderExtensions.UnreadableImageMessage);
+
         var orgId = link.Vendor.OrganizationId;
+        using var storedStream = new MemoryStream(storedBytes);
         var blobName = $"{orgId}/{DateTime.UtcNow:yyyy-MM}/portal-{Guid.NewGuid()}-{SanitizeFileName(file.FileName)}";
-        var upload = await blobs.UploadAsync(blobName, buffer, validation.DetectedContentType!, ct);
+        var upload = await blobs.UploadAsync(blobName, storedStream, storedContentType, ct);
 
         var doc = new Document
         {
@@ -102,8 +110,8 @@ public static class VendorPortalEndpoints
             OriginalFileName = file.FileName,
             BlobStorageUrl = upload.Url,
             BlobStoragePath = blobName,
-            FileSizeBytes = file.Length,
-            ContentType = validation.DetectedContentType!,
+            FileSizeBytes = storedBytes.Length,
+            ContentType = storedContentType,
             DocumentType = form["documentType"].ToString() is var dt && !string.IsNullOrWhiteSpace(dt) ? dt : "other",
             ExtractionStatus = ExtractionStatus.Pending,
             ComplianceStatus = ComplianceStatus.Pending,

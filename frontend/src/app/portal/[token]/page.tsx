@@ -65,10 +65,11 @@ function rejectionCopy(rejections: FileRejection[]): string | null {
   const first = rejections[0].errors[0];
   switch (first?.code) {
     case "file-invalid-type":
-      // Phone-aware: an iPhone photo often arrives as HEIC, which we can't read
-      // yet. Now that the portal invites "take a photo", a bare "isn't accepted"
-      // would be a dead-end — give the vendor the actual fix. (#196 review)
-      return "We can't read that file type. If you photographed it on an iPhone, set Settings > Camera > Formats to Most Compatible and take the photo again — or upload a PDF, JPEG, or PNG.";
+      // HEIC/HEIF (the iPhone camera default) is now accepted and transcoded to
+      // JPEG server-side (#220), so the old "switch to Most Compatible" workaround
+      // is gone. This now only fires for genuinely unsupported types (a Word doc, a
+      // video, a .zip) — point at the formats that do work.
+      return "We can't read that file type. Please upload a PDF or a photo (JPEG, PNG, or HEIC).";
     case "file-too-large":
       // Drop the desktop "split/compress" language — on a phone-photo surface
       // the actionable fix is to reshoot from further back or send a PDF. (#196 review)
@@ -278,6 +279,10 @@ export default function PortalPage() {
       "application/pdf": [".pdf"],
       "image/jpeg": [".jpg", ".jpeg"],
       "image/png": [".png"],
+      // iPhone "High Efficiency" photos. Accepted here and transcoded to JPEG
+      // server-side on ingest (#220) — no more "switch to Most Compatible" dead-end.
+      "image/heic": [".heic"],
+      "image/heif": [".heif"],
     },
     maxSize: 10 * 1024 * 1024,
     disabled: atQuota,
@@ -364,11 +369,12 @@ export default function PortalPage() {
           {/* Override react-dropzone's input `accept` to include `image/*` so the
               native file picker on iOS/Android surfaces "Take Photo" — a vendor
               photographing a paper certificate is the common mobile case. The
-              dropzone's own onDrop still validates against PDF/JPEG/PNG + 10 MB,
-              so a stray HEIC/library pick is rejected with clear copy. NOTE: the
-              explicit `accept` MUST stay AFTER the `{...getInputProps()}` spread —
-              react-dropzone injects its own narrower `accept` and last-prop-wins
-              is what lets this override take effect. (#196) */}
+              dropzone's own onDrop still validates against PDF/JPEG/PNG/HEIC + 10 MB
+              (HEIC is transcoded to JPEG server-side, #220), so a non-document pick
+              (a video, a .zip) is rejected with clear copy. NOTE: the explicit
+              `accept` MUST stay AFTER the `{...getInputProps()}` spread — react-dropzone
+              injects its own narrower `accept` and last-prop-wins is what lets this
+              override take effect. (#196) */}
           <input {...getInputProps()} accept="image/*,application/pdf" />
           <UploadCloud className="w-12 h-12 mx-auto text-sky-500" />
           <p className="mt-3 text-base font-medium text-slate-800">

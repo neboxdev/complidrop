@@ -20,6 +20,15 @@ public static class UploadFixtures
     /// <summary>Plain text bytes ("hello wd") — matches no supported magic-byte signature. Fresh buffer per call (see <see cref="PdfBytes"/>).</summary>
     public static byte[] TextBytes() => FileWith(0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x77, 0x64);
 
+    /// <summary>
+    /// A real HEIC photo fixture (generated with pillow-heif, committed under <c>TestFixtures/</c>),
+    /// used to exercise the #220 HEIC magic-byte validation + the Magick.NET transcode-to-JPEG path
+    /// end-to-end. The test csproj copies <c>TestFixtures</c> next to the assembly, so it resolves via
+    /// <see cref="AppContext.BaseDirectory"/> on any test host (incl. Linux CI). Fresh buffer per call.
+    /// </summary>
+    public static byte[] HeicPhotoBytes() =>
+        File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "TestFixtures", "sample-photo.heic"));
+
     /// <summary>Builds a 64-byte buffer prefixed with the given magic-byte header.</summary>
     public static byte[] FileWith(params byte[] header)
     {
