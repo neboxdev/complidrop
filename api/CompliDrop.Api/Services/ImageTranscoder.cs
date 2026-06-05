@@ -47,14 +47,18 @@ public sealed class MagickImageTranscoder(ILogger<MagickImageTranscoder> logger)
     /// </summary>
     public const long MaxPixels = 50_000_000;
 
+    /// <summary>Per-axis ceiling (matches the process-wide <see cref="ResourceLimits"/> width/height).</summary>
+    public const uint MaxDimension = 50_000;
+
     static MagickImageTranscoder()
     {
-        // Defense-in-depth behind the per-call MaxPixels guard: cap ImageMagick's decode resources
-        // process-wide so a malicious image can't exhaust host memory even on a path that skipped the
-        // guard. Set once, before any decode. (#220 review — security/perf)
-        ResourceLimits.Width = 50_000;
-        ResourceLimits.Height = 50_000;
-        ResourceLimits.Area = (ulong)MaxPixels;
+        // Hard per-axis backstop applied process-wide before any decode: ImageMagick throws if an image
+        // exceeds these, so even a path that somehow skipped ToJpeg's check can't allocate a giant
+        // bitmap. (Area is deliberately NOT set — it only spills the pixel cache to disk rather than
+        // rejecting — so the per-call MaxPixels check in ToJpeg is the primary area guard, and it stays
+        // reachable: a small-axis/large-area image still reaches that check.) (#220 review — security/perf)
+        ResourceLimits.Width = MaxDimension;
+        ResourceLimits.Height = MaxDimension;
     }
 
     public bool NeedsTranscodeToJpeg(string contentType) =>
@@ -68,7 +72,9 @@ public sealed class MagickImageTranscoder(ILogger<MagickImageTranscoder> logger)
             // header, so a small HEIC declaring enormous dimensions becomes a clean 400 instead of
             // OOMing the (public, untrusted) upload path. (#220 review — security/perf)
             var info = new MagickImageInfo(source);
-            if ((long)info.Width * info.Height > MaxPixels)
+            // Short-circuit on either axis before multiplying so a header declaring near-uint.MaxValue
+            // dimensions can't overflow the long product and slip past the area check. (#220 re-review)
+            if (info.Width > MaxDimension || info.Height > MaxDimension || (long)info.Width * info.Height > MaxPixels)
                 throw new ImageTranscodeException($"Image dimensions too large to process ({info.Width}x{info.Height}).");
 
             // Pin the input coder to HEIC so a crafted file that slipped past the ftyp magic-byte gate

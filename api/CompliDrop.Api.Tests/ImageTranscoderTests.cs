@@ -55,13 +55,14 @@ public class ImageTranscoderTests
     }
 
     [Fact]
-    public void ToJpeg_yields_an_upright_image_with_no_residual_orientation()
+    public void ToJpeg_yields_an_upright_jpeg_with_no_residual_orientation_metadata()
     {
-        // The source is a landscape 240x160 capture flagged for 90-degree display rotation. The
-        // transcode must produce an upright (portrait) image with the orientation normalized away
-        // (libheif applies the rotation on decode; AutoOrient backs up decoders that don't; Strip
-        // drops the now-stale tag) — so no viewer re-rotates it sideways. Dropping both AutoOrient
-        // and Strip would leave a stale orientation tag and this would fail.
+        // The source is flagged for 90-degree display rotation + carries GPS. The output must be an
+        // upright (portrait) JPEG with NO residual orientation tag, so no viewer re-rotates it. The
+        // rotation itself comes from libheif (it bakes HEIC orientation into pixels on decode);
+        // AutoOrient is defensive for any decode path that doesn't. The orientation assertion here
+        // specifically guards Strip: drop Strip and the stale EXIF orientation (=6) survives into the
+        // JPEG, so a re-read would report a non-TopLeft Orientation and this fails.
         var jpeg = _sut.ToJpeg(UploadFixtures.OrientedHeicPhotoBytes());
 
         using var img = new MagickImage(jpeg);
@@ -72,14 +73,14 @@ public class ImageTranscoderTests
     [Fact]
     public void ToJpeg_rejects_an_oversized_image_before_decoding_it()
     {
-        // Decompression-bomb guard: a header that declares more than MaxPixels must be rejected via
-        // the cheap MagickImageInfo pre-check, not decoded into a giant bitmap. We synthesize a tiny
-        // PNG and rewrite its IHDR width/height to a huge value, so the header lies about its size.
-        var bomb = OversizedImageHeader();
+        // Decompression-bomb guard: a real, well-formed 8000x8000 (64 MP) HEIC — over the ~50 MP
+        // ceiling — must be rejected via the cheap MagickImageInfo header pre-check, NOT decoded into a
+        // giant bitmap. The "too large" message binds this to the size guard specifically; and because
+        // the fixture is a genuinely decodable HEIC, removing the guard would make ToJpeg transcode it
+        // successfully (no throw) — so this test actually fails if the guard regresses.
+        var act = () => _sut.ToJpeg(UploadFixtures.HugeHeicPhotoBytes());
 
-        var act = () => _sut.ToJpeg(bomb);
-
-        act.Should().Throw<ImageTranscodeException>();
+        act.Should().Throw<ImageTranscodeException>().WithMessage("*too large*");
     }
 
     [Fact]
@@ -142,17 +143,4 @@ public class ImageTranscoderTests
         contentType.Should().Be("");
     }
 
-    // A 1x1 PNG whose IHDR width/height are rewritten to 60000x60000 (> MaxPixels) — the header lies,
-    // so the dimension pre-check fires before any pixel allocation. (The CRC is now wrong, which is
-    // fine: we assert it's rejected, and either the size guard or the corrupt-header path throws.)
-    private static byte[] OversizedImageHeader()
-    {
-        // Minimal valid 1x1 PNG.
-        var png = Convert.FromBase64String(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
-        // IHDR width is bytes 16-19, height 20-23 (big-endian). 60000 = 0x0000EA60.
-        png[16] = 0x00; png[17] = 0x00; png[18] = 0xEA; png[19] = 0x60;
-        png[20] = 0x00; png[21] = 0x00; png[22] = 0xEA; png[23] = 0x60;
-        return png;
-    }
 }

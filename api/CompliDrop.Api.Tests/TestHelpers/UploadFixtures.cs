@@ -36,6 +36,14 @@ public static class UploadFixtures
     public static byte[] OrientedHeicPhotoBytes() =>
         File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "TestFixtures", "sample-photo-oriented.heic"));
 
+    /// <summary>
+    /// An 8000x8000 (64 MP) HEIC — over the transcoder's ~50 MP ceiling but with each axis well under
+    /// the per-axis limit, so it exercises the area branch of the decompression-bomb guard (#220).
+    /// Solid color, so the file is tiny. Fresh buffer per call.
+    /// </summary>
+    public static byte[] HugeHeicPhotoBytes() =>
+        File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "TestFixtures", "sample-photo-huge.heic"));
+
     /// <summary>Builds a 64-byte buffer prefixed with the given magic-byte header.</summary>
     public static byte[] FileWith(params byte[] header)
     {

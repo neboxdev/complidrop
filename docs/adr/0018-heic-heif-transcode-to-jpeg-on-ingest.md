@@ -64,8 +64,9 @@ Concretely:
      cap) can declare enormous pixel dimensions that decode to gigabytes of bitmap. `ToJpeg` reads the
      header cheaply first (`MagickImageInfo`) and rejects anything over ~50 MP (`MaxPixels` — above a
      48 MP iPhone Pro photo, far below a bomb) **before** allocating pixels, turning a bomb into a
-     clean 400 instead of an OOM. Process-wide `ResourceLimits` (width/height/area) back this up as
-     defense-in-depth.
+     clean 400 instead of an OOM. Process-wide `ResourceLimits` back this up: width/height are hard
+     limits ImageMagick throws past; area caps the in-memory pixel cache (spilling beyond it to disk),
+     so the per-call check is the primary rejection.
    - **Coder pinning.** `MagickImage` is constructed with `MagickReadSettings { Format = Heic }` so a
      crafted file that slipped past the `ftyp` gate can't steer ImageMagick into an unexpected delegate
      (SVG/MSL/URL/PS/…); libheif reads every HEIF brand through that one coder.
