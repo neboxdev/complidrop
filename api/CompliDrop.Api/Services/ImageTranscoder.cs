@@ -68,19 +68,21 @@ public sealed class MagickImageTranscoder(ILogger<MagickImageTranscoder> logger)
     {
         try
         {
+            // Pin BOTH the header read and the decode to the HEIC coder so a crafted file that slipped
+            // past the ftyp magic-byte gate can't steer ImageMagick into an unexpected delegate
+            // (SVG/MSL/URL/PS/...). libheif reads every HEIF brand (heic/heif/mif1/...) through it.
+            // (#220 review — security)
+            var heicSettings = new MagickReadSettings { Format = MagickFormat.Heic };
+
             // Reject a decompression bomb BEFORE allocating pixels: MagickImageInfo reads only the
             // header, so a small HEIC declaring enormous dimensions becomes a clean 400 instead of
-            // OOMing the (public, untrusted) upload path. (#220 review — security/perf)
-            var info = new MagickImageInfo(source);
-            // Short-circuit on either axis before multiplying so a header declaring near-uint.MaxValue
-            // dimensions can't overflow the long product and slip past the area check. (#220 re-review)
+            // OOMing the (public, untrusted) upload path. Short-circuit on either axis before the area
+            // multiply so near-uint.MaxValue dims can't overflow the long product. (#220 review)
+            var info = new MagickImageInfo(source, heicSettings);
             if (info.Width > MaxDimension || info.Height > MaxDimension || (long)info.Width * info.Height > MaxPixels)
                 throw new ImageTranscodeException($"Image dimensions too large to process ({info.Width}x{info.Height}).");
 
-            // Pin the input coder to HEIC so a crafted file that slipped past the ftyp magic-byte gate
-            // can't steer ImageMagick into an unexpected delegate (SVG/MSL/URL/PS/...). libheif reads
-            // every HEIF brand (heic/heif/mif1/...) through this one coder. (#220 review — security)
-            using var image = new MagickImage(source, new MagickReadSettings { Format = MagickFormat.Heic });
+            using var image = new MagickImage(source, heicSettings);
             // iPhones flag rotation rather than rotating pixels; libheif applies it on decode, but
             // AutoOrient is the belt-and-suspenders for any path that doesn't — before Strip drops the
             // now-stale orientation tag along with EXIF/GPS (so no viewer re-rotates it, and no location
