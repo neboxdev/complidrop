@@ -3,7 +3,9 @@ using CompliDrop.Api.Data;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using Testcontainers.PostgreSql;
 
 namespace CompliDrop.Api.Tests;
@@ -34,16 +36,23 @@ public sealed class DatabaseMigratorIntegrationTests : IAsyncLifetime
     public async Task AutoMigrate_applies_all_pending_migrations_to_a_fresh_database()
     {
         await using var db = NewDb();
+        // ListLogger (not NullLogger) because the "applying N migrations" line is the operator's
+        // only signal that the schema changed — assert it, not just the schema state (#184).
+        var logger = new ListLogger<Program>();
 
         // A fresh container DB has the database but no schema → every assembly migration is pending.
-        (await db.Database.GetPendingMigrationsAsync()).Should().NotBeEmpty(
-            "a fresh database starts with no applied migrations");
+        var pendingBefore = (await db.Database.GetPendingMigrationsAsync()).ToList();
+        pendingBefore.Should().NotBeEmpty("a fresh database starts with no applied migrations");
 
-        await DatabaseMigrator.MigrateAndGuardAsync(db.Database, autoMigrate: true, NullLogger.Instance);
+        await DatabaseMigrator.MigrateAndGuardAsync(db.Database, autoMigrate: true, logger);
 
         (await db.Database.GetPendingMigrationsAsync()).Should().BeEmpty(
             "auto-migrate must bring the schema fully up to date");
         (await db.Database.GetAppliedMigrationsAsync()).Should().NotBeEmpty();
+
+        logger.Entries.Should().Contain(
+            e => e.Level == LogLevel.Information && e.Message.Contains($"Applying {pendingBefore.Count} pending"),
+            "the apply path must log the count it migrated, not run silently");
 
         // The exact shape that 500'd on 2026-06-05 (#226): materializing the full User entity
         // SELECTs every mapped column (SecurityStamp, EmailVerifiedAt, HasCompletedOnboarding, …).
@@ -60,6 +69,9 @@ public sealed class DatabaseMigratorIntegrationTests : IAsyncLifetime
         await using var db = NewDb();
         await DatabaseMigrator.MigrateAndGuardAsync(db.Database, autoMigrate: true, NullLogger.Instance);
         var appliedAfterFirst = (await db.Database.GetAppliedMigrationsAsync()).ToList();
+        // Baseline must be non-empty, else the equivalence check below is "empty == empty" and would
+        // green even if the first migrate had applied nothing.
+        appliedAfterFirst.Should().NotBeEmpty("the first migrate must actually apply the assembly's migrations");
 
         // Second run with nothing pending must be a clean no-op (no throw, no schema change).
         var act = async () =>
@@ -82,9 +94,15 @@ public sealed class DatabaseMigratorIntegrationTests : IAsyncLifetime
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*schema drift*");
 
-        // And it must NOT have applied anything as a side effect — drift detection is read-only.
-        (await db.Database.GetAppliedMigrationsAsync()).Should().BeEmpty(
-            "the drift guard reports drift; it must not silently migrate");
+        // It must NOT have applied anything as a side effect. The strongest signal is that the
+        // table the first migration creates still does not exist — querying Users throws "relation
+        // does not exist" (42P01), the exact inverse of the happy-path SELECT in the apply test.
+        // (Asserting GetAppliedMigrationsAsync is empty alone is weaker: an untouched DB is empty by
+        // default, so it can't distinguish "nothing applied" from "applied without history rows".)
+        var probe = async () => await db.Users.FirstOrDefaultAsync();
+        (await probe.Should().ThrowAsync<PostgresException>()).Which.SqlState
+            .Should().Be(PostgresErrorCodes.UndefinedTable, "the drift guard must not create any schema");
+        (await db.Database.GetAppliedMigrationsAsync()).Should().BeEmpty();
     }
 
     [Fact]
@@ -100,5 +118,23 @@ public sealed class DatabaseMigratorIntegrationTests : IAsyncLifetime
 
         await act.Should().NotThrowAsync(
             "a current schema must boot even with auto-migrate off (the release-command deploy shape)");
+    }
+
+    [Fact]
+    public async Task AutoMigrate_propagates_a_failed_migration_for_fail_fast()
+    {
+        await using var db = NewDb();
+
+        // Pre-create an object the initial migration's CREATE TABLE will collide with, forcing
+        // MigrateAsync itself to fail. The helper must NOT swallow it — a bad migration has to abort
+        // boot (fail-fast), the other half of the #226 guarantee alongside drift-abort. This is a
+        // distinct code path from the drift InvalidOperationException the guard raises itself.
+        await db.Database.ExecuteSqlRawAsync("CREATE TABLE \"Organizations\" (\"Id\" uuid NOT NULL);");
+
+        var act = async () =>
+            await DatabaseMigrator.MigrateAndGuardAsync(db.Database, autoMigrate: true, NullLogger.Instance);
+
+        (await act.Should().ThrowAsync<PostgresException>("MigrateAsync must surface a failed migration, not swallow it"))
+            .Which.SqlState.Should().Be(PostgresErrorCodes.DuplicateTable);
     }
 }
