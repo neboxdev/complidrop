@@ -189,17 +189,17 @@ The 401→refresh→retry chain with in-shell outage handling (no eviction on 5x
 ## Defect vs UX-debt triage
 
 **Defects (filed with `bug` label → auto-join #48):**
-1. FP-060 "View file" has never worked (no SAS/proxy).
-2. FP-110/FP-002.2+3 Account deletion never cancels Stripe + checkout lacks an already-subscribed guard.
-3. FP-003 "Monthly" extraction budget never resets (lifetime ceiling, permanent failure).
-4. FP-001 Verdict-freshness cluster (no expiry sweep; no re-eval on rule/assignment changes; vacuous-Compliant; stale export/filters; incl. FP-053's no-lower-bound filter).
-5. FP-004 Extraction robustness (Gemini MaxTokens truncation + missing finishReason check + deterministic retries; restart burns attempts; stale-Processing claims never reclaimed — evidence to #243; 25s blob-retry hang).
-6. FP-006 Duplicate system-template seeding (idempotency broke across rename; dev has 2×; **check prod**; unique index + dedupe migration).
-7. FP-002.4 Free-plan fences unenforced (portal ignores `HasVendorPortal` + `DocumentLimit`).
-8. FP-100 Export audit window excludes the To-day (server-TZ parse).
-9. FP-061 Expiry dates render a day early in US timezones.
-10. FP-093 + FP-074 Small correctness pair (reminder toggle lost-update race; blank vendor name accepted).
-11. FP-050 Dashboard dropzone silently swallows rejected files.
+1. **#254** FP-060 "View file" has never worked (no SAS/proxy).
+2. **#255** FP-110/FP-002.2+3 Account deletion never cancels Stripe + checkout lacks an already-subscribed guard.
+3. **#256** FP-003 "Monthly" extraction budget never resets (lifetime ceiling, permanent failure).
+4. **#257** FP-001 Verdict-freshness cluster (no expiry sweep; no re-eval on rule/assignment changes; vacuous-Compliant; stale export/filters; incl. FP-053's no-lower-bound filter).
+5. **#259** FP-004 Extraction robustness (Gemini MaxTokens truncation + missing finishReason check + deterministic retries; restart burns attempts; stale-Processing claims never reclaimed — evidence also commented on #243; 25s blob-retry hang).
+6. **#260** FP-006 Duplicate system-template seeding (idempotency broke across rename; dev has 2×; **check prod**; unique index + dedupe migration).
+7. **#261** FP-002.4 Free-plan fences unenforced (portal ignores `HasVendorPortal` + `DocumentLimit`).
+8. **#262** FP-100 Export audit window excludes the To-day (server-TZ parse).
+9. **#263** FP-061 Expiry dates render a day early in US timezones.
+10. **#264** FP-093 + FP-074 Small correctness pair (reminder toggle lost-update race; blank vendor name accepted).
+11. **#265** FP-050 Dashboard dropzone silently swallows rejected files.
 
 **Everything else** (UX debt, copy, states, a11y) → **#241**, grouped batch-able: (a) trust/truth fixes that ride the FP-001/FP-002 backend tickets, (b) the two-token contrast sweep FP-005, (c) per-page P1s, (d) P2 polish — cheap ones opportunistically per the triage policy.
 
