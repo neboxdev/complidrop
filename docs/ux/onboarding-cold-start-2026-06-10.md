@@ -6,7 +6,7 @@
 **Persona:** Pat Rivera, 50-something office manager of "The Garden Hall" (event venue, 1–9 people), non-technical, no compliance training, signs up cold with no human contact. Email `rubengg2016+pat-0610@gmail.com` (real, monitored inbox — deliverability was part of the test).
 **Method:** drove a real Chrome session through the exact funnel: marketing → signup → (email verify) → onboarding → add vendor → define requirements → get a document in (owner upload AND vendor portal) → first verdict. Per step: what Pat sees, what she'd click, where she stalls, what jargon assumes knowledge, what data she lacks, where the app goes quiet. The vendor side was walked cold as well.
 
-> **⚠️ Walk truncated by a prod outage.** Document upload (both paths) is 500-broken and no transactional email sends on prod — three missing/broken env settings, filed as **#247** (P0, with diagnosis). The funnel is therefore measured **signup → "document in"**, and the **extraction-wait → first-verdict leg is untested**. §6 lists exactly what to re-measure once #247 closes. This is itself the audit's loudest finding: *as of today, no cold signup can reach a verdict at all.*
+> **⚠️ Walk truncated by a prod outage.** Document upload (both paths) is 500-broken and no transactional email sends on prod — a deleted Azure storage account plus two never-set env settings, filed as **#247** (P0, with diagnosis). The funnel is therefore measured **signup → "document in"**, and the **extraction-wait → first-verdict leg is untested**. §6 lists exactly what to re-measure once #247 closes. This is itself the audit's loudest finding: *as of today, no cold signup can reach a verdict at all.*
 
 ---
 
@@ -88,7 +88,7 @@ Unreachable. The post-upload silence question ("does the app go quiet during ext
 ## 3. Ranked findings
 
 **P0 — launch-blocking, filed as bugs**
-1. #247 — prod env config missing: every upload 500s (both personas), no transactional email at all (this is what blocks the entire "email verify" leg), portal links minted as `localhost`. *No cold signup can succeed until this closes.*
+1. #247 — prod integrations down: every upload 500s (both personas; the Azure storage account was deleted/renamed — NXDOMAIN), no transactional email at all (`Resend:ApiKey` never set in prod; this is what blocks the entire "email verify" leg), portal links minted as `localhost` (`Frontend:BaseUrl` never set). *No cold signup can succeed until this closes.*
 2. #251 — duplicated system templates (first decision of the funnel is a coin flip).
 3. #249 — verify-resend claims success while email is down (invisible stranding; hides the #247 outage rather than causing it).
 4. #250 — localhost links would strand real vendors even with email fixed.
@@ -140,7 +140,7 @@ Add these audit-confirmed items to the sweep checklist:
 
 - Automation pace ≠ human pace; human estimates are reading-speed reconstructions, marked as such. Two early UI mishaps (a "lost" template save, a no-op email-link click) were traced to the automation clicking stale element references after layout shifts — re-tested cleanly and **excluded** from findings.
 - The browser session ran with a Spanish/Canary locale; date-format observations are locale-relative and deferred to #236.
-- **Post-audit correction (same day):** the inbox used to double-check email absence turned out to be the wrong Google account (the developer inbox, not the test inbox the audit signup used) — so "nothing in the inbox/spam" checks proved nothing. The email-outage finding stands on server-side evidence alone: the portal-invite endpoint's own "Email isn't set up yet, so we couldn't send it" admission during the walk, and delivery beginning (founder-confirmed screenshots) only after `Resend:ApiKey` was set ~35 min later. Future email-arrival checks (#258, #240's deliverability sweep) must use the real test inbox, not the connected Gmail tooling.
+- **Post-audit corrections (same day, two rounds):** (1) The inbox used to double-check email absence was the wrong Google account (developer inbox, not the test inbox) — "nothing in the inbox/spam" checks proved nothing; the email finding stands on the API's own "Email isn't set up yet, so we couldn't send it" admission plus the founder's later empty Resend send-log. (2) Emails the founder *did* receive that day ("Bluebonnet Event Hall", `+patfinal` — with `localhost:3000` links) initially looked like a prod fix + the #250 bug; they were actually sent by a **parallel #236 audit session driving the local dev app**, where the dev Resend key works and localhost links are correct. Prod email was never fixed during this audit. (3) The upload root cause is sharper than "missing env config": the Azure storage account `complidropstorage` **no longer exists** — NXDOMAIN from Azure's authoritative DNS, verified via three resolvers — which breaks prod and dev identically with no Railway change involved (#247 updated). Future email-arrival checks (#258, #240's deliverability sweep) must use the real test inbox, not the connected Gmail tooling.
 - The org used (`The Garden Hall`, vendor `Brightside Catering Co.`) is throwaway; cleaned up at audit close per #228 hygiene (self-serve in-app delete — itself a #240 datapoint — plus a DB sweep of the soft-deleted remnants). The §6 re-run starts from a fresh org.
 
 ## 6. Re-run checklist (after #247 closes)
