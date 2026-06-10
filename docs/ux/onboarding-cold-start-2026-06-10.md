@@ -140,6 +140,7 @@ Add these audit-confirmed items to the sweep checklist:
 
 - Automation pace ≠ human pace; human estimates are reading-speed reconstructions, marked as such. Two early UI mishaps (a "lost" template save, a no-op email-link click) were traced to the automation clicking stale element references after layout shifts — re-tested cleanly and **excluded** from findings.
 - The browser session ran with a Spanish/Canary locale; date-format observations are locale-relative and deferred to #236.
+- **Post-audit correction (same day):** the inbox used to double-check email absence turned out to be the wrong Google account (the developer inbox, not the test inbox the audit signup used) — so "nothing in the inbox/spam" checks proved nothing. The email-outage finding stands on server-side evidence alone: the portal-invite endpoint's own "Email isn't set up yet, so we couldn't send it" admission during the walk, and delivery beginning (founder-confirmed screenshots) only after `Resend:ApiKey` was set ~35 min later. Future email-arrival checks (#258, #240's deliverability sweep) must use the real test inbox, not the connected Gmail tooling.
 - The org used (`The Garden Hall`, vendor `Brightside Catering Co.`) is throwaway; cleaned up at audit close per #228 hygiene (self-serve in-app delete — itself a #240 datapoint — plus a DB sweep of the soft-deleted remnants). The §6 re-run starts from a fresh org.
 
 ## 6. Re-run checklist (after #247 closes)
