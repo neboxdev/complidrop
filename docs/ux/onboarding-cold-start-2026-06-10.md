@@ -6,7 +6,7 @@
 **Persona:** Pat Rivera, 50-something office manager of "The Garden Hall" (event venue, 1–9 people), non-technical, no compliance training, signs up cold with no human contact. Email `rubengg2016+pat-0610@gmail.com` (real, monitored inbox — deliverability was part of the test).
 **Method:** drove a real Chrome session through the exact funnel: marketing → signup → (email verify) → onboarding → add vendor → define requirements → get a document in (owner upload AND vendor portal) → first verdict. Per step: what Pat sees, what she'd click, where she stalls, what jargon assumes knowledge, what data she lacks, where the app goes quiet. The vendor side was walked cold as well.
 
-> **⚠️ Walk truncated by a prod outage.** Document upload (both paths) is 500-broken and no transactional email sends on prod — a deleted Azure storage account plus two never-set env settings, filed as **#247** (P0, with diagnosis). The funnel is therefore measured **signup → "document in"**, and the **extraction-wait → first-verdict leg is untested**. §6 lists exactly what to re-measure once #247 closes. This is itself the audit's loudest finding: *as of today, no cold signup can reach a verdict at all.*
+> **⚠️ Walk truncated by a prod outage** *(resolved same day — see §7 for the completed re-run)*. Document upload (both paths) was 500-broken and no transactional email sent on prod — a deleted Azure storage account plus never-set env settings, filed as **#247** (P0, with diagnosis). The funnel is therefore measured **signup → "document in"**, and the **extraction-wait → first-verdict leg is untested**. §6 lists exactly what to re-measure once #247 closes. This is itself the audit's loudest finding: *as of today, no cold signup can reach a verdict at all.*
 
 ---
 
@@ -153,3 +153,52 @@ The blocked tail, to be walked on a fresh org before #239 implementation starts:
 4. Portal-link email arrival + vendor upload E2E on the corrected public URL (phone viewport).
 5. Confirm the checklist's "Collect a document" ticks on the portal-upload path too (not just owner upload).
 6. Re-measure the §2 table and update this doc in place (append a "Re-run" section; keep the original numbers for the before/after).
+
+---
+
+## 7. Re-run — 2026-06-10 afternoon (post-#247, full funnel completed)
+
+Same persona, fresh throwaway org (`The Garden Hall` / `rubengg2016+pat-rerun@gmail.com`), same prod environment — now with the env fixed the same day (storage account recreated + rotated key; `Resend__*`, `Frontend__BaseUrl`, `DocumentAi__*` incl. `CredentialsJson`, and `Stripe__*` set on Railway). This section completes every §6 item.
+
+### Completed trace (T0 14:44:51)
+
+| Leg | Time | Result |
+|---|---|---|
+| Marketing → account created | 14:45:54 (T0+63 s) | ✅ unchanged from §1 |
+| Vendor added → Caterer checklist assigned | ~14:49 | ✅ ("Vendor updated" confirmed server-side) |
+| Owner upload | 14:54 | ✅ instant toast + row appears as **"Waiting to read / Awaiting review"** — plain language, no jargon |
+| Extraction → **first verdict** | verdict on screen ~14:57 | ✅ document detail: READING **Read** · COMPLIANCE **Compliant** · EXPIRES 15/1/2027; all 11 fields extracted correctly (confidence 1.0), editable |
+| Portal link + invite email | 15:02:51 | ✅ toast "Upload link emailed to …+vendor-rerun@gmail.com"; link mints on `https://www.complidrop.com` |
+| Vendor-side cold upload | 15:03:44 | ✅ immediate **"Received · ⟨file⟩ · Processing…"** feedback |
+| Vendor doc → verdict | ~15:05:12 | ✅ Completed + **Compliant**, auto-assigned to the vendor |
+| Onboarding checklist | after owner upload | ✅ all 4 steps ticked from real state → **card auto-hides at 100%** (per #191 design) |
+| Prod Stripe checkout (plan=pro) | 15:10 | ✅ 200, checkout session minted |
+
+### Metrics v2 (the numbers §2 couldn't capture)
+
+| Metric | Value |
+|---|---|
+| **Estimated Pat pace, signup → first verdict** | **~6.5–8 min** — comfortably **under the epic's 10-min bar** (signup ~1.5, welcome ~0.5, vendor ~1, requirements ~1–2 incl. the #251 dupe stall, upload ~0.5, extraction wait ~1–1.5, open verdict ~0.5) |
+| Upload → verdict latency (pipeline) | ~40–90 s (5 s worker poll + OCR + LLM; the list UI live-polls every 5 s while visible) |
+| Wall clock of this automated walk | ~12 min including tooling detours (not representative of a human) |
+| Jargon stalls | **0** (unchanged) |
+| Decision stalls | **1** — the duplicated "Caterer" pick (#251, still open and re-confirmed live) |
+| Dead ends | **0** — all three §2 dead ends were outage symptoms, now gone |
+| Vendor cold loop | invite email sent → portal opens on real domain → upload → "Received/Processing…" → verdict in ~80 s |
+
+### Verdict-page legibility notes (feeds #239)
+
+- Status tiles read plainly; "Compliant" is unambiguous. **But a passing document shows no "what we checked" breakdown** — Pat sees the verdict without the three Caterer rules that produced it. Reinforces #239 delta 1 (show checklist contents); a compliant-checks list would close the loop.
+- Money fields render raw (`2000000`, no `$`/commas) — minor formatting polish for #239.
+- The fourth tile "VERIFIED: —" is unexplained at first contact (manual-verification affordance) — one-line helper would do.
+
+### Still open / unchanged
+
+- **#251** (duplicate system templates) and **#252** (activity feed: "Portal link created" ×2 same second; one upload logged as both "Document uploaded" and "Document added"; entity-speak like "Vendor Portal Link · Upload Processed") — both re-confirmed live this run.
+- **Email-verify click**: verification + invite emails now genuinely send (Resend 200, correct `www.complidrop.com` links per config); the final click-the-link confirmation is founder-visual (test inbox unreadable by tooling — see §5).
+- Checklist tick via the portal-upload path couldn't be isolated (the owner upload had already completed the step).
+
+### Method notes for this run
+
+- Two automation artifacts were identified and excluded (same discipline as §5): (a) synthetic *pointer* clicks on the "Email link to …" button silently no-op while the element's own `click()` works — tooling quirk, not product (the button works for real users); (b) the documents list "froze" at "Waiting to read" only because the driven tab was visibility-hidden — TanStack pauses polling in hidden tabs by design; a watching user gets 5-second live updates.
+- The throwaway org was **kept alive** pending the founder's verify-link click (deleting it would invalidate the emailed token); cleanup follows that confirmation.
