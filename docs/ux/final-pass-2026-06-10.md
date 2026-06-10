@@ -212,7 +212,7 @@ The 401→refresh→retry chain with in-shell outage handling (no eviction on 5x
 | Core loop completable by Pat | No (rules page was a query-builder wall) | **Yes — 7 minutes cold, live-verified** |
 | Mobile | Structurally unusable (inline 240px sidebar, clipped tables) | Real shell, stacked cards, 44px floors; residual: rules-page fold, reminders history clip, select sizing |
 | Dominant failure mode | Structural walls + jargon | **Confident staleness** — UI asserts what the backend doesn't keep true |
-| P0 findings | 8 structural | 9 distinct: 3 systemic clusters (FP-001 verdicts, FP-002's four money promises, FP-003 budget) + FP-004's P0 half + 5 per-page (FP-020, FP-050, FP-060, FP-061, FP-070, with FP-110 aliasing FP-002.2) |
+| P0 findings | 8 structural | 9 distinct: 3 systemic clusters (FP-001 verdicts, FP-002's four money promises, FP-003 budget) + FP-004's P0 half + 5 per-page (FP-020, FP-050, FP-060, FP-061, FP-070; FP-110 aliases FP-002.2 and FP-030 aliases FP-002.1) |
 
 The 2026-06-03 P0s are all confirmed fixed in the live run: password reset exists, uploads capture vendor+type, onboarding exists, mobile shell exists, jargon is humanized, the rules page is a sentence builder, the landing page shows the product, reminder toggles are real switches.
 
