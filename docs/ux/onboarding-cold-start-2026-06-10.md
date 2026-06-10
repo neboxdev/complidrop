@@ -38,10 +38,10 @@ Lands **directly on the dashboard** (no verification gate — verification is a 
 Vendors page has an inline two-field add form (name + contact email), a teaching tip banner, and an explanatory empty state. After add, the row itself shows the next action: **"Set requirements"**. No dead end.
 
 ### Step 5 — "What this vendor must prove" ⚠️
-Vendor detail offers a dropdown of suggested checklists with the helper "Pick the checklist for their type — we check every document against it", and an honest warning while none is set. Two real stalls:
+Vendor detail offers a dropdown of suggested checklists with the helper "Pick the checklist for their type — we check every document against it", and an honest warning while none is set. One real stall and one guidance gap:
 
-1. **Every checklist appears twice** (Caterer ×2, Security Service ×2, …) — the system template set is duplicated in the prod DB (seed/rename race; **#251**). Pat cannot know which "Caterer" is right.
-2. **Nothing shows what the chosen checklist demands.** After picking "Caterer", neither the vendor page nor anywhere on the path says "this checks: ≥ $1M general liability, expiration date present, workers-comp coverage". Pat proceeds on faith. (Feeds #239 — see §4.)
+1. **Stall — every checklist appears twice** (Caterer ×2, Security Service ×2, …) — the system template set is duplicated in the prod DB (seed/rename race; **#251**). Pat cannot know which "Caterer" is right.
+2. **Guidance gap — nothing shows what the chosen checklist demands.** After picking "Caterer", neither the vendor page nor anywhere on the path says "this checks: ≥ $1M general liability, expiration date present, workers-comp coverage". Pat doesn't stall — she proceeds on faith, which is its own problem. (Feeds #239 — see §4.)
 
 A third, related seam appears later: the **Vendor requirements page says "YOUR CHECKLISTS — None yet"** even though Pat just assigned "Caterer" to her vendor (system templates assigned directly never become "hers"). "Where did my Caterer list go?" (Feeds #239/#238.)
 
@@ -76,7 +76,7 @@ Unreachable. The post-upload silence question ("does the app go quiet during ext
 | **Estimated Pat pace, signup → document-in** | **~6–8 min** *if she has a COI file at hand* | reading-speed estimates per step |
 | Estimated Pat pace, signup → first verdict | **~8–10 min + extraction time** — *unverifiable today* | extraction leg untested (#247); 10-min epic bar is in reach but not proven |
 | Hard jargon stalls | **0** on the walked path | post-#188/#192 copy holds up; COI expanded at first use; "what they must prove" framing works. Caveat: requirement *contents* (limits/operators) were never shown to Pat at all — the jargon test for those is deferred to the requirements-detail flow (#239 must surface them in plain sentences) |
-| Decision stalls | **2** | duplicate "Caterer" pick (#251); "which of the 2 collect paths" (upload vs link — mild, checklist copy handles it) |
+| Decision stalls | **1** (+1 mild non-stall) | duplicate "Caterer" pick (#251). The upload-vs-link choice at "Collect a document" registers but the checklist copy resolves it; the invisible-checklist-contents issue is counted as a guidance gap (§1 step 5, §3 finding 6), not a stall |
 | Dead ends | **3** | owner upload 500 (no action offered); vendor portal upload 500 (no action offered); verify-email loop (resend "succeeds", nothing arrives — invisible) |
 | Quiet zones | **1 confirmed, 1 unknown** | confirmed: nothing tells Pat emails aren't going out; unknown: post-upload extraction wait (untested) |
 | Data Pat lacks | **1 critical** | a COI file. Everything else (vendor name/email, venue type) she knows by heart. This is the entire case for #238 |
@@ -88,9 +88,9 @@ Unreachable. The post-upload silence question ("does the app go quiet during ext
 ## 3. Ranked findings
 
 **P0 — launch-blocking, filed as bugs**
-1. #247 — prod env config missing: every upload 500s (both personas), no transactional email at all, portal links minted as `localhost`. *No cold signup can succeed until this closes.*
+1. #247 — prod env config missing: every upload 500s (both personas), no transactional email at all (this is what blocks the entire "email verify" leg), portal links minted as `localhost`. *No cold signup can succeed until this closes.*
 2. #251 — duplicated system templates (first decision of the funnel is a coin flip).
-3. #249 — verify-resend claims success while email is down (invisible stranding; also blocks the entire "email verify" leg of the funnel).
+3. #249 — verify-resend claims success while email is down (invisible stranding; hides the #247 outage rather than causing it).
 4. #250 — localhost links would strand real vendors even with email fixed.
 
 **P1 — funnel quality (route to implementation tickets, §4)**
