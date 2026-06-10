@@ -1,0 +1,226 @@
+# CompliDrop — Final UX audit, post-overhaul (2026-06-10)
+
+**Ticket:** #236 (epic #234). **Baseline:** the 2026-06-03 reviews in this folder scored the pre-overhaul app **3/10** on the "intuitiveness for Pat" rubric. The overhaul (#181–#197, #216, #220, #229–#231) closed as #180. This pass certifies the assembled result — or rather, produces the punch list that gets it there.
+
+> **Method.** Two independent evidence streams, reconciled:
+> 1. **Live in-browser run** of the real stack (API `:5292` + Next dev `:3000`, real Neon dev DB, real Document AI + Gemini extraction, Azurite blob store) — registered a fresh account as Pat, walked signup → onboarding → vendor → requirements → upload → verdict → portal end-to-end at desktop (1280×800) and mobile (375×812) viewports.
+> 2. **Eight parallel fresh-eyes agents**, each reading the rendered code for one surface (marketing+auth, dashboard+onboarding, documents, vendors+requirements, reminders/export/settings, vendor portal, a11y+mobile sweep, backend promise-vs-reality). Agents were explicitly forbidden from reading `docs/ux/`, `docs/qa/`, or prior findings — an uncontaminated re-derivation, same as the 2026-06-03 method.
+>
+> Persona: **Pat** — 50-something, non-technical office manager at a Texas event venue, often on her phone, aging eyes. Portal persona: **Tony** — a vendor's office admin on a phone, never heard of CompliDrop.
+> Scoring anchors: **10** first-try success, zero hesitation, one-handed on a phone · **8** nothing blocks or confuses (ship bar) · **6** completes with 1–2 hesitations · **4** needs outside help once / structure fights her · **2** cannot complete the page's job.
+> Finding ids are `FP-###` (final pass) for traceability into #241 and the bug tickets.
+>
+> *Coverage note:* a handful of states could not be reached live (verify-email **success**, password-reset **success**, the NonCompliant explainer and ManualRequired review cards, Stripe checkout completion) — dev-environment email delivery wasn't observable and mid-session extraction wedges (see FP-004) blocked the failing-COI verdict. Those states are **code-verified by two independent agents each**; everything else in this doc was exercised in the running app.
+
+## Verdict
+
+**Overall: 6/10** (baseline 3/10). The overhaul genuinely landed: the core loop now works end-to-end (live run: cold signup → guided checklist → vendor → checklist clone → upload → real extraction → green "Compliant" with the right expiry date, ~7 minutes, zero human help — the epic's 10-minute exit bar is met *on the happy path*). Mobile has a real shell, statuses are humanized, empty states guide, the portal is genuinely good on a phone.
+
+**But no authenticated page clears the ≥8/10 bar yet.** The failure mode has changed shape: 2026-06-03 was *structural walls* (Pat couldn't even author a rule); 2026-06-10 is **confident lies** — the UI states things the backend doesn't make true. Compliance badges freeze at their last computation and are never re-checked as dates pass or rules change; "You're on the free plan" shows to paying users during load; the register page says "Start your Pro account" while creating a Free one; the audit-ready PDF can print "Compliant" for an expired document; deleting a paid account keeps charging the card. For a compliance product, stale-but-green is worse than broken.
+
+### Per-page scores (same rubric as 2026-06-03)
+
+| Page | Score | Clears ≥8/10? | One-line reason |
+|---|---|---|---|
+| Marketing landing `/` | 7 | **No** | Honest, Pat-fluent copy and real product mock — but brand sky/orange text fails AA for exactly Pat's eyes, and two claims overstate the backend (vendor links universal, 60-day vendor reminder) |
+| Content pages (FAQ, glossary, venues, vs-spreadsheet, contact, privacy, terms) | 8–9 | **Yes** | Best-in-class plain-English; one P0 copy lie (FAQ "you always confirm before it counts") must go |
+| Register `/register` | 6 | **No** | Clean form, live password checklist — but `?plan=pro` promises a Pro account and silently creates Free |
+| Login `/login` | 7 | **No** | Complete (forgot link, show/hide) — but every server error is a 4-second top-right toast, nothing inline |
+| Forgot password | 6 | **No** | Failures (429/offline) still render the "Check your email" success card |
+| Reset password | 5 | **No** | The common expired-link case dead-ends on a transient toast with no "request a new link" affordance |
+| Verify email | 7 | **No** | Clear states; "Go to dashboard" bounces logged-out phone users to a login form unexplained |
+| Dashboard | 6 | **No** | Great first-run; populated state has dead-end stat cards, numbers that don't reconcile, and an outage renders as "brand-new account" |
+| Onboarding (modal + checklist + tips) | 7 | **No** | Genuinely good guided flow; leads with the unexplained "COI" acronym; one stray tap kills the tour forever |
+| Documents list | 6 | **No** | Filters/search/pagination/stacked cards all work; stale verdicts make the "Expired" filter lie; header still says "Extraction" |
+| Upload flow (dropzone + details panel) | 5 | **No** | Vendor-first staging is the right design; rejected files (wrong type, >10 MB, iPhone HEIC) produce **zero feedback** |
+| Document detail | 5 | **No** | Best copy in the app ("Why isn't this compliant?") — but "View file" has never worked, the vendor is invisible, Failed docs are dead ends, duplicate field labels (two "Policy number") |
+| Vendors list | 7 | **No** | Solid add/search/cards; "Docs 3" is a dead-end number; Enter doesn't submit; no vendor delete anywhere |
+| Vendor detail | 4 | **No** | The checklist dropdown shows three identical "Caterer" entries (live-confirmed); assigning never re-checks existing docs; no documents section; error state spins forever |
+| Vendor requirements `/rules` | 6 | **No** | The sentence-builder is the overhaul's crown jewel; on a phone, tapping a checklist appears to do nothing (editor renders 2.5 screens below the fold — measured live); duplicate rules allowed silently |
+| Reminders | 5 | **No** | A11y-correct toggles — but who-gets-emailed is invisible, "Notify vendor" can be a silent no-op, fast toggle pairs lose updates, and the vendor email says "log in" (vendors can't) with no link |
+| Export | 6 | **No** | Honest scope copy; the audit PDF silently drops the entire "To" day; both buttons dead-end after 15 idle minutes |
+| Settings (incl. billing) | 5 | **No** | Timezone picker is ~400 raw IANA ids (live-confirmed wall from `Africa/Abidjan`); paid users can see "You're on the free plan" + Upgrade buttons; deleting a paid account never cancels Stripe |
+| Vendor portal `/portal/{token}` | 7 | **No** | Genuinely good mobile-first happy path (live HEIC upload worked); network failure at load *lies* ("link no longer available"); no terminal "you're done" state; "What {org} needs from you" is hardcoded boilerplate |
+
+**Epic #234 exit bar ("every page ≥ 8/10"): NOT met.** Pages are clustered at 5–7 — fixable by punch list, not redesign. The only redesign-class item is the verdict-freshness architecture (FP-001).
+
+---
+
+## The systemic findings (cross-page roots)
+
+Six roots explain most of the per-page failures. Fixing these six moves nearly every score.
+
+### FP-001 · P0 · Compliance verdicts are a write-once cache presented as live truth — **defect, ticketed**
+`ComplianceStatus` is computed only on: extraction completion, manual field edit, document vendor/type PATCH (`ExtractionWorker.cs:196`, `DocumentEndpoints.cs:255,469`). Nothing re-evaluates when (a) **time passes** — no background sweep flips Compliant → ExpiringSoon → Expired (`Program.cs:95-96` registers only ExtractionWorker + ReminderBackgroundService); (b) **rules change** (`ComplianceEndpoints.cs:113-172` saves and returns); (c) **a checklist is assigned to a vendor** (`VendorEndpoints.cs:96-114`) — despite the vendor page's amber hint promising exactly that, and `rules/page.tsx:169-171` claiming "We check every document you upload against the list automatically." The manual re-check endpoint (`POST /api/compliance/check/{id}`) has **zero frontend callers**. Consequences, all user-visible:
+- An expired COI keeps its green "Compliant" badge indefinitely; the list's "Expired" filter (stored status) finds nothing while the dashboard pipeline (live dates) shows 1 — two answers on one screen (`DashboardEndpoints.cs:26-32` vs `:75-76`).
+- The "audit-ready" PDF prints the frozen status (`ExportService.cs:96`) — it can certify an expired document as Compliant.
+- Upload-then-assign-checklist (the portal's natural order) leaves docs "Awaiting review" forever.
+- A doc whose type matches no rule in the vendor's checklist gets **Compliant by vacuous pass** (`ComplianceCheckService.cs:71-96` — zero applicable rules → `allPassed` stays true), so a menu PDF uploaded as "Other" goes green.
+**Fix (one cluster):** nightly + on-read derivation of date-driven status; re-evaluation fan-out after rule/template/assignment mutations (pure DB work, no LLM cost); `Pending` (not Compliant) when no rules apply; export derives date-status at generation time. → **bug ticket, see Triage.**
+
+### FP-002 · P0 · The money path breaks four promises — **defects, ticketed**
+1. **Register with `?plan=pro|annual` says "Start your Pro account" / "You selected the Pro plan — $49/month" and silently creates a Free account** — no checkout handoff, lands on `/dashboard` (`register-form.tsx:50-66,146-156`; `AuthEndpoints.cs:130-141` unconditionally `Plan="free"`).
+2. **Deleting a paid account never cancels the Stripe subscription** (`AuthEndpoints.cs:774-817` — no `IStripeService` involvement; the service has no cancel method at all). Login is scrubbed, so the ex-customer can't even reach the billing portal: the card bills forever, recourse = chargeback.
+3. **`/api/billing/checkout` has no already-subscribed guard** (`BillingEndpoints.cs:24-81`) — combined with the settings page rendering "You're on the free plan" + Upgrade tiles during loading/error/webhook-lag (`settings/page.tsx:104,127-129,177` — no `isLoading`/`isError` branch), a paying user can buy a second live subscription that's invisible in the app.
+4. **Free-plan fences aren't real**: `HasVendorPortal` is stored but never enforced (`VendorEndpoints.cs:130-166` — free orgs generate working portal links while Settings shows "Vendor portal: Off" — observed live on the test org), and the portal upload path performs **no `DocumentLimit` check** (`VendorPortalEndpoints.cs:52-198`), so vendor uploads sail past the 5-doc cap that gates the upgrade.
+
+### FP-003 · P0 · The "monthly" AI budget never resets — extraction dies permanently — **defect, ticketed**
+`Subscription.ExtractionSpendThisMonthUsd` is only ever incremented (`CostTrackingService.cs:29-36`); no reset job exists. Ceilings are $5 free / $50 paid (`CostCeilings.cs`). Once crossed — ever — every future upload (dashboard *and* portal) is marked Failed with copy promising "It resumes next cycle" (`display-labels.ts:274-275`). It never resumes; the Settings tile labeled "this month" shows lifetime spend. Compliance data silently stops updating from that day on.
+
+### FP-004 · P0/P1 · Extraction pipeline robustness — **defects, ticketed**
+Observed live: a normal one-page COI failed all attempts with `JsonReaderException: Expected depth to be zero…` at `GeminiExtractionClient.cs:115`. Root cause chain: `Gemini:MaxTokens` defaults to **2000** (`appsettings.json:39`) — a COI's schema-constrained fields array exceeds it — the response is truncated at the token cap, the client never checks `finishReason`, the parse throws, and the worker **retries the identical request** until the attempt cap, then dead-ends at "Couldn't read." (Raising the cap to 8192 in-session made the same document extract perfectly at confidence 1.00 — 13 fields.) Related robustness gaps, also observed live:
+- **API restarts (= every Railway deploy) interrupt in-flight extractions**; each interrupted claim burns a `ProcessingAttempts` increment, so a few deploys at the wrong moment can fail a document that never had a real extraction error (`ExtractionWorker.cs:140-145` counts claims, not failures).
+- After hard process kills, the two in-flight documents were **never reclaimed** by a fresh worker despite the 5-minute zombie window (`ClaimSql`'s stale-Processing branch) — fresh `Pending` claims worked fine in the same session. Symptom consistent with orphaned row locks surviving on pooled connections (`FOR UPDATE SKIP LOCKED` then skips them forever). Documents sit at "Reading…" indefinitely with no terminal state and no user-facing recovery other than knowing to click "Read again". Evidence handed to **#243** (concurrency audit) for root-cause; the UI half (a "taking longer than usual" state after N minutes) goes to #241.
+- **No end-to-end timeout bounds a processing attempt** — late in the session the worker was observed wedged mid-attempt (claim logged, then silence; the document never reached the "Extracting…" log nor any terminal state, twice). Whatever the wedge (pooled-connection hang, blob stream, OCR/LLM call without a deadline), `ProcessDocumentAsync` should run under a hard per-attempt timeout (~2–3 min) that requeues/fails cleanly instead of holding the claim forever.
+- The upload request blocks ~25s through 6 Azure SDK retries when blob storage is unreachable before 500ing (`BlobStorageService.cs:27` — the ctor itself does network I/O via `CreateIfNotExists`).
+
+### FP-005 · P1 · Two theme tokens fail WCAG AA on nearly every primary action — #241
+White-on-`--primary` sky-500 #0EA5E9 = **2.77:1** (every default button: Sign in, Create my account, Upload, Save changes, Email link to vendor, plan Upgrades) and white-on-`--accent` orange #F97316 = **2.80:1** (every marketing CTA incl. "Get started free") — `globals.css:58,64`, consumed by `button.tsx:16`. Same sky as *text* on white: hero span, section eyebrows, pricing CTAs, FAQ/glossary links. `text-slate-400` (2.56:1) carries decision text (disabled-Add reason, "(optional)" markers) and all resting action icons (trash/pencil/revoke). **Fix is two tokens + one class sweep:** `--primary` → sky-700 `#0369A1` for text/borders (keep sky-500 fills only with dark fg), `--accent` → orange-700 `#C2410C`, meaningful `slate-400` → `slate-500`. Highest leverage-per-line in this report.
+
+### FP-006 · P1 · Duplicate system checklists in the database — **defect, ticketed**
+The dev DB contains **two full sets** of the five system templates (10 rows, distinct ids, identical names — confirmed via `/api/compliance/templates`). The seeder dedupes by *name* (`ComplianceTemplateSeed.cs:44-51`), which broke across the `RenameSystemTemplatesToVenueTypes` migration window; there's no unique index on `(IsSystemTemplate, Name)` and no concurrency guard (two instances booting simultaneously double-seed). User-visible: every org's suggested-checklists rail and every vendor's assign dropdown lists each type twice — and after Pat clones one, **three identical "Caterer" options** with no way to tell hers apart (observed live). **Prod must be checked for the same duplication.** The UI half (label "Your checklists" vs "Suggested by CompliDrop" optgroups, suffix clones) goes to #241.
+
+---
+
+## Per-page findings
+
+Order: P0 → P1 → P2. Items marked **[bug→#48]** are defects filed as labeled tickets (see Triage); everything else lands in #241.
+
+### Marketing landing `/`
+- **FP-010 · P1** Brand sky/orange as text/CTA fails AA → see FP-005.
+- **FP-011 · P1** Step 3 sells the vendor upload link as universal; it's Pro-gated (`HasVendorPortal=false` on free — `AuthEndpoints.cs:138`) and the 60-day reminder is team-only (`NotifyVendor = days <= 30`, `AuthEndpoints.cs:143-154`) while copy says all four go "to you and straight to your vendor" (`page.tsx:201,270-274`). Fix copy (or flip the seed/enforcement) — pairs with FP-002.4.
+- **FP-012 · P2** Hero mock pairs a green "Compliant" badge with "Expires in 23 days" — the real engine would show amber "Expiring soon" at ≤30 days. Change to "in 64 days".
+- **FP-013 · P2** Event-venues page claims event-aware chasing ("Reminders go out automatically as the event approaches", "reminds the stragglers") — no event concept exists; reminders key only off document expiry. Reword.
+- **FP-014 · P2** No custom `not-found.tsx` anywhere — mistyped/stale URLs render Next's bare 404 with no brand or way back.
+- **FP-015 · P2** `/contact` ends with the "Get started free" CTA strip — selling to a customer who arrived angry. Omit `ContentCta` there.
+
+### Content pages — **the one P0 copy item**
+- **FP-020 · P0 (copy)** FAQ: "You always review and confirm what CompliDrop extracted before it counts" (`faq/page.tsx:48`) — false; verdicts are fully automatic the moment extraction lands (`ExtractionWorker.cs:196-197`). For a trust-page on a compliance product this is the one sentence that must not overclaim. Reword: "When we're not confident in a reading, we flag it for your review before you rely on it."
+- **FP-021 · P2** FAQ/vs-spreadsheet advertise export as Pro-only; `/api/export/*` has no plan gate. Pick a side (pairs with FP-002.4).
+
+### Register / Login / Password flows
+- **FP-030 · P0** Plan-promise break at signup → FP-002.1. Frontend half (route `?plan=pro` registrations into checkout or change the heading) in #241; it needs no backend change to stop lying.
+- **FP-031 · P1** Forgot-password failures (429 from the shared 5/min `auth-strict` IP bucket — exactly what a locked-out user hits after failed logins — or offline) still flip to "Check your email" (`forgot-password/page.tsx:28-36` swallows all errors into `setSent(true)`). Show the error; only 2xx flips the card.
+- **FP-032 · P1** Reset-password with an expired token (45-min TTL; people open reset emails late) toasts and leaves the dead form — no "Request a new link" affordance (`reset-password-client.tsx:47-56`; the missing-token branch at `:58-72` has the right card — reuse it).
+- **FP-033 · P1** Login/register server errors are toast-only, top-right, ~4s (`login/page.tsx:41-50`, `register-form.tsx:146-156`) — on a phone Pat's eyes are on the submit button; she reads "nothing happened" and retries toward the lockout. Add a persistent inline `role="alert"` block; on `auth.email_taken` include "Sign in instead" + reset links.
+- **FP-034 · P2** Reset-password lacks the live password checklist register has; rules appear only as post-submit errors. Export `PasswordChecklist` and reuse; `mode:"onTouched"`.
+- **FP-035 · P2** `aria-describedby`/`aria-invalid` error wiring (the project's own #189 contract) missing on forgot/reset + all three settings security forms (`account-management.tsx:94-275`). Extend `forms.test.tsx` per CLAUDE.md.
+- **FP-036 · P2** Full name/Company lack `autoComplete="name"`/`"organization"`; "Size (optional)" is ambiguous ("Company size", placeholder "e.g. 10–30 people"); "(optional)" markers are slate-400; auth pages all share the marketing tab title; PasswordInput eye toggle is 32px (no `pointer-coarse` floor); "Forgot your password?" is `text-xs` with no padding.
+- **FP-037 · P2** Verify-email success/error CTAs say "dashboard" but bounce logged-out users to `/login` unexplained; banner has no "wrong address? fix it in Settings" path for the typo case it exists for.
+
+### Dashboard + onboarding
+- **FP-040 · P1** Stats-fetch failure renders the brand-new-account experience for a customer with data: cards `?? 0`, checklist reappears at "1 of 4" (`dashboard/page.tsx:47,80-115`; `GetStartedChecklist.tsx:85` doesn't gate on `isError`). Mirror the documents-page `StaleDataBanner` pattern.
+- **FP-041 · P1** Stat cards are dead ends — "Non-compliant: 3" answers "which 3?" nowhere. Make documents filters URL-addressable (`?status=…&expiresWithin=…`) and link cards/pipeline buckets.
+- **FP-042 · P1** Numbers don't reconcile: rate divides by totals that include un-evaluated and ExpiringSoon docs (`DashboardEndpoints.cs:54`); Compliant card (stored) vs Expired bucket (live dates) contradict on one screen → resolves with FP-001 + an "Awaiting review" card so every doc is visibly in one bucket.
+- **FP-043 · P1** Activity feed leaks machine strings + duplicates: portal uploads render "Vendor Portal Link · Upload Processed" (the product's most magical moment as robot text), `compliancecheck.created` ×5 floods on a 5-rule eval, vendor add appears twice (interceptor + explicit audit), Pat's first-ever entry is "User · Updated" (welcome-modal flag flip). Whitelist feed-worthy actions; add the two portal labels to `display-labels.ts:95-128`.
+- **FP-044 · P1** Welcome modal slide 1 leads with the unexplained "COI" acronym (`WelcomeModal.tsx:23`; also checklist hint + dashboard card). First use spells it out: "insurance certificates (COIs)". Three files, one-line each.
+- **FP-045 · P1** Session expiry is a silent bounce to `/login` losing her place (`query-client.ts:71-78`, `layout.tsx:142-148`; zero `returnTo` handling in the codebase). One-shot sessionStorage flag → login notice ("You were signed out for security") + return path.
+- **FP-046 · P2** Backdrop tap/Escape permanently completes the tour (`dashboard/page.tsx:33-39` persists on any close); checklist has no dismiss for expiry-only users; step-2 link lands on the vendor *list* while the hint describes the vendor *edit* action; modal lacks `max-h`/scroll on landscape phones; slide changes unannounced to SR.
+- **FP-047 · P2** Toasts render top-right **over the mobile top bar** — measured live: the success toast's `<li>` intercepted taps on the hamburger (sonner pauses dismissal when the tab is hidden, so it can sit there long); on desktop it covers the banner's "Resend email". `position="bottom-center"` on coarse pointers.
+- **FP-048 · P2** Stat cards flash hard zeros while loading (skeletons exist for activity only); zero-value pipeline buckets paint a ≥6% colored bar ("Expired" shows red at 0 — `dashboard/page.tsx:225`); "Expiring ≤ 30d" is math notation; activity rows name no subject and show seconds-precision timestamps; "Still being read" never ticks down (no `refetchInterval`); dashboard expiry buckets use UTC day boundary (off by one for Texas evenings — `DashboardEndpoints.cs:20,60-76`); desktop logo isn't a home link; Log out has no `onError` (silent no-op offline); no Help/Support affordance anywhere while error copy says "contact support".
+
+### Documents list + upload
+- **FP-050 · P0** Dropzone rejections are **completely silent** — wrong type, >10 MB, and iPhone HEIC produce no toast, no inline message, nothing (`documents/page.tsx:132-147` ignores react-dropzone's `rejections`; the portal already has the right pattern + copy at `portal/[token]/page.tsx:63-84,202-212`). This is the first 30 seconds of a real first session. Port the portal's `rejectionCopy()`. **[bug→#48]**
+- **FP-051 · P1** Dashboard dropzone rejects HEIC that the backend accepts and transcodes (`FileValidationService.cs:49-58`, `DocumentEndpoints.cs:339-342`) and the portal allows — the owner's own staff get the worst upload path. Copy the portal's `accept` map + `accept="image/*,application/pdf"` input override; helper text → "PDF or a photo (JPEG, PNG, HEIC) · 10 MB max".
+- **FP-052 · P1** Stale-verdict consequences on this page (filter lies, badge vs "5d ago" contradiction) → FP-001.
+- **FP-053 · P2** Header column "Extraction" (detail page says "Reading"); "Expiring in 30 days" filter includes long-expired docs (`DocumentEndpoints.cs:72-76`, no lower bound) **[bug→#48, folded into FP-001 ticket]**; "5d ago" shorthand → "expired 5 days ago"; batch uploads: static "Uploading…", one toast per file (25 files = 25 toasts), single vendor+type forced on mixed batches; VendorPicker caps at 8 with no "keep typing" hint; delete trash icon is slate-400 ghost.
+
+### Document detail
+- **FP-060 · P0** "View file" links the raw private blob URI — `blob.Uri.ToString()` with no SAS, container `PublicAccessType.None` (`BlobStorageService.cs:27,39`; `[id]/page.tsx:461-470`); no download/proxy endpoint exists. **It has never worked** — confirmed live (fetch fails; in prod it's Azure's XML error). Pat can never compare the paper against what was read — the exact task the review flow asks of her. Add `GET /api/documents/{id}/file` streaming via `DownloadAsync`, `Content-Disposition: inline`. **[bug→#48]**
+- **FP-061 · P0** Expiration dates render one day early for US users: date-only strings parsed `AssumeUniversal` → stored UTC midnight → `toLocaleDateString()` shifts back a day in any US zone (`CanonicalDocumentFields.cs:56-63`; `documents/page.tsx:570`, `[id]/page.tsx:500`). The detail page contradicts itself two inches apart (field shows `2026-08-01`, summary shows 7/31/2026). Render with `timeZone:"UTC"` or return date-only strings. (Invisible in the en-GB live run — UTC+1 — which is precisely why it survived; confirmed in code.) **[bug→#48]**
+- **FP-062 · P1** "Read again" destroys manual corrections warned only by a desktop hover `title` (`[id]/page.tsx:452-459`; worker deletes + recreates all fields, overwrites `DocumentType`, `ExtractionWorker.cs:247,278-292`). Wrap in the existing `ConfirmDialog`; skip when nothing was edited.
+- **FP-063 · P1** "Awaiting review" (Pending) is a permanent dead end with no explanation or CTA: no-vendor and vendor-without-checklist cases say nothing (`[id]/page.tsx:497-499`; explainer renders only for failed checks). Render the cause + inline fix (VendorPicker / link to the vendor's requirements); relabel "Not checked yet".
+- **FP-064 · P1** Failed docs offer no manual entry — `doc.fields` is empty so the editor shows "No details read yet." with nothing to type into (`[id]/page.tsx:532-537`), though `PUT /fields` supports creation (`DocumentEndpoints.cs:419-436`). She's holding the paper; let her type the expiration date. Render the canonical field set empty + enable Save.
+- **FP-065 · P1** The vendor is invisible on the page (name/id fetched, rendered only inside the non-compliance explainer) and unassignable for orphans — she can't tell whose document she's reading (`[id]/page.tsx:56-58,425-502`). Add a Vendor summary cell + inline picker when null.
+- **FP-066 · P1** Multi-policy COIs flatten into duplicate, unqualified field labels — observed live: two "Policy number", two "Expiration date", two "Effective date" rows with no hint which belongs to General Liability vs Workers' Comp. Group fields by coverage section or qualify labels ("Policy number — workers' comp").
+- **FP-067 · P1** During automatic retries the page shows the rose "We couldn't read this document" card and the pulsing "Reading…" badge simultaneously (`ProcessingError` isn't cleared until terminal success — `ExtractionWorker.cs:216-220,302`; card gated only on `processingError`, `[id]/page.tsx:508`). Gate on `extractionStatus === "Failed"`.
+- **FP-068 · P2** Money fields render raw integers ("1000000") while the requirements page formats `$1,000,000` — observed live; date fields are free text and an unparseable date silently nulls the typed column while toasting "Fields updated" (`CanonicalDocumentFields.cs:29-37`); AI silently overrides a human-chosen document type (`ExtractionWorker.cs:247`); mailto-only CTAs no-op for webmail users; unsaved edits survive into a completed re-extract and can overwrite fresh data; "Verified" cell unexplained; ManualReviewCard says "amber" but the least-certain fields are outlined rose (`[id]/page.tsx:101-105,221-225`).
+
+### Vendors list + detail
+- **FP-070 · P0** The "What this vendor must prove" dropdown mixes system + org checklists with identical names, no labels, no ordering (`vendors/[id]/page.tsx:136-138` ignores `isSystemTemplate`; `ComplianceEndpoints.cs:32-38` has no `OrderBy`) — live state after one clone: **three identical "Caterer" options**. Compounded by FP-006 (DB duplicates) and FP-001c (assignment doesn't re-check). Optgroups ("Your checklists" / "Suggested by CompliDrop"), suffix clones, show "used by N vendors" on suggested cards too.
+- **FP-071 · P1** No documents section on vendor detail; the list's "Docs 3" isn't a link; no `?vendor=` filter exists — "is this vendor squared away?" is unanswerable on the vendor's own page. Add a documents card with compliance badges.
+- **FP-072 · P1** Any vendor-detail load error spins "Loading vendor…" forever (`[id]/page.tsx:29-31` — no error branch; the list page has the right pattern).
+- **FP-073 · P1** No way to delete a vendor anywhere (`useDeleteVendor` exists, imported only by its test; endpoint exists). Typos live forever in lists, counts, exports.
+- **FP-074 · P1** `UpdateVendor` accepts a blank name (`VendorEndpoints.cs:105` — Create has the check, Update forgot) → invisible unclickable row. Server 400 + disabled Save. **[bug→#48]**
+- **FP-075 · P1** Revoked links keep a working Copy button (only Revoke is gated on `isActive`) — she copies a dead link to her florist. Mute/hide Copy on inactive rows; say *why* inactive ("Revoked" vs "Used up").
+- **FP-076 · P2** Revoke is one-tap destructive with no confirm and silent success; per-row Copy can fail with zero feedback (no catch); no busy state while emailing a link (1–3s, two network calls); "0/20 uploads" unexplained; deleted checklist leaves the dropdown silently blank instead of showing the no-requirements warning; Enter doesn't submit the add form (no `<form>`); contact email never validated (then the email button trusts it); duplicate names allowed everywhere; "Active links" column is unexplained jargon on first run.
+
+### Vendor requirements `/rules`
+- **FP-080 · P1** On a phone, selecting a checklist appears to do nothing — the editor rendered at **y=2082 with the viewport at 0** (measured live, 812px viewport; `rules/page.tsx:179` stacks the full rail above the editor below `md`). `scrollIntoView` on selection, or a two-step list→editor flow.
+- **FP-081 · P1** Duplicate same-field requirements add silently — live: "Carries at least $1,000,000…" AND "$2,000,000…" coexist, the summary reads both, contradictorily. Gray out already-added menu items ("Already added — edit it instead"); backend dedupe on `(templateId, documentType, fieldName, operator)`.
+- **FP-082 · P1** Loading/error states render as the "None yet" empty state (`rules/page.tsx:160-204` — no `isLoading`/`isError` branch for the rail; detail pane skeleton-loops on error).
+- **FP-083 · P2** "Insurance has not expired" sentence over-claims — the rule is `required` on `expiration_date` (passes on any date, even past); honest helper text exists but the persistent sentence doesn't. Reword ("Has an expiration date on file — we track expiry from it") or add a real `date_in_future` operator. Pairs with FP-001.
+- **FP-084 · P2** Summary sentence over-claims across types ("A Transportation/Shuttle is compliant when **every document** proves: … CDL …" — rules apply per-type); "Document must not be expired" menu item is secretly COI-only and renders as a different sentence than clicked; "Licenses & permits" group contains no permit items (permit/certification/contract types have no buildable requirements at all → feeds vacuous-Compliant); seeded "Security Service" renders an uneditable fallback row ("Expiration date must be present"); money input accepts `$1` without a sanity nudge ("1.5"/"1m" parse to $1); no success toast on rule save/remove + stale-sentence beat + double-tap delete races; delete-checklist confirm omits the vendor count it knows; the tip says "Then assign the checklist to a vendor" with no path to do it; activity feed calls it a fourth name ("Requirement set").
+
+### Reminders
+- **FP-090 · P1** Who-receives-what is invisible: "Notify team / Notify vendor" headers name no addresses; a vendor without a contact email is **silently skipped** (`ReminderBackgroundService.cs:205-215`) — the lapse she bought the product to prevent. One sentence under the table + a "N vendors have no email" warning.
+- **FP-091 · P1** Docs that enter inside the lead-time window (or already expired) never get any reminder — each fires only on the exact day `expiry − DaysBefore` (`ReminderBackgroundService.cs:171,188-196`); the week-one onboarding stack of soon-to-expire COIs gets zero emails while the checklist says reminders are "already set up". Catch-up pass on upload (dedupe index already supports it) or at minimum disclose.
+- **FP-092 · P1** The vendor reminder email says "Log in to {org} on CompliDrop" — vendors can't log in — and contains **no link at all**; the footer points at "Settings → Reminders" which doesn't exist (cadence isn't editable; the page is top-level) (`ReminderBackgroundService.cs:419-439`). Branch the body by recipient; embed/mint a portal link for vendors. Highest-leverage email change in the product.
+- **FP-093 · P1** Two quick toggles on one row lose the first (mutation rebuilds the full PUT body from the stale cache — `reminders/page.tsx:42-54`; endpoint overwrites all fields). Optimistic `onMutate` cache patch (also fixes the perceived lag). **[bug→#48]**
+- **FP-094 · P1** Schedule table has no loading/error/empty states (bare `(reminders.data ?? []).map` — a failed fetch leaves four floating column headers); history error renders the false "No reminders sent yet."
+- **FP-095 · P2** "Lead time" header is logistics jargon → "Reminder / Email you / Email the vendor / On"; page header could name the actual zone ("at 8 AM Central — change it in Settings"); deliveries table is clipped on phones with no overflow strategy (Status column — the signal — invisible; `reminders/page.tsx:112` lacks the `overflow-x-auto` its sibling has); `EmailBodyTemplate` is stored/round-tripped but the sender ignores it (latent) **[noted in bug ticket]**.
+
+### Export
+- **FP-100 · P1** The audit PDF excludes the entire "To" day — bare date parses to midnight, compared `<=` (`ExportEndpoints.cs:25-26`, `ExportService.cs:36`) — while the PDF caption claims the full range; with the default range (today as To) the most recent day is always missing. End-of-day exclusive bound, org-TZ interpretation. **[bug→#48]**
+- **FP-101 · P1** Both download buttons dead-end after 15 idle minutes — bare `fetch` with no 401→refresh→retry (`export/page.tsx:38-40`), and the page mounts zero queries to keep the session warm; "Try again" then fails forever. The codebase already has the right pattern in `ExportDataButton` (`account-management.tsx:195-207`) — extract and share it.
+- **FP-102 · P2** No `from ≤ to` validation (inverted range silently yields an empty log; cleared field → generic error); shared `busy` flag freezes both buttons with static labels; PDF timestamps are unlabeled UTC (6h off Texas wall clocks); CSV leaks `vendor_portal`/`user` machine tokens and leads with GUIDs; default "To" can be tomorrow after 7 PM Central (`isoDaysAgo` uses `toISOString`); "BI tools" jargon survives in the CSV card.
+
+### Settings (incl. billing)
+- **FP-110 · P0** Delete-account leaves the Stripe subscription billing → FP-002.2. **[bug→#48]**
+- **FP-111 · P1** Paid users can see "You're on the free plan." + three live Upgrade tiles during loading, on error, and in the post-checkout webhook gap (no `isLoading`/`isError` branch; no `?upgraded=true` polling) → FP-002.3 for the backend guard; frontend states here.
+- **FP-112 · P1** The timezone picker is ~400 raw IANA ids in a native select starting at `Africa/Abidjan` (live-confirmed) — the moment Pat phones her nephew. Friendly labels with US zones first ("Central Time — Chicago (CT)"), keep IANA values; `FALLBACK_ZONES` is already the right seed list.
+- **FP-113 · P2** "AI reading cost $0.43 / this month · included in your plan" is internal telemetry in a 10px footnote (and "this month" is lifetime — FP-003); "Vendor portal: Off" tile offers no explanation or upsell; Founding vs Annual both headline $39/mo with no cadence contrast and an unenforced "First 50 only"; all three plan buttons read "Redirecting…" together; no renewal date shown (`currentPeriodEnd` fetched, unrendered); "Role: admin" raw token; password rules revealed only post-submit; data-export copy promises "documents" but delivers metadata-only JSON; no skeleton for the org card.
+
+### Vendor portal `/portal/{token}` (Tony, mobile-first)
+- **FP-120 · P1** Network failure at load renders the *permanent-death* copy "This link is no longer available. Ask your customer for a fresh upload link." with no retry (`portal/[token]/page.tsx:149-157,309-322`) — a one-bar-LTE blip becomes a two-human round trip (and Pat's "Email link" re-sends the same working URL, confusing both). Distinguish fetch-rejection from server-rejected tokens; add "Try again".
+- **FP-121 · P1** No terminal success state: each upload shows "Received … Processing…" forever (hardcoded span; the status-poll endpoint exists, uncalled) — live-confirmed. Tony's job is "prove I sent it"; tell him: "Done — {org} has your document. You can close this page."
+- **FP-122 · P1** "What {org} needs from you" presents a hardcoded server constant as Pat's specific ask (`VendorPortalEndpoints.cs:43`); no instructions channel exists anywhere (no column, no input). Short-term: retitle ("What to upload"). Real fix: `Instructions` on `VendorPortalLink` + textarea at link creation + render-through (the frontend already guards `info.instructions`).
+- **FP-123 · P2** Upload counter and at-quota disable use only the at-load count — live-confirmed "0 / 20" after a successful upload; fold session uploads in. Dropzone stays tappable mid-upload (double-submit; no `Idempotency-Key` on the portal POST); accepted-format copy contradicts itself across three surfaces (hint omits HEIC; rejection copy includes it; backend messages differ); rate-limit copy promises "retry now" inside a fixed 1-hour window and a stopped batch never names the unsent remainder; dead-link page drops the branded shell and can show near-duplicate messages; mid-upload network failure has a captured `retryFile` deliberately unused (comment/code mismatch); no privacy line or portal-specific tab title (inherits the SEO title — live-confirmed); previous-session uploads invisible (re-upload/text-Pat loop); "Hi Tony's Catering Co." greets a legal entity.
+
+### Cross-cutting a11y/mobile (beyond FP-005)
+- **FP-130 · P1** Portal upload progress/success never announced to SR (the one external surface; the dashboard has live regions — port the pattern). Both dropzones are unnamed role-less focusables (react-dropzone defaults; pass `role:"button"` + `aria-label`). VendorPicker suppresses the focus outline for a ~1.07:1 background (`focus:outline-none focus:bg-sky-50`) — keyboard users can't see which vendor Enter selects, and mis-selection mis-files a compliance document. Sub-44px stragglers where it hurts: portal "Retry upload" (~30px), VendorPicker rows (36px), inline assign-vendor "Cancel" (~16px, directly beneath the tappable vendor list — a fat-finger assigns the wrong vendor).
+- **FP-131 · P2** Native `<select>`s are 36px/`text-sm` (iOS zoom trigger; filters, type, timezone — extract one shared class with `text-base md:text-sm pointer-coarse:min-h-11`); focus rings at 50% opacity ≈1.67:1; confidence hints not `aria-describedby`-linked to their inputs; WelcomeModal slide changes silent; portal-link rows can't wrap below `sm`; `StaleDataBanner` detail truncates regardless of zoom; rules selection state is hue-only in grayscale (aria-current is present).
+
+### What's genuinely good — do not regress
+The 401→refresh→retry chain with in-shell outage handling (no eviction on 5xx); `pointer-coarse:min-h-11` floors baked into Button/Input; the humanized status vocabulary and tiered "Double-check this" prompts (no naked confidence %); the vendor-first upload staging; distinct error-vs-empty states on documents/vendors lists; the `ToggleSwitch` (real switch semantics, 44px hit area, non-color cue); the global `prefers-reduced-motion` neutralizer; stacked-card mobile tables; the requirement sentence-builder + live summary + money presets; the portal's rejection copy and camera affordance; honest pre-launch social proof and the "When a spreadsheet is fine" section; the non-compliance explainer with owner-authored reasons.
+
+---
+
+## Defect vs UX-debt triage
+
+**Defects (filed with `bug` label → auto-join #48):**
+1. FP-060 "View file" has never worked (no SAS/proxy).
+2. FP-110/FP-002.2+3 Account deletion never cancels Stripe + checkout lacks an already-subscribed guard.
+3. FP-003 "Monthly" extraction budget never resets (lifetime ceiling, permanent failure).
+4. FP-001 Verdict-freshness cluster (no expiry sweep; no re-eval on rule/assignment changes; vacuous-Compliant; stale export/filters; incl. FP-053's no-lower-bound filter).
+5. FP-004 Extraction robustness (Gemini MaxTokens truncation + missing finishReason check + deterministic retries; restart burns attempts; stale-Processing claims never reclaimed — evidence to #243; 25s blob-retry hang).
+6. FP-006 Duplicate system-template seeding (idempotency broke across rename; dev has 2×; **check prod**; unique index + dedupe migration).
+7. FP-002.4 Free-plan fences unenforced (portal ignores `HasVendorPortal` + `DocumentLimit`).
+8. FP-100 Export audit window excludes the To-day (server-TZ parse).
+9. FP-061 Expiry dates render a day early in US timezones.
+10. FP-093 + FP-074 Small correctness pair (reminder toggle lost-update race; blank vendor name accepted).
+11. FP-050 Dashboard dropzone silently swallows rejected files.
+
+**Everything else** (UX debt, copy, states, a11y) → **#241**, grouped batch-able: (a) trust/truth fixes that ride the FP-001/FP-002 backend tickets, (b) the two-token contrast sweep FP-005, (c) per-page P1s, (d) P2 polish — cheap ones opportunistically per the triage policy.
+
+## Comparison to the 2026-06-03 baseline
+
+| | 2026-06-03 | 2026-06-10 |
+|---|---|---|
+| Overall | 3/10 | **6/10** |
+| Core loop completable by Pat | No (rules page was a query-builder wall) | **Yes — 7 minutes cold, live-verified** |
+| Mobile | Structurally unusable (inline 240px sidebar, clipped tables) | Real shell, stacked cards, 44px floors; residual: rules-page fold, reminders history clip, select sizing |
+| Dominant failure mode | Structural walls + jargon | **Confident staleness** — UI asserts what the backend doesn't keep true |
+| P0 count | 8 structural | 6 systemic (1 architectural, 4 money/trust defects, 1 data defect) |
+
+The 2026-06-03 P0s are all confirmed fixed in the live run: password reset exists, uploads capture vendor+type, onboarding exists, mobile shell exists, jargon is humanized, the rules page is a sentence builder, the landing page shows the product, reminder toggles are real switches.
+
+## Acceptance-criteria mapping (#236)
+
+- Findings doc at `docs/ux/final-pass-2026-06-10.md` — this file.
+- Overall + per-page scores on the 2026-06-03 rubric — above.
+- P0/P1 triaged into #241 / split tickets — #241 body refreshed with the FP-### punch list; defects split into `bug`-labeled tickets (ids recorded in #241 and the PR).
+- Defects filed with `bug` label — list above.
+- Explicit per-page verdict lines — the score table's "Clears ≥8/10?" column.
+
+*Method note for the re-score (#241): re-run the same rubric per page after the fix batches; the per-page reasons above name the exact items that gate each page below 8.*
