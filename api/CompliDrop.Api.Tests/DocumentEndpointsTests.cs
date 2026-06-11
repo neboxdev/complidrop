@@ -34,6 +34,76 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
+    public async Task View_file_streams_the_original_bytes_inline_with_the_stored_content_type()
+    {
+        // #254: the detail page's "View file" used to link the raw PRIVATE blob URI (no SAS,
+        // container PublicAccessType.None) — Azure rejected every click. The authenticated
+        // tenant-filtered proxy is the only safe way to the bytes.
+        var auth = await RegisterAndLoginAsync();
+        var pdf = PdfBytes();
+        var upload = await auth.Client.PostAsync("/api/documents/upload", UploadForm(pdf, "coi.pdf", "application/pdf"));
+        var id = await UploadedId(upload);
+
+        var resp = await auth.Client.GetAsync($"/api/documents/{id}/file");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        resp.Content.Headers.ContentType!.MediaType.Should().Be("application/pdf");
+        (await resp.Content.ReadAsByteArrayAsync()).Should().Equal(pdf, "the proxy must stream the stored bytes verbatim");
+        // Inline (render in the tab, don't download) + the original filename for save-as.
+        resp.Content.Headers.ContentDisposition!.DispositionType.Should().Be("inline");
+        resp.Content.Headers.ContentDisposition.FileName.Should().Contain("coi.pdf");
+        // Private compliance documents: never cacheable by a shared proxy; nosniff pins the
+        // magic-byte-validated content type against browser re-interpretation.
+        resp.Headers.CacheControl!.ToString().Should().Contain("no-store");
+        resp.Headers.GetValues("X-Content-Type-Options").Should().Contain("nosniff");
+    }
+
+    [Fact]
+    public async Task View_file_is_tenant_scoped_and_anonymous_gets_401()
+    {
+        var orgA = await RegisterAndLoginAsync();
+        var upload = await orgA.Client.PostAsync("/api/documents/upload", UploadForm(PdfBytes(), "coi.pdf", "application/pdf"));
+        var id = await UploadedId(upload);
+
+        var orgB = await RegisterAndLoginAsync();
+        var crossOrg = await orgB.Client.GetAsync($"/api/documents/{id}/file");
+        crossOrg.StatusCode.Should().Be(HttpStatusCode.NotFound, "another org's document id resolves to nothing through the tenant filter");
+
+        var anon = await CreateClient().GetAsync($"/api/documents/{id}/file");
+        anon.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task View_file_404s_when_the_blob_is_gone_instead_of_500ing()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var upload = await auth.Client.PostAsync("/api/documents/upload", UploadForm(PdfBytes(), "coi.pdf", "application/pdf"));
+        var id = await UploadedId(upload);
+
+        // Simulate the real Azure client's BlobNotFound (the row exists, the blob vanished).
+        var blobs = (FakeBlobStorageService)Fixture.Factory.Services.GetRequiredService<IBlobStorageService>();
+        blobs.NextDownloadThrows = new Azure.RequestFailedException(404, "BlobNotFound");
+
+        var resp = await auth.Client.GetAsync($"/api/documents/{id}/file");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task Document_detail_no_longer_exposes_the_raw_blob_url()
+    {
+        // The raw private URI leaked storage-account/container naming and 409'd on every
+        // click — off the contract now that the proxy exists (#254).
+        var auth = await RegisterAndLoginAsync();
+        var upload = await auth.Client.PostAsync("/api/documents/upload", UploadForm(PdfBytes(), "coi.pdf", "application/pdf"));
+        var id = await UploadedId(upload);
+
+        var detail = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{id}");
+
+        detail.GetProperty("data").TryGetProperty("blobStorageUrl", out _).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task Upload_with_bytes_not_matching_a_supported_type_is_rejected()
     {
         var auth = await RegisterAndLoginAsync();

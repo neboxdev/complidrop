@@ -35,7 +35,8 @@ public record DocumentDetail(
     int? DaysUntilExpiry,
     bool IsManuallyVerified,
     string? UploadedBy,
-    string? BlobStorageUrl,
+    // No BlobStorageUrl: the raw Azure URI is private (PublicAccessType.None) and clicking it
+    // always 409'd — clients view the file through GET /api/documents/{id}/file instead (#254).
     decimal? GeneralLiabilityLimit,
     DocumentFieldDto[] Fields,
     // The per-requirement evaluation rows (passed + failed) so the detail page

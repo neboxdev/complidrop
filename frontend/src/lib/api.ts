@@ -198,14 +198,13 @@ async function fetchOrFriendlyThrow(
   }
 }
 
-async function request<T>(path: string, init: RequestInitEx = {}): Promise<T> {
-  const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
-  const headers = new Headers(init.headers ?? {});
-  if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-  if (init.idempotencyKey) headers.set("Idempotency-Key", init.idempotencyKey);
-
+/**
+ * The transport half of `request()`: fetch with cookies + the coalesced
+ * 401-refresh-retry, returning the raw `Response` without interpreting the
+ * body. Shared by the JSON-envelope path (`request`) and the binary path
+ * (`api.getBlob`) so both get the same silent session recovery (#254).
+ */
+async function fetchWithRefresh(url: string, init: RequestInitEx, headers: Headers): Promise<Response> {
   let res = await fetchOrFriendlyThrow(url, { ...init, credentials: "include", headers });
 
   if (res.status === 401 && !init.skipRefresh) {
@@ -221,40 +220,72 @@ async function request<T>(path: string, init: RequestInitEx = {}): Promise<T> {
       releaseRefresh();
     }
   }
+  return res;
+}
 
-  if (!res.ok) {
-    let code = "server.error";
-    // Initialize to the generic fallback BEFORE attempting the envelope
-    // parse. If res.json() fails (non-JSON body — most commonly a
-    // Cloudflare/proxy/CDN HTML error page on a 502/503), the fallback
-    // wins; only a successful envelope parse with a present
-    // body.error.message can override it. statusText ("Bad Gateway",
-    // "Service Unavailable") is HTTP jargon hostile to the SMB target
-    // audience (#77).
-    let message = GENERIC_FALLBACK_MESSAGE;
-    let correlationId: string | undefined;
-    try {
-      const body = (await res.json()) as ApiEnvelope<unknown>;
-      code = body.error?.code ?? code;
-      // .trim() guards against a server that returns
-      // `{ error: { message: "" } }` (or whitespace-only). `??`
-      // alone would let an empty string overwrite the fallback and
-      // surface an empty toast. The trimmed string is preserved as
-      // the override only when it has actual content.
-      const envMessage = body.error?.message?.trim();
-      if (envMessage) message = envMessage;
-      correlationId = body.error?.correlationId;
-    } catch {
-      /* non-JSON error body — message stays as the generic fallback */
-    }
-    throw new ApiError(code, message, res.status, correlationId);
+/**
+ * Map a non-OK response to a jargon-free `ApiError` (#77 contract). Shared by
+ * `request` and `api.getBlob` so binary endpoints surface the same friendly
+ * envelope messages as JSON ones.
+ */
+async function throwFriendlyError(res: Response): Promise<never> {
+  let code = "server.error";
+  // Initialize to the generic fallback BEFORE attempting the envelope
+  // parse. If res.json() fails (non-JSON body — most commonly a
+  // Cloudflare/proxy/CDN HTML error page on a 502/503), the fallback
+  // wins; only a successful envelope parse with a present
+  // body.error.message can override it. statusText ("Bad Gateway",
+  // "Service Unavailable") is HTTP jargon hostile to the SMB target
+  // audience (#77).
+  let message = GENERIC_FALLBACK_MESSAGE;
+  let correlationId: string | undefined;
+  try {
+    const body = (await res.json()) as ApiEnvelope<unknown>;
+    code = body.error?.code ?? code;
+    // .trim() guards against a server that returns
+    // `{ error: { message: "" } }` (or whitespace-only). `??`
+    // alone would let an empty string overwrite the fallback and
+    // surface an empty toast. The trimmed string is preserved as
+    // the override only when it has actual content.
+    const envMessage = body.error?.message?.trim();
+    if (envMessage) message = envMessage;
+    correlationId = body.error?.correlationId;
+  } catch {
+    /* non-JSON error body — message stays as the generic fallback */
   }
+  throw new ApiError(code, message, res.status, correlationId);
+}
+
+async function request<T>(path: string, init: RequestInitEx = {}): Promise<T> {
+  const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
+  const headers = new Headers(init.headers ?? {});
+  if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (init.idempotencyKey) headers.set("Idempotency-Key", init.idempotencyKey);
+
+  const res = await fetchWithRefresh(url, init, headers);
+
+  if (!res.ok) return throwFriendlyError(res);
 
   if (res.status === 204) return undefined as T;
 
   const body = (await res.json()) as ApiEnvelope<T>;
   if (body.error) throw new ApiError(body.error.code, body.error.message, res.status, body.error.correlationId);
   return body.data as T;
+}
+
+/**
+ * GET a binary endpoint (e.g. `GET /api/documents/{id}/file`) as a Blob, with
+ * the same cookie auth, silent 401-refresh, and friendly error mapping as the
+ * envelope client. Unlike the export page's bare-fetch pattern, a stale
+ * session recovers transparently instead of failing the click (#254).
+ */
+async function getBlob(path: string, opts: Omit<RequestInitEx, "method" | "body"> = {}): Promise<Blob> {
+  const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
+  const res = await fetchWithRefresh(url, { method: "GET", ...opts }, new Headers(opts.headers ?? {}));
+  if (!res.ok) return throwFriendlyError(res);
+  return res.blob();
 }
 
 export const api = {
@@ -279,4 +310,5 @@ export const api = {
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
   postForm: <T>(path: string, form: FormData, opts: Omit<RequestInitEx, "method" | "body"> = {}) =>
     request<T>(path, { method: "POST", body: form, ...opts }),
+  getBlob,
 };

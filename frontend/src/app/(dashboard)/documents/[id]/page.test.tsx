@@ -1559,6 +1559,114 @@ describe("DocumentDetailPage — ManualRequired review CTA (#193)", () => {
   });
 });
 
+describe("DocumentDetailPage — View file streams through the authenticated proxy (#254)", () => {
+  // jsdom's URL lacks the object-URL statics. ATTACH them rather than
+  // replacing the global URL constructor — MSW and the api client both do
+  // `new URL(...)`, so swapping the constructor for a stub object kills every
+  // mocked request in the test. Removed again below so no other suite in this
+  // file can accidentally depend on them.
+  function stubObjectUrl() {
+    const createObjectURL = vi.fn().mockReturnValue("blob:mock-view-file");
+    const revokeObjectURL = vi.fn();
+    Object.assign(URL, { createObjectURL, revokeObjectURL });
+    return { createObjectURL, revokeObjectURL };
+  }
+
+  afterEach(() => {
+    delete (URL as unknown as Record<string, unknown>).createObjectURL;
+    delete (URL as unknown as Record<string, unknown>).revokeObjectURL;
+  });
+
+  function mountCompleted() {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(makeDocumentDetail({ extractionStatus: "Completed" })),
+      ),
+    );
+    return renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_completed_01" },
+    });
+  }
+
+  it("opens a tab synchronously, then navigates it to the fetched blob", async () => {
+    const { createObjectURL } = stubObjectUrl();
+    const tab = { location: { href: "" }, close: vi.fn() };
+    const openSpy = vi
+      .spyOn(window, "open")
+      .mockReturnValue(tab as unknown as Window);
+    let served = 0;
+    server.use(
+      http.get(url("/api/documents/:id/file"), () => {
+        served++;
+        return new Response("PDFBYTES", {
+          status: 200,
+          headers: { "Content-Type": "application/pdf" },
+        });
+      }),
+    );
+
+    mountCompleted();
+    fireEvent.click(await screen.findByRole("button", { name: /view file/i }));
+
+    // The tab handle is grabbed inside the click's own task — that's what
+    // keeps popup blockers out of the way — and navigated once bytes land.
+    expect(openSpy).toHaveBeenCalledWith("about:blank", "_blank");
+    await waitFor(() => expect(tab.location.href).toBe("blob:mock-view-file"));
+    expect(served).toBe(1);
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(tab.close).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+    // The raw private Azure URL is gone from the page entirely — the old
+    // anchor 409'd on every click (FP-060).
+    expect(document.querySelector('a[href*="blob.core.windows.net"]')).toBeNull();
+  });
+
+  it("closes the tab and surfaces the server message when the fetch fails", async () => {
+    stubObjectUrl();
+    const tab = { location: { href: "" }, close: vi.fn() };
+    vi.spyOn(window, "open").mockReturnValue(tab as unknown as Window);
+    server.use(
+      http.get(url("/api/documents/:id/file"), () =>
+        jsonError("document.not_found", "Document not found.", { status: 404 }),
+      ),
+    );
+
+    mountCompleted();
+    fireEvent.click(await screen.findByRole("button", { name: /view file/i }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith("Document not found."));
+    expect(tab.close).toHaveBeenCalledTimes(1);
+    expect(tab.location.href).toBe("");
+    // #77 contract: never HTTP jargon — no interpolated status code, no bare statusText.
+    const arg = toastError.mock.calls[0]?.[0] as string;
+    expect(arg).not.toMatch(/\b404\b/);
+    expect(arg).not.toMatch(/^not found$/i);
+  });
+
+  it("explains in plain English when the browser blocks the new tab", async () => {
+    stubObjectUrl();
+    vi.spyOn(window, "open").mockReturnValue(null);
+    server.use(
+      http.get(url("/api/documents/:id/file"), () =>
+        new Response("PDFBYTES", {
+          status: 200,
+          headers: { "Content-Type": "application/pdf" },
+        }),
+      ),
+    );
+
+    mountCompleted();
+    fireEvent.click(await screen.findByRole("button", { name: /view file/i }));
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith(
+        "Your browser blocked the new tab. Allow pop-ups for this site and try again.",
+      ),
+    );
+  });
+});
+
 describe("DocumentDetailPage — humanized processing error (#193)", () => {
   it("shows friendly copy + a support link and hides the raw code behind a disclosure", async () => {
     server.use(
