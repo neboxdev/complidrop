@@ -328,4 +328,33 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         sub.StripeCustomerId.Should().Be("cus_test_123");
         (await ProcessedCountAsync(eventId)).Should().Be(1);
     }
+
+    [Fact]
+    public async Task Reapplying_an_already_applied_event_yields_the_same_state()
+    {
+        // Pins the idempotency contract the #268 ordering relies on (IStripeService doc,
+        // ADR 0020): in the crash window between handler success and the dedupe insert,
+        // Stripe's retry re-runs the handler against already-applied state. Simulated by
+        // deleting the dedupe row after a successful delivery and re-posting the identical
+        // payload. A future handler edit that increments/appends instead of upserting
+        // breaks this test.
+        var orgId = await SeedFreeOrgAsync();
+        var eventId = $"evt_{Guid.NewGuid():N}";
+        var payload = CheckoutCompletedEvent(eventId, orgId);
+
+        (await PostWebhook(payload, SignatureFor(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using (var db = CreateSystemDb())
+            await db.ProcessedStripeEvents.Where(p => p.Id == eventId).ExecuteDeleteAsync();
+
+        (await PostWebhook(payload, SignatureFor(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var sub = await ReloadByOrgAsync(orgId);
+        sub.Plan.Should().Be("pro");
+        sub.Status.Should().Be("active");
+        sub.DocumentLimit.Should().BeNull();
+        sub.HasVendorPortal.Should().BeTrue();
+        sub.StripeCustomerId.Should().Be("cus_test_123");
+        (await ProcessedCountAsync(eventId)).Should().Be(1);
+    }
 }
