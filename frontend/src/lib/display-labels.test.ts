@@ -216,8 +216,16 @@ describe("processingErrorMessage (#193)", () => {
     expect(tooMany).not.toMatch(/extraction\.too_many_attempts/);
     expect(tooMany).not.toMatch(/Exceeded 5 attempts/);
 
-    expect(processingErrorMessage("extraction.cost_ceiling_hit: Monthly extraction cost ceiling reached."))
-      .toMatch(/monthly processing limit/i);
+    const ceiling = processingErrorMessage(
+      "extraction.cost_ceiling_hit: Monthly extraction cost ceiling reached.",
+    );
+    expect(ceiling).toMatch(/monthly processing limit/i);
+    // #256: the limit now genuinely resets monthly, but an already-failed document is
+    // NOT re-read automatically — the copy must point at "Read again", never promise
+    // the old "it resumes next cycle" auto-recovery.
+    expect(ceiling).toMatch(/resets at the start of next month/i);
+    expect(ceiling).toMatch(/read again/i);
+    expect(ceiling).not.toMatch(/resumes next cycle/i);
     expect(processingErrorMessage("extraction.failed: System.Exception boom"))
       .toMatch(/something went wrong/i);
   });

@@ -271,8 +271,11 @@ export function complianceFailureReason(check: ComplianceCheckLike): string {
 const PROCESSING_ERROR_LABELS: Readonly<Record<string, string>> = {
   "extraction.too_many_attempts":
     "We tried several times but couldn't read this file. It may be blurry, password-protected, or not a type we recognize — try uploading a clearer copy.",
+  // The monthly limit genuinely resets at the start of each UTC month (#256) — but an
+  // already-failed document is NOT re-read automatically: the user presses "Read again"
+  // (document detail header) once the new month starts. Don't promise auto-recovery.
   "extraction.cost_ceiling_hit":
-    "We couldn't read this file because your account hit its monthly processing limit. It resumes next cycle, or contact support to raise the limit.",
+    "We couldn't read this file because your account hit its monthly processing limit. The limit resets at the start of next month — open this document and press “Read again” then, or contact support to raise it.",
   "extraction.failed":
     "Something went wrong while reading this file. Try uploading it again, or contact support if it keeps happening.",
 };

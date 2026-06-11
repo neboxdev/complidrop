@@ -118,6 +118,7 @@ public static class BillingEndpoints
     private static async Task<IResult> GetSubscription(
         SystemDbContext db,
         ICurrentUser currentUser,
+        TimeProvider timeProvider,
         CancellationToken ct)
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
@@ -136,7 +137,10 @@ public static class BillingEndpoints
                 documentsUsed = docCount,
                 hasVendorPortal = sub.HasVendorPortal,
                 currentPeriodEnd = sub.CurrentPeriodEnd,
-                extractionSpend = sub.ExtractionSpendThisMonthUsd
+                // EFFECTIVE spend, not the raw counter: a stale-month row reads as zero (#256),
+                // so the Settings "this month" tile shows the same number the ceiling enforces.
+                extractionSpend = CostTrackingService.EffectiveSpend(
+                    sub, DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime))
             },
             error = (object?)null
         });

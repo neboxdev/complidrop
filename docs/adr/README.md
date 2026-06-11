@@ -27,3 +27,5 @@ Use `/adr <title>` to scaffold a new one.
 - [0017](0017-manual-field-edits-sync-compliance-inputs.md) — Manual field edits sync the canonical compliance inputs (`ExtractionFields` + typed columns); re-extraction overwrites manual edits
 - [0018](0018-heic-heif-transcode-to-jpeg-on-ingest.md) — HEIC/HEIF uploads are transcoded to JPEG on ingest (Magick.NET) so OCR, any LLM provider, and the browser preview all see a supported format
 - [0019](0019-test-harness-bridges-abortsignal.md) — The frontend test harness bridges `AbortSignal` across the jsdom ↔ undici realm boundary so `queryFn({ signal })` cancellation is testable
+- [0020](0020-stripe-webhook-at-least-once-idempotent-handlers.md) — Stripe webhook dedupe is at-least-once with idempotent handlers
+- [0021](0021-extraction-budget-lazy-utc-month-reset.md) — Extraction budget resets lazily on a UTC-month anchor (deliberate UTC divergence from 0007's org-local convention)
