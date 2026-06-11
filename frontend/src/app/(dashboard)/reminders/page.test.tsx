@@ -8,14 +8,16 @@
  */
 import { describe, it, expect } from "vitest";
 import { http } from "msw";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import RemindersPage from "./page";
 import {
   renderWithProviders,
   server,
   url,
   jsonOk,
+  jsonError,
   authedMe,
+  toastError,
 } from "@/test";
 
 // sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
@@ -32,7 +34,6 @@ describe("RemindersPage — smoke (#36)", () => {
             notifyVendor: false,
             isActive: true,
             emailSubjectTemplate: null,
-            emailBodyTemplate: null,
           },
         ]),
       ),
@@ -77,7 +78,6 @@ describe("RemindersPage — smoke (#36)", () => {
             notifyVendor: false,
             isActive: true,
             emailSubjectTemplate: null,
-            emailBodyTemplate: null,
           },
         ]),
       ),
@@ -97,6 +97,155 @@ describe("RemindersPage — smoke (#36)", () => {
     // aria-checked reflects state: team + active on, vendor off.
     expect(screen.getByRole("switch", { name: /notify team/i })).toBeChecked();
     expect(screen.getByRole("switch", { name: /notify vendor/i })).not.toBeChecked();
+  });
+});
+
+describe("RemindersPage — toggle saves (#264 / FP-093)", () => {
+  const INITIAL = {
+    id: "r_01",
+    daysBefore: 30,
+    notifyInternalUser: false,
+    notifyVendor: false,
+    isActive: true,
+    emailSubjectTemplate: null,
+  };
+
+  it("two toggles flipped inside the refetch window both persist — the last PUT carries the first flip", async () => {
+    // The lost-update race: the PUT body used to be rebuilt from the render-scope
+    // query snapshot, so flipping vendor right after team sent team's STALE value
+    // and silently reverted it. The body is now built from the optimistically
+    // patched cache, so the final PUT must carry BOTH flips.
+    const putBodies: Array<Record<string, unknown>> = [];
+    server.use(
+      http.get(url("/api/reminders"), () => jsonOk([INITIAL])),
+      http.get(url("/api/reminders/history"), () => jsonOk([])),
+      http.put(url("/api/reminders/r_01"), async ({ request }) => {
+        putBodies.push((await request.json()) as Record<string, unknown>);
+        return jsonOk({ id: "r_01" });
+      }),
+    );
+
+    renderWithProviders(<RemindersPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText(/30/)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("switch", { name: /notify team/i }));
+    fireEvent.click(screen.getByRole("switch", { name: /notify vendor/i }));
+
+    await waitFor(() => expect(putBodies).toHaveLength(2));
+    // The second (last-writer) PUT must include the FIRST toggle's new value.
+    // Asserting the first body's vendor field would be timing-sensitive (the
+    // two onMutate patches interleave); the invariant that kills the bug is
+    // that the last PUT to land carries every flip.
+    expect(putBodies[1]).toMatchObject({
+      notifyInternalUser: true,
+      notifyVendor: true,
+    });
+  });
+
+  it("a toggle flips optimistically while the PUT is still in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // Mutable server state so the post-settle refetch confirms (not reverts)
+    // the optimistic flip, letting the test drain cleanly.
+    const serverState = { ...INITIAL };
+    server.use(
+      http.get(url("/api/reminders"), () => jsonOk([serverState])),
+      http.get(url("/api/reminders/history"), () => jsonOk([])),
+      http.put(url("/api/reminders/r_01"), async ({ request }) => {
+        Object.assign(serverState, (await request.json()) as object);
+        await gate;
+        return jsonOk({ id: "r_01" });
+      }),
+    );
+
+    renderWithProviders(<RemindersPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText(/30/)).toBeInTheDocument());
+
+    const team = screen.getByRole("switch", { name: /notify team/i });
+    expect(team).not.toBeChecked();
+
+    fireEvent.click(team);
+    // Checked BEFORE the PUT resolves — the cache patch in onMutate, not the
+    // post-save refetch, is what flips the switch (kills the perceived lag).
+    await waitFor(() => expect(team).toBeChecked());
+
+    release();
+    await waitFor(() => expect(team).toBeChecked());
+  });
+
+  it("serializes PUTs per scope and refetches once, after the LAST mutation settles", async () => {
+    // Pins three load-bearing behaviors of the mutation wiring (#264 review):
+    //   1. scope serialization — toggle B's PUT must not start while A's is in
+    //      flight (in-order, single-in-flight kills server-side reordering);
+    //   2. onMutate fires immediately even for the queued mutation — B flips
+    //      optimistically while its PUT is still waiting on A;
+    //   3. the onSettled gate — exactly ONE list refetch, after the last settle.
+    let releaseA!: () => void;
+    const gateA = new Promise<void>((r) => (releaseA = r));
+    const serverState = { ...INITIAL };
+    let listFetches = 0;
+    let putStarts = 0;
+    let putsInFlight = 0;
+    let maxPutsInFlight = 0;
+    server.use(
+      http.get(url("/api/reminders"), () => {
+        listFetches++;
+        return jsonOk([serverState]);
+      }),
+      http.get(url("/api/reminders/history"), () => jsonOk([])),
+      http.put(url("/api/reminders/r_01"), async ({ request }) => {
+        putStarts++;
+        putsInFlight++;
+        maxPutsInFlight = Math.max(maxPutsInFlight, putsInFlight);
+        const body = (await request.json()) as object;
+        if (putStarts === 1) await gateA;
+        Object.assign(serverState, body);
+        putsInFlight--;
+        return jsonOk({ id: "r_01" });
+      }),
+    );
+
+    renderWithProviders(<RemindersPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText(/30/)).toBeInTheDocument());
+    const fetchesAfterMount = listFetches;
+
+    const team = screen.getByRole("switch", { name: /notify team/i });
+    const vendor = screen.getByRole("switch", { name: /notify vendor/i });
+    fireEvent.click(team);
+    fireEvent.click(vendor);
+
+    // Both flip optimistically even though PUT A is gated and PUT B is queued.
+    await waitFor(() => expect(team).toBeChecked());
+    expect(vendor).toBeChecked();
+    expect(listFetches).toBe(fetchesAfterMount); // no refetch while pending
+
+    releaseA();
+    await waitFor(() => expect(putStarts).toBe(2));
+    await waitFor(() => expect(listFetches).toBe(fetchesAfterMount + 1));
+    expect(maxPutsInFlight).toBe(1); // serialized, never concurrent
+    // Refetch confirms (not reverts) the flips — server state carried both.
+    expect(team).toBeChecked();
+    expect(vendor).toBeChecked();
+  });
+
+  it("a failed save reverts the switch and surfaces the global error toast", async () => {
+    server.use(
+      http.get(url("/api/reminders"), () => jsonOk([INITIAL])),
+      http.get(url("/api/reminders/history"), () => jsonOk([])),
+      http.put(url("/api/reminders/r_01"), () =>
+        jsonError("server.error", "Could not save your change.", { status: 500 }),
+      ),
+    );
+
+    renderWithProviders(<RemindersPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText(/30/)).toBeInTheDocument());
+
+    const team = screen.getByRole("switch", { name: /notify team/i });
+    fireEvent.click(team);
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith("Could not save your change."));
+    // The post-settle refetch re-syncs to server truth — the optimistic flip reverts.
+    await waitFor(() => expect(team).not.toBeChecked());
   });
 });
 

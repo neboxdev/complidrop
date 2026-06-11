@@ -60,6 +60,22 @@ describe("VendorsPage — state matrix (#36)", () => {
     );
   });
 
+  it("Add vendor stays disabled for an empty or whitespace-only name (#264)", async () => {
+    // A whitespace name would pass `!name` but be rejected server-side —
+    // the button now requires a non-blank trimmed name.
+    server.use(http.get(url("/api/vendors"), () => jsonOk([])));
+
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+    const btn = await screen.findByRole("button", { name: /add vendor/i });
+    expect(btn).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "   " } });
+    expect(btn).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Acme Catering" } });
+    expect(btn).toBeEnabled();
+  });
+
   it("error: a 5xx surfaces an error card with role=alert, the server message, and a Retry affordance, NOT the empty fallback (#80)", async () => {
     server.use(
       http.get(url("/api/vendors"), () =>

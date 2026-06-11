@@ -161,7 +161,15 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
               )}
             </div>
           </div>
-          <div className="flex justify-end">
+          <div className="flex items-center justify-end gap-3">
+            {/* A blank name would render an invisible, unclickable row in the vendors
+                list (the name is the row's link) — block it client-side with a visible
+                reason; the server enforces the same 400 (#264 / FP-074). */}
+            {!form.name.trim() && (
+              <p role="status" className="text-xs text-rose-600">
+                Vendor name is required.
+              </p>
+            )}
             <Button
               onClick={async () => {
                 try {
@@ -177,7 +185,8 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                   toast.error(err instanceof Error ? err.message : "Failed to update vendor");
                 }
               }}
-              disabled={update.isPending}
+              disabled={update.isPending || !form.name.trim()}
+              title={form.name.trim() ? undefined : "Vendor name is required."}
             >
               Save changes
             </Button>

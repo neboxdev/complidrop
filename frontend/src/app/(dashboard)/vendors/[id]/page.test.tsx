@@ -283,6 +283,27 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
     expect(toastArg).not.toMatch(/502/);
   });
 
+  it("disables Save with a visible reason when the name is blanked (#264 / FP-074)", async () => {
+    // A blank name would render an invisible, unclickable row in the vendors
+    // list (the name is the row's link) — the client blocks the save with a
+    // reason; the server enforces the same 400.
+    mountWith(VENDOR_DETAIL);
+    await screen.findByRole("heading", { name: /acme subcontractor/i });
+
+    const name = screen.getByLabelText("Name");
+    const save = screen.getByRole("button", { name: /save changes/i });
+    expect(save).toBeEnabled();
+    expect(screen.queryByText(/vendor name is required/i)).toBeNull();
+
+    fireEvent.change(name, { target: { value: "   " } });
+    expect(save).toBeDisabled();
+    expect(screen.getByText(/vendor name is required/i)).toBeInTheDocument();
+
+    fireEvent.change(name, { target: { value: "Acme Rewired" } });
+    expect(save).toBeEnabled();
+    expect(screen.queryByText(/vendor name is required/i)).toBeNull();
+  });
+
   it("copy link nudges the user to paste it into an email", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {

@@ -85,7 +85,7 @@ export default function VendorsPage() {
           </div>
           <Button
             className="w-full sm:w-auto"
-            disabled={!name || createVendor.isPending}
+            disabled={!name.trim() || createVendor.isPending}
             onClick={async () => {
               try {
                 await createVendor.mutateAsync({ name, contactEmail: email || null });

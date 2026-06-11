@@ -100,6 +100,11 @@ public static class VendorEndpoints
         IAuditLogger audit,
         CancellationToken ct)
     {
+        // Same guard as CreateVendor: a blank name renders an invisible, unclickable row
+        // in the vendors list (the name is the row's link). The create path always had
+        // this check; the update path forgot it (#264 / FP-074).
+        if (string.IsNullOrWhiteSpace(req.Name)) return Error(400, "validation.name", "Vendor name is required.");
+
         var v = await db.Vendors.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (v is null) return NotFound();
         v.Name = req.Name.Trim();

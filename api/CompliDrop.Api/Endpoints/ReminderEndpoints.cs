@@ -31,8 +31,7 @@ public static class ReminderEndpoints
                 notifyInternalUser = r.NotifyInternalUser,
                 notifyVendor = r.NotifyVendor,
                 isActive = r.IsActive,
-                emailSubjectTemplate = r.EmailSubjectTemplate,
-                emailBodyTemplate = r.EmailBodyTemplate
+                emailSubjectTemplate = r.EmailSubjectTemplate
             })
             .ToListAsync(ct);
         return Results.Ok(new { data = reminders, error = (object?)null });
@@ -50,7 +49,10 @@ public static class ReminderEndpoints
         r.NotifyVendor = req.NotifyVendor;
         r.IsActive = req.IsActive;
         r.EmailSubjectTemplate = req.EmailSubjectTemplate;
-        r.EmailBodyTemplate = req.EmailBodyTemplate;
+        // Reminder.EmailBodyTemplate is deliberately NOT on the API surface: the send path
+        // (ReminderBackgroundService.BuildBody) never read it, so accepting/returning it was a
+        // stored-but-ignored lie (#264 / FP-095). The DB column stays dormant until the #241
+        // recipient-aware email rewrite decides whether to honor or drop it.
         await db.SaveChangesAsync(ct);
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }
@@ -188,5 +190,4 @@ public record ReminderUpdateRequest(
     bool NotifyInternalUser,
     bool NotifyVendor,
     bool IsActive,
-    string? EmailSubjectTemplate,
-    string? EmailBodyTemplate);
+    string? EmailSubjectTemplate);

@@ -52,6 +52,56 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     }
 
     [Fact]
+    public async Task Updating_a_vendor_with_a_blank_name_is_400_and_preserves_the_name()
+    {
+        // #264 / FP-074: CreateVendor always rejected blank names; the update path forgot the
+        // guard, letting a whitespace name through — an invisible, unclickable row in the
+        // vendors list (the name is the row's link).
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Acme Catering", "ops@acme.test");
+
+        foreach (var blank in new[] { "", "   ", null })
+        {
+            var resp = await auth.Client.PutAsJsonAsync($"/api/vendors/{vendorId}", new
+            {
+                name = blank,
+                contactEmail = "ops@acme.test",
+                contactPhone = (string?)null,
+                category = (string?)null,
+                complianceTemplateId = (Guid?)null,
+            });
+
+            resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"name '{blank ?? "<null>"}' must be rejected");
+            (await ErrorCode(resp)).Should().Be("validation.name");
+        }
+
+        await using var db = CreateSystemDb();
+        (await db.Vendors.SingleAsync(v => v.Id == vendorId)).Name.Should().Be("Acme Catering");
+    }
+
+    [Fact]
+    public async Task Updating_a_vendor_with_a_valid_name_trims_and_persists_it()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Acme Catering", "ops@acme.test");
+
+        var resp = await auth.Client.PutAsJsonAsync($"/api/vendors/{vendorId}", new
+        {
+            name = "  Acme Catering LLC  ",
+            contactEmail = "ops@acme.test",
+            contactPhone = (string?)null,
+            category = "Catering",
+            complianceTemplateId = (Guid?)null,
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        var v = await db.Vendors.SingleAsync(v => v.Id == vendorId);
+        v.Name.Should().Be("Acme Catering LLC");
+        v.Category.Should().Be("Catering");
+    }
+
+    [Fact]
     public async Task Deleting_a_vendor_deactivates_its_portal_links()
     {
         // #269: the soft-deleted vendor vanishes behind the query filter, so a still-active
