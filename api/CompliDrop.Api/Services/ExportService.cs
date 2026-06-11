@@ -208,14 +208,15 @@ public class ExportService(SystemDbContext db) : IExportService
     }
 
     // Start of the given org-local calendar day as a UTC instant. Some zones have
-    // historically sprung forward AT midnight (e.g. Brazil), making local 00:00
-    // nonexistent — map into the gap's end so the day still starts where the
-    // clocks do (DST gaps are at most an hour).
+    // historically sprung forward AT midnight (e.g. Brazil 2018), making local 00:00
+    // nonexistent — and a few skipped ENTIRE days crossing the date line (Pacific/Apia
+    // 2011-12-30, modeled as invalid only by Linux tzdata, not Windows), so the guard
+    // iterates until it exits the gap instead of assuming a one-hour DST hole.
     private static DateTime StartOfLocalDayUtc(DateOnly day, TimeZoneInfo? tz)
     {
         var midnight = DateTime.SpecifyKind(day.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
         if (tz is null) return DateTime.SpecifyKind(midnight, DateTimeKind.Utc);
-        if (tz.IsInvalidTime(midnight)) midnight = midnight.AddHours(1);
+        while (tz.IsInvalidTime(midnight)) midnight = midnight.AddHours(1);
         return TimeZoneInfo.ConvertTimeToUtc(midnight, tz);
     }
 

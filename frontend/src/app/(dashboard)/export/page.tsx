@@ -83,13 +83,13 @@ export default function ExportPage() {
               <label htmlFor={fromId} className="text-xs text-slate-500 flex items-center gap-1">
                 <Calendar className="w-3 h-3" /> From
               </label>
-              <Input id={fromId} type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="mt-1" />
+              <Input id={fromId} type="date" min="2000-01-01" max="2100-12-31" value={from} onChange={(e) => setFrom(e.target.value)} className="mt-1" />
             </div>
             <div>
               <label htmlFor={toId} className="text-xs text-slate-500 flex items-center gap-1">
                 <Calendar className="w-3 h-3" /> To
               </label>
-              <Input id={toId} type="date" value={to} onChange={(e) => setTo(e.target.value)} className="mt-1" />
+              <Input id={toId} type="date" min="2000-01-01" max="2100-12-31" value={to} onChange={(e) => setTo(e.target.value)} className="mt-1" />
             </div>
           </div>
           {/* Scope clarification (#197): the date range only bounds the audit/
