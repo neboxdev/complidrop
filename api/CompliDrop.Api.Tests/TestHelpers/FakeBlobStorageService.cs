@@ -20,8 +20,11 @@ public sealed class FakeBlobStorageService : IBlobStorageService
         return new BlobUploadResult(blobName, $"memory://{blobName}", bytes.Length, contentType);
     }
 
-    public Task<Stream> DownloadAsync(string blobName, CancellationToken ct) =>
-        Task.FromResult<Stream>(new MemoryStream(_blobs.TryGetValue(blobName, out var b) ? b : []));
+    // Honest not-found: null for an unknown name, mirroring the interface contract the real
+    // Azure implementation maps its 404 to (#254). Tests that need a document's blob to exist
+    // must actually Upload it (see ExtractionWorkerTests.SeedDocAsync).
+    public Task<Stream?> DownloadAsync(string blobName, CancellationToken ct) =>
+        Task.FromResult<Stream?>(_blobs.TryGetValue(blobName, out var b) ? new MemoryStream(b) : null);
 
     public Task DeleteAsync(string blobName, CancellationToken ct)
     {

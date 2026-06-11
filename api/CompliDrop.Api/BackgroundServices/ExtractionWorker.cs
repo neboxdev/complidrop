@@ -158,7 +158,8 @@ public class ExtractionWorker(
 
             logger.LogInformation("Extracting document {DocumentId}", doc.Id);
 
-            await using var blob = await blobs.DownloadAsync(doc.BlobStoragePath, ct);
+            await using var blob = await blobs.DownloadAsync(doc.BlobStoragePath, ct)
+                ?? throw new InvalidOperationException("Document blob not found in storage.");
             using var buffer = new MemoryStream();
             await blob.CopyToAsync(buffer, ct);
             buffer.Position = 0;

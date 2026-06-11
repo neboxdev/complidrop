@@ -936,3 +936,79 @@ describe("api.* — error-envelope → ApiError message mapping (#35)", () => {
     },
   );
 });
+
+describe("api.getBlob — binary GET with the shared transport (#254)", () => {
+  // getBlob exists so binary endpoints (View file) get the SAME silent
+  // 401-refresh and friendly-error mapping as the envelope client — the very
+  // properties the export page's bare-fetch pattern lacks. Pin both: a
+  // regression back to a bare fetch (or a skipRefresh leak) would pass every
+  // page-level test, which only mocks an always-authed session.
+  const calls: FetchCall[] = [];
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    calls.length = 0;
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("retries after a successful refresh and resolves to the served bytes", async () => {
+    let fileCalls = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = (init?.method ?? "GET").toUpperCase();
+      calls.push({ url, method });
+      expect(init?.credentials).toBe("include");
+      if (url.endsWith("/api/auth/refresh")) {
+        return new Response(null, { status: 204 });
+      }
+      fileCalls++;
+      if (fileCalls === 1) {
+        return jsonResponse(401, errorEnvelope("auth.unauthorized", "expired"));
+      }
+      return new Response("PDFBYTES", {
+        status: 200,
+        headers: { "Content-Type": "application/pdf" },
+      });
+    });
+
+    const blob = await api.getBlob("/api/documents/d1/file");
+
+    expect(await blob.text()).toBe("PDFBYTES");
+    expect(blob.type).toBe("application/pdf");
+    // Exactly the 3-call recovery sequence: file → refresh → file.
+    expect(calls.map((c) => `${c.method} ${c.url.split("/api/")[1]}`)).toEqual([
+      "GET documents/d1/file",
+      "POST auth/refresh",
+      "GET documents/d1/file",
+    ]);
+  });
+
+  it("maps a non-OK response to a friendly ApiError (server envelope message, no jargon)", async () => {
+    fetchMock.mockImplementation(async () =>
+      jsonResponse(404, errorEnvelope("document.not_found", "Document not found.")),
+    );
+
+    const err = await api.getBlob("/api/documents/d1/file").catch((e) => e as Error);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).code).toBe("document.not_found");
+    expect((err as ApiError).message).toBe("Document not found.");
+    expect((err as ApiError).message).not.toMatch(/\b404\b/);
+  });
+
+  it("collapses a network failure to the generic fallback, never a browser TypeError", async () => {
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    const err = await api.getBlob("/api/documents/d1/file").catch((e) => e as Error);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).code).toBe("network.unreachable");
+    expect((err as ApiError).message).toBe(GENERIC_FALLBACK_MESSAGE);
+  });
+});

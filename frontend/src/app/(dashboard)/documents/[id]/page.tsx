@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, ArrowLeft, Mail, RefreshCw, RotateCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ExternalLink, Mail, RefreshCw, RotateCw, ShieldCheck } from "lucide-react";
 import { api, ApiError, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { ComplianceBadge, ExtractionBadge } from "@/components/StatusBadges";
@@ -65,7 +65,6 @@ type DocDetail = {
   daysUntilExpiry: number | null;
   isManuallyVerified: boolean;
   uploadedBy: string | null;
-  blobStorageUrl: string | null;
   generalLiabilityLimit: number | null;
   fields: DocField[];
   complianceChecks: ComplianceCheck[];
@@ -303,6 +302,55 @@ export default function DocumentDetailPage() {
     },
   });
 
+  // "View file" streams the original through the authenticated proxy
+  // (GET /api/documents/{id}/file, #254) — the raw blob URL is private and was
+  // never viewable. api.getBlob carries the silent 401-refresh, so a stale
+  // session recovers instead of dumping a JSON error in the new tab. The tab
+  // handle is opened in the CLICK HANDLER (synchronous with the user gesture —
+  // popup blockers allow window.open only there, and TanStack defers
+  // mutationFn to a microtask) and passed in as the mutation variable.
+  const viewFile = useMutation({
+    mutationFn: async (tab: Window | null) => {
+      try {
+        if (tab === null) {
+          // Aggressively-configured blocker: no tab handle. Plain English, no
+          // browser jargon beyond the word users see in their own browser UI.
+          throw new ApiError(
+            "browser.popup_blocked",
+            "Your browser blocked the new tab. Allow pop-ups for this site and try again.",
+            0,
+          );
+        }
+        const blob = await api.getBlob(`/api/documents/${params.id}/file`);
+        const url = URL.createObjectURL(blob);
+        tab.location.href = url;
+        // Revoke when the viewer TAB closes, not on a fixed timer: the whole
+        // point of the button is keeping the tab open to compare against the
+        // fields, and a timed revoke would break F5 / save-as in that tab
+        // after it fired. Polling tab.closed is the only portable signal —
+        // there is no cross-window close event for the opener.
+        const revokeWhenClosed = setInterval(() => {
+          if (tab.closed) {
+            clearInterval(revokeWhenClosed);
+            URL.revokeObjectURL(url);
+          }
+        }, 5_000);
+      } catch (err) {
+        tab?.close();
+        throw err;
+      }
+    },
+    onError: (err) => {
+      // Same shape as reextract above — see that comment for the
+      // rationale. (#122)
+      const message =
+        err instanceof Error && err.message?.trim()
+          ? err.message
+          : GENERIC_FALLBACK_MESSAGE;
+      toast.error(message);
+    },
+  });
+
   const saveFields = useMutation({
     mutationFn: (fields: { fieldName: string; fieldValue: string }[]) =>
       api.put<void>(`/api/documents/${params.id}/fields`, { fields }),
@@ -459,16 +507,15 @@ export default function DocumentDetailPage() {
           >
             <RefreshCw className={cn("w-4 h-4 mr-1", reextract.isPending && "animate-spin")} /> Read again
           </Button>
-          {doc.blobStorageUrl && (
-            <a
-              href={doc.blobStorageUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="text-sm text-sky-700 hover:underline"
-            >
-              View file
-            </a>
-          )}
+          <Button
+            variant="outline"
+            size="sm"
+            title="Opens the original file in a new tab so you can compare it against what we read."
+            onClick={() => viewFile.mutate(window.open("about:blank", "_blank"))}
+            disabled={viewFile.isPending}
+          >
+            <ExternalLink className={cn("w-4 h-4 mr-1", viewFile.isPending && "animate-pulse")} /> View file
+          </Button>
         </div>
       </header>
 

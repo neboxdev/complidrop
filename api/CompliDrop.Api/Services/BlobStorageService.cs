@@ -8,7 +8,12 @@ namespace CompliDrop.Api.Services;
 public interface IBlobStorageService
 {
     Task<BlobUploadResult> UploadAsync(string blobName, Stream content, string contentType, CancellationToken ct);
-    Task<Stream> DownloadAsync(string blobName, CancellationToken ct);
+    /// <summary>
+    /// Opens a read stream for the blob, or <c>null</c> when it does not exist. Not-found is
+    /// part of THIS contract (not a leaked vendor exception) so callers never need to know the
+    /// storage SDK's error surface — the Azure implementation maps its 404 internally (#254).
+    /// </summary>
+    Task<Stream?> DownloadAsync(string blobName, CancellationToken ct);
     Task DeleteAsync(string blobName, CancellationToken ct);
     Uri GetBlobUri(string blobName);
 }
@@ -39,11 +44,20 @@ public class BlobStorageService : IBlobStorageService
         return new BlobUploadResult(blobName, blob.Uri.ToString(), length, contentType);
     }
 
-    public async Task<Stream> DownloadAsync(string blobName, CancellationToken ct)
+    public async Task<Stream?> DownloadAsync(string blobName, CancellationToken ct)
     {
         var blob = _container.GetBlobClient(blobName);
-        var result = await blob.DownloadStreamingAsync(cancellationToken: ct);
-        return result.Value.Content;
+        try
+        {
+            var result = await blob.DownloadStreamingAsync(cancellationToken: ct);
+            return result.Value.Content;
+        }
+        catch (Azure.RequestFailedException ex) when (ex.Status == 404)
+        {
+            // BlobNotFound / ContainerNotFound — surface as the interface's null, so no
+            // caller has to reference the Azure SDK's exception types.
+            return null;
+        }
     }
 
     public async Task DeleteAsync(string blobName, CancellationToken ct)

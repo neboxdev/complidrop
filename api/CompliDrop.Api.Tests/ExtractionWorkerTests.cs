@@ -103,6 +103,14 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             UpdatedAt = now,
         });
         await db.SaveChangesAsync();
+
+        // The blob fake reports honest not-found (null) since #254, and the worker fails a
+        // document whose blob is missing — so a seeded path must have actual stored bytes.
+        if (blobPath is not null)
+        {
+            var blobs = Fixture.Factory.Services.GetRequiredService<IBlobStorageService>();
+            await blobs.UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
+        }
         return (orgId, docId);
     }
 
@@ -834,6 +842,28 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         doc.ProcessingError.Should().Contain("blob path");
         Extraction.ExtractCallCount.Should().Be(0, "extraction must never run without a document to read");
         Ocr.OcrCallCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Document_whose_blob_vanished_from_storage_is_failed_safely_without_extracting()
+    {
+        // The sibling shape of the no-blob-path guard (#254): the row HAS a path but the blob
+        // is gone from storage — DownloadAsync's null contract surfaces as a throw that routes
+        // through the normal failure handling. Crucially, the failure happens BEFORE OCR/LLM
+        // run, so a vanished blob never spends money.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        var blobs = Fixture.Factory.Services.GetRequiredService<IBlobStorageService>();
+        await blobs.DeleteAsync("blob/path/doc.pdf", default);
+        var worker = BuildWorker();
+
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "a first failure below the cap is retried");
+        doc.ProcessingError.Should().Contain("blob not found");
+        Extraction.ExtractCallCount.Should().Be(0);
+        Ocr.OcrCallCount.Should().Be(0, "the not-found path must fail before OCR spends money");
     }
 
     [Theory]

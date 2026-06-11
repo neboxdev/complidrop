@@ -21,6 +21,7 @@ public static class DocumentEndpoints
 
         group.MapGet("/", ListDocuments);
         group.MapGet("/{id:guid}", GetDocument);
+        group.MapGet("/{id:guid}/file", GetDocumentFile);
         group.MapPost("/upload", UploadDocument)
             .DisableAntiforgery()
             .WithMetadata(new RequestSizeLimitAttribute(10 * 1024 * 1024));
@@ -175,7 +176,6 @@ public static class DocumentEndpoints
                 : null,
             doc.IsManuallyVerified,
             doc.UploadedBy,
-            doc.BlobStorageUrl,
             doc.GeneralLiabilityLimit,
             doc.Fields.Select(f => new DocumentFieldDto(
                 f.Id, f.FieldName, f.FieldValue, f.FieldType, f.Confidence, f.IsManuallyEdited, f.OriginalValue)).ToArray(),
@@ -194,6 +194,49 @@ public static class DocumentEndpoints
             doc.UpdatedAt);
 
         return Results.Ok(new { data = detail, error = (object?)null });
+    }
+
+    /// <summary>
+    /// Streams the original uploaded file through the API (#254). The blob container is
+    /// PRIVATE (<c>PublicAccessType.None</c>) and no SAS is ever minted — by design: flipping
+    /// the container public would expose every customer's COIs, and SAS links once handed out
+    /// can't be tenant-revoked. This authenticated, tenant-filtered proxy is the only way a
+    /// browser may see the bytes.
+    /// </summary>
+    private static async Task<IResult> GetDocumentFile(
+        Guid id,
+        AppDbContext db,
+        IBlobStorageService blobs,
+        HttpContext http,
+        CancellationToken ct)
+    {
+        // Tenant-filtered set: a cross-org, soft-deleted, or unknown id resolves to nothing —
+        // 404, never another org's document bytes.
+        var doc = await db.Documents
+            .Where(d => d.Id == id)
+            .Select(d => new { d.BlobStoragePath, d.ContentType, d.OriginalFileName })
+            .FirstOrDefaultAsync(ct);
+        if (doc is null || string.IsNullOrWhiteSpace(doc.BlobStoragePath)) return NotFound();
+
+        // Null = the row exists but the blob vanished (manual storage cleanup, partial
+        // delete) — a friendly 404, not an unhandled 500. Not-found is part of the
+        // IBlobStorageService contract, so no Azure SDK types leak to this layer.
+        var stream = await blobs.DownloadAsync(doc.BlobStoragePath, ct);
+        if (stream is null) return NotFound();
+
+        // Inline so the browser renders the PDF/image in the tab instead of downloading.
+        // SetHttpFileName emits both the quoted `filename` and the RFC 6266 UTF-8 `filename*`
+        // for non-ASCII upload names. Private compliance documents must never be cached by a
+        // shared proxy, and nosniff pins the stored (magic-byte-validated, ingest-normalized)
+        // content type against browser re-interpretation.
+        var disposition = new Microsoft.Net.Http.Headers.ContentDispositionHeaderValue("inline");
+        disposition.SetHttpFileName(doc.OriginalFileName);
+        http.Response.Headers.ContentDisposition = disposition.ToString();
+        http.Response.Headers.CacheControl = "private, no-store";
+        http.Response.Headers.XContentTypeOptions = "nosniff";
+        return Results.Stream(
+            stream,
+            string.IsNullOrWhiteSpace(doc.ContentType) ? "application/octet-stream" : doc.ContentType);
     }
 
     private static async Task<IResult> UpdateDocument(

@@ -6,9 +6,7 @@ import { FileText, FileSpreadsheet, Calendar } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5292";
+import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 
 export default function ExportPage() {
   const [from, setFrom] = useState(isoDaysAgo(30));
@@ -26,21 +24,13 @@ export default function ExportPage() {
   const download = async (path: string, filename: string) => {
     setBusy(true);
     try {
-      // Bare fetch (NOT the api.* client) because the response is a
-      // binary blob, not a JSON envelope. The api client only handles
-      // envelope responses; for downloads we own the fetch — and we
-      // own the error-message discipline that the api client otherwise
-      // enforces (#77).
-      //
-      // Both error branches (non-OK status, fetch reject) collapse to
-      // the same jargon-free GENERIC_FALLBACK_MESSAGE — never leak a
-      // raw status code into the toast copy (e.g. "Export failed
-      // (502)"), never let a browser TypeError ("Failed to fetch")
-      // through. Matches the api.ts contract from #77.
-      const res = await fetch(`${API_BASE}${path}`, { credentials: "include" })
-        .catch(() => null);
-      if (!res || !res.ok) throw new Error(GENERIC_FALLBACK_MESSAGE);
-      const blob = await res.blob();
+      // api.getBlob (#254) replaces this page's old bare fetch: same cookie
+      // transport and jargon-free error discipline (#77), plus two things the
+      // bare fetch lacked — the coalesced silent 401-refresh (a stale session
+      // recovers instead of failing the click) and the server's friendly
+      // envelope message on failure (the bare fetch collapsed every error to
+      // the generic fallback).
+      const blob = await api.getBlob(path);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -49,10 +39,9 @@ export default function ExportPage() {
       URL.revokeObjectURL(url);
       toast.success("Download started");
     } catch (err) {
-      // `err.message` is guaranteed non-empty (we just threw it as the
-      // GENERIC_FALLBACK_MESSAGE), but the truthy guard defends
-      // against a future blob().error or url-revoke throw whose
-      // .message could be a browser-jargon string.
+      // ApiError.message is already friendly (server envelope message or the
+      // generic fallback); the truthy guard defends against a future
+      // blob()/url-revoke throw whose .message could be browser jargon.
       const message =
         err instanceof Error && err.message ? err.message : GENERIC_FALLBACK_MESSAGE;
       toast.error(message);
@@ -99,9 +88,9 @@ export default function ExportPage() {
             The date range filters the <strong className="font-medium">activity log</strong> only —
             the documents table always lists all of your active documents.
           </p>
-          {/* Inverted-range guard (#262): the blob download path surfaces only the
-              generic fallback on failure (per the #77 contract), so the API's friendly
-              400 would never reach the user — catch it before the request instead. */}
+          {/* Inverted-range guard (#262): catch the inversion before any request —
+              instant feedback beats a round-trip, even now that api.getBlob (#254)
+              would surface the API's friendly 400 message on the toast. */}
           {rangeInverted && (
             <p className="text-xs text-rose-600" role="alert">
               The start date must be on or before the end date.

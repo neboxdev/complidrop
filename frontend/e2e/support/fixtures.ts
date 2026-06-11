@@ -153,7 +153,6 @@ export type DocumentDetailFixtureE2E = {
   daysUntilExpiry: number | null;
   isManuallyVerified: boolean;
   uploadedBy: string | null;
-  blobStorageUrl: string | null;
   generalLiabilityLimit: number | null;
   fields: Array<{
     id: string;
@@ -199,7 +198,6 @@ const DOCUMENT_DETAIL_BASE: DocumentDetailFixtureE2E = {
   daysUntilExpiry: null,
   isManuallyVerified: false,
   uploadedBy: null,
-  blobStorageUrl: null,
   generalLiabilityLimit: null,
   fields: [],
   complianceChecks: [],
