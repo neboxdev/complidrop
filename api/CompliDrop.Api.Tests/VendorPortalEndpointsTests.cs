@@ -109,6 +109,97 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     }
 
     [Fact]
+    public async Task Soft_deleted_vendor_with_a_stale_active_link_returns_404_not_500()
+    {
+        // #269 defense in depth: pre-fix deletions (or any path that misses the
+        // deactivate-on-delete write) leave the link active while the vendor Include
+        // materializes null. Both portal endpoints must die at the null-guard, not NRE.
+        var seeded = await SeedLinkAsync();
+        await using (var db = CreateSystemDb())
+            await db.Vendors.Where(v => v.Id == seeded.VendorId)
+                .ExecuteUpdateAsync(s => s.SetProperty(v => v.DeletedAt, DateTime.UtcNow));
+
+        var info = await CreateClient().GetAsync($"/api/portal/{seeded.Token}");
+        info.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(info)).Should().Be("vendor.portal_token_invalid");
+
+        var upload = await UploadAsync(CreateClient(), seeded.Token, PdfBytes(), "coi.pdf", "application/pdf");
+        upload.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(upload)).Should().Be("vendor.portal_token_invalid");
+    }
+
+    [Fact]
+    public async Task Soft_deleted_org_with_an_active_link_returns_404_and_accepts_no_uploads()
+    {
+        // Account deletion never touches vendor rows or portal links (#269). The org
+        // filter nulls the ThenInclude — and a direct POST that skips the info page must
+        // not keep inserting documents into the deleted tenant.
+        var seeded = await SeedLinkAsync();
+        await using (var db = CreateSystemDb())
+            await db.Organizations.Where(o => o.Id == seeded.OrgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(o => o.DeletedAt, DateTime.UtcNow));
+
+        var info = await CreateClient().GetAsync($"/api/portal/{seeded.Token}");
+        info.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(info)).Should().Be("vendor.portal_token_invalid");
+
+        var upload = await UploadAsync(CreateClient(), seeded.Token, PdfBytes(), "coi.pdf", "application/pdf");
+        upload.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        await using var db2 = CreateSystemDb();
+        (await db2.Documents.IgnoreQueryFilters().CountAsync(d => d.OrganizationId == seeded.OrgId))
+            .Should().Be(0, "a deleted tenant must not accumulate new documents");
+    }
+
+    [Fact]
+    public async Task Status_endpoint_stops_serving_a_soft_deleted_tenants_documents()
+    {
+        // #269: GetStatus deliberately tolerates IsActive=false (post-quota polling), but a
+        // dead vendor/org must 404 — otherwise a deleted tenant's document status stays
+        // publicly queryable through any old token.
+        var seeded = await SeedLinkAsync();
+        Guid docId;
+        await using (var db = CreateSystemDb())
+        {
+            docId = Guid.NewGuid();
+            db.Documents.Add(new Document
+            {
+                Id = docId, OrganizationId = seeded.OrgId, VendorId = seeded.VendorId,
+                OriginalFileName = "d.pdf", BlobStorageUrl = "blob://d", FileSizeBytes = 1,
+                ContentType = "application/pdf", DocumentType = "coi",
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+        (await CreateClient().GetAsync($"/api/portal/{seeded.Token}/status/{docId}"))
+            .StatusCode.Should().Be(HttpStatusCode.OK, "sanity: live tenant serves status");
+
+        await using (var db = CreateSystemDb())
+            await db.Vendors.Where(v => v.Id == seeded.VendorId)
+                .ExecuteUpdateAsync(s => s.SetProperty(v => v.DeletedAt, DateTime.UtcNow));
+
+        var resp = await CreateClient().GetAsync($"/api/portal/{seeded.Token}/status/{docId}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(resp)).Should().Be("vendor.portal_token_invalid");
+    }
+
+    [Fact]
+    public async Task Dead_tenant_with_an_expired_link_answers_404_not_410()
+    {
+        // The null-guard runs BEFORE the expiry check: a 410 would acknowledge the token
+        // was once valid for a now-deleted tenant (and invite "request a new link").
+        var seeded = await SeedLinkAsync(expiresAt: DateTime.UtcNow.AddDays(-1));
+        await using (var db = CreateSystemDb())
+            await db.Organizations.Where(o => o.Id == seeded.OrgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(o => o.DeletedAt, DateTime.UtcNow));
+
+        var info = await CreateClient().GetAsync($"/api/portal/{seeded.Token}");
+
+        info.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(info)).Should().Be("vendor.portal_token_invalid");
+    }
+
+    [Fact]
     public async Task Unknown_token_is_404_and_leaks_no_tenant_data()
     {
         // A real link exists, but we query a completely different (unknown) token.

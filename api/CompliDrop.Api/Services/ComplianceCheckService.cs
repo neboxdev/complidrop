@@ -58,6 +58,15 @@ public class ComplianceCheckService(
         var template = doc.Vendor?.ComplianceTemplate;
         if (template is null || template.Rules.Count == 0)
         {
+            // "No governing rules" must also mean "no check rows" — without this, a doc
+            // whose template was unassigned/emptied keeps stale checks from the old rules
+            // while showing Pending (#269 review). Materialized async: handing RemoveRange
+            // an IQueryable executes the query on the blocking sync path.
+            var stale = await context.Set<ComplianceCheck>()
+                .Where(c => c.DocumentId == doc.Id)
+                .ToListAsync(ct);
+            context.Set<ComplianceCheck>().RemoveRange(stale);
+
             if (doc.ComplianceStatus != ComplianceStatus.ExpiringSoon)
                 doc.ComplianceStatus = ComplianceStatus.Pending;
             doc.UpdatedAt = nowUtc;
@@ -65,7 +74,9 @@ public class ComplianceCheckService(
             return doc.ComplianceStatus;
         }
 
-        var previous = context.Set<ComplianceCheck>().Where(c => c.DocumentId == doc.Id);
+        var previous = await context.Set<ComplianceCheck>()
+            .Where(c => c.DocumentId == doc.Id)
+            .ToListAsync(ct);
         context.Set<ComplianceCheck>().RemoveRange(previous);
 
         var applicableRules = template.Rules

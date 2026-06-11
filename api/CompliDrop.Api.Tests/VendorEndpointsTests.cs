@@ -4,6 +4,7 @@ using System.Text.Json;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CompliDrop.Api.Tests;
@@ -48,6 +49,60 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         resp.EnsureSuccessStatusCode();
         var data = await Data(resp);
         return (data.GetProperty("id").GetGuid(), data.GetProperty("token").GetString()!, data.GetProperty("url").GetString()!);
+    }
+
+    [Fact]
+    public async Task Deleting_a_vendor_deactivates_its_portal_links()
+    {
+        // #269: the soft-deleted vendor vanishes behind the query filter, so a still-active
+        // emailed link used to NRE-500 on every click. Deletion must kill the links with it.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Doomed LLC", "x@doomed.test");
+        var (linkId, token, _) = await GenerateLinkAsync(auth.Client, vendorId);
+
+        var del = await auth.Client.DeleteAsync($"/api/vendors/{vendorId}");
+        del.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using (var db = CreateSystemDb())
+            (await db.VendorPortalLinks.SingleAsync(l => l.Id == linkId)).IsActive.Should().BeFalse();
+
+        // The emailed link now dies cleanly at the IsActive gate — friendly 404, not a 500.
+        var portal = await CreateClient().GetAsync($"/api/portal/{token}");
+        portal.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(portal)).Should().Be("vendor.portal_token_invalid");
+
+        // ExecuteUpdate bypasses the audit interceptor, so the explicit audit row is the
+        // ONLY trace of the link mutation — and audit-ready export is the product promise.
+        await using var db2 = CreateSystemDb();
+        var deactivation = await db2.AuditLogs.SingleAsync(a =>
+            a.Action == "vendorPortalLink.deactivated_on_vendor_delete" && a.EntityId == vendorId);
+        deactivation.AfterJson.Should().Contain(linkId.ToString(), "the affected link ids belong in the audit payload");
+        (await db2.AuditLogs.AnyAsync(a => a.Action == "vendor.deleted" && a.EntityId == vendorId)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Deleting_a_vendor_with_no_links_emits_no_link_deactivation_audit_row()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Linkless LLC", null);
+
+        (await auth.Client.DeleteAsync($"/api/vendors/{vendorId}")).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        (await db.AuditLogs.AnyAsync(a => a.Action == "vendorPortalLink.deactivated_on_vendor_delete" && a.EntityId == vendorId))
+            .Should().BeFalse("no links were deactivated");
+    }
+
+    [Fact]
+    public async Task Second_delete_of_the_same_vendor_returns_404()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Twice LLC", null);
+        (await auth.Client.DeleteAsync($"/api/vendors/{vendorId}")).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var second = await auth.Client.DeleteAsync($"/api/vendors/{vendorId}");
+
+        second.StatusCode.Should().Be(HttpStatusCode.NotFound, "the soft-deleted vendor is hidden by the query filter");
     }
 
     [Fact]

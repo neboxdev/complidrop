@@ -121,8 +121,43 @@ public static class VendorEndpoints
     {
         var v = await db.Vendors.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (v is null) return NotFound();
-        db.Vendors.Remove(v);
-        await db.SaveChangesAsync(ct);
+
+        // Deactivate the vendor's portal links and soft-delete the vendor atomically
+        // (#269): the soft-deleted vendor vanishes behind the query filter, which
+        // previously left emailed links "live" — every click materialized
+        // link.Vendor == null and NRE-500'd. ExecuteUpdate, NOT tracked entities:
+        // loading the links into the change tracker arms EF's client-side cascade, and
+        // Remove(vendor) would then HARD-delete the link rows at SaveChanges
+        // (VendorPortalLink has no DeletedAt for the interceptor's soft-delete
+        // translation). The transaction covers the link deactivation + vendor
+        // soft-delete only — audit rows are written AFTER commit, because IAuditLogger
+        // goes through SystemDbContext on a different connection and cannot join this
+        // transaction (#269 review; the explicit link row exists at all because
+        // ExecuteUpdate bypasses the audit interceptor).
+        var linkIds = await db.VendorPortalLinks
+            .Where(l => l.VendorId == id && l.IsActive)
+            .Select(l => l.Id)
+            .ToListAsync(ct);
+
+        await using (var tx = await db.Database.BeginTransactionAsync(ct))
+        {
+            // Filtered by the captured ids so the audit payload below states EXACTLY what
+            // this operation deactivated. A link minted concurrently between the snapshot
+            // and here stays active but is inert: the portal's dead-tenant guards 404 it
+            // the moment the vendor soft-delete commits.
+            await db.VendorPortalLinks
+                .Where(l => linkIds.Contains(l.Id))
+                .ExecuteUpdateAsync(s => s.SetProperty(l => l.IsActive, false), ct);
+
+            db.Vendors.Remove(v);
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+
+        if (linkIds.Count > 0)
+            await audit.LogAsync(
+                "vendorPortalLink.deactivated_on_vendor_delete", nameof(Vendor), id,
+                after: new { count = linkIds.Count, linkIds });
         await audit.LogAsync("vendor.deleted", nameof(Vendor), id);
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }

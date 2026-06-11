@@ -158,16 +158,73 @@ public static class ComplianceEndpoints
         Guid templateId,
         Guid ruleId,
         AppDbContext db,
+        IComplianceCheckService checker,
         IAuditLogger audit,
         CancellationToken ct)
     {
+        // Resolve through the tenant-filtered template set, excluding system templates —
+        // mirrors UpsertRule. ComplianceRule itself carries no OrganizationId (and so no
+        // tenant filter), so querying it directly would let a caller holding both GUIDs
+        // delete another org's rule — or mutate the SHARED system templates every org
+        // sees (#269).
+        var template = await db.ComplianceTemplates
+            .FirstOrDefaultAsync(t => t.Id == templateId && !t.IsSystemTemplate, ct);
+        if (template is null) return NotFound();
+
         var rule = await db.ComplianceRules
             .Where(r => r.Id == ruleId && r.ComplianceTemplateId == templateId)
             .FirstOrDefaultAsync(ct);
         if (rule is null) return NotFound();
-        db.ComplianceRules.Remove(rule);
-        await db.SaveChangesAsync(ct);
+
+        // ComplianceCheck → ComplianceRule is ON DELETE RESTRICT, so the dependent check
+        // rows must go with the rule (#269: the rules-page trash button 500'd forever once
+        // any document had been evaluated against the rule). Everything — check cleanup,
+        // rule delete, and the re-evaluation of affected documents — runs in ONE
+        // transaction: a failure (or client abort) mid-re-eval rolls the whole delete back
+        // for a clean retry, instead of leaving documents stuck on verdicts computed
+        // against a rule that no longer exists. EvaluateAsync enlists because it uses this
+        // same request-scoped AppDbContext. Re-eval on rule EDITS / assignment changes
+        // stays #257's scope.
+        try
+        {
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+            // Single DELETE … RETURNING so the affected-document snapshot and the check
+            // cleanup are one atomic statement — a separate SELECT-then-DELETE leaves a
+            // window where a concurrent evaluation's check row is deleted without its
+            // document making the re-eval list. No timestamptz involved (ADR 0009 n/a).
+            var affectedDocIds = (await db.Database
+                .SqlQuery<Guid>($"""
+                    DELETE FROM "ComplianceChecks" WHERE "ComplianceRuleId" = {ruleId} RETURNING "DocumentId"
+                    """)
+                .ToListAsync(ct))
+                .Distinct()
+                .ToList();
+
+            db.ComplianceRules.Remove(rule);
+            await db.SaveChangesAsync(ct);
+
+            // EvaluateAsync is tenant-filtered, so a foreign document id (possible only via
+            // a cross-org template assignment, see #273) resolves to nothing and is skipped.
+            foreach (var docId in affectedDocIds)
+                await checker.EvaluateAsync(docId, ct);
+
+            await tx.CommitAsync(ct);
+        }
+        catch (DbUpdateException)
+        {
+            // A concurrent evaluation inserted a fresh check for this rule between the
+            // cleanup and the rule delete (FK restrict). The rollback left everything
+            // intact — the retry's snapshot will include the new row.
+            return Error(409, "compliance.conflict",
+                "This requirement was being checked at the same moment. Please try again.");
+        }
+
+        // Audit AFTER commit: IAuditLogger writes through SystemDbContext — a different
+        // connection that cannot join this transaction (see #269 review). Worst case is a
+        // missing audit row on a post-commit crash, the same shape as every other endpoint.
         await audit.LogAsync("complianceRule.deleted", nameof(ComplianceRule), ruleId);
+
         return Results.Ok(new { data = new { id = ruleId }, error = (object?)null });
     }
 
