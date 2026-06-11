@@ -125,19 +125,90 @@ public sealed class CostTrackingServiceTests(IntegrationTestFixture fixture) : I
     [Fact]
     public async Task Concurrent_RecordSpends_do_not_lose_increments()
     {
-        // The old read-modify-write save could drop an increment when two workers raced; the
-        // conditional ExecuteUpdate is a single server-side CASE WHEN, so both land.
+        // The old read-modify-write save could drop an increment when workers raced; the
+        // conditional ExecuteUpdate is a single server-side CASE WHEN, so all land. Ten
+        // overlapping writers (each on its own connection) so a read-modify-write regression
+        // loses at least one update with near-certainty instead of passing flakily.
         var orgId = await SeedOrgWithSubscriptionAsync(spend: 0m, anchor: JuneStart);
 
-        await using var dbA = CreateSystemDb();
-        await using var dbB = CreateSystemDb();
-        await Task.WhenAll(
-            CreateService(dbA, June15).RecordSpendAsync(orgId, 0.10m, default),
-            CreateService(dbB, June15).RecordSpendAsync(orgId, 0.15m, default));
+        var contexts = Enumerable.Range(0, 10).Select(_ => CreateSystemDb()).ToList();
+        try
+        {
+            await Task.WhenAll(contexts.Select(db =>
+                CreateService(db, June15).RecordSpendAsync(orgId, 0.10m, default)));
+        }
+        finally
+        {
+            foreach (var db in contexts) await db.DisposeAsync();
+        }
 
         await using var verify = CreateSystemDb();
         (await verify.Subscriptions.SingleAsync(s => s.OrganizationId == orgId))
-            .ExtractionSpendThisMonthUsd.Should().Be(0.25m);
+            .ExtractionSpendThisMonthUsd.Should().Be(1.00m);
+    }
+
+    [Fact]
+    public async Task A_stale_stamped_writer_cannot_roll_the_anchor_backwards()
+    {
+        // Month-boundary race (#256 review): a RecordSpend stamped just before the UTC month
+        // flip that commits AFTER another instance re-anchored the row to the new month must
+        // increment the new month's counter — not overwrite it and regress the anchor, which
+        // would wipe counted spend and read as effective $0.
+        var orgId = await SeedOrgWithSubscriptionAsync(spend: 2.00m, anchor: JuneStart);
+
+        var lateMayStamp = new DateTimeOffset(2026, 5, 31, 23, 59, 59, TimeSpan.Zero);
+        await using (var db = CreateSystemDb())
+            await CreateService(db, lateMayStamp).RecordSpendAsync(orgId, 0.25m, default);
+
+        await using var verify = CreateSystemDb();
+        var sub = await verify.Subscriptions.SingleAsync(s => s.OrganizationId == orgId);
+        sub.SpendMonthStart.Should().Be(JuneStart, "the anchor is monotonic — never moves backwards");
+        sub.ExtractionSpendThisMonthUsd.Should().Be(2.25m,
+            "the boundary-straddling laggard's cents land in the newer month (safe direction)");
+    }
+
+    [Fact]
+    public async Task Anchor_equality_is_year_aware()
+    {
+        // Kills the month-number-only mutant: an anchor from the SAME calendar month of a
+        // PRIOR year is stale — it must not count against the ceiling, and a new spend must
+        // reset rather than increment it.
+        var orgId = await SeedOrgWithSubscriptionAsync(spend: 100m, anchor: new DateOnly(2025, 6, 1));
+
+        await using (var db = CreateSystemDb())
+        {
+            var svc = CreateService(db, June15);
+            (await svc.CanSpendAsync(orgId, 0.01m, default)).Should().BeTrue(
+                "June 2025 spend is not June 2026 spend");
+            await svc.RecordSpendAsync(orgId, 0.25m, default);
+        }
+
+        await using var verify = CreateSystemDb();
+        var sub = await verify.Subscriptions.SingleAsync(s => s.OrganizationId == orgId);
+        sub.ExtractionSpendThisMonthUsd.Should().Be(0.25m);
+        sub.SpendMonthStart.Should().Be(JuneStart);
+    }
+
+    [Fact]
+    public async Task An_org_without_a_subscription_row_is_denied_and_RecordSpend_is_a_noop()
+    {
+        // CanSpend fails CLOSED on a missing row (the worker comment relies on it), and the
+        // ExecuteUpdate-on-empty-set RecordSpend neither throws nor conjures a row.
+        var orgId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        await using (var seed = CreateSystemDb())
+        {
+            seed.Organizations.Add(new Organization { Id = orgId, Name = "No-sub Org", CreatedAt = now, UpdatedAt = now });
+            await seed.SaveChangesAsync();
+        }
+
+        await using var db = CreateSystemDb();
+        var svc = CreateService(db, June15);
+        (await svc.CanSpendAsync(orgId, 0.01m, default)).Should().BeFalse("no subscription row → fail closed");
+        await svc.RecordSpendAsync(orgId, 0.25m, default);
+
+        await using var verify = CreateSystemDb();
+        (await verify.Subscriptions.AnyAsync(s => s.OrganizationId == orgId)).Should().BeFalse();
     }
 
     [Fact]

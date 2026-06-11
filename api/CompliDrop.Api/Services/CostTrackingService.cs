@@ -30,13 +30,15 @@ public class CostTrackingService(
     public static DateOnly MonthStart(DateOnly utcToday) => new(utcToday.Year, utcToday.Month, 1);
 
     /// <summary>
-    /// The spend that actually counts against this month's ceiling: the stored counter when the
-    /// row is anchored to the current UTC month, otherwise zero (stale counter from an earlier
-    /// month — including the lifetime totals accumulated before #256). Shared with the billing
-    /// endpoint so the Settings "this month" tile shows the same number the gate enforces.
+    /// The spend that actually counts against this month's ceiling: the stored counter unless it
+    /// is anchored to a PAST month (stale — including the lifetime totals accumulated before
+    /// #256), which reads as zero. A future-anchored counter (possible only under clock skew
+    /// between instances) still counts: over-enforcing the ceiling is the safe direction for a
+    /// spend control. Shared with the billing endpoint so the Settings "this month" tile shows
+    /// the same number the gate enforces.
     /// </summary>
     public static decimal EffectiveSpend(Subscription sub, DateOnly utcToday) =>
-        sub.SpendMonthStart == MonthStart(utcToday) ? sub.ExtractionSpendThisMonthUsd : 0m;
+        sub.SpendMonthStart >= MonthStart(utcToday) ? sub.ExtractionSpendThisMonthUsd : 0m;
 
     public async Task<bool> CanSpendAsync(Guid organizationId, decimal plannedUsd, CancellationToken ct)
     {
@@ -54,19 +56,26 @@ public class CostTrackingService(
         var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
         var monthStart = MonthStart(DateOnly.FromDateTime(nowUtc));
 
-        // One atomic conditional UPDATE: increment when the row is already anchored to the
-        // current month, otherwise overwrite with this spend and re-anchor (the lazy reset).
+        // One atomic conditional UPDATE: increment when the row is anchored to the current (or a
+        // newer) month, otherwise overwrite with this spend and re-anchor (the lazy reset).
         // ExecuteUpdate (CASE WHEN server-side) instead of read-modify-write so two concurrent
         // workers can't lose an increment — the old tracked-entity save raced exactly that way.
-        // It bypasses the audit interceptor, which is the pre-existing behavior anyway for this
-        // write (background scope has no current user → no audit row); UpdatedAt is set manually
-        // for the same reason. A missing subscription row updates nothing — same as before.
+        // The anchor is MONOTONIC (>= / never moves backwards): a writer that stamped its month
+        // just before a UTC month flip but commits after another instance already re-anchored
+        // the row must INCREMENT the new month's counter, not wipe it by re-anchoring to the
+        // old month — a boundary-straddling laggard's cents land in the newer month, which is
+        // the safe direction for a spend control (#256 review).
+        // ExecuteUpdate bypasses the audit interceptor, which is the pre-existing behavior
+        // anyway for this write (background scope has no current user → no audit row);
+        // UpdatedAt is set manually for the same reason. A missing subscription row updates
+        // nothing — same as before.
         await db.Subscriptions
             .Where(s => s.OrganizationId == organizationId)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(x => x.ExtractionSpendThisMonthUsd,
-                    x => x.SpendMonthStart == monthStart ? x.ExtractionSpendThisMonthUsd + usd : usd)
-                .SetProperty(x => x.SpendMonthStart, monthStart)
+                    x => x.SpendMonthStart >= monthStart ? x.ExtractionSpendThisMonthUsd + usd : usd)
+                .SetProperty(x => x.SpendMonthStart,
+                    x => x.SpendMonthStart >= monthStart ? x.SpendMonthStart : monthStart)
                 .SetProperty(x => x.UpdatedAt, nowUtc), ct);
     }
 }
