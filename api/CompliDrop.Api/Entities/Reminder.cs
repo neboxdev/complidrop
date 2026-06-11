@@ -43,6 +43,11 @@ public class Subscription
     public int? DocumentLimit { get; set; } = 5;
     public bool HasVendorPortal { get; set; } = false;
     public decimal ExtractionSpendThisMonthUsd { get; set; } = 0m;
+    // UTC month the spend counter belongs to (first of month). A row anchored to any OTHER
+    // month carries a stale counter that counts as zero — the lazy monthly reset of #256.
+    // DateOnly.MinValue (also the column default, incl. for pre-#256 rows) is always stale,
+    // so existing lifetime counters were forgiven on deploy and a fresh row starts at zero.
+    public DateOnly SpendMonthStart { get; set; } = DateOnly.MinValue;
     public DateTime? CurrentPeriodEnd { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }

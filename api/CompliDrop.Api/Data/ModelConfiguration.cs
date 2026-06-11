@@ -179,6 +179,10 @@ internal static class ModelConfiguration
             e.Property(s => s.Plan).HasMaxLength(50).HasDefaultValue("free");
             e.Property(s => s.Status).HasMaxLength(50).HasDefaultValue("active");
             e.Property(s => s.ExtractionSpendThisMonthUsd).HasColumnType("numeric(12,4)").HasDefaultValue(0m);
+            // DateOnly.MinValue = "always stale": pre-#256 rows (whose counter held LIFETIME
+            // spend) and fresh rows both start with an anchor that can never equal the current
+            // month, so their counter reads as zero until the first post-#256 spend re-anchors it.
+            e.Property(s => s.SpendMonthStart).HasDefaultValue(DateOnly.MinValue);
             e.HasIndex(s => s.StripeCustomerId)
                 .IsUnique()
                 .HasFilter("\"StripeCustomerId\" IS NOT NULL");

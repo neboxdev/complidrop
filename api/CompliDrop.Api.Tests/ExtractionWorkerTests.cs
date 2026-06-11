@@ -2,6 +2,7 @@ using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Services;
 using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
@@ -79,6 +80,9 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
                 Plan = plan,
                 Status = "active",
                 ExtractionSpendThisMonthUsd = spend,
+                // Anchor to the CURRENT UTC month — since #256 the counter only counts when
+                // the anchor matches the evaluation month (the worker runs on the real clock).
+                SpendMonthStart = CostTrackingService.MonthStart(DateOnly.FromDateTime(DateTime.UtcNow)),
                 CreatedAt = now,
                 UpdatedAt = now,
             });
