@@ -218,12 +218,15 @@ public sealed class BillingCheckoutVocabTests(IntegrationTestFixture fixture) : 
     [InlineData("active")]
     [InlineData("trialing")]
     [InlineData("past_due")]
+    [InlineData("unpaid")]
+    [InlineData("paused")]
     public async Task Already_subscribed_org_gets_409_and_never_reaches_stripe(string status)
     {
         // #255: a paying user must never be handed a second checkout session — a second
         // completed checkout double-bills, and both webhooks write the same org row so
-        // the duplicate is invisible in-app. past_due blocks too: the fix for a failing
-        // payment is Manage billing, not a parallel subscription.
+        // the duplicate is invisible in-app. Every non-terminal status with a live Stripe
+        // sub blocks: past_due/unpaid still invoice, paused can resume — the fix for all
+        // of them is Manage billing, not a parallel subscription.
         var auth = await RegisterAndLoginAsync();
         await MakeSubscriptionLiveAsync(auth.OrgId, status);
 
@@ -232,6 +235,22 @@ public sealed class BillingCheckoutVocabTests(IntegrationTestFixture fixture) : 
         response.StatusCode.Should().Be(HttpStatusCode.Conflict);
         ErrorCode(body).Should().Be("billing.already_subscribed");
         FakeStripe.LastCheckout.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Another_orgs_live_subscription_does_not_block_checkout()
+    {
+        // The guard's Subscriptions lookup runs on SystemDbContext (no tenant filter); the
+        // manual OrganizationId predicate is the only isolation. Two-org pin: paid org A
+        // must not 409-block free org B's first checkout.
+        var paidOrg = await RegisterAndLoginAsync();
+        await MakeSubscriptionLiveAsync(paidOrg.OrgId, "active");
+        var freeOrg = await RegisterAndLoginAsync();
+
+        var (response, body) = await PostCheckoutAsync(freeOrg.Client, "pro");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        SessionUrl(body).Should().NotBeNullOrWhiteSpace();
     }
 
     [Fact]

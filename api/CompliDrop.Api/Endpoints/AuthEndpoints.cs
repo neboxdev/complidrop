@@ -803,13 +803,23 @@ public static class AuthEndpoints
         if (sub?.StripeSubscriptionId is { } stripeSubId && sub.Status != "canceled")
         {
             if (!stripe.IsEnabled)
+            {
+                // A live subscription we cannot cancel because billing is unconfigured is
+                // an ops emergency: every paid user's GDPR erasure is blocked until fixed.
+                logger.LogError(
+                    "Account deletion blocked for org {OrgId}: a live Stripe subscription exists but Stripe is not configured (IsEnabled=false)", orgId);
                 return Error(503, "billing.unavailable",
                     "We can't reach billing right now, so your account was not deleted. Please try again later.");
+            }
             try
             {
                 await stripe.CancelSubscriptionAsync(stripeSubId, http.RequestAborted);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            // Map everything to the retryable 502 EXCEPT a genuine client abort. The Stripe
+            // SDK surfaces its own HTTP timeout as a TaskCanceledException while the request
+            // is NOT aborted — that must land here as 502 billing.cancel_failed, not escape
+            // as a 500.
+            catch (Exception ex) when (ex is not OperationCanceledException || !http.RequestAborted.IsCancellationRequested)
             {
                 logger.LogError(ex, "Stripe subscription cancel failed during account deletion for org {OrgId}", orgId);
                 return Error(502, "billing.cancel_failed",

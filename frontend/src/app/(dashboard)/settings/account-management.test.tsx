@@ -203,10 +203,38 @@ describe("DangerZone — delete account (#183)", () => {
   it("warns that a paid plan is canceled on deletion (#255)", () => {
     // The API cancels the Stripe subscription before deleting (#255); the danger-zone
     // copy must promise that so a paying user isn't scared deletion keeps billing them.
+    // ("no new charges will start", not "never charged again": cancel stops renewals,
+    // but an already-open past_due invoice can still be retried by Stripe dunning.)
     renderWithProviders(<DangerZone />, { auth: authedMe });
 
     expect(
-      screen.getByText(/if you have a paid plan, it will be canceled — you won't be charged again/i),
+      screen.getByText(/if you have a paid plan, it will be canceled — no new charges will start/i),
     ).toBeInTheDocument();
+  });
+
+  it("surfaces the server's cancel-failure message verbatim and stays signed in (#255)", async () => {
+    // The API aborts deletion with 502 billing.cancel_failed when the Stripe cancel
+    // fails. The actionable server copy must reach the toast verbatim (error-message
+    // policy) — not collapse into the generic fallback, and never leak HTTP jargon —
+    // and the user must NOT be logged out or redirected (nothing was deleted).
+    const serverMessage =
+      "We couldn't cancel your paid plan, so your account was not deleted. Please try again, or cancel the plan from Manage billing first.";
+    server.use(
+      http.post(url("/api/auth/account/delete"), () =>
+        jsonError("billing.cancel_failed", serverMessage, { status: 502 }),
+      ),
+    );
+    const { queryClient } = renderWithProviders(<DangerZone />, { auth: authedMe });
+
+    fireEvent.click(screen.getByRole("button", { name: /^delete my account$/i }));
+    fireEvent.change(screen.getByLabelText(/enter your password to confirm/i), {
+      target: { value: "Password1234" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /permanently delete/i }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith(serverMessage));
+    expect(toastError).not.toHaveBeenCalledWith(expect.stringMatching(/502|bad gateway|failed to fetch/i));
+    expect(navState.router.push).not.toHaveBeenCalledWith("/login");
+    expect(queryClient.getQueryData([...ME_KEY])).toBeDefined();
   });
 });

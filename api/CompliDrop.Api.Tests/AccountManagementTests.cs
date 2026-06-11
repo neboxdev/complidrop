@@ -393,7 +393,7 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
         var auth = await RegisterAndLoginAsync();
         var stripeSubId = await MakeSubscriptionPaidAsync(auth.OrgId);
 
-        FakeStripe.FailNextCancelSubscription = true;
+        FakeStripe.FailNextCancelSubscriptionWith = new Stripe.StripeException("Simulated transient Stripe cancel failure.");
         var failed = await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" });
 
         failed.StatusCode.Should().Be(HttpStatusCode.BadGateway);
@@ -415,6 +415,66 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
         (await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" }))
             .StatusCode.Should().Be(HttpStatusCode.OK);
         FakeStripe.CanceledSubscriptions.Should().ContainSingle().Which.Should().Be(stripeSubId);
+    }
+
+    [Fact]
+    public async Task Delete_account_maps_a_stripe_sdk_timeout_to_the_retryable_502()
+    {
+        // The Stripe SDK surfaces its own HTTP timeout as a TaskCanceledException while the
+        // request is NOT client-aborted. The catch filter must map that to the designed 502
+        // billing.cancel_failed (retryable, friendly copy) — not let it escape as a 500.
+        var auth = await RegisterAndLoginAsync();
+        await MakeSubscriptionPaidAsync(auth.OrgId);
+
+        FakeStripe.FailNextCancelSubscriptionWith = new TaskCanceledException("Stripe SDK request timeout.");
+        var failed = await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" });
+
+        failed.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        var body = await failed.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("billing.cancel_failed");
+        (await auth.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task Delete_account_aborts_with_503_when_stripe_is_not_configured_but_a_live_sub_exists()
+    {
+        // Proceeding would recreate the exact #255 harm (card keeps billing, login gone),
+        // so an unconfigured Stripe must abort the deletion with the retryable 503.
+        var auth = await RegisterAndLoginAsync();
+        await MakeSubscriptionPaidAsync(auth.OrgId);
+
+        FakeStripe.IsEnabled = false;
+        var resp = await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("billing.unavailable");
+        body.GetProperty("error").GetProperty("message").GetString().Should().NotContainEquivalentOf("stripe");
+
+        FakeStripe.CanceledSubscriptions.Should().BeEmpty();
+        (await auth.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == auth.UserId)).DeletedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Delete_account_never_touches_another_orgs_subscription()
+    {
+        // Both new subscription lookups run on SystemDbContext (no tenant filter) — the
+        // manual OrganizationId predicate is the only isolation. Two-org pin: deleting
+        // free-org B must not cancel paid-org A's Stripe subscription.
+        var paidOrg = await RegisterAndLoginAsync();
+        var paidSubId = await MakeSubscriptionPaidAsync(paidOrg.OrgId);
+        var freeOrg = await RegisterAndLoginAsync();
+
+        (await freeOrg.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        FakeStripe.CanceledSubscriptions.Should().BeEmpty();
+        await using var db = CreateSystemDb();
+        var paidSub = await db.Subscriptions.FirstAsync(s => s.OrganizationId == paidOrg.OrgId);
+        paidSub.StripeSubscriptionId.Should().Be(paidSubId);
+        paidSub.Status.Should().Be("active");
     }
 
     // ───────── data export ─────────

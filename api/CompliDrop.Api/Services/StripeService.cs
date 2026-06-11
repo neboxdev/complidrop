@@ -43,6 +43,16 @@ public class StripeService(
 {
     private readonly StripeSettings _cfg = settings.Value;
 
+    // Test seam (#255): lets unit tests drive CancelSubscriptionAsync's error
+    // discrimination against a stubbed HTTP transport (StubHttpMessageHandler), with no
+    // global StripeConfiguration mutation. Null in production — the parameterless Stripe
+    // service ctors then resolve the global configuration. Same InternalsVisibleTo
+    // precedent as ResolvePlanFromPriceId.
+    internal IStripeClient? ClientOverride { get; set; }
+
+    private Stripe.SubscriptionService NewSubscriptionService() =>
+        ClientOverride is null ? new() : new(ClientOverride);
+
     public bool IsEnabled => !string.IsNullOrWhiteSpace(_cfg.SecretKey);
     public string MonthlyPriceId => _cfg.MonthlyPriceId;
     public string AnnualPriceId => _cfg.AnnualPriceId;
@@ -123,7 +133,7 @@ public class StripeService(
         EnsureConfigured();
         StripeConfiguration.ApiKey = _cfg.SecretKey;
 
-        var svc = new Stripe.SubscriptionService();
+        var svc = NewSubscriptionService();
         try
         {
             await svc.CancelAsync(stripeSubscriptionId, cancellationToken: ct);
@@ -182,6 +192,32 @@ public class StripeService(
     private async Task ApplyCheckoutCompletedAsync(Session session, CancellationToken ct)
     {
         if (!Guid.TryParse(session.ClientReferenceId, out var orgId)) return;
+
+        // Deleted-org door (#255): checkout sessions stay completable for ~24h, so a
+        // session minted before account deletion can complete AFTER the org is gone.
+        // Never activate a deleted org — cancel the just-created subscription instead
+        // so the card never starts billing an account with no login. IgnoreQueryFilters
+        // is required (and permitted: system context) to SEE the soft-deleted org.
+        var org = await db.Organizations.IgnoreQueryFilters().FirstOrDefaultAsync(o => o.Id == orgId, ct);
+        if (org is null || org.DeletedAt is not null)
+        {
+            if (session.SubscriptionId is { } orphanedSubId)
+            {
+                if (IsEnabled)
+                {
+                    await CancelSubscriptionAsync(orphanedSubId, ct);
+                    logger.LogWarning(
+                        "Checkout completed for deleted org {OrgId}; canceled orphaned Stripe subscription {SubscriptionId}", orgId, orphanedSubId);
+                }
+                else
+                {
+                    logger.LogError(
+                        "Checkout completed for deleted org {OrgId} but Stripe is not configured — subscription {SubscriptionId} must be canceled manually", orgId, orphanedSubId);
+                }
+            }
+            return;
+        }
+
         var sub = await db.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == orgId, ct);
         if (sub is null) return;
         sub.StripeCustomerId = session.CustomerId ?? sub.StripeCustomerId;

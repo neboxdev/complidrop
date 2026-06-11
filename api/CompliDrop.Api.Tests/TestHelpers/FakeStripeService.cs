@@ -69,11 +69,12 @@ public sealed class FakeStripeService(IServiceScopeFactory scopeFactory) : IStri
     public CheckoutCall? LastCheckout => _checkouts.LastOrDefault();
     public IReadOnlyList<string> CanceledSubscriptions => _canceledSubscriptions.ToArray();
 
-    /// <summary>When true, the next <see cref="CancelSubscriptionAsync"/> call throws
-    /// (simulating a transient Stripe API failure) and the flag auto-clears so the
-    /// following call succeeds — mirrors a user retrying account deletion (#255).
-    /// <see cref="Reset"/> also clears it.</summary>
-    public bool FailNextCancelSubscription { get; set; }
+    /// <summary>When set, the next <see cref="CancelSubscriptionAsync"/> call throws this
+    /// exception (simulating a transient Stripe API failure — set a StripeException for an
+    /// API error, a TaskCanceledException for the SDK's own HTTP timeout) and the knob
+    /// auto-clears so the following call succeeds — mirrors a user retrying account
+    /// deletion (#255). <see cref="Reset"/> also clears it.</summary>
+    public Exception? FailNextCancelSubscriptionWith { get; set; }
 
     /// <summary>Clears captured sessions + restores defaults. A test
     /// that mutated any public property — IsEnabled, MonthlyPriceId,
@@ -91,7 +92,7 @@ public sealed class FakeStripeService(IServiceScopeFactory scopeFactory) : IStri
         AnnualPriceId = DefaultAnnualPriceId;
         FoundingPriceId = DefaultFoundingPriceId;
         FailNextWebhookHandling = false;
-        FailNextCancelSubscription = false;
+        FailNextCancelSubscriptionWith = null;
     }
 
     public Task<string> CreateCheckoutSessionAsync(
@@ -117,11 +118,10 @@ public sealed class FakeStripeService(IServiceScopeFactory scopeFactory) : IStri
 
     public Task CancelSubscriptionAsync(string stripeSubscriptionId, CancellationToken ct)
     {
-        if (FailNextCancelSubscription)
+        if (FailNextCancelSubscriptionWith is { } failure)
         {
-            FailNextCancelSubscription = false;
-            throw new StripeException(
-                "Simulated transient Stripe cancel failure (FakeStripeService.FailNextCancelSubscription).");
+            FailNextCancelSubscriptionWith = null;
+            throw failure;
         }
         _canceledSubscriptions.Enqueue(stripeSubscriptionId);
         return Task.CompletedTask;

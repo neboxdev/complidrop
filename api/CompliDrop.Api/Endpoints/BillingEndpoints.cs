@@ -64,10 +64,14 @@ public static class BillingEndpoints
         // same org row so the duplicate is invisible in-app (Manage billing is the path to
         // plan changes). Runs BEFORE the idempotency lookup so a pre-subscription cached
         // sessionUrl (24h TTL, Stripe sessions live 24h) can't be replayed into a second
-        // subscription either. Statuses follow the ticket: active/trialing/past_due block;
-        // canceled (and incomplete, which has no StripeSubscriptionId yet) may re-checkout.
+        // subscription either. Blocked = every non-terminal status with a live Stripe sub
+        // (unpaid/paused still invoice or can resume — same "live" definition as the
+        // delete-path cancel). Re-checkout stays legitimate for canceled and
+        // incomplete_expired (terminal), and incomplete (initial payment retry; expires to
+        // incomplete_expired within ~23h).
         var sub = await db.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == orgId, ct);
-        if (sub?.StripeSubscriptionId is not null && sub.Status is "active" or "trialing" or "past_due")
+        if (sub?.StripeSubscriptionId is not null
+            && sub.Status is "active" or "trialing" or "past_due" or "unpaid" or "paused")
             return Error(409, "billing.already_subscribed", "You already have an active plan — use Manage billing to change it.");
 
         var idempotencyKey = http.Request.Headers["Idempotency-Key"].FirstOrDefault();
