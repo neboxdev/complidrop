@@ -25,6 +25,7 @@ public static class BillingEndpoints
     private static async Task<IResult> Checkout(
         CheckoutRequest req,
         HttpContext http,
+        SystemDbContext db,
         IStripeService stripe,
         IIdempotencyService idem,
         IOptions<FrontendSettings> frontend,
@@ -57,6 +58,24 @@ public static class BillingEndpoints
         if (!stripe.IsEnabled) return Error(503, "billing.unavailable", "Billing is not yet configured.");
 
         var orgId = currentUser.OrganizationId.Value;
+
+        // Already-subscribed guard (#255): never hand a live subscriber a fresh checkout
+        // session — a second completed checkout double-bills, and both webhooks write the
+        // same org row so the duplicate is invisible in-app (Manage billing is the path to
+        // plan changes). Runs BEFORE the idempotency lookup so a pre-subscription cached
+        // sessionUrl (24h TTL, Stripe sessions live 24h) can't be replayed into a second
+        // subscription either. Fail-closed denylist: re-checkout is legitimate ONLY for
+        // canceled / incomplete_expired (terminal) and incomplete (initial payment retry;
+        // auto-expires to incomplete_expired within ~23h) — every other status with a live
+        // Stripe sub blocks, so a future Stripe status (the way "paused" appeared in 2023)
+        // cannot silently re-open the double-checkout door. The delete-path cancel
+        // (AuthEndpoints.DeleteAccount) is stricter still: it cancels anything that is not
+        // known-canceled, terminal or not.
+        var sub = await db.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == orgId, ct);
+        if (sub?.StripeSubscriptionId is not null
+            && sub.Status is not ("canceled" or "incomplete_expired" or "incomplete"))
+            return Error(409, "billing.already_subscribed", "You already have an active plan — use Manage billing to change it.");
+
         var idempotencyKey = http.Request.Headers["Idempotency-Key"].FirstOrDefault();
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
         {

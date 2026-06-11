@@ -777,7 +777,9 @@ public static class AuthEndpoints
         SystemDbContext db,
         IPasswordHasher hasher,
         IOptions<CookieSettings> cookieOpts,
-        IAuditLogger audit)
+        IAuditLogger audit,
+        IStripeService stripe,
+        ILogger<DeleteAccountRequest> logger)
     {
         if (GetUserId(http) is not { } userId)
             return Error(401, "auth.unauthorized", "Not authenticated.");
@@ -789,6 +791,42 @@ public static class AuthEndpoints
             return Error(400, "auth.invalid_password", "Your password is incorrect.");
 
         var orgId = user.OrganizationId;
+
+        // Cancel any live Stripe subscription BEFORE any irreversible local change
+        // (#255): deletion destroys the login, and with it the only path to the
+        // billing portal — a missed cancel keeps billing the ex-customer's card with
+        // chargeback as their only recourse. Anything not known-canceled gets the
+        // cancel call (past_due/trialing/unpaid/incomplete can all still invoice);
+        // CancelSubscriptionAsync absorbs the Stripe-side already-terminal cases.
+        // Failure aborts the deletion with a retryable error and no local change.
+        var sub = await db.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == orgId);
+        if (sub?.StripeSubscriptionId is { } stripeSubId && sub.Status != "canceled")
+        {
+            if (!stripe.IsEnabled)
+            {
+                // A live subscription we cannot cancel because billing is unconfigured is
+                // an ops emergency: every paid user's GDPR erasure is blocked until fixed.
+                logger.LogError(
+                    "Account deletion blocked for org {OrgId}: a live Stripe subscription exists but Stripe is not configured (IsEnabled=false)", orgId);
+                return Error(503, "billing.unavailable",
+                    "We can't reach billing right now, so your account was not deleted. Please try again later.");
+            }
+            try
+            {
+                await stripe.CancelSubscriptionAsync(stripeSubId, http.RequestAborted);
+            }
+            // Map everything to the retryable 502 EXCEPT a genuine client abort. The Stripe
+            // SDK surfaces its own HTTP timeout as a TaskCanceledException while the request
+            // is NOT aborted — that must land here as 502 billing.cancel_failed, not escape
+            // as a 500.
+            catch (Exception ex) when (ex is not OperationCanceledException || !http.RequestAborted.IsCancellationRequested)
+            {
+                logger.LogError(ex, "Stripe subscription cancel failed during account deletion for org {OrgId}", orgId);
+                return Error(502, "billing.cancel_failed",
+                    "We couldn't cancel your paid plan, so your account was not deleted. Please try again, or cancel the plan from Manage billing first.");
+            }
+        }
+
         // Audit FIRST so the deletion event is recorded with the still-intact
         // identity (the explicit log is excluded from the scrub below).
         await audit.LogAsync(
@@ -811,6 +849,30 @@ public static class AuthEndpoints
         if (org is not null) org.DeletedAt = now;
 
         await db.SaveChangesAsync();
+
+        // TOCTOU defense (#255): a checkout webhook racing this request can commit a
+        // StripeSubscriptionId between the pre-delete read above and the soft-delete
+        // commit (the webhook's deleted-org door catches the mirror interleaving where
+        // the webhook reads AFTER our commit). Re-check now that DeletedAt is final and
+        // best-effort cancel anything that materialized; log-only on failure — the
+        // deletion itself is already committed, and CancellationToken.None keeps a
+        // client abort from stranding the cancel.
+        var subAfter = await db.Subscriptions.AsNoTracking().FirstOrDefaultAsync(s => s.OrganizationId == orgId);
+        if (subAfter?.StripeSubscriptionId is { } lateSubId
+            && lateSubId != sub?.StripeSubscriptionId
+            && subAfter.Status != "canceled"
+            && stripe.IsEnabled)
+        {
+            try
+            {
+                await stripe.CancelSubscriptionAsync(lateSubId, CancellationToken.None);
+                logger.LogWarning("Canceled Stripe subscription {SubscriptionId} that raced account deletion for org {OrgId}", lateSubId, orgId);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError(ex, "Post-deletion Stripe cancel failed for org {OrgId} subscription {SubscriptionId} — cancel manually", orgId, lateSubId);
+            }
+        }
 
         ClearAuthCookies(http, cookieOpts.Value);
         return Results.Ok(new { data = new { message = "Your account has been deleted." }, error = (object?)null });

@@ -19,6 +19,26 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
     private FakeEmailService Email =>
         (FakeEmailService)Fixture.Factory.Services.GetRequiredService<IEmailService>();
 
+    private FakeStripeService FakeStripe =>
+        (FakeStripeService)Fixture.Factory.Services.GetRequiredService<IStripeService>();
+
+    /// <summary>Flips the registered org's subscription to a live paid plan, as the
+    /// checkout.session.completed webhook would have left it. Returns the Stripe sub id.</summary>
+    private async Task<string> MakeSubscriptionPaidAsync(Guid orgId, string status = "active")
+    {
+        var subId = $"sub_{Guid.NewGuid():N}";
+        await using var db = CreateSystemDb();
+        var sub = await db.Subscriptions.FirstAsync(s => s.OrganizationId == orgId);
+        sub.StripeCustomerId = $"cus_{Guid.NewGuid():N}";
+        sub.StripeSubscriptionId = subId;
+        sub.Plan = "pro";
+        sub.Status = status;
+        sub.DocumentLimit = null;
+        sub.HasVendorPortal = true;
+        await db.SaveChangesAsync();
+        return subId;
+    }
+
     private static string ExtractVerifyToken(string htmlBody)
     {
         var m = Regex.Match(htmlBody, @"verify-email\?token=([A-Za-z0-9\-_]+)");
@@ -309,6 +329,152 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
     {
         (await CreateClient().PostAsJsonAsync("/api/auth/account/delete", new { password = "x" }))
             .StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    // ───────── delete account × Stripe cancel (#255) ─────────
+
+    [Fact]
+    public async Task Delete_account_with_a_live_paid_subscription_cancels_it_on_stripe()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var stripeSubId = await MakeSubscriptionPaidAsync(auth.OrgId);
+
+        (await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        FakeStripe.CanceledSubscriptions.Should().ContainSingle().Which.Should().Be(stripeSubId);
+        await using var db = CreateSystemDb();
+        (await db.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == auth.UserId)).DeletedAt.Should().NotBeNull();
+    }
+
+    [Theory]
+    [InlineData("past_due")]
+    [InlineData("trialing")]
+    public async Task Delete_account_cancels_non_terminal_paid_statuses_too(string status)
+    {
+        var auth = await RegisterAndLoginAsync();
+        var stripeSubId = await MakeSubscriptionPaidAsync(auth.OrgId, status);
+
+        (await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        FakeStripe.CanceledSubscriptions.Should().ContainSingle().Which.Should().Be(stripeSubId);
+    }
+
+    [Fact]
+    public async Task Delete_account_on_the_free_plan_makes_no_stripe_call()
+    {
+        var auth = await RegisterAndLoginAsync();
+
+        (await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        FakeStripe.CanceledSubscriptions.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Delete_account_with_an_already_canceled_subscription_skips_the_stripe_call()
+    {
+        var auth = await RegisterAndLoginAsync();
+        await MakeSubscriptionPaidAsync(auth.OrgId, status: "canceled");
+
+        (await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        FakeStripe.CanceledSubscriptions.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Delete_account_aborts_with_a_friendly_error_when_the_stripe_cancel_fails()
+    {
+        // #255: if the cancel can't be confirmed, deletion must NOT proceed — destroying
+        // the login destroys the only path to the billing portal while the card keeps
+        // billing. The error is retryable and the retry completes both halves.
+        var auth = await RegisterAndLoginAsync();
+        var stripeSubId = await MakeSubscriptionPaidAsync(auth.OrgId);
+
+        FakeStripe.FailNextCancelSubscriptionWith = new Stripe.StripeException("Simulated transient Stripe cancel failure.");
+        var failed = await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" });
+
+        failed.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        var body = await failed.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("billing.cancel_failed");
+        body.GetProperty("error").GetProperty("message").GetString().Should().NotContainEquivalentOf("stripe",
+            "error copy stays jargon-free for SMB users");
+
+        // Nothing was deleted, no false audit trail, still signed in.
+        (await auth.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.OK);
+        await using (var db = CreateSystemDb())
+        {
+            (await db.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == auth.UserId)).DeletedAt.Should().BeNull();
+            (await db.AuditLogs.CountAsync(a => a.Action == "user.account_deleted" && a.UserId == auth.UserId))
+                .Should().Be(0, "the deletion audit event must not be recorded for an aborted deletion");
+        }
+
+        // Retry (transient failure cleared) completes the cancel AND the deletion.
+        (await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        FakeStripe.CanceledSubscriptions.Should().ContainSingle().Which.Should().Be(stripeSubId);
+    }
+
+    [Fact]
+    public async Task Delete_account_maps_a_stripe_sdk_timeout_to_the_retryable_502()
+    {
+        // The Stripe SDK surfaces its own HTTP timeout as a TaskCanceledException while the
+        // request is NOT client-aborted. The catch filter must map that to the designed 502
+        // billing.cancel_failed (retryable, friendly copy) — not let it escape as a 500.
+        var auth = await RegisterAndLoginAsync();
+        await MakeSubscriptionPaidAsync(auth.OrgId);
+
+        FakeStripe.FailNextCancelSubscriptionWith = new TaskCanceledException("Stripe SDK request timeout.");
+        var failed = await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" });
+
+        failed.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        var body = await failed.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("billing.cancel_failed");
+        (await auth.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task Delete_account_aborts_with_503_when_stripe_is_not_configured_but_a_live_sub_exists()
+    {
+        // Proceeding would recreate the exact #255 harm (card keeps billing, login gone),
+        // so an unconfigured Stripe must abort the deletion with the retryable 503.
+        var auth = await RegisterAndLoginAsync();
+        await MakeSubscriptionPaidAsync(auth.OrgId);
+
+        FakeStripe.IsEnabled = false;
+        var resp = await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("billing.unavailable");
+        body.GetProperty("error").GetProperty("message").GetString().Should().NotContainEquivalentOf("stripe");
+
+        FakeStripe.CanceledSubscriptions.Should().BeEmpty();
+        (await auth.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.Users.IgnoreQueryFilters().SingleAsync(u => u.Id == auth.UserId)).DeletedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Delete_account_never_touches_another_orgs_subscription()
+    {
+        // Both new subscription lookups run on SystemDbContext (no tenant filter) — the
+        // manual OrganizationId predicate is the only isolation. Two-org pin: deleting
+        // free-org B must not cancel paid-org A's Stripe subscription.
+        var paidOrg = await RegisterAndLoginAsync();
+        var paidSubId = await MakeSubscriptionPaidAsync(paidOrg.OrgId);
+        var freeOrg = await RegisterAndLoginAsync();
+
+        (await freeOrg.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        FakeStripe.CanceledSubscriptions.Should().BeEmpty();
+        await using var db = CreateSystemDb();
+        var paidSub = await db.Subscriptions.FirstAsync(s => s.OrganizationId == paidOrg.OrgId);
+        paidSub.StripeSubscriptionId.Should().Be(paidSubId);
+        paidSub.Status.Should().Be("active");
     }
 
     // ───────── data export ─────────

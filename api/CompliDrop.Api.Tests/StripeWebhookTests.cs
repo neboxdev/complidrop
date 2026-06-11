@@ -97,7 +97,7 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
     // `subscription: null` keeps FetchPriceIdFromSubscription from making an outbound
     // Stripe API call (null price id → "pro" fallback), so the full checkout-completed
     // handler runs network-free in the test host.
-    private static string CheckoutCompletedEvent(string eventId, Guid orgId) => JsonSerializer.Serialize(
+    private static string CheckoutCompletedEvent(string eventId, Guid orgId, string? subscriptionId = null) => JsonSerializer.Serialize(
         Envelope(eventId, "checkout.session.completed",
             new
             {
@@ -105,7 +105,7 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
                 @object = "checkout.session",
                 client_reference_id = orgId.ToString(),
                 customer = "cus_test_123",
-                subscription = (string?)null
+                subscription = subscriptionId
             }));
 
     private static string SubscriptionStateEvent(string eventId, string type, string subId, string status, string priceId) => JsonSerializer.Serialize(
@@ -327,6 +327,34 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         sub.HasVendorPortal.Should().BeTrue();
         sub.StripeCustomerId.Should().Be("cus_test_123");
         (await ProcessedCountAsync(eventId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Checkout_completed_for_a_deleted_org_never_activates_the_subscription()
+    {
+        // #255 session door: a checkout session minted before account deletion stays
+        // completable for ~24h. Completing it must NOT flip the soft-deleted org to a
+        // live paid plan (the ex-customer has no login to ever see or stop it). In this
+        // harness Stripe is unconfigured, so the orphan-cancel is logged rather than
+        // called — the pinned safety property is "deleted org is never activated".
+        var orgId = await SeedFreeOrgAsync();
+        await using (var db = CreateSystemDb())
+        {
+            var org = await db.Organizations.IgnoreQueryFilters().FirstAsync(o => o.Id == orgId);
+            org.DeletedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+        }
+        var eventId = $"evt_{Guid.NewGuid():N}";
+        var payload = CheckoutCompletedEvent(eventId, orgId, subscriptionId: $"sub_{Guid.NewGuid():N}");
+
+        var resp = await PostWebhook(payload, SignatureFor(payload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var sub = await ReloadByOrgAsync(orgId);
+        sub.Plan.Should().Be("free");
+        sub.StripeSubscriptionId.Should().BeNull("a deleted org must never be activated");
+        sub.HasVendorPortal.Should().BeFalse();
+        (await ProcessedCountAsync(eventId)).Should().Be(1, "the event is handled (as a cancel/no-op), not retried forever");
     }
 
     [Fact]

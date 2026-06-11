@@ -22,6 +22,15 @@ public interface IStripeService
     /// never as increments/appends.
     /// </summary>
     Task HandleWebhookEventAsync(Event ev, CancellationToken ct);
+
+    /// <summary>
+    /// Cancels the Stripe subscription immediately (no further invoices). Absorbs the
+    /// already-gone cases (resource_missing, or Stripe-side status already canceled /
+    /// incomplete_expired) as success — the goal state "no future billing" holds. Any
+    /// other failure throws; callers performing irreversible local effects (account
+    /// deletion, #255) must abort when this throws.
+    /// </summary>
+    Task CancelSubscriptionAsync(string stripeSubscriptionId, CancellationToken ct);
     string MonthlyPriceId { get; }
     string AnnualPriceId { get; }
     string FoundingPriceId { get; }
@@ -33,6 +42,17 @@ public class StripeService(
     ILogger<StripeService> logger) : IStripeService
 {
     private readonly StripeSettings _cfg = settings.Value;
+
+    // Test seam (#255): lets unit tests drive CancelSubscriptionAsync's error
+    // discrimination against a stubbed HTTP transport (StubHttpMessageHandler). When set,
+    // the global StripeConfiguration is neither read NOR written on that path, keeping the
+    // unit tests parallel-safe. Null in production — the parameterless Stripe service
+    // ctors then resolve the global configuration. Same InternalsVisibleTo precedent as
+    // ResolvePlanFromPriceId.
+    internal IStripeClient? ClientOverride { get; set; }
+
+    private Stripe.SubscriptionService NewSubscriptionService() =>
+        ClientOverride is null ? new() : new(ClientOverride);
 
     public bool IsEnabled => !string.IsNullOrWhiteSpace(_cfg.SecretKey);
     public string MonthlyPriceId => _cfg.MonthlyPriceId;
@@ -109,6 +129,46 @@ public class StripeService(
         return session.Url;
     }
 
+    public async Task CancelSubscriptionAsync(string stripeSubscriptionId, CancellationToken ct)
+    {
+        EnsureConfigured();
+        if (ClientOverride is null) StripeConfiguration.ApiKey = _cfg.SecretKey;
+
+        var svc = NewSubscriptionService();
+        try
+        {
+            await svc.CancelAsync(stripeSubscriptionId, cancellationToken: ct);
+            logger.LogInformation("Canceled Stripe subscription {SubscriptionId}", stripeSubscriptionId);
+        }
+        catch (StripeException ex)
+        {
+            if (ex.StripeError?.Code == "resource_missing")
+            {
+                logger.LogInformation("Stripe subscription {SubscriptionId} not found on cancel — treating as already gone", stripeSubscriptionId);
+                return;
+            }
+
+            // A cancel can also fail because the subscription is ALREADY terminal on
+            // Stripe's side while our local row is stale (webhook lag, or a historical
+            // lost webhook). Blocking on that would permanently wedge account deletion,
+            // so verify the live status and absorb terminal states.
+            try
+            {
+                var current = await svc.GetAsync(stripeSubscriptionId, cancellationToken: ct);
+                if (current.Status is "canceled" or "incomplete_expired")
+                {
+                    logger.LogInformation("Stripe subscription {SubscriptionId} already {Status} on cancel", stripeSubscriptionId, current.Status);
+                    return;
+                }
+            }
+            catch (StripeException)
+            {
+                // Verification itself failed — surface the original cancel error.
+            }
+            throw;
+        }
+    }
+
     public async Task HandleWebhookEventAsync(Event ev, CancellationToken ct)
     {
         logger.LogInformation("Stripe webhook {Type} {Id}", ev.Type, ev.Id);
@@ -133,6 +193,32 @@ public class StripeService(
     private async Task ApplyCheckoutCompletedAsync(Session session, CancellationToken ct)
     {
         if (!Guid.TryParse(session.ClientReferenceId, out var orgId)) return;
+
+        // Deleted-org door (#255): checkout sessions stay completable for ~24h, so a
+        // session minted before account deletion can complete AFTER the org is gone.
+        // Never activate a deleted org — cancel the just-created subscription instead
+        // so the card never starts billing an account with no login. IgnoreQueryFilters
+        // is required (and permitted: system context) to SEE the soft-deleted org.
+        var org = await db.Organizations.IgnoreQueryFilters().FirstOrDefaultAsync(o => o.Id == orgId, ct);
+        if (org is null || org.DeletedAt is not null)
+        {
+            if (session.SubscriptionId is { } orphanedSubId)
+            {
+                if (IsEnabled)
+                {
+                    await CancelSubscriptionAsync(orphanedSubId, ct);
+                    logger.LogWarning(
+                        "Checkout completed for deleted org {OrgId}; canceled orphaned Stripe subscription {SubscriptionId}", orgId, orphanedSubId);
+                }
+                else
+                {
+                    logger.LogError(
+                        "Checkout completed for deleted org {OrgId} but Stripe is not configured — subscription {SubscriptionId} must be canceled manually", orgId, orphanedSubId);
+                }
+            }
+            return;
+        }
+
         var sub = await db.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == orgId, ct);
         if (sub is null) return;
         sub.StripeCustomerId = session.CustomerId ?? sub.StripeCustomerId;

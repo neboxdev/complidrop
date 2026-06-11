@@ -261,7 +261,8 @@ function DeleteAccountForm() {
     <div className="space-y-2">
       <h3 className="text-sm font-medium text-slate-700">Delete account</h3>
       <p className="text-xs text-slate-500">
-        Permanently deletes your account and organization data. This can&apos;t be undone.
+        Permanently deletes your account and organization data. This can&apos;t be undone. If you
+        have a paid plan, it will be canceled — no new charges will start.
       </p>
       {!confirming ? (
         <Button type="button" size="sm" variant="destructive" onClick={() => setConfirming(true)}>
