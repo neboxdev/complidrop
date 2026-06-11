@@ -21,9 +21,15 @@ namespace CompliDrop.Api.Migrations
     /// The predicate mirrors <c>VendorEndpoints.TemplateIsAssignable</c> / the AppDbContext
     /// query filter exactly: assignable = <c>DeletedAt IS NULL AND (IsSystemTemplate OR same
     /// org)</c>. Plain column comparisons only — no timestamptz expressions (ADR 0009 n/a).
-    /// Vendors table is MVP-small, so a single UPDATE is fine. Orphaned ComplianceCheck rows
-    /// from a cleared assignment are NOT purged here: the next evaluation of each document
-    /// clears them via the no-governing-rules branch (ComplianceCheckService).
+    /// Vendors table is MVP-small, so a single UPDATE is fine.
+    /// </para>
+    /// <para>
+    /// A second statement purges ComplianceCheck rows already LEAKED by a cross-org evaluation
+    /// (rule's template org ≠ document org): the lazy self-heal in ComplianceCheckService cannot
+    /// reach them for an EXPIRED document — the Expired early-return exits before the
+    /// no-governing-rules branch — so they would otherwise stay visible via ListChecks forever.
+    /// Checks referencing the org's OWN (soft-deleted) templates are deliberately NOT purged:
+    /// no tenant boundary is crossed, and the next evaluation clears them where reachable.
     /// </para>
     /// </summary>
     public partial class ClearForeignOrDeletedVendorTemplateRefs : Migration
@@ -45,10 +51,25 @@ namespace CompliDrop.Api.Migrations
               );
             """;
 
+        /// <summary>
+        /// Purges check rows written by a cross-org evaluation. Exposed for the same
+        /// test-pinning reason as <see cref="UpSql"/>.
+        /// </summary>
+        internal const string PurgeLeakedChecksSql = """
+            DELETE FROM "ComplianceChecks" AS c
+            USING "ComplianceRules" AS r, "ComplianceTemplates" AS t, "Documents" AS d
+            WHERE c."ComplianceRuleId" = r."Id"
+              AND r."ComplianceTemplateId" = t."Id"
+              AND c."DocumentId" = d."Id"
+              AND NOT t."IsSystemTemplate"
+              AND t."OrganizationId" <> d."OrganizationId";
+            """;
+
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
             migrationBuilder.Sql(UpSql);
+            migrationBuilder.Sql(PurgeLeakedChecksSql);
         }
 
         /// <inheritdoc />

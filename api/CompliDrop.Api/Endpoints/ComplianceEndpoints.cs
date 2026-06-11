@@ -110,20 +110,28 @@ public static class ComplianceEndpoints
         // but the vendor row would keep the stale FK — GetVendor round-trips it into the edit
         // form, and the assignment guard (VendorEndpoints.TemplateIsAssignable) would then 400
         // every save of that form, even for unrelated field edits. ExecuteUpdate (not tracked
-        // entities) for the same reason as DeleteVendor's link deactivation; the captured ids
-        // feed the explicit audit row below because ExecuteUpdate bypasses the audit
-        // interceptor. Re-evaluating the affected vendors' documents stays #257's scope
-        // (assignment change) — the next evaluation clears their now-orphaned checks.
-        var vendorIds = await db.Vendors
-            .Where(v => v.ComplianceTemplateId == id)
-            .Select(v => v.Id)
-            .ToListAsync(ct);
-
+        // entities) for the same reason as DeleteVendor's link deactivation; the in-transaction
+        // id snapshot feeds the explicit audit row below because ExecuteUpdate bypasses the
+        // audit interceptor (UpdatedAt is bumped manually for the same reason). The UPDATE
+        // filters by predicate, not the snapshot, so an assignment committed between the two
+        // statements is still cleared; one committed after the UPDATE leaves a dangling FK —
+        // recoverable (clearing the field is always assignable) and eval-safe (both evaluation
+        // contexts filter out the soft-deleted template). Re-evaluating the affected vendors'
+        // documents stays #257's scope (assignment change) — the next evaluation clears their
+        // now-orphaned checks.
+        List<Guid> vendorIds;
         await using (var tx = await db.Database.BeginTransactionAsync(ct))
         {
+            vendorIds = await db.Vendors
+                .Where(v => v.ComplianceTemplateId == id)
+                .Select(v => v.Id)
+                .ToListAsync(ct);
+
             await db.Vendors
-                .Where(v => vendorIds.Contains(v.Id))
-                .ExecuteUpdateAsync(s => s.SetProperty(v => v.ComplianceTemplateId, (Guid?)null), ct);
+                .Where(v => v.ComplianceTemplateId == id)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(v => v.ComplianceTemplateId, (Guid?)null)
+                    .SetProperty(v => v.UpdatedAt, DateTime.UtcNow), ct);
 
             db.ComplianceTemplates.Remove(template);
             await db.SaveChangesAsync(ct);

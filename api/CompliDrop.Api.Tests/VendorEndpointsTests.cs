@@ -239,8 +239,51 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             await db.ComplianceTemplates.Where(t => t.Id == deletedTemplateId)
                 .ExecuteUpdateAsync(s => s.SetProperty(t => t.DeletedAt, DateTime.UtcNow));
 
+            // Leaked-check shape the lazy self-heal can NEVER reach: an EXPIRED document whose
+            // checks were written by a pre-guard cross-org evaluation (the Expired early-return
+            // exits before the no-governing-rules branch). An own-org check row on the same
+            // org's live template must survive the purge.
+            var now = DateTime.UtcNow;
+            var foreignRuleId = Guid.NewGuid();
+            var ownRuleId = Guid.NewGuid();
+            db.ComplianceRules.Add(new CompliDrop.Api.Entities.ComplianceRule
+            {
+                Id = foreignRuleId, ComplianceTemplateId = foreignTemplateId, DocumentType = "coi",
+                FieldName = "general_liability_limit", Operator = "min_value", ExpectedValue = "5000000", SortOrder = 0
+            });
+            db.ComplianceRules.Add(new CompliDrop.Api.Entities.ComplianceRule
+            {
+                Id = ownRuleId, ComplianceTemplateId = ownTemplateId, DocumentType = "coi",
+                FieldName = "general_liability_limit", Operator = "required", SortOrder = 0
+            });
+            var expiredDoc = new CompliDrop.Api.Entities.Document
+            {
+                Id = Guid.NewGuid(), OrganizationId = orgA.OrgId, VendorId = poisonedVendorId,
+                OriginalFileName = "expired.pdf", BlobStorageUrl = "blob://x", FileSizeBytes = 1,
+                ContentType = "application/pdf", DocumentType = "coi",
+                ExpirationDate = now.AddDays(-30), CreatedAt = now, UpdatedAt = now
+            };
+            db.Documents.Add(expiredDoc);
+            await db.SaveChangesAsync();
+
+            var leakedCheckId = Guid.NewGuid();
+            var ownCheckId = Guid.NewGuid();
+            db.ComplianceChecks.Add(new CompliDrop.Api.Entities.ComplianceCheck
+            {
+                Id = leakedCheckId, DocumentId = expiredDoc.Id, ComplianceRuleId = foreignRuleId,
+                IsPassed = false, Notes = "leaked", CheckedAt = now
+            });
+            db.ComplianceChecks.Add(new CompliDrop.Api.Entities.ComplianceCheck
+            {
+                Id = ownCheckId, DocumentId = expiredDoc.Id, ComplianceRuleId = ownRuleId,
+                IsPassed = true, CheckedAt = now
+            });
+            await db.SaveChangesAsync();
+
             await db.Database.ExecuteSqlRawAsync(
                 CompliDrop.Api.Migrations.ClearForeignOrDeletedVendorTemplateRefs.UpSql);
+            await db.Database.ExecuteSqlRawAsync(
+                CompliDrop.Api.Migrations.ClearForeignOrDeletedVendorTemplateRefs.PurgeLeakedChecksSql);
 
             (await db.Vendors.SingleAsync(v => v.Id == poisonedVendorId)).ComplianceTemplateId.Should().BeNull(
                 "the cross-org reference must be remediated");
@@ -250,6 +293,10 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
                 "a live own-org assignment must survive the remediation");
             (await db.Vendors.SingleAsync(v => v.Id == systemVendorId)).ComplianceTemplateId.Should().Be(systemTemplateId,
                 "a system-template assignment must survive the remediation");
+            (await db.ComplianceChecks.AnyAsync(c => c.Id == leakedCheckId)).Should().BeFalse(
+                "the cross-org leaked check row on the expired doc must be purged");
+            (await db.ComplianceChecks.AnyAsync(c => c.Id == ownCheckId)).Should().BeTrue(
+                "an own-org check row must survive the purge");
         }
     }
 
