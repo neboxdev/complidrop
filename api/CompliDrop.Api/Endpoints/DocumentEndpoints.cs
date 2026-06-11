@@ -218,17 +218,11 @@ public static class DocumentEndpoints
             .FirstOrDefaultAsync(ct);
         if (doc is null || string.IsNullOrWhiteSpace(doc.BlobStoragePath)) return NotFound();
 
-        Stream stream;
-        try
-        {
-            stream = await blobs.DownloadAsync(doc.BlobStoragePath, ct);
-        }
-        catch (Azure.RequestFailedException ex) when (ex.Status == StatusCodes.Status404NotFound)
-        {
-            // The row exists but the blob vanished (manual storage cleanup, partial delete) —
-            // a friendly 404, not an unhandled 500.
-            return NotFound();
-        }
+        // Null = the row exists but the blob vanished (manual storage cleanup, partial
+        // delete) — a friendly 404, not an unhandled 500. Not-found is part of the
+        // IBlobStorageService contract, so no Azure SDK types leak to this layer.
+        var stream = await blobs.DownloadAsync(doc.BlobStoragePath, ct);
+        if (stream is null) return NotFound();
 
         // Inline so the browser renders the PDF/image in the tab instead of downloading.
         // SetHttpFileName emits both the quoted `filename` and the RFC 6266 UTF-8 `filename*`

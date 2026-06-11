@@ -103,6 +103,14 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             UpdatedAt = now,
         });
         await db.SaveChangesAsync();
+
+        // The blob fake reports honest not-found (null) since #254, and the worker fails a
+        // document whose blob is missing — so a seeded path must have actual stored bytes.
+        if (blobPath is not null)
+        {
+            var blobs = Fixture.Factory.Services.GetRequiredService<IBlobStorageService>();
+            await blobs.UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
+        }
         return (orgId, docId);
     }
 

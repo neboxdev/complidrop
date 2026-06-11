@@ -324,9 +324,17 @@ export default function DocumentDetailPage() {
         const blob = await api.getBlob(`/api/documents/${params.id}/file`);
         const url = URL.createObjectURL(blob);
         tab.location.href = url;
-        // Revoke after the viewer has had ample time to load the blob; an
-        // immediate revoke can race the new tab's navigation.
-        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        // Revoke when the viewer TAB closes, not on a fixed timer: the whole
+        // point of the button is keeping the tab open to compare against the
+        // fields, and a timed revoke would break F5 / save-as in that tab
+        // after it fired. Polling tab.closed is the only portable signal —
+        // there is no cross-window close event for the opener.
+        const revokeWhenClosed = setInterval(() => {
+          if (tab.closed) {
+            clearInterval(revokeWhenClosed);
+            URL.revokeObjectURL(url);
+          }
+        }, 5_000);
       } catch (err) {
         tab?.close();
         throw err;

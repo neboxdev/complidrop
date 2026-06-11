@@ -1575,6 +1575,9 @@ describe("DocumentDetailPage — View file streams through the authenticated pro
   afterEach(() => {
     delete (URL as unknown as Record<string, unknown>).createObjectURL;
     delete (URL as unknown as Record<string, unknown>).revokeObjectURL;
+    // The window.open spies must not leak a null-returning mock into later
+    // suites in this file (no global restoreMocks in this project).
+    vi.restoreAllMocks();
   });
 
   function mountCompleted() {
@@ -1617,9 +1620,9 @@ describe("DocumentDetailPage — View file streams through the authenticated pro
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(tab.close).not.toHaveBeenCalled();
     expect(toastError).not.toHaveBeenCalled();
-    // The raw private Azure URL is gone from the page entirely — the old
-    // anchor 409'd on every click (FP-060).
-    expect(document.querySelector('a[href*="blob.core.windows.net"]')).toBeNull();
+    // "View file" is a button-driven proxy fetch now, never an anchor — the
+    // old raw-blob-URL link 409'd on every click (FP-060).
+    expect(screen.queryByRole("link", { name: /view file/i })).toBeNull();
   });
 
   it("closes the tab and surfaces the server message when the fetch fails", async () => {

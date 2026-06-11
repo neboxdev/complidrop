@@ -80,13 +80,66 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         var upload = await auth.Client.PostAsync("/api/documents/upload", UploadForm(PdfBytes(), "coi.pdf", "application/pdf"));
         var id = await UploadedId(upload);
 
-        // Simulate the real Azure client's BlobNotFound (the row exists, the blob vanished).
-        var blobs = (FakeBlobStorageService)Fixture.Factory.Services.GetRequiredService<IBlobStorageService>();
-        blobs.NextDownloadThrows = new Azure.RequestFailedException(404, "BlobNotFound");
+        // The row exists but the blob vanished (manual storage cleanup) — the real Azure
+        // client's BlobNotFound maps to the interface's null, which the endpoint 404s.
+        var blobs = Fixture.Factory.Services.GetRequiredService<IBlobStorageService>();
+        string blobPath;
+        await using (var db = CreateSystemDb())
+            blobPath = (await db.Documents.SingleAsync(d => d.Id == id)).BlobStoragePath!;
+        await blobs.DeleteAsync(blobPath, default);
 
         var resp = await auth.Client.GetAsync($"/api/documents/{id}/file");
 
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task View_file_404s_when_the_row_has_no_blob_path()
+    {
+        // Directly-seeded rows (and any legacy row) can carry a null BlobStoragePath — the
+        // guard must 404, not pass null into the storage layer.
+        var auth = await RegisterAndLoginAsync();
+        var docId = Guid.NewGuid();
+        await using (var db = CreateSystemDb())
+        {
+            db.Documents.Add(new Document
+            {
+                Id = docId,
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "pathless.pdf",
+                BlobStorageUrl = "blob://pathless",
+                BlobStoragePath = null,
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var resp = await auth.Client.GetAsync($"/api/documents/{docId}/file");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task View_file_serves_the_STORED_content_type_for_an_ingest_normalized_heic()
+    {
+        // A HEIC upload is transcoded to JPEG at ingest (#220) — the proxy must serve the
+        // STORED content type (image/jpeg), not anything inferred from the ".heic" filename,
+        // or the tab can't render it. This is the one input where the two strategies differ.
+        var auth = await RegisterAndLoginAsync();
+        var upload = await auth.Client.PostAsync("/api/documents/upload",
+            UploadForm(HeicPhotoBytes(), "coi.heic", "image/heic"));
+        upload.EnsureSuccessStatusCode();
+        var id = await UploadedId(upload);
+
+        var resp = await auth.Client.GetAsync($"/api/documents/{id}/file");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        resp.Content.Headers.ContentType!.MediaType.Should().Be("image/jpeg");
+        resp.Content.Headers.ContentDisposition!.FileName.Should().Contain("coi.heic",
+            "the original upload name is preserved for provenance even though the bytes are JPEG");
     }
 
     [Fact]

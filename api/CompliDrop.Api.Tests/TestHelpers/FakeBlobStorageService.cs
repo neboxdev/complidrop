@@ -11,17 +11,6 @@ public sealed class FakeBlobStorageService : IBlobStorageService
 {
     private readonly ConcurrentDictionary<string, byte[]> _blobs = new();
 
-    /// <summary>
-    /// One-shot: the next <see cref="DownloadAsync"/> throws this instead of returning a
-    /// stream, then the toggle clears. Lets tests simulate the real Azure client's
-    /// <c>RequestFailedException</c> (e.g. 404 BlobNotFound) — the in-memory default of
-    /// returning an empty stream can't exercise those endpoint catch paths. Reset between
-    /// tests by <see cref="IntegrationTestFixture.ResetAsync"/>.
-    /// </summary>
-    public Exception? NextDownloadThrows { get; set; }
-
-    public void Reset() => NextDownloadThrows = null;
-
     public async Task<BlobUploadResult> UploadAsync(string blobName, Stream content, string contentType, CancellationToken ct)
     {
         using var ms = new MemoryStream();
@@ -31,15 +20,11 @@ public sealed class FakeBlobStorageService : IBlobStorageService
         return new BlobUploadResult(blobName, $"memory://{blobName}", bytes.Length, contentType);
     }
 
-    public Task<Stream> DownloadAsync(string blobName, CancellationToken ct)
-    {
-        if (NextDownloadThrows is { } ex)
-        {
-            NextDownloadThrows = null;
-            throw ex;
-        }
-        return Task.FromResult<Stream>(new MemoryStream(_blobs.TryGetValue(blobName, out var b) ? b : []));
-    }
+    // Honest not-found: null for an unknown name, mirroring the interface contract the real
+    // Azure implementation maps its 404 to (#254). Tests that need a document's blob to exist
+    // must actually Upload it (see ExtractionWorkerTests.SeedDocAsync).
+    public Task<Stream?> DownloadAsync(string blobName, CancellationToken ct) =>
+        Task.FromResult<Stream?>(_blobs.TryGetValue(blobName, out var b) ? new MemoryStream(b) : null);
 
     public Task DeleteAsync(string blobName, CancellationToken ct)
     {

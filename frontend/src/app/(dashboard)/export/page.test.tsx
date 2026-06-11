@@ -38,9 +38,9 @@ describe("ExportPage — smoke (#36)", () => {
   });
 
   it("blocks an inverted date range before any request (#262)", () => {
-    // The blob download path only ever toasts the generic fallback (per the #77
-    // contract), so the API's friendly 400 can't reach the user — the page must
-    // catch the inversion itself: inline message + disabled button.
+    // Catch the inversion client-side for instant feedback (inline message +
+    // disabled button) — no round-trip needed, even though api.getBlob (#254)
+    // now surfaces the API's friendly 400 message on the toast.
     renderWithProviders(<ExportPage />, { auth: authedMe });
     const [fromInput, toInput] = Array.from(document.querySelectorAll('input[type="date"]'));
 
