@@ -101,6 +101,141 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         v.Category.Should().Be("Catering");
     }
 
+    private static async Task<Guid> CreateTemplateAsync(HttpClient client, string name)
+    {
+        var resp = await client.PostAsJsonAsync("/api/compliance/templates", new
+        {
+            name,
+            description = (string?)null,
+        });
+        resp.EnsureSuccessStatusCode();
+        return (await Data(resp)).GetProperty("id").GetGuid();
+    }
+
+    private static Task<HttpResponseMessage> UpdateVendorTemplateAsync(HttpClient client, Guid vendorId, Guid? templateId) =>
+        client.PutAsJsonAsync($"/api/vendors/{vendorId}", new
+        {
+            name = "Acme Catering",
+            contactEmail = (string?)null,
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = templateId,
+        });
+
+    [Fact]
+    public async Task Assigning_a_cross_org_template_is_rejected_and_runs_no_foreign_rules()
+    {
+        // #273: the template id used to bind with only the DB FK as a guard, so another org's
+        // template id was accepted — and the SystemDbContext evaluation path (no tenant filter)
+        // would then run the foreign org's rules against this org's documents, writing the
+        // foreign rule names/expected values into visible ComplianceCheck rows.
+        var orgB = await RegisterAndLoginAsync();
+        var foreignTemplateId = await CreateTemplateAsync(orgB.Client, "Org B secret checklist");
+
+        var orgA = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(orgA.Client, "Acme Catering", null);
+
+        // Update path rejected; assignment never lands.
+        var update = await UpdateVendorTemplateAsync(orgA.Client, vendorId, foreignTemplateId);
+        update.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(update)).Should().Be("complianceTemplate.not_found");
+
+        // Create path rejected; no vendor row materializes.
+        var create = await orgA.Client.PostAsJsonAsync("/api/vendors", new
+        {
+            name = "Mole LLC",
+            contactEmail = (string?)null,
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = foreignTemplateId,
+        });
+        create.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(create)).Should().Be("complianceTemplate.not_found");
+
+        Guid docId;
+        await using (var db = CreateSystemDb())
+        {
+            (await db.Vendors.SingleAsync(v => v.Id == vendorId)).ComplianceTemplateId.Should().BeNull();
+            (await db.Vendors.AnyAsync(v => v.Name == "Mole LLC")).Should().BeFalse();
+
+            // Seed a document on the vendor and run the evaluation end-to-end: with the
+            // assignment rejected there is no template, so NO check rows may appear — the
+            // foreign org's rules never execute against org A's documents.
+            var doc = new CompliDrop.Api.Entities.Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = orgA.OrgId,
+                VendorId = vendorId,
+                OriginalFileName = "coi.pdf",
+                BlobStorageUrl = "https://blob.test/coi.pdf",
+                BlobStoragePath = "test/coi.pdf",
+                FileSizeBytes = 123,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                UploadedBy = "user",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            };
+            db.Add(doc);
+            await db.SaveChangesAsync();
+            docId = doc.Id;
+        }
+
+        var check = await orgA.Client.PostAsync($"/api/compliance/check/{docId}", null);
+        check.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using (var db2 = CreateSystemDb())
+            (await db2.ComplianceChecks.AnyAsync(c => c.DocumentId == docId)).Should().BeFalse(
+                "no template is assigned, so no rules — least of all org B's — may produce check rows");
+    }
+
+    [Fact]
+    public async Task Assigning_a_system_template_or_own_template_is_accepted()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Acme Catering", null);
+
+        // System template: visible to every org through the tenant filter's IsSystemTemplate arm.
+        var templates = await auth.Client.GetAsync("/api/compliance/templates");
+        templates.EnsureSuccessStatusCode();
+        var systemTemplateId = (await Data(templates)).EnumerateArray()
+            .First(t => t.GetProperty("isSystemTemplate").GetBoolean())
+            .GetProperty("id").GetGuid();
+
+        var assignSystem = await UpdateVendorTemplateAsync(auth.Client, vendorId, systemTemplateId);
+        assignSystem.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // Own template.
+        var ownTemplateId = await CreateTemplateAsync(auth.Client, "House rules");
+        var assignOwn = await UpdateVendorTemplateAsync(auth.Client, vendorId, ownTemplateId);
+        assignOwn.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        (await db.Vendors.SingleAsync(v => v.Id == vendorId)).ComplianceTemplateId.Should().Be(ownTemplateId);
+
+        // Clearing the assignment (null) stays allowed.
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, null)).StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task Nonexistent_and_soft_deleted_template_ids_get_the_same_response_as_cross_org()
+    {
+        // The rejection must not disclose whether the id exists in another org — random,
+        // soft-deleted, and cross-org ids all yield the identical envelope (#273).
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Acme Catering", null);
+
+        var random = await UpdateVendorTemplateAsync(auth.Client, vendorId, Guid.NewGuid());
+        random.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(random)).Should().Be("complianceTemplate.not_found");
+
+        var deletedTemplateId = await CreateTemplateAsync(auth.Client, "Short-lived");
+        (await auth.Client.DeleteAsync($"/api/compliance/templates/{deletedTemplateId}")).EnsureSuccessStatusCode();
+
+        var deleted = await UpdateVendorTemplateAsync(auth.Client, vendorId, deletedTemplateId);
+        deleted.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(deleted)).Should().Be("complianceTemplate.not_found");
+    }
+
     [Fact]
     public async Task Deleting_a_vendor_deactivates_its_portal_links()
     {
