@@ -5,6 +5,7 @@ using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CompliDrop.Api.Tests;
@@ -196,5 +197,76 @@ public sealed class BillingCheckoutVocabTests(IntegrationTestFixture fixture) : 
         ErrorCode(body).Should().Be("billing.plan_unknown");
         SessionUrl(body).Should().BeNull(); // proves the cached response was NOT returned
         FakeStripe.LastCheckout.Should().BeNull();
+    }
+
+    // ───────── already-subscribed guard (#255) ─────────
+
+    /// <summary>Flips the org's subscription to a live Stripe-linked state, as the
+    /// checkout.session.completed webhook would have left it.</summary>
+    private async Task MakeSubscriptionLiveAsync(Guid orgId, string status)
+    {
+        await using var db = CreateSystemDb();
+        var sub = await db.Subscriptions.FirstAsync(s => s.OrganizationId == orgId);
+        sub.StripeSubscriptionId = $"sub_{Guid.NewGuid():N}";
+        sub.StripeCustomerId = $"cus_{Guid.NewGuid():N}";
+        sub.Plan = "pro";
+        sub.Status = status;
+        await db.SaveChangesAsync();
+    }
+
+    [Theory]
+    [InlineData("active")]
+    [InlineData("trialing")]
+    [InlineData("past_due")]
+    public async Task Already_subscribed_org_gets_409_and_never_reaches_stripe(string status)
+    {
+        // #255: a paying user must never be handed a second checkout session — a second
+        // completed checkout double-bills, and both webhooks write the same org row so
+        // the duplicate is invisible in-app. past_due blocks too: the fix for a failing
+        // payment is Manage billing, not a parallel subscription.
+        var auth = await RegisterAndLoginAsync();
+        await MakeSubscriptionLiveAsync(auth.OrgId, status);
+
+        var (response, body) = await PostCheckoutAsync(auth.Client, "pro");
+
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        ErrorCode(body).Should().Be("billing.already_subscribed");
+        FakeStripe.LastCheckout.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Canceled_subscription_may_checkout_again()
+    {
+        var auth = await RegisterAndLoginAsync();
+        await MakeSubscriptionLiveAsync(auth.OrgId, "canceled");
+
+        var (response, body) = await PostCheckoutAsync(auth.Client, "pro");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        SessionUrl(body).Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Fact]
+    public async Task Already_subscribed_guard_pre_empts_a_stale_idempotency_hit()
+    {
+        // The dangerous replay: user checks out (response cached under their key),
+        // SUBSCRIBES, then the client replays the same Idempotency-Key. If the guard
+        // ran after the idempotency lookup, the cached pre-subscription sessionUrl
+        // would come back — and Stripe checkout sessions stay completable for 24h,
+        // the same window as the idempotency TTL. The guard must win: 409, no URL.
+        var auth = await RegisterAndLoginAsync();
+        var key = $"ikey_{Guid.NewGuid():N}";
+
+        var (first, firstBody) = await PostCheckoutAsync(auth.Client, "pro", idempotencyKey: key);
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        SessionUrl(firstBody).Should().NotBeNullOrWhiteSpace();
+
+        await MakeSubscriptionLiveAsync(auth.OrgId, "active"); // the webhook landed
+
+        var (replay, replayBody) = await PostCheckoutAsync(auth.Client, "pro", idempotencyKey: key);
+
+        replay.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        ErrorCode(replayBody).Should().Be("billing.already_subscribed");
+        SessionUrl(replayBody).Should().BeNull("the cached pre-subscription sessionUrl must not be replayed");
     }
 }

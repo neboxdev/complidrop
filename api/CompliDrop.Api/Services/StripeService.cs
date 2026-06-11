@@ -22,6 +22,15 @@ public interface IStripeService
     /// never as increments/appends.
     /// </summary>
     Task HandleWebhookEventAsync(Event ev, CancellationToken ct);
+
+    /// <summary>
+    /// Cancels the Stripe subscription immediately (no further invoices). Absorbs the
+    /// already-gone cases (resource_missing, or Stripe-side status already canceled /
+    /// incomplete_expired) as success — the goal state "no future billing" holds. Any
+    /// other failure throws; callers performing irreversible local effects (account
+    /// deletion, #255) must abort when this throws.
+    /// </summary>
+    Task CancelSubscriptionAsync(string stripeSubscriptionId, CancellationToken ct);
     string MonthlyPriceId { get; }
     string AnnualPriceId { get; }
     string FoundingPriceId { get; }
@@ -107,6 +116,46 @@ public class StripeService(
             ReturnUrl = returnUrl
         }, cancellationToken: ct);
         return session.Url;
+    }
+
+    public async Task CancelSubscriptionAsync(string stripeSubscriptionId, CancellationToken ct)
+    {
+        EnsureConfigured();
+        StripeConfiguration.ApiKey = _cfg.SecretKey;
+
+        var svc = new Stripe.SubscriptionService();
+        try
+        {
+            await svc.CancelAsync(stripeSubscriptionId, cancellationToken: ct);
+            logger.LogInformation("Canceled Stripe subscription {SubscriptionId}", stripeSubscriptionId);
+        }
+        catch (StripeException ex)
+        {
+            if (ex.StripeError?.Code == "resource_missing")
+            {
+                logger.LogInformation("Stripe subscription {SubscriptionId} not found on cancel — treating as already gone", stripeSubscriptionId);
+                return;
+            }
+
+            // A cancel can also fail because the subscription is ALREADY terminal on
+            // Stripe's side while our local row is stale (webhook lag, or a historical
+            // lost webhook). Blocking on that would permanently wedge account deletion,
+            // so verify the live status and absorb terminal states.
+            try
+            {
+                var current = await svc.GetAsync(stripeSubscriptionId, cancellationToken: ct);
+                if (current.Status is "canceled" or "incomplete_expired")
+                {
+                    logger.LogInformation("Stripe subscription {SubscriptionId} already {Status} on cancel", stripeSubscriptionId, current.Status);
+                    return;
+                }
+            }
+            catch (StripeException)
+            {
+                // Verification itself failed — surface the original cancel error.
+            }
+            throw;
+        }
     }
 
     public async Task HandleWebhookEventAsync(Event ev, CancellationToken ct)

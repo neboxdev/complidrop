@@ -25,6 +25,7 @@ public static class BillingEndpoints
     private static async Task<IResult> Checkout(
         CheckoutRequest req,
         HttpContext http,
+        SystemDbContext db,
         IStripeService stripe,
         IIdempotencyService idem,
         IOptions<FrontendSettings> frontend,
@@ -57,6 +58,18 @@ public static class BillingEndpoints
         if (!stripe.IsEnabled) return Error(503, "billing.unavailable", "Billing is not yet configured.");
 
         var orgId = currentUser.OrganizationId.Value;
+
+        // Already-subscribed guard (#255): never hand a live subscriber a fresh checkout
+        // session — a second completed checkout double-bills, and both webhooks write the
+        // same org row so the duplicate is invisible in-app (Manage billing is the path to
+        // plan changes). Runs BEFORE the idempotency lookup so a pre-subscription cached
+        // sessionUrl (24h TTL, Stripe sessions live 24h) can't be replayed into a second
+        // subscription either. Statuses follow the ticket: active/trialing/past_due block;
+        // canceled (and incomplete, which has no StripeSubscriptionId yet) may re-checkout.
+        var sub = await db.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == orgId, ct);
+        if (sub?.StripeSubscriptionId is not null && sub.Status is "active" or "trialing" or "past_due")
+            return Error(409, "billing.already_subscribed", "You already have an active plan — use Manage billing to change it.");
+
         var idempotencyKey = http.Request.Headers["Idempotency-Key"].FirstOrDefault();
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
         {

@@ -49,6 +49,7 @@ public sealed class FakeStripeService(IServiceScopeFactory scopeFactory) : IStri
 
     private readonly ConcurrentQueue<CheckoutCall> _checkouts = new();
     private readonly ConcurrentQueue<PortalCall> _portals = new();
+    private readonly ConcurrentQueue<string> _canceledSubscriptions = new();
     private int _counter;
 
     public bool IsEnabled { get; set; } = true;
@@ -66,6 +67,13 @@ public sealed class FakeStripeService(IServiceScopeFactory scopeFactory) : IStri
     public IReadOnlyList<CheckoutCall> Checkouts => _checkouts.ToArray();
     public IReadOnlyList<PortalCall> Portals => _portals.ToArray();
     public CheckoutCall? LastCheckout => _checkouts.LastOrDefault();
+    public IReadOnlyList<string> CanceledSubscriptions => _canceledSubscriptions.ToArray();
+
+    /// <summary>When true, the next <see cref="CancelSubscriptionAsync"/> call throws
+    /// (simulating a transient Stripe API failure) and the flag auto-clears so the
+    /// following call succeeds — mirrors a user retrying account deletion (#255).
+    /// <see cref="Reset"/> also clears it.</summary>
+    public bool FailNextCancelSubscription { get; set; }
 
     /// <summary>Clears captured sessions + restores defaults. A test
     /// that mutated any public property — IsEnabled, MonthlyPriceId,
@@ -76,12 +84,14 @@ public sealed class FakeStripeService(IServiceScopeFactory scopeFactory) : IStri
     {
         _checkouts.Clear();
         _portals.Clear();
+        _canceledSubscriptions.Clear();
         Interlocked.Exchange(ref _counter, 0);
         IsEnabled = true;
         MonthlyPriceId = DefaultMonthlyPriceId;
         AnnualPriceId = DefaultAnnualPriceId;
         FoundingPriceId = DefaultFoundingPriceId;
         FailNextWebhookHandling = false;
+        FailNextCancelSubscription = false;
     }
 
     public Task<string> CreateCheckoutSessionAsync(
@@ -103,6 +113,18 @@ public sealed class FakeStripeService(IServiceScopeFactory scopeFactory) : IStri
         var url = $"https://billing.stripe.test/{sessionId}";
         _portals.Enqueue(new PortalCall(organizationId, returnUrl, url));
         return Task.FromResult(url);
+    }
+
+    public Task CancelSubscriptionAsync(string stripeSubscriptionId, CancellationToken ct)
+    {
+        if (FailNextCancelSubscription)
+        {
+            FailNextCancelSubscription = false;
+            throw new StripeException(
+                "Simulated transient Stripe cancel failure (FakeStripeService.FailNextCancelSubscription).");
+        }
+        _canceledSubscriptions.Enqueue(stripeSubscriptionId);
+        return Task.CompletedTask;
     }
 
     /// <summary>Delegates to the real <see cref="StripeService"/> so the

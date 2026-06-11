@@ -199,4 +199,14 @@ describe("DangerZone — delete account (#183)", () => {
     // + qc.clear()) so the deleted user can't keep rendering as authenticated.
     await waitFor(() => expect(queryClient.getQueryData([...ME_KEY])).toBeUndefined());
   });
+
+  it("warns that a paid plan is canceled on deletion (#255)", () => {
+    // The API cancels the Stripe subscription before deleting (#255); the danger-zone
+    // copy must promise that so a paying user isn't scared deletion keeps billing them.
+    renderWithProviders(<DangerZone />, { auth: authedMe });
+
+    expect(
+      screen.getByText(/if you have a paid plan, it will be canceled — you won't be charged again/i),
+    ).toBeInTheDocument();
+  });
 });
