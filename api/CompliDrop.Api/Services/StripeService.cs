@@ -44,10 +44,11 @@ public class StripeService(
     private readonly StripeSettings _cfg = settings.Value;
 
     // Test seam (#255): lets unit tests drive CancelSubscriptionAsync's error
-    // discrimination against a stubbed HTTP transport (StubHttpMessageHandler), with no
-    // global StripeConfiguration mutation. Null in production — the parameterless Stripe
-    // service ctors then resolve the global configuration. Same InternalsVisibleTo
-    // precedent as ResolvePlanFromPriceId.
+    // discrimination against a stubbed HTTP transport (StubHttpMessageHandler). When set,
+    // the global StripeConfiguration is neither read NOR written on that path, keeping the
+    // unit tests parallel-safe. Null in production — the parameterless Stripe service
+    // ctors then resolve the global configuration. Same InternalsVisibleTo precedent as
+    // ResolvePlanFromPriceId.
     internal IStripeClient? ClientOverride { get; set; }
 
     private Stripe.SubscriptionService NewSubscriptionService() =>
@@ -131,7 +132,7 @@ public class StripeService(
     public async Task CancelSubscriptionAsync(string stripeSubscriptionId, CancellationToken ct)
     {
         EnsureConfigured();
-        StripeConfiguration.ApiKey = _cfg.SecretKey;
+        if (ClientOverride is null) StripeConfiguration.ApiKey = _cfg.SecretKey;
 
         var svc = NewSubscriptionService();
         try

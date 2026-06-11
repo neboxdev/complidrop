@@ -253,11 +253,14 @@ public sealed class BillingCheckoutVocabTests(IntegrationTestFixture fixture) : 
         SessionUrl(body).Should().NotBeNullOrWhiteSpace();
     }
 
-    [Fact]
-    public async Task Canceled_subscription_may_checkout_again()
+    [Theory]
+    [InlineData("canceled")]            // terminal — re-subscribe is the recovery path
+    [InlineData("incomplete_expired")]  // terminal — initial payment never completed
+    [InlineData("incomplete")]          // initial payment retry; auto-expires within ~23h
+    public async Task Terminal_or_incomplete_subscription_may_checkout_again(string status)
     {
         var auth = await RegisterAndLoginAsync();
-        await MakeSubscriptionLiveAsync(auth.OrgId, "canceled");
+        await MakeSubscriptionLiveAsync(auth.OrgId, status);
 
         var (response, body) = await PostCheckoutAsync(auth.Client, "pro");
 

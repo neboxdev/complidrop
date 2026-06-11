@@ -18,8 +18,8 @@ namespace CompliDrop.Api.Tests;
 /// cancel-failed-but-live-status-canceled → success, verify-failure → original error)
 /// lives BELOW that seam, so it gets the StubHttpMessageHandler treatment instead — the
 /// same convention as the Gemini/Anthropic client tests. The Stripe SDK is pointed at the
-/// stub via the internal ClientOverride seam (no global StripeConfiguration mutation, so
-/// these tests are parallel-safe).
+/// stub via the internal ClientOverride seam; with the override set the global
+/// StripeConfiguration is neither read nor written, so these tests are parallel-safe.
 /// </summary>
 public sealed class StripeServiceCancelTests
 {

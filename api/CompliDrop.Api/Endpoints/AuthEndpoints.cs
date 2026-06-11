@@ -850,6 +850,30 @@ public static class AuthEndpoints
 
         await db.SaveChangesAsync();
 
+        // TOCTOU defense (#255): a checkout webhook racing this request can commit a
+        // StripeSubscriptionId between the pre-delete read above and the soft-delete
+        // commit (the webhook's deleted-org door catches the mirror interleaving where
+        // the webhook reads AFTER our commit). Re-check now that DeletedAt is final and
+        // best-effort cancel anything that materialized; log-only on failure — the
+        // deletion itself is already committed, and CancellationToken.None keeps a
+        // client abort from stranding the cancel.
+        var subAfter = await db.Subscriptions.AsNoTracking().FirstOrDefaultAsync(s => s.OrganizationId == orgId);
+        if (subAfter?.StripeSubscriptionId is { } lateSubId
+            && lateSubId != sub?.StripeSubscriptionId
+            && subAfter.Status != "canceled"
+            && stripe.IsEnabled)
+        {
+            try
+            {
+                await stripe.CancelSubscriptionAsync(lateSubId, CancellationToken.None);
+                logger.LogWarning("Canceled Stripe subscription {SubscriptionId} that raced account deletion for org {OrgId}", lateSubId, orgId);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError(ex, "Post-deletion Stripe cancel failed for org {OrgId} subscription {SubscriptionId} — cancel manually", orgId, lateSubId);
+            }
+        }
+
         ClearAuthCookies(http, cookieOpts.Value);
         return Results.Ok(new { data = new { message = "Your account has been deleted." }, error = (object?)null });
     }
