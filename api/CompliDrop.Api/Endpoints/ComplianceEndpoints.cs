@@ -104,8 +104,44 @@ public static class ComplianceEndpoints
     {
         var template = await db.ComplianceTemplates.FirstOrDefaultAsync(t => t.Id == id && !t.IsSystemTemplate, ct);
         if (template is null) return NotFound();
-        db.ComplianceTemplates.Remove(template);
-        await db.SaveChangesAsync(ct);
+
+        // Clear the assignment on vendors still pointing at this template, atomically with the
+        // soft delete (#273 review): the soft-deleted template vanishes behind the query filter,
+        // but the vendor row would keep the stale FK — GetVendor round-trips it into the edit
+        // form, and the assignment guard (VendorEndpoints.TemplateIsAssignable) would then 400
+        // every save of that form, even for unrelated field edits. ExecuteUpdate (not tracked
+        // entities) for the same reason as DeleteVendor's link deactivation; the in-transaction
+        // id snapshot feeds the explicit audit row below because ExecuteUpdate bypasses the
+        // audit interceptor (UpdatedAt is bumped manually for the same reason). The UPDATE
+        // filters by predicate, not the snapshot, so an assignment committed between the two
+        // statements is still cleared; one committed after the UPDATE leaves a dangling FK —
+        // recoverable (clearing the field is always assignable) and eval-safe (both evaluation
+        // contexts filter out the soft-deleted template). Re-evaluating the affected vendors'
+        // documents stays #257's scope (assignment change) — the next evaluation clears their
+        // now-orphaned checks.
+        List<Guid> vendorIds;
+        await using (var tx = await db.Database.BeginTransactionAsync(ct))
+        {
+            vendorIds = await db.Vendors
+                .Where(v => v.ComplianceTemplateId == id)
+                .Select(v => v.Id)
+                .ToListAsync(ct);
+
+            await db.Vendors
+                .Where(v => v.ComplianceTemplateId == id)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(v => v.ComplianceTemplateId, (Guid?)null)
+                    .SetProperty(v => v.UpdatedAt, DateTime.UtcNow), ct);
+
+            db.ComplianceTemplates.Remove(template);
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+        }
+
+        if (vendorIds.Count > 0)
+            await audit.LogAsync(
+                "vendor.template_cleared_on_template_delete", nameof(ComplianceTemplate), id,
+                after: new { count = vendorIds.Count, vendorIds });
         await audit.LogAsync("complianceTemplate.deleted", nameof(ComplianceTemplate), id);
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }

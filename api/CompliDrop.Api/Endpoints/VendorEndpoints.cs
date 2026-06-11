@@ -74,6 +74,7 @@ public static class VendorEndpoints
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
         if (string.IsNullOrWhiteSpace(req.Name)) return Error(400, "validation.name", "Vendor name is required.");
+        if (!await TemplateIsAssignable(req.ComplianceTemplateId, db, ct)) return TemplateNotFound();
 
         var vendor = new Vendor
         {
@@ -107,6 +108,7 @@ public static class VendorEndpoints
 
         var v = await db.Vendors.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (v is null) return NotFound();
+        if (!await TemplateIsAssignable(req.ComplianceTemplateId, db, ct)) return TemplateNotFound();
         v.Name = req.Name.Trim();
         v.ContactEmail = req.ContactEmail;
         v.ContactPhone = req.ContactPhone;
@@ -309,6 +311,24 @@ public static class VendorEndpoints
             </div>
             """;
     }
+
+    /// <summary>
+    /// Tenant-isolation guard for the request-body-bound <c>ComplianceTemplateId</c> (#273):
+    /// without it, any GUID satisfying the FK binds — including ANOTHER org's template, whose
+    /// rules the evaluation path (ComplianceCheckService via SystemDbContext, no tenant filter)
+    /// would then run against this org's documents, leaking the foreign org's rule names /
+    /// expected values into ComplianceCheck rows. The tenant-filtered ComplianceTemplates set
+    /// already encodes the allow-list — <c>DeletedAt == null AND (IsSystemTemplate OR
+    /// OrganizationId == CurrentOrgId)</c> — so "not visible through the filter" IS "not
+    /// assignable". Cross-org, nonexistent, and soft-deleted ids all produce the IDENTICAL
+    /// response (no existence disclosure). Null (clearing the assignment) is always allowed.
+    /// </summary>
+    private static async Task<bool> TemplateIsAssignable(Guid? templateId, AppDbContext db, CancellationToken ct) =>
+        templateId is not Guid tid || await db.ComplianceTemplates.AnyAsync(t => t.Id == tid, ct);
+
+    private static IResult TemplateNotFound() =>
+        Error(400, "complianceTemplate.not_found",
+            "That requirement checklist no longer exists. Refresh the page and pick another.");
 
     private static string GenerateToken()
     {

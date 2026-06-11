@@ -1,4 +1,6 @@
 using System.Net;
+using System.Net.Http.Json;
+using CompliDrop.Api.Data.Seed;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
@@ -237,5 +239,74 @@ public sealed class ComplianceRuleDeleteTests(IntegrationTestFixture fixture) : 
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
         await using var db = CreateSystemDb();
         (await db.ComplianceRules.AnyAsync(r => r.Id == s.RuleAId)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_rule_cannot_be_upserted_onto_another_orgs_template()
+    {
+        // The upsert twin of the delete pin above (#273 review): UpsertRule's tenant isolation
+        // rests entirely on the template-first lookup (tenant-filtered set + !IsSystemTemplate);
+        // ComplianceRule itself has no tenant filter, so a regression here would let an org
+        // create/edit rules on another org's checklist.
+        var orgB = await RegisterAndLoginAsync();
+        var s = await SeedAsync(orgB.OrgId);
+        var orgA = await RegisterAndLoginAsync();
+
+        var create = await orgA.Client.PostAsJsonAsync($"/api/compliance/templates/{s.TemplateId}/rules", new
+        {
+            id = (Guid?)null,
+            documentType = "coi",
+            fieldName = "general_liability_limit",
+            @operator = "min_value",
+            expectedValue = "1",
+            errorMessage = "planted",
+            sortOrder = 99,
+        });
+        create.StatusCode.Should().Be(HttpStatusCode.NotFound);
+
+        // Edit attempt with org B's rule id riding the same foreign template id.
+        var edit = await orgA.Client.PostAsJsonAsync($"/api/compliance/templates/{s.TemplateId}/rules", new
+        {
+            id = s.RuleAId,
+            documentType = "coi",
+            fieldName = "general_liability_limit",
+            @operator = "min_value",
+            expectedValue = "1",
+            errorMessage = "tampered",
+            sortOrder = 0,
+        });
+        edit.StatusCode.Should().Be(HttpStatusCode.NotFound);
+
+        await using var db = CreateSystemDb();
+        (await db.ComplianceRules.CountAsync(r => r.ComplianceTemplateId == s.TemplateId)).Should().Be(2,
+            "no rule may be planted on the foreign template");
+        (await db.ComplianceRules.SingleAsync(r => r.Id == s.RuleAId)).ExpectedValue.Should().Be("2000000",
+            "the foreign rule must not be tampered with");
+    }
+
+    [Fact]
+    public async Task A_rule_cannot_be_upserted_onto_a_shared_system_template()
+    {
+        // System templates are visible to every org through the filter's IsSystemTemplate arm,
+        // but mutating them would change the SHARED checklist every org sees — the
+        // !IsSystemTemplate clause in UpsertRule's lookup is the guard.
+        var auth = await RegisterAndLoginAsync();
+        var s = await SeedAsync(ComplianceTemplateSeed.SystemOrgId, isSystem: true, twoRules: false);
+
+        var resp = await auth.Client.PostAsJsonAsync($"/api/compliance/templates/{s.TemplateId}/rules", new
+        {
+            id = (Guid?)null,
+            documentType = "coi",
+            fieldName = "general_liability_limit",
+            @operator = "min_value",
+            expectedValue = "1",
+            errorMessage = "planted on shared template",
+            sortOrder = 99,
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        await using var db = CreateSystemDb();
+        (await db.ComplianceRules.CountAsync(r => r.ComplianceTemplateId == s.TemplateId)).Should().Be(1,
+            "the shared system template's rules must be unchanged");
     }
 }

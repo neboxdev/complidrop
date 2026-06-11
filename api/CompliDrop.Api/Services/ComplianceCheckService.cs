@@ -56,6 +56,17 @@ public class ComplianceCheckService(
         }
 
         var template = doc.Vendor?.ComplianceTemplate;
+
+        // Defense-in-depth for the tenant boundary (#273): the system path runs on
+        // SystemDbContext (no tenant filter), so a Vendor row whose ComplianceTemplateId was
+        // poisoned with another org's template — possible only via data written before the
+        // assignment-time guard in VendorEndpoints — would load the FOREIGN template here and
+        // write its rule names/expected values into this org's visible ComplianceCheck rows.
+        // Treat such a template as absent: the no-governing-rules branch below then clears any
+        // previously-leaked check rows, so a poisoned row self-heals on its next evaluation.
+        if (template is not null && !template.IsSystemTemplate && template.OrganizationId != doc.OrganizationId)
+            template = null;
+
         if (template is null || template.Rules.Count == 0)
         {
             // "No governing rules" must also mean "no check rows" — without this, a doc
