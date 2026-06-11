@@ -1625,6 +1625,43 @@ describe("DocumentDetailPage — View file streams through the authenticated pro
     expect(screen.queryByRole("link", { name: /view file/i })).toBeNull();
   });
 
+  it("revokes the object URL when the viewer tab closes — and not before", async () => {
+    // The revoke is tied to the TAB's lifetime (5s tab.closed poll), not a
+    // fixed timer: a timed revoke would break F5 / save-as in a tab the user
+    // deliberately keeps open to compare against the fields.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { revokeObjectURL } = stubObjectUrl();
+      const tab = { location: { href: "" }, close: vi.fn(), closed: false };
+      vi.spyOn(window, "open").mockReturnValue(tab as unknown as Window);
+      server.use(
+        http.get(url("/api/documents/:id/file"), () =>
+          new Response("PDFBYTES", {
+            status: 200,
+            headers: { "Content-Type": "application/pdf" },
+          }),
+        ),
+      );
+
+      mountCompleted();
+      fireEvent.click(await screen.findByRole("button", { name: /view file/i }));
+      await waitFor(() => expect(tab.location.href).toBe("blob:mock-view-file"));
+
+      // Tab still open → polls fire but never revoke.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(revokeObjectURL).not.toHaveBeenCalled();
+
+      // Tab closes → the next poll revokes exactly once and clears the interval.
+      tab.closed = true;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:mock-view-file");
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("closes the tab and surfaces the server message when the fetch fails", async () => {
     stubObjectUrl();
     const tab = { location: { href: "" }, close: vi.fn() };

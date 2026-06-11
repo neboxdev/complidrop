@@ -844,6 +844,28 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         Ocr.OcrCallCount.Should().Be(0);
     }
 
+    [Fact]
+    public async Task Document_whose_blob_vanished_from_storage_is_failed_safely_without_extracting()
+    {
+        // The sibling shape of the no-blob-path guard (#254): the row HAS a path but the blob
+        // is gone from storage — DownloadAsync's null contract surfaces as a throw that routes
+        // through the normal failure handling. Crucially, the failure happens BEFORE OCR/LLM
+        // run, so a vanished blob never spends money.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        var blobs = Fixture.Factory.Services.GetRequiredService<IBlobStorageService>();
+        await blobs.DeleteAsync("blob/path/doc.pdf", default);
+        var worker = BuildWorker();
+
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "a first failure below the cap is retried");
+        doc.ProcessingError.Should().Contain("blob not found");
+        Extraction.ExtractCallCount.Should().Be(0);
+        Ocr.OcrCallCount.Should().Be(0, "the not-found path must fail before OCR spends money");
+    }
+
     [Theory]
     [InlineData(0.40, false)] // low average confidence
     [InlineData(0.95, true)]  // high confidence, but the extractor flagged it for reprocessing
