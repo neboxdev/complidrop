@@ -408,13 +408,9 @@ public class ReminderBackgroundService(
         return info is null ? utc : TimeZoneInfo.ConvertTimeFromUtc(utc, info);
     }
 
-    /// <summary>Returns the named IANA / Windows zone, or null for an unknown id.</summary>
-    private static TimeZoneInfo? TryFindTimeZone(string tz)
-    {
-        try { return TimeZoneInfo.FindSystemTimeZoneById(tz); }
-        catch (TimeZoneNotFoundException) { return null; }
-        catch (InvalidTimeZoneException) { return null; }
-    }
+    /// <summary>Returns the named IANA / Windows zone, or null for an unknown id.
+    /// Delegates to the shared <see cref="Services.TimeZones"/> policy (#262).</summary>
+    private static TimeZoneInfo? TryFindTimeZone(string tz) => Services.TimeZones.TryFind(tz);
 
     private static string BuildBody(string orgName, Document doc, int daysBefore)
     {

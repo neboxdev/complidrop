@@ -139,6 +139,10 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
 
         fromUtc.Should().Be(new DateTime(2026, 6, 10, 0, 0, 0, DateTimeKind.Utc));
         toUtcExclusive.Should().Be(new DateTime(2026, 6, 11, 0, 0, 0, DateTimeKind.Utc));
+        // Kind matters, not just ticks: Npgsql rejects non-UTC kinds for timestamptz
+        // parameters, so a regression to Unspecified here only explodes at query time.
+        fromUtc.Kind.Should().Be(DateTimeKind.Utc);
+        toUtcExclusive.Kind.Should().Be(DateTimeKind.Utc);
     }
 
     [Fact]
@@ -151,8 +155,82 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
         body.GetProperty("error").GetProperty("code").GetString().Should().Be("export.invalid_range");
-        body.GetProperty("error").GetProperty("message").GetString().Should().NotMatch("*[0-9][0-9][0-9]*",
+        body.GetProperty("error").GetProperty("message").GetString().Should().NotMatchRegex("[0-9]{3}",
             "no status codes or jargon in user-facing copy");
+    }
+
+    [Theory]
+    [InlineData("?to=9999-12-31")]               // DateOnly.MaxValue has no next day
+    [InlineData("?to=0001-01-15")]               // default from = to − 30 would underflow
+    [InlineData("?from=1999-12-31&to=2026-06-10")]
+    public async Task Audit_report_rejects_degenerate_dates_with_400_not_500(string query)
+    {
+        var auth = await RegisterAndLoginAsync();
+
+        var resp = await auth.Client.GetAsync($"/api/export/audit-report{query}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("export.invalid_range");
+    }
+
+    [Fact]
+    public async Task Audit_report_rejects_a_lone_future_from_that_inverts_against_todays_default()
+    {
+        // ?from=<future> with `to` omitted skips the endpoint's both-provided check;
+        // the service resolves to = org-local today, detects the inversion, and the
+        // endpoint maps it to the same friendly 400 — never a self-contradicting PDF.
+        var auth = await RegisterAndLoginAsync();
+        var future = DateTime.UtcNow.AddDays(60).ToString("yyyy-MM-dd");
+
+        var resp = await auth.Client.GetAsync($"/api/export/audit-report?from={future}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("export.invalid_range");
+    }
+
+    [Fact]
+    public void Audit_window_survives_a_zone_whose_midnight_does_not_exist()
+    {
+        // Brazil's 2018 spring-forward happened AT local midnight: 2018-11-04 00:00
+        // São Paulo time is invalid. The guard maps the day start into the gap's end
+        // (01:00 BRST, UTC-2 → 03:00Z). Deterministic on every host — pre-2019 Brazil
+        // rules are frozen history in tzdata/ICU.
+        var (fromUtc, _, _, _) = ExportService.ResolveAuditWindow(
+            new DateTime(2018, 11, 4), new DateTime(2018, 11, 4), "America/Sao_Paulo",
+            nowUtc: new DateTime(2018, 11, 4, 12, 0, 0, DateTimeKind.Utc));
+
+        fromUtc.Should().Be(new DateTime(2018, 11, 4, 3, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public async Task Audit_query_boundary_is_half_open_through_real_postgres()
+    {
+        // The original #262 bug lived in this exact predicate (`CreatedAt <= to`), and
+        // the PDF is FlateDecode-compressed (not text-assertable) — so the half-open
+        // comparison is pinned by driving the query seam directly with the resolver's
+        // outputs: 23:59 NY on the To day is IN, the next NY midnight is OUT.
+        var auth = await RegisterAndLoginAsync();
+        var inEvent = new DateTime(2026, 6, 11, 3, 59, 0, DateTimeKind.Utc);  // 23:59 NY June 10
+        var outEvent = new DateTime(2026, 6, 11, 4, 0, 0, DateTimeKind.Utc);  // 00:00 NY June 11
+        await using (var db = CreateSystemDb())
+        {
+            db.AuditLogs.Add(new AuditLog { Id = Guid.NewGuid(), OrganizationId = auth.OrgId, Action = "test.in", EntityType = "Test", CreatedAt = inEvent });
+            db.AuditLogs.Add(new AuditLog { Id = Guid.NewGuid(), OrganizationId = auth.OrgId, Action = "test.out", EntityType = "Test", CreatedAt = outEvent });
+            await db.SaveChangesAsync();
+        }
+        var (fromUtc, toUtcExclusive, _, _) = ExportService.ResolveAuditWindow(
+            new DateTime(2026, 5, 11), new DateTime(2026, 6, 10), "America/New_York",
+            nowUtc: new DateTime(2026, 6, 10, 12, 0, 0, DateTimeKind.Utc));
+
+        await using var sysDb = CreateSystemDb();
+        var (rows, truncated) = await new ExportService(sysDb)
+            .QueryAuditSliceAsync(auth.OrgId, fromUtc, toUtcExclusive, default);
+
+        truncated.Should().BeFalse();
+        rows.Select(r => r.Action).Should().Contain("test.in", "events during the To day are inside the window")
+            .And.NotContain("test.out", "the upper bound is exclusive — the next org-local day is out");
     }
 
     [Fact]

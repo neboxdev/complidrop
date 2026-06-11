@@ -10,6 +10,10 @@ using QuestPDF.Infrastructure;
 
 namespace CompliDrop.Api.Services;
 
+/// <summary>The requested audit window is inverted (from after to) even after defaults
+/// resolve; the endpoint maps this to the 400 export.invalid_range envelope (#262).</summary>
+public sealed class InvalidExportRangeException : Exception;
+
 public interface IExportService
 {
     /// <summary>
@@ -25,6 +29,27 @@ public interface IExportService
 
 public class ExportService(SystemDbContext db) : IExportService
 {
+    internal const int AuditCap = 500;
+
+    /// <summary>
+    /// The audit-slice query as an internal seam (#262 review): the To-day boundary bug
+    /// lived in exactly this predicate, and the PDF is FlateDecode-compressed (not
+    /// text-assertable), so the half-open comparison is pinned by a Testcontainers test
+    /// driving this method directly with ResolveAuditWindow's outputs. Fetches one past
+    /// the cap so truncation is disclosed instead of silently dropping events (#197).
+    /// </summary>
+    internal async Task<(List<AuditLog> Rows, bool Truncated)> QueryAuditSliceAsync(
+        Guid organizationId, DateTime fromUtc, DateTime toUtcExclusive, CancellationToken ct)
+    {
+        var raw = await db.AuditLogs
+            .Where(a => a.OrganizationId == organizationId && a.CreatedAt >= fromUtc && a.CreatedAt < toUtcExclusive)
+            .OrderByDescending(a => a.CreatedAt)
+            .Take(AuditCap + 1)
+            .ToListAsync(ct);
+        var truncated = raw.Count > AuditCap;
+        return (truncated ? raw.Take(AuditCap).ToList() : raw, truncated);
+    }
+
     public async Task<byte[]> BuildAuditReportAsync(Guid organizationId, DateTime? from, DateTime? to, CancellationToken ct)
     {
         var org = await db.Organizations.FirstAsync(o => o.Id == organizationId, ct);
@@ -42,18 +67,7 @@ public class ExportService(SystemDbContext db) : IExportService
             .Include(d => d.Vendor)
             .OrderBy(d => d.ExpirationDate)
             .ToListAsync(ct);
-        // Fetch one past the cap so we can disclose truncation instead of
-        // silently dropping events. The cap stays at 500 (a multi-thousand-row
-        // PDF is unusable anyway); the report now SAYS when it's showing only
-        // the most recent 500. (#197)
-        const int auditCap = 500;
-        var auditRaw = await db.AuditLogs
-            .Where(a => a.OrganizationId == organizationId && a.CreatedAt >= fromUtc && a.CreatedAt < toUtcExclusive)
-            .OrderByDescending(a => a.CreatedAt)
-            .Take(auditCap + 1)
-            .ToListAsync(ct);
-        var auditTruncated = auditRaw.Count > auditCap;
-        var audit = auditTruncated ? auditRaw.Take(auditCap).ToList() : auditRaw;
+        var (audit, auditTruncated) = await QueryAuditSliceAsync(organizationId, fromUtc, toUtcExclusive, ct);
 
         // Resolve UserIds to human names so the report shows WHO acted, not a raw
         // GUID. IgnoreQueryFilters so a soft-deleted account (ADR 0013) still
@@ -115,7 +129,7 @@ public class ExportService(SystemDbContext db) : IExportService
 
                     col.Item().PaddingTop(18).Text("Audit Log").SemiBold().FontSize(14);
                     col.Item().Text(auditTruncated
-                            ? $"Showing the {auditCap} most recent events from {fromDate:yyyy-MM-dd} to {toDate:yyyy-MM-dd}"
+                            ? $"Showing the {AuditCap} most recent events from {fromDate:yyyy-MM-dd} to {toDate:yyyy-MM-dd}"
                             : $"{audit.Count} events from {fromDate:yyyy-MM-dd} to {toDate:yyyy-MM-dd}")
                         .FontSize(9).FontColor("#64748b");
                     col.Item().Element(e =>
@@ -175,11 +189,17 @@ public class ExportService(SystemDbContext db) : IExportService
     internal static (DateTime FromUtc, DateTime ToUtcExclusive, DateOnly FromDate, DateOnly ToDate)
         ResolveAuditWindow(DateTime? from, DateTime? to, string orgTimeZone, DateTime nowUtc)
     {
-        var tz = TryFindTimeZone(orgTimeZone);
+        var tz = TimeZones.TryFind(orgTimeZone);
         var todayLocal = DateOnly.FromDateTime(
             tz is null ? nowUtc : TimeZoneInfo.ConvertTimeFromUtc(nowUtc, tz));
         var toDate = to is { } t ? DateOnly.FromDateTime(t) : todayLocal;
         var fromDate = from is { } f ? DateOnly.FromDateTime(f) : toDate.AddDays(-30);
+
+        // The endpoint validates the both-provided case, but a lone future `from`
+        // resolves against the org's today and can still invert — which would render
+        // a self-contradicting caption ("0 events from 2027-01-01 to 2026-06-11").
+        if (fromDate > toDate) throw new InvalidExportRangeException();
+
         return (
             StartOfLocalDayUtc(fromDate, tz),
             StartOfLocalDayUtc(toDate.AddDays(1), tz),
@@ -199,14 +219,6 @@ public class ExportService(SystemDbContext db) : IExportService
         return TimeZoneInfo.ConvertTimeToUtc(midnight, tz);
     }
 
-    /// <summary>Returns the named IANA / Windows zone, or null for an unknown id —
-    /// same contract as ReminderBackgroundService.TryFindTimeZone.</summary>
-    private static TimeZoneInfo? TryFindTimeZone(string tz)
-    {
-        try { return TimeZoneInfo.FindSystemTimeZoneById(tz); }
-        catch (TimeZoneNotFoundException) { return null; }
-        catch (InvalidTimeZoneException) { return null; }
-    }
 
     public async Task<byte[]> BuildCsvAsync(Guid organizationId, CancellationToken ct)
     {

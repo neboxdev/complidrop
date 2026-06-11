@@ -14,6 +14,8 @@ export default function ExportPage() {
   const [from, setFrom] = useState(isoDaysAgo(30));
   const [to, setTo] = useState(isoDaysAgo(0));
   const [busy, setBusy] = useState(false);
+  // yyyy-MM-dd strings compare correctly as strings; empty inputs don't block.
+  const rangeInverted = Boolean(from && to && from > to);
   // a11y: wire the From/To date inputs to their labels via htmlFor +
   // id so screen readers announce each input with its date-range
   // context. Missed by the original #76 sweep — only the auth and
@@ -97,8 +99,16 @@ export default function ExportPage() {
             The date range filters the <strong className="font-medium">activity log</strong> only —
             the documents table always lists all of your active documents.
           </p>
+          {/* Inverted-range guard (#262): the blob download path surfaces only the
+              generic fallback on failure (per the #77 contract), so the API's friendly
+              400 would never reach the user — catch it before the request instead. */}
+          {rangeInverted && (
+            <p className="text-xs text-rose-600" role="alert">
+              The start date must be on or before the end date.
+            </p>
+          )}
           <Button
-            disabled={busy}
+            disabled={busy || rangeInverted}
             onClick={() =>
               download(
                 `/api/export/audit-report?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
