@@ -88,6 +88,96 @@ public sealed class ComplianceRuleDeleteTests(IntegrationTestFixture fixture) : 
     }
 
     [Fact]
+    public async Task Deleting_a_rule_reevaluates_every_affected_document_not_just_one()
+    {
+        // Pins the plural in "re-evaluates affected documents": both docs were
+        // NonCompliant solely because of rule A, so both must flip to Compliant.
+        var auth = await RegisterAndLoginAsync();
+        var s = await SeedAsync(auth.OrgId);
+        Guid doc2;
+        await using (var db = CreateSystemDb())
+        {
+            var doc1 = await db.Documents.SingleAsync(d => d.Id == s.DocId);
+            doc2 = Guid.NewGuid();
+            db.Documents.Add(new Document
+            {
+                Id = doc2, OrganizationId = auth.OrgId, VendorId = doc1.VendorId,
+                OriginalFileName = "d2.pdf", BlobStorageUrl = "blob://d2", FileSizeBytes = 1,
+                ContentType = "application/pdf", DocumentType = "coi",
+                GeneralLiabilityLimit = 1_500_000m, ExpirationDate = DateTime.UtcNow.AddYears(1),
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+        (await auth.Client.PostAsync($"/api/compliance/check/{s.DocId}", null)).EnsureSuccessStatusCode();
+        (await auth.Client.PostAsync($"/api/compliance/check/{doc2}", null)).EnsureSuccessStatusCode();
+
+        var resp = await auth.Client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db2 = CreateSystemDb();
+        (await db2.Documents.SingleAsync(d => d.Id == s.DocId)).ComplianceStatus.Should().Be(ComplianceStatus.Compliant);
+        (await db2.Documents.SingleAsync(d => d.Id == doc2)).ComplianceStatus.Should().Be(ComplianceStatus.Compliant);
+    }
+
+    [Fact]
+    public async Task Foreign_org_checks_against_the_rule_are_cleaned_without_touching_the_foreign_document()
+    {
+        // Simulates the #273 state: another org's document carries a check row against
+        // OUR rule. Deleting the rule must remove that row (the FK would restrict
+        // otherwise) but the tenant-filtered re-eval must leave the foreign document
+        // itself untouched.
+        var auth = await RegisterAndLoginAsync();
+        var s = await SeedAsync(auth.OrgId);
+        Guid foreignDocId;
+        await using (var db = CreateSystemDb())
+        {
+            var foreignOrg = Guid.NewGuid();
+            var foreignVendor = Guid.NewGuid();
+            foreignDocId = Guid.NewGuid();
+            var now = DateTime.UtcNow;
+            db.Organizations.Add(new Organization { Id = foreignOrg, Name = "F", CreatedAt = now, UpdatedAt = now });
+            db.Vendors.Add(new Vendor { Id = foreignVendor, OrganizationId = foreignOrg, Name = "FV", CreatedAt = now, UpdatedAt = now });
+            db.Documents.Add(new Document
+            {
+                Id = foreignDocId, OrganizationId = foreignOrg, VendorId = foreignVendor,
+                OriginalFileName = "f.pdf", BlobStorageUrl = "blob://f", FileSizeBytes = 1,
+                ContentType = "application/pdf", DocumentType = "coi",
+                ComplianceStatus = ComplianceStatus.NonCompliant,
+                CreatedAt = now, UpdatedAt = now
+            });
+            db.ComplianceChecks.Add(new ComplianceCheck
+            {
+                Id = Guid.NewGuid(), DocumentId = foreignDocId, ComplianceRuleId = s.RuleAId,
+                IsPassed = false, CheckedAt = now
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var resp = await auth.Client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db2 = CreateSystemDb();
+        (await db2.ComplianceChecks.AnyAsync(c => c.ComplianceRuleId == s.RuleAId)).Should().BeFalse();
+        var foreign = await db2.Documents.SingleAsync(d => d.Id == foreignDocId);
+        foreign.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant,
+            "the tenant-filtered re-eval must not rewrite another org's verdict");
+    }
+
+    [Fact]
+    public async Task Second_delete_of_the_same_rule_returns_404()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var s = await SeedAsync(auth.OrgId);
+        (await auth.Client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}"))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var second = await auth.Client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}");
+
+        second.StatusCode.Should().Be(HttpStatusCode.NotFound, "the second trash-button click must not 500");
+    }
+
+    [Fact]
     public async Task Deleting_the_last_rule_resets_affected_documents_to_Pending()
     {
         var auth = await RegisterAndLoginAsync();

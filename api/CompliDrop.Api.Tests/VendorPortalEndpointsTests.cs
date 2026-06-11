@@ -151,6 +151,55 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     }
 
     [Fact]
+    public async Task Status_endpoint_stops_serving_a_soft_deleted_tenants_documents()
+    {
+        // #269: GetStatus deliberately tolerates IsActive=false (post-quota polling), but a
+        // dead vendor/org must 404 — otherwise a deleted tenant's document status stays
+        // publicly queryable through any old token.
+        var seeded = await SeedLinkAsync();
+        Guid docId;
+        await using (var db = CreateSystemDb())
+        {
+            docId = Guid.NewGuid();
+            db.Documents.Add(new Document
+            {
+                Id = docId, OrganizationId = seeded.OrgId, VendorId = seeded.VendorId,
+                OriginalFileName = "d.pdf", BlobStorageUrl = "blob://d", FileSizeBytes = 1,
+                ContentType = "application/pdf", DocumentType = "coi",
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+        (await CreateClient().GetAsync($"/api/portal/{seeded.Token}/status/{docId}"))
+            .StatusCode.Should().Be(HttpStatusCode.OK, "sanity: live tenant serves status");
+
+        await using (var db = CreateSystemDb())
+            await db.Vendors.Where(v => v.Id == seeded.VendorId)
+                .ExecuteUpdateAsync(s => s.SetProperty(v => v.DeletedAt, DateTime.UtcNow));
+
+        var resp = await CreateClient().GetAsync($"/api/portal/{seeded.Token}/status/{docId}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(resp)).Should().Be("vendor.portal_token_invalid");
+    }
+
+    [Fact]
+    public async Task Dead_tenant_with_an_expired_link_answers_404_not_410()
+    {
+        // The null-guard runs BEFORE the expiry check: a 410 would acknowledge the token
+        // was once valid for a now-deleted tenant (and invite "request a new link").
+        var seeded = await SeedLinkAsync(expiresAt: DateTime.UtcNow.AddDays(-1));
+        await using (var db = CreateSystemDb())
+            await db.Organizations.Where(o => o.Id == seeded.OrgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(o => o.DeletedAt, DateTime.UtcNow));
+
+        var info = await CreateClient().GetAsync($"/api/portal/{seeded.Token}");
+
+        info.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(info)).Should().Be("vendor.portal_token_invalid");
+    }
+
+    [Fact]
     public async Task Unknown_token_is_404_and_leaks_no_tenant_data()
     {
         // A real link exists, but we query a completely different (unknown) token.

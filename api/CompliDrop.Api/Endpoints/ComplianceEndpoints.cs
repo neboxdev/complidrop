@@ -177,29 +177,50 @@ public static class ComplianceEndpoints
         if (rule is null) return NotFound();
 
         // ComplianceCheck → ComplianceRule is ON DELETE RESTRICT, so the dependent check
-        // rows must be removed in the same SaveChanges or Postgres rejects the delete
-        // (#269: the rules-page trash button 500'd forever once any document had been
-        // evaluated against the rule). Affected documents are captured first and
-        // re-evaluated after the delete so their verdicts reflect the remaining rules
-        // (re-eval on rule EDITS / assignment changes stays #257's scope).
-        var affectedDocIds = await db.ComplianceChecks
-            .Where(c => c.ComplianceRuleId == ruleId)
-            .Select(c => c.DocumentId)
-            .Distinct()
-            .ToListAsync(ct);
+        // rows must go with the rule (#269: the rules-page trash button 500'd forever once
+        // any document had been evaluated against the rule). Everything — check cleanup,
+        // rule delete, and the re-evaluation of affected documents — runs in ONE
+        // transaction: a failure (or client abort) mid-re-eval rolls the whole delete back
+        // for a clean retry, instead of leaving documents stuck on verdicts computed
+        // against a rule that no longer exists. EvaluateAsync enlists because it uses this
+        // same request-scoped AppDbContext. Re-eval on rule EDITS / assignment changes
+        // stays #257's scope.
+        try
+        {
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
 
-        var checks = await db.ComplianceChecks
-            .Where(c => c.ComplianceRuleId == ruleId)
-            .ToListAsync(ct);
-        db.ComplianceChecks.RemoveRange(checks);
-        db.ComplianceRules.Remove(rule);
-        await db.SaveChangesAsync(ct);
+            var affectedDocIds = await db.ComplianceChecks
+                .Where(c => c.ComplianceRuleId == ruleId)
+                .Select(c => c.DocumentId)
+                .Distinct()
+                .ToListAsync(ct);
+
+            await db.ComplianceChecks
+                .Where(c => c.ComplianceRuleId == ruleId)
+                .ExecuteDeleteAsync(ct);
+            db.ComplianceRules.Remove(rule);
+            await db.SaveChangesAsync(ct);
+
+            // EvaluateAsync is tenant-filtered, so a foreign document id (possible only via
+            // a cross-org template assignment, see #273) resolves to nothing and is skipped.
+            foreach (var docId in affectedDocIds)
+                await checker.EvaluateAsync(docId, ct);
+
+            await tx.CommitAsync(ct);
+        }
+        catch (DbUpdateException)
+        {
+            // A concurrent evaluation inserted a fresh check for this rule between the
+            // cleanup and the rule delete (FK restrict). The rollback left everything
+            // intact — the retry's snapshot will include the new row.
+            return Error(409, "compliance.conflict",
+                "This requirement was being checked at the same moment. Please try again.");
+        }
+
+        // Audit AFTER commit: IAuditLogger writes through SystemDbContext — a different
+        // connection that cannot join this transaction (see #269 review). Worst case is a
+        // missing audit row on a post-commit crash, the same shape as every other endpoint.
         await audit.LogAsync("complianceRule.deleted", nameof(ComplianceRule), ruleId);
-
-        // EvaluateAsync is tenant-filtered, so a foreign document id (possible only via a
-        // cross-org template assignment, see #273) resolves to nothing and is skipped.
-        foreach (var docId in affectedDocIds)
-            await checker.EvaluateAsync(docId, ct);
 
         return Results.Ok(new { data = new { id = ruleId }, error = (object?)null });
     }
