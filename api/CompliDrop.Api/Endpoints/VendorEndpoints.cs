@@ -141,8 +141,12 @@ public static class VendorEndpoints
 
         await using (var tx = await db.Database.BeginTransactionAsync(ct))
         {
+            // Filtered by the captured ids so the audit payload below states EXACTLY what
+            // this operation deactivated. A link minted concurrently between the snapshot
+            // and here stays active but is inert: the portal's dead-tenant guards 404 it
+            // the moment the vendor soft-delete commits.
             await db.VendorPortalLinks
-                .Where(l => l.VendorId == id && l.IsActive)
+                .Where(l => linkIds.Contains(l.Id))
                 .ExecuteUpdateAsync(s => s.SetProperty(l => l.IsActive, false), ct);
 
             db.Vendors.Remove(v);

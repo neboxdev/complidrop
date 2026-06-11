@@ -189,15 +189,18 @@ public static class ComplianceEndpoints
         {
             await using var tx = await db.Database.BeginTransactionAsync(ct);
 
-            var affectedDocIds = await db.ComplianceChecks
-                .Where(c => c.ComplianceRuleId == ruleId)
-                .Select(c => c.DocumentId)
+            // Single DELETE … RETURNING so the affected-document snapshot and the check
+            // cleanup are one atomic statement — a separate SELECT-then-DELETE leaves a
+            // window where a concurrent evaluation's check row is deleted without its
+            // document making the re-eval list. No timestamptz involved (ADR 0009 n/a).
+            var affectedDocIds = (await db.Database
+                .SqlQuery<Guid>($"""
+                    DELETE FROM "ComplianceChecks" WHERE "ComplianceRuleId" = {ruleId} RETURNING "DocumentId"
+                    """)
+                .ToListAsync(ct))
                 .Distinct()
-                .ToListAsync(ct);
+                .ToList();
 
-            await db.ComplianceChecks
-                .Where(c => c.ComplianceRuleId == ruleId)
-                .ExecuteDeleteAsync(ct);
             db.ComplianceRules.Remove(rule);
             await db.SaveChangesAsync(ct);
 
