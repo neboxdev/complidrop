@@ -5,6 +5,7 @@ using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using Stripe;
 
 namespace CompliDrop.Api.Endpoints;
@@ -147,15 +148,32 @@ public static class BillingEndpoints
 
         if (await db.ProcessedStripeEvents.AnyAsync(p => p.Id == ev.Id, ct)) return Results.Ok();
 
+        // Handle FIRST, mark processed AFTER (#268, ADR 0020). If the handler throws, the
+        // event id is never recorded, the response is a 5xx, and Stripe's retry re-runs the
+        // handler. Recording before handling turned any transient failure into a permanently
+        // dropped event: the retry hit the dedupe check above and got a 200 while the side
+        // effects (e.g. flipping a paid checkout's org off the free cap) never ran. Safe
+        // because HandleWebhookEventAsync is idempotent per event — the crash window between
+        // handler success and the dedupe insert resolves to a benign re-apply on retry.
+        await stripe.HandleWebhookEventAsync(ev, ct);
+
         db.ProcessedStripeEvents.Add(new ProcessedStripeEvent
         {
             Id = ev.Id,
             Type = ev.Type,
             ProcessedAt = DateTime.UtcNow
         });
-        await db.SaveChangesAsync(ct);
-
-        await stripe.HandleWebhookEventAsync(ev, ct);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
+        {
+            // Concurrent delivery of the same event id: both requests passed the AnyAsync
+            // check and ran the (idempotent) handler; the other one recorded the event first.
+            // The row existing IS the deduped-success state — absorb the race instead of
+            // 500ing Stripe into a spurious extra retry.
+        }
         return Results.Ok();
     }
 

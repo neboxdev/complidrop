@@ -56,6 +56,13 @@ public sealed class FakeStripeService(IServiceScopeFactory scopeFactory) : IStri
     public string AnnualPriceId { get; set; } = DefaultAnnualPriceId;
     public string FoundingPriceId { get; set; } = DefaultFoundingPriceId;
 
+    /// <summary>When true, the next <see cref="HandleWebhookEventAsync"/> call throws
+    /// (simulating a transient handler failure — a DB blip or the outbound Stripe call
+    /// inside the checkout handler failing) and the flag auto-clears, so the following
+    /// call succeeds. Mirrors Stripe's deliver → fail → retry sequence (#268).
+    /// <see cref="Reset"/> also clears it.</summary>
+    public bool FailNextWebhookHandling { get; set; }
+
     public IReadOnlyList<CheckoutCall> Checkouts => _checkouts.ToArray();
     public IReadOnlyList<PortalCall> Portals => _portals.ToArray();
     public CheckoutCall? LastCheckout => _checkouts.LastOrDefault();
@@ -74,6 +81,7 @@ public sealed class FakeStripeService(IServiceScopeFactory scopeFactory) : IStri
         MonthlyPriceId = DefaultMonthlyPriceId;
         AnnualPriceId = DefaultAnnualPriceId;
         FoundingPriceId = DefaultFoundingPriceId;
+        FailNextWebhookHandling = false;
     }
 
     public Task<string> CreateCheckoutSessionAsync(
@@ -112,6 +120,13 @@ public sealed class FakeStripeService(IServiceScopeFactory scopeFactory) : IStri
     /// create scopes" intent visible at the type level.</summary>
     public async Task HandleWebhookEventAsync(Event ev, CancellationToken ct)
     {
+        if (FailNextWebhookHandling)
+        {
+            FailNextWebhookHandling = false;
+            throw new InvalidOperationException(
+                "Simulated transient webhook handler failure (FakeStripeService.FailNextWebhookHandling).");
+        }
+
         using var scope = scopeFactory.CreateScope();
         var real = scope.ServiceProvider.GetRequiredService<StripeService>();
         await real.HandleWebhookEventAsync(ev, ct);

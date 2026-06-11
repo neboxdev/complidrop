@@ -3,9 +3,11 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Stripe;
 using Subscription = CompliDrop.Api.Entities.Subscription;
 
@@ -20,6 +22,9 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
 {
     // Must match CustomWebApplicationFactory's Stripe:WebhookSecret.
     private const string WebhookSecret = "whsec_test_secret_for_integration_tests";
+
+    private FakeStripeService FakeStripe =>
+        (FakeStripeService)Fixture.Factory.Services.GetRequiredService<IStripeService>();
 
     // Default `plan: "pro"` matches the post-ADR-0011 vocab. The
     // Stripe-side `MonthlyPriceId` config key is unchanged; the
@@ -48,6 +53,30 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         return subId;
     }
 
+    /// <summary>Seeds a pre-checkout org: free plan, 5-doc cap, no portal, no Stripe ids —
+    /// the state a paying customer's org is stuck in when checkout.session.completed is lost.</summary>
+    private async Task<Guid> SeedFreeOrgAsync()
+    {
+        var orgId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+
+        await using var db = CreateSystemDb();
+        db.Organizations.Add(new Organization { Id = orgId, Name = $"Org-{orgId:N}", CreatedAt = now, UpdatedAt = now });
+        db.Subscriptions.Add(new Subscription
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            Plan = "free",
+            Status = "active",
+            DocumentLimit = 5,
+            HasVendorPortal = false,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        return orgId;
+    }
+
     private static object Envelope(string eventId, string type, object dataObject) => new
     {
         id = eventId,
@@ -64,6 +93,20 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
     private static string DeletedEvent(string eventId, string subId) => JsonSerializer.Serialize(
         Envelope(eventId, "customer.subscription.deleted",
             new { id = subId, @object = "subscription", status = "canceled" }));
+
+    // `subscription: null` keeps FetchPriceIdFromSubscription from making an outbound
+    // Stripe API call (null price id → "pro" fallback), so the full checkout-completed
+    // handler runs network-free in the test host.
+    private static string CheckoutCompletedEvent(string eventId, Guid orgId) => JsonSerializer.Serialize(
+        Envelope(eventId, "checkout.session.completed",
+            new
+            {
+                id = $"cs_{Guid.NewGuid():N}",
+                @object = "checkout.session",
+                client_reference_id = orgId.ToString(),
+                customer = "cus_test_123",
+                subscription = (string?)null
+            }));
 
     private static string SubscriptionStateEvent(string eventId, string type, string subId, string status, string priceId) => JsonSerializer.Serialize(
         Envelope(eventId, type,
@@ -101,6 +144,18 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
     {
         await using var db = CreateSystemDb();
         return await db.Subscriptions.FirstAsync(s => s.StripeSubscriptionId == subId);
+    }
+
+    private async Task<Subscription> ReloadByOrgAsync(Guid orgId)
+    {
+        await using var db = CreateSystemDb();
+        return await db.Subscriptions.FirstAsync(s => s.OrganizationId == orgId);
+    }
+
+    private async Task<int> ProcessedCountAsync(string eventId)
+    {
+        await using var db = CreateSystemDb();
+        return await db.ProcessedStripeEvents.CountAsync(p => p.Id == eventId);
     }
 
     [Fact]
@@ -163,14 +218,16 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
     public async Task Unknown_event_type_is_accepted_as_a_noop()
     {
         var subId = await SeedSubscriptionAsync(plan: "pro", status: "active");
+        var eventId = $"evt_{Guid.NewGuid():N}";
         var payload = JsonSerializer.Serialize(Envelope(
-            $"evt_{Guid.NewGuid():N}", "customer.subscription.trial_will_end",
+            eventId, "customer.subscription.trial_will_end",
             new { id = subId, @object = "subscription", status = "trialing" }));
 
         var resp = await PostWebhook(payload, SignatureFor(payload));
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);          // accepted + recorded
         (await ReloadAsync(subId)).Status.Should().Be("active"); // but no handler ran
+        (await ProcessedCountAsync(eventId)).Should().Be(1);     // noop still marked processed
     }
 
     [Fact]
@@ -224,5 +281,80 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         (await ReloadAsync(subId)).Status.Should().Be("tampered");
         await using var db2 = CreateSystemDb();
         (await db2.ProcessedStripeEvents.CountAsync(p => p.Id == eventId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Transient_handler_failure_returns_5xx_and_does_not_mark_the_event_processed()
+    {
+        // #268 regression: the dedupe row used to be committed BEFORE the handler ran, so a
+        // throwing handler left the event marked processed — Stripe's retry was deduped to a
+        // 200 and the event was lost forever.
+        var orgId = await SeedFreeOrgAsync();
+        var eventId = $"evt_{Guid.NewGuid():N}";
+        var payload = CheckoutCompletedEvent(eventId, orgId);
+
+        FakeStripe.FailNextWebhookHandling = true;
+        var resp = await PostWebhook(payload, SignatureFor(payload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.InternalServerError,
+            "Stripe only retries on a non-2xx response");
+        (await ProcessedCountAsync(eventId)).Should().Be(0,
+            "a failed handler must leave the event unrecorded so the retry re-runs it");
+        (await ReloadByOrgAsync(orgId)).Plan.Should().Be("free");
+    }
+
+    [Fact]
+    public async Task Stripe_retry_after_transient_handler_failure_applies_the_paid_subscription()
+    {
+        // The P0 from #268: customer PAID (checkout.session.completed), first delivery hits a
+        // transient failure, Stripe retries the same event id. The retry must re-run the
+        // handler and flip the org off the free cap — not be swallowed by the dedupe check.
+        var orgId = await SeedFreeOrgAsync();
+        var eventId = $"evt_{Guid.NewGuid():N}";
+        var payload = CheckoutCompletedEvent(eventId, orgId);
+
+        FakeStripe.FailNextWebhookHandling = true;
+        (await PostWebhook(payload, SignatureFor(payload)))
+            .StatusCode.Should().Be(HttpStatusCode.InternalServerError);
+
+        var retry = await PostWebhook(payload, SignatureFor(payload));
+
+        retry.StatusCode.Should().Be(HttpStatusCode.OK);
+        var sub = await ReloadByOrgAsync(orgId);
+        sub.Plan.Should().Be("pro");
+        sub.Status.Should().Be("active");
+        sub.DocumentLimit.Should().BeNull("the paid plan removes the 5-document cap");
+        sub.HasVendorPortal.Should().BeTrue();
+        sub.StripeCustomerId.Should().Be("cus_test_123");
+        (await ProcessedCountAsync(eventId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Reapplying_an_already_applied_event_yields_the_same_state()
+    {
+        // Pins the idempotency contract the #268 ordering relies on (IStripeService doc,
+        // ADR 0020): in the crash window between handler success and the dedupe insert,
+        // Stripe's retry re-runs the handler against already-applied state. Simulated by
+        // deleting the dedupe row after a successful delivery and re-posting the identical
+        // payload. A future handler edit that increments/appends instead of upserting
+        // breaks this test.
+        var orgId = await SeedFreeOrgAsync();
+        var eventId = $"evt_{Guid.NewGuid():N}";
+        var payload = CheckoutCompletedEvent(eventId, orgId);
+
+        (await PostWebhook(payload, SignatureFor(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using (var db = CreateSystemDb())
+            await db.ProcessedStripeEvents.Where(p => p.Id == eventId).ExecuteDeleteAsync();
+
+        (await PostWebhook(payload, SignatureFor(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var sub = await ReloadByOrgAsync(orgId);
+        sub.Plan.Should().Be("pro");
+        sub.Status.Should().Be("active");
+        sub.DocumentLimit.Should().BeNull();
+        sub.HasVendorPortal.Should().BeTrue();
+        sub.StripeCustomerId.Should().Be("cus_test_123");
+        (await ProcessedCountAsync(eventId)).Should().Be(1);
     }
 }
