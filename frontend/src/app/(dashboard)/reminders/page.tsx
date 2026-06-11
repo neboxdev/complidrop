@@ -15,7 +15,6 @@ type Reminder = {
   notifyVendor: boolean;
   isActive: boolean;
   emailSubjectTemplate: string | null;
-  emailBodyTemplate: string | null;
 };
 
 type ReminderHistoryEntry = {
@@ -40,18 +39,42 @@ export default function RemindersPage() {
   });
 
   const update = useMutation({
+    mutationKey: ["reminder-update"],
+    // The PUT body is rebuilt from the QUERY CACHE, not the render-scope
+    // `reminders.data` snapshot — and onMutate below has already merged this
+    // mutation's patch into that cache. Two toggles flipped on one row inside
+    // the refetch window therefore each see the other's value instead of
+    // sending a stale field that silently reverts the first flip (#264 / FP-093).
     mutationFn: (vars: { id: string; patch: Partial<Reminder> }) => {
-      const current = reminders.data?.find((r) => r.id === vars.id);
+      const current = qc.getQueryData<Reminder[]>(["reminders"])?.find((r) => r.id === vars.id);
       const next = { ...current, ...vars.patch };
       return api.put<void>(`/api/reminders/${vars.id}`, {
         notifyInternalUser: next.notifyInternalUser ?? true,
         notifyVendor: next.notifyVendor ?? false,
         isActive: next.isActive ?? true,
         emailSubjectTemplate: next.emailSubjectTemplate ?? null,
-        emailBodyTemplate: next.emailBodyTemplate ?? null,
       });
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["reminders"] }),
+    onMutate: async (vars) => {
+      // Cancel any in-flight list refetch so a response that predates this
+      // flip can't land after it and overwrite the optimistic state.
+      await qc.cancelQueries({ queryKey: ["reminders"], exact: true });
+      qc.setQueryData<Reminder[]>(["reminders"], (old) =>
+        old?.map((r) => (r.id === vars.id ? { ...r, ...vars.patch } : r)),
+      );
+    },
+    // No snapshot rollback on error: with overlapping toggle mutations a
+    // restored snapshot would clobber the other mutation's optimistic patch —
+    // the refetch below re-syncs to server truth instead, and the global
+    // error toast (meta below) explains the revert.
+    onSettled: () => {
+      // Only the LAST settling mutation invalidates: an earlier mutation's
+      // refetch could return state that predates a still-pending PUT and
+      // visually revert it. isMutating counts this mutation while settling.
+      if (qc.isMutating({ mutationKey: ["reminder-update"] }) === 1) {
+        return qc.invalidateQueries({ queryKey: ["reminders"] });
+      }
+    },
     // Toggles have no local error UI — opt into the global mutation-error
     // toast so a failed save isn't silently lost (the switch would otherwise
     // appear to flip with no persisted change). See lib/query-client.ts.
