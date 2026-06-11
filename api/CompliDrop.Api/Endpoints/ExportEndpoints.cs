@@ -22,11 +22,35 @@ public static class ExportEndpoints
         DateTime? to = null)
     {
         if (currentUser.OrganizationId is null) return Results.Unauthorized();
-        var windowTo = (to ?? DateTime.UtcNow).ToUniversalTime();
-        var windowFrom = (from ?? windowTo.AddDays(-30)).ToUniversalTime();
-        var bytes = await export.BuildAuditReportAsync(currentUser.OrganizationId.Value, windowFrom, windowTo, ct);
-        return Results.File(bytes, "application/pdf", $"complidrop-audit-{DateTime.UtcNow:yyyyMMdd}.pdf");
+        if (from is { } f && to is { } t && f.Date > t.Date)
+            return InvalidRange("The start date must be on or before the end date.");
+        // Sanity-bound the years so degenerate inputs (?to=9999-12-31) can't overflow
+        // the window math (DateOnly.MaxValue has no next day → 500 instead of a 400).
+        if (from is { } f2 && (f2.Year < 2000 || f2.Year > 2100)
+            || to is { } t2 && (t2.Year < 2000 || t2.Year > 2100))
+            return InvalidRange("Pick dates between the years 2000 and 2100.");
+
+        try
+        {
+            // Window semantics (org-local calendar days, To inclusive) live in the
+            // service, which owns the org row and its timezone (#262).
+            var bytes = await export.BuildAuditReportAsync(currentUser.OrganizationId.Value, from, to, ct);
+            return Results.File(bytes, "application/pdf", $"complidrop-audit-{DateTime.UtcNow:yyyyMMdd}.pdf");
+        }
+        catch (InvalidExportRangeException)
+        {
+            // A lone future `from` can invert against the org-local default `to` — only
+            // the service knows the org's today, so this arm of the validation lives there.
+            return InvalidRange("The start date must be on or before the end date.");
+        }
     }
+
+    private static IResult InvalidRange(string message) =>
+        Results.Json(new
+        {
+            data = (object?)null,
+            error = new { code = "export.invalid_range", message }
+        }, statusCode: 400);
 
     private static async Task<IResult> Csv(
         IExportService export,

@@ -6,7 +6,7 @@
  * Smoke test: render-without-crash + the two from/to date inputs.
  */
 import { describe, it, expect } from "vitest";
-import { screen } from "@testing-library/react";
+import { screen, fireEvent } from "@testing-library/react";
 import ExportPage from "./page";
 import { renderWithProviders, authedMe } from "@/test";
 
@@ -35,5 +35,24 @@ describe("ExportPage — smoke (#36)", () => {
     expect(
       screen.getByText(/the documents table always lists all of your active documents/i),
     ).toBeInTheDocument();
+  });
+
+  it("blocks an inverted date range before any request (#262)", () => {
+    // The blob download path only ever toasts the generic fallback (per the #77
+    // contract), so the API's friendly 400 can't reach the user — the page must
+    // catch the inversion itself: inline message + disabled button.
+    renderWithProviders(<ExportPage />, { auth: authedMe });
+    const [fromInput, toInput] = Array.from(document.querySelectorAll('input[type="date"]'));
+
+    fireEvent.change(fromInput, { target: { value: "2026-06-10" } });
+    fireEvent.change(toInput, { target: { value: "2026-05-11" } });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/start date must be on or before the end date/i);
+    expect(screen.getByRole("button", { name: /download pdf/i })).toBeDisabled();
+
+    // Fixing the range clears the guard.
+    fireEvent.change(toInput, { target: { value: "2026-06-11" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("button", { name: /download pdf/i })).toBeEnabled();
   });
 });

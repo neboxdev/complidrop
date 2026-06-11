@@ -515,11 +515,10 @@ public static class AuthEndpoints
         return Results.Ok(new { data = ToMeResponse(user, org, sub?.Plan ?? "free"), error = (object?)null });
     }
 
-    private static bool IsValidTimeZone(string tz)
-    {
-        try { TimeZoneInfo.FindSystemTimeZoneById(tz); return true; }
-        catch { return false; }
-    }
+    // Null guard kept: the previous catch-all also tolerated null input; TimeZones.TryFind
+    // would throw ArgumentNullException through (#262 consolidation).
+    private static bool IsValidTimeZone(string tz) =>
+        tz is not null && Services.TimeZones.TryFind(tz) is not null;
 
     // ───────────────────────── Account & access management (#183) ─────────────────────────
 

@@ -10,35 +10,64 @@ using QuestPDF.Infrastructure;
 
 namespace CompliDrop.Api.Services;
 
+/// <summary>The requested audit window is inverted (from after to) even after defaults
+/// resolve; the endpoint maps this to the 400 export.invalid_range envelope (#262).</summary>
+public sealed class InvalidExportRangeException : Exception;
+
 public interface IExportService
 {
-    Task<byte[]> BuildAuditReportAsync(Guid organizationId, DateTime from, DateTime to, CancellationToken ct);
+    /// <summary>
+    /// Builds the audit PDF for a window of ORG-LOCAL calendar days (#262). Bare
+    /// <paramref name="from"/>/<paramref name="to"/> dates are interpreted in the org's
+    /// IANA timezone with <paramref name="to"/> INCLUSIVE end-of-day; null
+    /// <paramref name="to"/> = the org's today, null <paramref name="from"/> = to − 30 days.
+    /// </summary>
+    Task<byte[]> BuildAuditReportAsync(Guid organizationId, DateTime? from, DateTime? to, CancellationToken ct);
     Task<byte[]> BuildCsvAsync(Guid organizationId, CancellationToken ct);
     Task<byte[]> BuildVendorReportAsync(Guid organizationId, Guid vendorId, CancellationToken ct);
 }
 
 public class ExportService(SystemDbContext db) : IExportService
 {
-    public async Task<byte[]> BuildAuditReportAsync(Guid organizationId, DateTime from, DateTime to, CancellationToken ct)
+    internal const int AuditCap = 500;
+
+    /// <summary>
+    /// The audit-slice query as an internal seam (#262 review): the To-day boundary bug
+    /// lived in exactly this predicate, and the PDF is FlateDecode-compressed (not
+    /// text-assertable), so the half-open comparison is pinned by a Testcontainers test
+    /// driving this method directly with ResolveAuditWindow's outputs. Fetches one past
+    /// the cap so truncation is disclosed instead of silently dropping events (#197).
+    /// </summary>
+    internal async Task<(List<AuditLog> Rows, bool Truncated)> QueryAuditSliceAsync(
+        Guid organizationId, DateTime fromUtc, DateTime toUtcExclusive, CancellationToken ct)
+    {
+        var raw = await db.AuditLogs
+            .Where(a => a.OrganizationId == organizationId && a.CreatedAt >= fromUtc && a.CreatedAt < toUtcExclusive)
+            .OrderByDescending(a => a.CreatedAt)
+            .Take(AuditCap + 1)
+            .ToListAsync(ct);
+        var truncated = raw.Count > AuditCap;
+        return (truncated ? raw.Take(AuditCap).ToList() : raw, truncated);
+    }
+
+    public async Task<byte[]> BuildAuditReportAsync(Guid organizationId, DateTime? from, DateTime? to, CancellationToken ct)
     {
         var org = await db.Organizations.FirstAsync(o => o.Id == organizationId, ct);
+
+        // Resolve the window as org-local calendar days (#262). The previous
+        // `.ToUniversalTime()` on bare (Kind=Unspecified) query dates interpreted them in
+        // the SERVER zone, and `CreatedAt <= to` cut the window at midnight at the START
+        // of the To day — with the default UI range (To = today) the most recent day was
+        // always missing while the caption claimed it was covered.
+        var (fromUtc, toUtcExclusive, fromDate, toDate) =
+            ResolveAuditWindow(from, to, org.TimeZone, DateTime.UtcNow);
+
         var docs = await db.Documents
             .Where(d => d.OrganizationId == organizationId && d.DeletedAt == null)
             .Include(d => d.Vendor)
             .OrderBy(d => d.ExpirationDate)
             .ToListAsync(ct);
-        // Fetch one past the cap so we can disclose truncation instead of
-        // silently dropping events. The cap stays at 500 (a multi-thousand-row
-        // PDF is unusable anyway); the report now SAYS when it's showing only
-        // the most recent 500. (#197)
-        const int auditCap = 500;
-        var auditRaw = await db.AuditLogs
-            .Where(a => a.OrganizationId == organizationId && a.CreatedAt >= from && a.CreatedAt <= to)
-            .OrderByDescending(a => a.CreatedAt)
-            .Take(auditCap + 1)
-            .ToListAsync(ct);
-        var auditTruncated = auditRaw.Count > auditCap;
-        var audit = auditTruncated ? auditRaw.Take(auditCap).ToList() : auditRaw;
+        var (audit, auditTruncated) = await QueryAuditSliceAsync(organizationId, fromUtc, toUtcExclusive, ct);
 
         // Resolve UserIds to human names so the report shows WHO acted, not a raw
         // GUID. IgnoreQueryFilters so a soft-deleted account (ADR 0013) still
@@ -100,8 +129,8 @@ public class ExportService(SystemDbContext db) : IExportService
 
                     col.Item().PaddingTop(18).Text("Audit Log").SemiBold().FontSize(14);
                     col.Item().Text(auditTruncated
-                            ? $"Showing the {auditCap} most recent events from {from:yyyy-MM-dd} to {to:yyyy-MM-dd}"
-                            : $"{audit.Count} events from {from:yyyy-MM-dd} to {to:yyyy-MM-dd}")
+                            ? $"Showing the {AuditCap} most recent events from {fromDate:yyyy-MM-dd} to {toDate:yyyy-MM-dd}"
+                            : $"{audit.Count} events from {fromDate:yyyy-MM-dd} to {toDate:yyyy-MM-dd}")
                         .FontSize(9).FontColor("#64748b");
                     col.Item().Element(e =>
                         e.Border(1).BorderColor("#e2e8f0").Padding(8).Column(inner =>
@@ -147,6 +176,50 @@ public class ExportService(SystemDbContext db) : IExportService
     // for unit testing. (#197 review)
     internal static string DisplayName(string? fullName, string email) =>
         string.IsNullOrWhiteSpace(fullName) ? email : fullName;
+
+    /// <summary>
+    /// Resolves the audit window from bare request dates to UTC instants bracketing
+    /// ORG-LOCAL calendar days (#262): [start of fromDate, start of the day AFTER
+    /// toDate) in the org's zone — i.e. To is inclusive end-of-day. Defaults: null
+    /// to = the org's today; null from = to − 30 days. The returned DateOnly pair is
+    /// what the PDF caption shows, so the caption and the query can never disagree.
+    /// Mirrors the reminder worker's host-independent window math (unknown timezone
+    /// id falls back to UTC). internal for direct unit testing (InternalsVisibleTo).
+    /// </summary>
+    internal static (DateTime FromUtc, DateTime ToUtcExclusive, DateOnly FromDate, DateOnly ToDate)
+        ResolveAuditWindow(DateTime? from, DateTime? to, string orgTimeZone, DateTime nowUtc)
+    {
+        var tz = TimeZones.TryFind(orgTimeZone);
+        var todayLocal = DateOnly.FromDateTime(
+            tz is null ? nowUtc : TimeZoneInfo.ConvertTimeFromUtc(nowUtc, tz));
+        var toDate = to is { } t ? DateOnly.FromDateTime(t) : todayLocal;
+        var fromDate = from is { } f ? DateOnly.FromDateTime(f) : toDate.AddDays(-30);
+
+        // The endpoint validates the both-provided case, but a lone future `from`
+        // resolves against the org's today and can still invert — which would render
+        // a self-contradicting caption ("0 events from 2027-01-01 to 2026-06-11").
+        if (fromDate > toDate) throw new InvalidExportRangeException();
+
+        return (
+            StartOfLocalDayUtc(fromDate, tz),
+            StartOfLocalDayUtc(toDate.AddDays(1), tz),
+            fromDate,
+            toDate);
+    }
+
+    // Start of the given org-local calendar day as a UTC instant. Some zones have
+    // historically sprung forward AT midnight (e.g. Brazil 2018), making local 00:00
+    // nonexistent — and a few skipped ENTIRE days crossing the date line (Pacific/Apia
+    // 2011-12-30, modeled as invalid only by Linux tzdata, not Windows), so the guard
+    // iterates until it exits the gap instead of assuming a one-hour DST hole.
+    private static DateTime StartOfLocalDayUtc(DateOnly day, TimeZoneInfo? tz)
+    {
+        var midnight = DateTime.SpecifyKind(day.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+        if (tz is null) return DateTime.SpecifyKind(midnight, DateTimeKind.Utc);
+        while (tz.IsInvalidTime(midnight)) midnight = midnight.AddHours(1);
+        return TimeZoneInfo.ConvertTimeToUtc(midnight, tz);
+    }
+
 
     public async Task<byte[]> BuildCsvAsync(Guid organizationId, CancellationToken ct)
     {
