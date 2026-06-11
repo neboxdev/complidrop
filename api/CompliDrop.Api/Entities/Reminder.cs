@@ -8,6 +8,9 @@ public class Reminder
     public bool NotifyInternalUser { get; set; } = true;
     public bool NotifyVendor { get; set; } = false;
     public string? EmailSubjectTemplate { get; set; }
+    // Dormant: not on the API surface (#264 / FP-095) and never read by the send path;
+    // retained for #241 (recipient-aware email rewrite) to honor or drop — see
+    // ReminderEndpoints.UpdateReminder. Do NOT remove in a dead-code sweep without #241.
     public string? EmailBodyTemplate { get; set; }
     public bool IsActive { get; set; } = true;
 

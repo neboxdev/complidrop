@@ -40,6 +40,13 @@ export default function RemindersPage() {
 
   const update = useMutation({
     mutationKey: ["reminder-update"],
+    // Serialize the PUTs: the endpoint is a full-row write (last commit wins
+    // server-side), so two near-simultaneous PUTs could still commit out of
+    // order and silently drop the later flip. Scoped mutations run their
+    // network calls one-at-a-time IN ORDER while onMutate still fires
+    // immediately (query-core runs onMutate before the canRun gate), so the
+    // optimistic UX is unchanged (#264 review).
+    scope: { id: "reminder-update" },
     // The PUT body is rebuilt from the QUERY CACHE, not the render-scope
     // `reminders.data` snapshot — and onMutate below has already merged this
     // mutation's patch into that cache. Two toggles flipped on one row inside
@@ -59,20 +66,38 @@ export default function RemindersPage() {
       // Cancel any in-flight list refetch so a response that predates this
       // flip can't land after it and overwrite the optimistic state.
       await qc.cancelQueries({ queryKey: ["reminders"], exact: true });
+      const prevRow = qc.getQueryData<Reminder[]>(["reminders"])?.find((r) => r.id === vars.id);
       qc.setQueryData<Reminder[]>(["reminders"], (old) =>
         old?.map((r) => (r.id === vars.id ? { ...r, ...vars.patch } : r)),
       );
+      // Capture ONLY the fields this mutation touches, for a targeted error
+      // rollback — a full-row snapshot restore would clobber a sibling
+      // mutation's optimistic patch.
+      const previous = prevRow
+        ? (Object.fromEntries(
+            (Object.keys(vars.patch) as (keyof Reminder)[]).map((k) => [k, prevRow[k]]),
+          ) as Partial<Reminder>)
+        : undefined;
+      return { previous };
     },
-    // No snapshot rollback on error: with overlapping toggle mutations a
-    // restored snapshot would clobber the other mutation's optimistic patch —
-    // the refetch below re-syncs to server truth instead, and the global
-    // error toast (meta below) explains the revert.
+    onError: (_err, vars, ctx) => {
+      // Targeted rollback so the failed flip reverts even when the network is
+      // down and the onSettled refetch below can't reach the server. Restores
+      // only this mutation's own fields (see onMutate).
+      if (!ctx?.previous) return;
+      const previous = ctx.previous;
+      qc.setQueryData<Reminder[]>(["reminders"], (old) =>
+        old?.map((r) => (r.id === vars.id ? { ...r, ...previous } : r)),
+      );
+    },
     onSettled: () => {
       // Only the LAST settling mutation invalidates: an earlier mutation's
       // refetch could return state that predates a still-pending PUT and
       // visually revert it. isMutating counts this mutation while settling.
+      // exact: true — toggling reminder config can't change delivery history,
+      // so don't drag the 200-row history query along (matches cancelQueries).
       if (qc.isMutating({ mutationKey: ["reminder-update"] }) === 1) {
-        return qc.invalidateQueries({ queryKey: ["reminders"] });
+        return qc.invalidateQueries({ queryKey: ["reminders"], exact: true });
       }
     },
     // Toggles have no local error UI — opt into the global mutation-error

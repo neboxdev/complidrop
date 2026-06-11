@@ -173,6 +173,61 @@ describe("RemindersPage — toggle saves (#264 / FP-093)", () => {
     await waitFor(() => expect(team).toBeChecked());
   });
 
+  it("serializes PUTs per scope and refetches once, after the LAST mutation settles", async () => {
+    // Pins three load-bearing behaviors of the mutation wiring (#264 review):
+    //   1. scope serialization — toggle B's PUT must not start while A's is in
+    //      flight (in-order, single-in-flight kills server-side reordering);
+    //   2. onMutate fires immediately even for the queued mutation — B flips
+    //      optimistically while its PUT is still waiting on A;
+    //   3. the onSettled gate — exactly ONE list refetch, after the last settle.
+    let releaseA!: () => void;
+    const gateA = new Promise<void>((r) => (releaseA = r));
+    const serverState = { ...INITIAL };
+    let listFetches = 0;
+    let putStarts = 0;
+    let putsInFlight = 0;
+    let maxPutsInFlight = 0;
+    server.use(
+      http.get(url("/api/reminders"), () => {
+        listFetches++;
+        return jsonOk([serverState]);
+      }),
+      http.get(url("/api/reminders/history"), () => jsonOk([])),
+      http.put(url("/api/reminders/r_01"), async ({ request }) => {
+        putStarts++;
+        putsInFlight++;
+        maxPutsInFlight = Math.max(maxPutsInFlight, putsInFlight);
+        const body = (await request.json()) as object;
+        if (putStarts === 1) await gateA;
+        Object.assign(serverState, body);
+        putsInFlight--;
+        return jsonOk({ id: "r_01" });
+      }),
+    );
+
+    renderWithProviders(<RemindersPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText(/30/)).toBeInTheDocument());
+    const fetchesAfterMount = listFetches;
+
+    const team = screen.getByRole("switch", { name: /notify team/i });
+    const vendor = screen.getByRole("switch", { name: /notify vendor/i });
+    fireEvent.click(team);
+    fireEvent.click(vendor);
+
+    // Both flip optimistically even though PUT A is gated and PUT B is queued.
+    await waitFor(() => expect(team).toBeChecked());
+    expect(vendor).toBeChecked();
+    expect(listFetches).toBe(fetchesAfterMount); // no refetch while pending
+
+    releaseA();
+    await waitFor(() => expect(putStarts).toBe(2));
+    await waitFor(() => expect(listFetches).toBe(fetchesAfterMount + 1));
+    expect(maxPutsInFlight).toBe(1); // serialized, never concurrent
+    // Refetch confirms (not reverts) the flips — server state carried both.
+    expect(team).toBeChecked();
+    expect(vendor).toBeChecked();
+  });
+
   it("a failed save reverts the switch and surfaces the global error toast", async () => {
     server.use(
       http.get(url("/api/reminders"), () => jsonOk([INITIAL])),
