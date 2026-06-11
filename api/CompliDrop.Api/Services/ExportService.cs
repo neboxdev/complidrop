@@ -12,16 +12,31 @@ namespace CompliDrop.Api.Services;
 
 public interface IExportService
 {
-    Task<byte[]> BuildAuditReportAsync(Guid organizationId, DateTime from, DateTime to, CancellationToken ct);
+    /// <summary>
+    /// Builds the audit PDF for a window of ORG-LOCAL calendar days (#262). Bare
+    /// <paramref name="from"/>/<paramref name="to"/> dates are interpreted in the org's
+    /// IANA timezone with <paramref name="to"/> INCLUSIVE end-of-day; null
+    /// <paramref name="to"/> = the org's today, null <paramref name="from"/> = to − 30 days.
+    /// </summary>
+    Task<byte[]> BuildAuditReportAsync(Guid organizationId, DateTime? from, DateTime? to, CancellationToken ct);
     Task<byte[]> BuildCsvAsync(Guid organizationId, CancellationToken ct);
     Task<byte[]> BuildVendorReportAsync(Guid organizationId, Guid vendorId, CancellationToken ct);
 }
 
 public class ExportService(SystemDbContext db) : IExportService
 {
-    public async Task<byte[]> BuildAuditReportAsync(Guid organizationId, DateTime from, DateTime to, CancellationToken ct)
+    public async Task<byte[]> BuildAuditReportAsync(Guid organizationId, DateTime? from, DateTime? to, CancellationToken ct)
     {
         var org = await db.Organizations.FirstAsync(o => o.Id == organizationId, ct);
+
+        // Resolve the window as org-local calendar days (#262). The previous
+        // `.ToUniversalTime()` on bare (Kind=Unspecified) query dates interpreted them in
+        // the SERVER zone, and `CreatedAt <= to` cut the window at midnight at the START
+        // of the To day — with the default UI range (To = today) the most recent day was
+        // always missing while the caption claimed it was covered.
+        var (fromUtc, toUtcExclusive, fromDate, toDate) =
+            ResolveAuditWindow(from, to, org.TimeZone, DateTime.UtcNow);
+
         var docs = await db.Documents
             .Where(d => d.OrganizationId == organizationId && d.DeletedAt == null)
             .Include(d => d.Vendor)
@@ -33,7 +48,7 @@ public class ExportService(SystemDbContext db) : IExportService
         // the most recent 500. (#197)
         const int auditCap = 500;
         var auditRaw = await db.AuditLogs
-            .Where(a => a.OrganizationId == organizationId && a.CreatedAt >= from && a.CreatedAt <= to)
+            .Where(a => a.OrganizationId == organizationId && a.CreatedAt >= fromUtc && a.CreatedAt < toUtcExclusive)
             .OrderByDescending(a => a.CreatedAt)
             .Take(auditCap + 1)
             .ToListAsync(ct);
@@ -100,8 +115,8 @@ public class ExportService(SystemDbContext db) : IExportService
 
                     col.Item().PaddingTop(18).Text("Audit Log").SemiBold().FontSize(14);
                     col.Item().Text(auditTruncated
-                            ? $"Showing the {auditCap} most recent events from {from:yyyy-MM-dd} to {to:yyyy-MM-dd}"
-                            : $"{audit.Count} events from {from:yyyy-MM-dd} to {to:yyyy-MM-dd}")
+                            ? $"Showing the {auditCap} most recent events from {fromDate:yyyy-MM-dd} to {toDate:yyyy-MM-dd}"
+                            : $"{audit.Count} events from {fromDate:yyyy-MM-dd} to {toDate:yyyy-MM-dd}")
                         .FontSize(9).FontColor("#64748b");
                     col.Item().Element(e =>
                         e.Border(1).BorderColor("#e2e8f0").Padding(8).Column(inner =>
@@ -147,6 +162,51 @@ public class ExportService(SystemDbContext db) : IExportService
     // for unit testing. (#197 review)
     internal static string DisplayName(string? fullName, string email) =>
         string.IsNullOrWhiteSpace(fullName) ? email : fullName;
+
+    /// <summary>
+    /// Resolves the audit window from bare request dates to UTC instants bracketing
+    /// ORG-LOCAL calendar days (#262): [start of fromDate, start of the day AFTER
+    /// toDate) in the org's zone — i.e. To is inclusive end-of-day. Defaults: null
+    /// to = the org's today; null from = to − 30 days. The returned DateOnly pair is
+    /// what the PDF caption shows, so the caption and the query can never disagree.
+    /// Mirrors the reminder worker's host-independent window math (unknown timezone
+    /// id falls back to UTC). internal for direct unit testing (InternalsVisibleTo).
+    /// </summary>
+    internal static (DateTime FromUtc, DateTime ToUtcExclusive, DateOnly FromDate, DateOnly ToDate)
+        ResolveAuditWindow(DateTime? from, DateTime? to, string orgTimeZone, DateTime nowUtc)
+    {
+        var tz = TryFindTimeZone(orgTimeZone);
+        var todayLocal = DateOnly.FromDateTime(
+            tz is null ? nowUtc : TimeZoneInfo.ConvertTimeFromUtc(nowUtc, tz));
+        var toDate = to is { } t ? DateOnly.FromDateTime(t) : todayLocal;
+        var fromDate = from is { } f ? DateOnly.FromDateTime(f) : toDate.AddDays(-30);
+        return (
+            StartOfLocalDayUtc(fromDate, tz),
+            StartOfLocalDayUtc(toDate.AddDays(1), tz),
+            fromDate,
+            toDate);
+    }
+
+    // Start of the given org-local calendar day as a UTC instant. Some zones have
+    // historically sprung forward AT midnight (e.g. Brazil), making local 00:00
+    // nonexistent — map into the gap's end so the day still starts where the
+    // clocks do (DST gaps are at most an hour).
+    private static DateTime StartOfLocalDayUtc(DateOnly day, TimeZoneInfo? tz)
+    {
+        var midnight = DateTime.SpecifyKind(day.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+        if (tz is null) return DateTime.SpecifyKind(midnight, DateTimeKind.Utc);
+        if (tz.IsInvalidTime(midnight)) midnight = midnight.AddHours(1);
+        return TimeZoneInfo.ConvertTimeToUtc(midnight, tz);
+    }
+
+    /// <summary>Returns the named IANA / Windows zone, or null for an unknown id —
+    /// same contract as ReminderBackgroundService.TryFindTimeZone.</summary>
+    private static TimeZoneInfo? TryFindTimeZone(string tz)
+    {
+        try { return TimeZoneInfo.FindSystemTimeZoneById(tz); }
+        catch (TimeZoneNotFoundException) { return null; }
+        catch (InvalidTimeZoneException) { return null; }
+    }
 
     public async Task<byte[]> BuildCsvAsync(Guid organizationId, CancellationToken ct)
     {

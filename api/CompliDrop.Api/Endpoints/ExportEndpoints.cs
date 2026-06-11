@@ -22,9 +22,16 @@ public static class ExportEndpoints
         DateTime? to = null)
     {
         if (currentUser.OrganizationId is null) return Results.Unauthorized();
-        var windowTo = (to ?? DateTime.UtcNow).ToUniversalTime();
-        var windowFrom = (from ?? windowTo.AddDays(-30)).ToUniversalTime();
-        var bytes = await export.BuildAuditReportAsync(currentUser.OrganizationId.Value, windowFrom, windowTo, ct);
+        if (from is { } f && to is { } t && f.Date > t.Date)
+            return Results.Json(new
+            {
+                data = (object?)null,
+                error = new { code = "export.invalid_range", message = "The start date must be on or before the end date." }
+            }, statusCode: 400);
+
+        // Window semantics (org-local calendar days, To inclusive) live in the service,
+        // which owns the org row and its timezone (#262).
+        var bytes = await export.BuildAuditReportAsync(currentUser.OrganizationId.Value, from, to, ct);
         return Results.File(bytes, "application/pdf", $"complidrop-audit-{DateTime.UtcNow:yyyyMMdd}.pdf");
     }
 

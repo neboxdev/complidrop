@@ -1,5 +1,7 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text;
+using System.Text.Json;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
@@ -79,6 +81,92 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
         ExportService.DisplayName("", "jane@acme.test").Should().Be("jane@acme.test");
         ExportService.DisplayName("   ", "jane@acme.test").Should().Be("jane@acme.test");
         ExportService.DisplayName(null, "jane@acme.test").Should().Be("jane@acme.test");
+    }
+
+    // ───────── audit window resolution (#262) ─────────
+
+    [Fact]
+    public void Audit_window_includes_the_entire_To_day_in_the_orgs_timezone()
+    {
+        // The P0 from #262: "to=2026-06-10" used to become midnight at the START of
+        // June 10 (server zone), excluding the whole To day. For a New York org the
+        // window must run to the start of June 11 NY time (04:00Z during EDT), so an
+        // event at 23:59 NY on the To day (03:59Z next UTC day) is inside.
+        var (fromUtc, toUtcExclusive, fromDate, toDate) = ExportService.ResolveAuditWindow(
+            new DateTime(2026, 5, 11), new DateTime(2026, 6, 10), "America/New_York",
+            nowUtc: new DateTime(2026, 6, 10, 12, 0, 0, DateTimeKind.Utc));
+
+        fromUtc.Should().Be(new DateTime(2026, 5, 11, 4, 0, 0, DateTimeKind.Utc));
+        toUtcExclusive.Should().Be(new DateTime(2026, 6, 11, 4, 0, 0, DateTimeKind.Utc));
+        var lateToDayEvent = new DateTime(2026, 6, 11, 3, 59, 0, DateTimeKind.Utc); // 23:59 NY June 10
+        (lateToDayEvent >= fromUtc && lateToDayEvent < toUtcExclusive).Should().BeTrue(
+            "events during the To day must be inside the window");
+        fromDate.Should().Be(new DateOnly(2026, 5, 11));
+        toDate.Should().Be(new DateOnly(2026, 6, 10), "the caption shows the org-local calendar dates");
+    }
+
+    [Fact]
+    public void Audit_window_means_the_orgs_calendar_day_not_the_servers()
+    {
+        // A Tokyo org's "June 10" is 2026-06-09T15:00Z → 2026-06-10T15:00Z — host-independent.
+        var (fromUtc, toUtcExclusive, _, _) = ExportService.ResolveAuditWindow(
+            new DateTime(2026, 6, 10), new DateTime(2026, 6, 10), "Asia/Tokyo",
+            nowUtc: new DateTime(2026, 6, 10, 12, 0, 0, DateTimeKind.Utc));
+
+        fromUtc.Should().Be(new DateTime(2026, 6, 9, 15, 0, 0, DateTimeKind.Utc));
+        toUtcExclusive.Should().Be(new DateTime(2026, 6, 10, 15, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void Audit_window_defaults_use_the_orgs_today_not_UTCs()
+    {
+        // 02:00Z on June 11 is still the EVENING OF JUNE 10 in New York: a null `to`
+        // must resolve to the org's today (June 10), and null `from` to 30 days prior.
+        var (_, _, fromDate, toDate) = ExportService.ResolveAuditWindow(
+            from: null, to: null, "America/New_York",
+            nowUtc: new DateTime(2026, 6, 11, 2, 0, 0, DateTimeKind.Utc));
+
+        toDate.Should().Be(new DateOnly(2026, 6, 10));
+        fromDate.Should().Be(new DateOnly(2026, 5, 11));
+    }
+
+    [Fact]
+    public void Audit_window_falls_back_to_UTC_for_an_unknown_timezone_id()
+    {
+        var (fromUtc, toUtcExclusive, _, _) = ExportService.ResolveAuditWindow(
+            new DateTime(2026, 6, 10), new DateTime(2026, 6, 10), "Not/AZone",
+            nowUtc: new DateTime(2026, 6, 10, 12, 0, 0, DateTimeKind.Utc));
+
+        fromUtc.Should().Be(new DateTime(2026, 6, 10, 0, 0, 0, DateTimeKind.Utc));
+        toUtcExclusive.Should().Be(new DateTime(2026, 6, 11, 0, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public async Task Audit_report_rejects_an_inverted_date_range_with_a_friendly_400()
+    {
+        var auth = await RegisterAndLoginAsync();
+
+        var resp = await auth.Client.GetAsync("/api/export/audit-report?from=2026-06-10&to=2026-05-11");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("export.invalid_range");
+        body.GetProperty("error").GetProperty("message").GetString().Should().NotMatch("*[0-9][0-9][0-9]*",
+            "no status codes or jargon in user-facing copy");
+    }
+
+    [Fact]
+    public async Task Audit_report_accepts_a_single_day_window()
+    {
+        // from == to is the smallest legal window (one org-local day, inclusive).
+        var auth = await RegisterAndLoginAsync();
+        var day = DateTime.UtcNow.ToString("yyyy-MM-dd");
+
+        var resp = await auth.Client.GetAsync($"/api/export/audit-report?from={day}&to={day}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var bytes = await resp.Content.ReadAsByteArrayAsync();
+        Encoding.ASCII.GetString(bytes, 0, 4).Should().Be("%PDF");
     }
 
     [Fact]
