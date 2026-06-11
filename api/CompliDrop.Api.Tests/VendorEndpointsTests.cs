@@ -123,14 +123,27 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         });
 
     [Fact]
-    public async Task Assigning_a_cross_org_template_is_rejected_and_runs_no_foreign_rules()
+    public async Task Assigning_a_cross_org_template_is_rejected_and_never_lands()
     {
         // #273: the template id used to bind with only the DB FK as a guard, so another org's
         // template id was accepted — and the SystemDbContext evaluation path (no tenant filter)
-        // would then run the foreign org's rules against this org's documents, writing the
-        // foreign rule names/expected values into visible ComplianceCheck rows.
+        // would then run the foreign org's rules against this org's documents. The evaluation
+        // half (defense-in-depth for rows poisoned before this guard) is pinned in
+        // ComplianceCheckServiceTests.Foreign_org_template_is_ignored_by_the_system_evaluation_path.
         var orgB = await RegisterAndLoginAsync();
         var foreignTemplateId = await CreateTemplateAsync(orgB.Client, "Org B secret checklist");
+        // A real rule on the foreign template — its content is exactly what #273 stops leaking.
+        var rule = await orgB.Client.PostAsJsonAsync($"/api/compliance/templates/{foreignTemplateId}/rules", new
+        {
+            id = (Guid?)null,
+            documentType = "coi",
+            fieldName = "general_liability_limit",
+            @operator = "min_value",
+            expectedValue = "5000000",
+            errorMessage = "Org B's secret threshold",
+            sortOrder = 1,
+        });
+        rule.EnsureSuccessStatusCode();
 
         var orgA = await RegisterAndLoginAsync();
         var vendorId = await CreateVendorAsync(orgA.Client, "Acme Catering", null);
@@ -152,40 +165,92 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         create.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         (await ErrorCode(create)).Should().Be("complianceTemplate.not_found");
 
-        Guid docId;
+        await using var db = CreateSystemDb();
+        (await db.Vendors.SingleAsync(v => v.Id == vendorId)).ComplianceTemplateId.Should().BeNull();
+        (await db.Vendors.AnyAsync(v => v.Name == "Mole LLC")).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Deleting_a_template_clears_the_assignment_on_its_vendors()
+    {
+        // #273 review: DeleteTemplate used to soft-delete the template while vendors kept the
+        // stale FK — GetVendor round-trips it into the edit form, and the new assignment guard
+        // would then 400 every save of that form, even for unrelated field edits.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Acme Catering", null);
+        var templateId = await CreateTemplateAsync(auth.Client, "House rules");
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, templateId)).EnsureSuccessStatusCode();
+
+        (await auth.Client.DeleteAsync($"/api/compliance/templates/{templateId}")).EnsureSuccessStatusCode();
+
         await using (var db = CreateSystemDb())
         {
             (await db.Vendors.SingleAsync(v => v.Id == vendorId)).ComplianceTemplateId.Should().BeNull();
-            (await db.Vendors.AnyAsync(v => v.Name == "Mole LLC")).Should().BeFalse();
-
-            // Seed a document on the vendor and run the evaluation end-to-end: with the
-            // assignment rejected there is no template, so NO check rows may appear — the
-            // foreign org's rules never execute against org A's documents.
-            var doc = new CompliDrop.Api.Entities.Document
-            {
-                Id = Guid.NewGuid(),
-                OrganizationId = orgA.OrgId,
-                VendorId = vendorId,
-                OriginalFileName = "coi.pdf",
-                BlobStorageUrl = "https://blob.test/coi.pdf",
-                BlobStoragePath = "test/coi.pdf",
-                FileSizeBytes = 123,
-                ContentType = "application/pdf",
-                DocumentType = "coi",
-                UploadedBy = "user",
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow,
-            };
-            db.Add(doc);
-            await db.SaveChangesAsync();
-            docId = doc.Id;
+            // ExecuteUpdate bypasses the audit interceptor — the explicit audit row is the only
+            // trace of the cleared assignments, and audit-ready export is the product promise.
+            var cleared = await db.AuditLogs.SingleAsync(a =>
+                a.Action == "vendor.template_cleared_on_template_delete" && a.EntityId == templateId);
+            cleared.AfterJson.Should().Contain(vendorId.ToString());
         }
 
-        var check = await orgA.Client.PostAsync($"/api/compliance/check/{docId}", null);
-        check.StatusCode.Should().Be(HttpStatusCode.OK);
-        await using (var db2 = CreateSystemDb())
-            (await db2.ComplianceChecks.AnyAsync(c => c.DocumentId == docId)).Should().BeFalse(
-                "no template is assigned, so no rules — least of all org B's — may produce check rows");
+        // The B1 regression scenario: an edit-form save for that vendor (now round-tripping a
+        // null template) succeeds instead of 400ing.
+        var save = await UpdateVendorTemplateAsync(auth.Client, vendorId, null);
+        save.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task Remediation_migration_clears_stale_and_foreign_template_refs_but_keeps_valid_ones()
+    {
+        // Executes the EXACT statement the ClearForeignOrDeletedVendorTemplateRefs migration
+        // ships (same pin pattern as the SendDate backfill test). Legacy shapes are seeded
+        // directly via SystemDb — they predate the assignment-time guard and the
+        // delete-clears-vendors behavior, so the API can no longer produce them.
+        var orgA = await RegisterAndLoginAsync();
+        var orgB = await RegisterAndLoginAsync();
+
+        var foreignTemplateId = await CreateTemplateAsync(orgB.Client, "Org B checklist");
+        var ownTemplateId = await CreateTemplateAsync(orgA.Client, "Keep me");
+        var deletedTemplateId = await CreateTemplateAsync(orgA.Client, "Was deleted");
+
+        var poisonedVendorId = await CreateVendorAsync(orgA.Client, "Poisoned LLC", null);
+        var staleVendorId = await CreateVendorAsync(orgA.Client, "Stale LLC", null);
+        var healthyVendorId = await CreateVendorAsync(orgA.Client, "Healthy LLC", null);
+        (await UpdateVendorTemplateAsync(orgA.Client, healthyVendorId, ownTemplateId)).EnsureSuccessStatusCode();
+
+        // The IsSystemTemplate arm: system templates belong to the synthetic system org, so
+        // without that arm the migration would null EVERY system-template assignment in prod.
+        var templates = await orgA.Client.GetAsync("/api/compliance/templates");
+        templates.EnsureSuccessStatusCode();
+        var systemTemplateId = (await Data(templates)).EnumerateArray()
+            .First(t => t.GetProperty("isSystemTemplate").GetBoolean())
+            .GetProperty("id").GetGuid();
+        var systemVendorId = await CreateVendorAsync(orgA.Client, "System-assigned LLC", null);
+        (await UpdateVendorTemplateAsync(orgA.Client, systemVendorId, systemTemplateId)).EnsureSuccessStatusCode();
+
+        await using (var db = CreateSystemDb())
+        {
+            // Cross-org assignment written while the FK was the only guard.
+            await db.Vendors.Where(v => v.Id == poisonedVendorId)
+                .ExecuteUpdateAsync(s => s.SetProperty(v => v.ComplianceTemplateId, foreignTemplateId));
+            // Assign-then-delete legacy shape: stale FK onto a soft-deleted template.
+            await db.Vendors.Where(v => v.Id == staleVendorId)
+                .ExecuteUpdateAsync(s => s.SetProperty(v => v.ComplianceTemplateId, deletedTemplateId));
+            await db.ComplianceTemplates.Where(t => t.Id == deletedTemplateId)
+                .ExecuteUpdateAsync(s => s.SetProperty(t => t.DeletedAt, DateTime.UtcNow));
+
+            await db.Database.ExecuteSqlRawAsync(
+                CompliDrop.Api.Migrations.ClearForeignOrDeletedVendorTemplateRefs.UpSql);
+
+            (await db.Vendors.SingleAsync(v => v.Id == poisonedVendorId)).ComplianceTemplateId.Should().BeNull(
+                "the cross-org reference must be remediated");
+            (await db.Vendors.SingleAsync(v => v.Id == staleVendorId)).ComplianceTemplateId.Should().BeNull(
+                "the soft-deleted-template reference must be remediated");
+            (await db.Vendors.SingleAsync(v => v.Id == healthyVendorId)).ComplianceTemplateId.Should().Be(ownTemplateId,
+                "a live own-org assignment must survive the remediation");
+            (await db.Vendors.SingleAsync(v => v.Id == systemVendorId)).ComplianceTemplateId.Should().Be(systemTemplateId,
+                "a system-template assignment must survive the remediation");
+        }
     }
 
     [Fact]
