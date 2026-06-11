@@ -266,6 +266,15 @@ describe("DocumentDetailPage — basic states (#36)", () => {
     // would otherwise surface only at the slow Playwright tier).
     expect(screen.getByTestId("extraction-status")).toHaveTextContent("Read");
     expect(screen.getByTestId("compliance-status")).toHaveTextContent("Compliant");
+    // #263: the Expires cell renders the CALENDAR date the document says
+    // (2026-12-31), never the local-shifted previous day. The vitest TZ is
+    // pinned to America/New_York, where the old bare toLocaleDateString
+    // rendered 12/30/2026 for this fixture.
+    expect(
+      screen.getByText(
+        new Date("2026-12-31T00:00:00Z").toLocaleDateString(undefined, { timeZone: "UTC" }),
+      ),
+    ).toBeInTheDocument();
     // Field row rendered.
     expect(screen.getByText("Policy Number")).toBeInTheDocument();
     // RTL idiom for "input is rendered with this value" — better than

@@ -19,6 +19,7 @@ import {
   processingErrorMessage,
 } from "@/lib/display-labels";
 import { SUPPORT_EMAIL } from "@/lib/site";
+import { formatCalendarDate } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import { useEffect, useId, useRef, useState } from "react";
 
@@ -497,7 +498,7 @@ export default function DocumentDetailPage() {
           label="Compliance"
           value={<ComplianceBadge status={doc.complianceStatus} data-testid="compliance-status" />}
         />
-        <SummaryCell label="Expires" value={doc.expirationDate ? new Date(doc.expirationDate).toLocaleDateString() : "—"} />
+        <SummaryCell label="Expires" value={formatCalendarDate(doc.expirationDate)} />
         <SummaryCell label="Verified" value={doc.isManuallyVerified ? <span className="inline-flex items-center gap-1 text-emerald-700"><ShieldCheck className="w-3.5 h-3.5" /> Yes</span> : "—"} />
       </section>
 
