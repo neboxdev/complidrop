@@ -147,6 +147,16 @@ public static class BillingEndpoints
 
         if (await db.ProcessedStripeEvents.AnyAsync(p => p.Id == ev.Id, ct)) return Results.Ok();
 
+        // Handle FIRST, mark processed AFTER (#268). If the handler throws, the event id
+        // is never recorded, the response is a 5xx, and Stripe's retry re-runs the handler.
+        // Recording before handling turned any transient failure into a permanently dropped
+        // event: the retry hit the dedupe check above and got a 200 while the side effects
+        // (e.g. flipping a paid checkout's org off the free cap) never ran. Safe because
+        // HandleWebhookEventAsync is idempotent per event — the crash window between handler
+        // success and the dedupe insert, and the concurrent-duplicate race where two
+        // deliveries both pass the AnyAsync check, both resolve to a benign re-apply.
+        await stripe.HandleWebhookEventAsync(ev, ct);
+
         db.ProcessedStripeEvents.Add(new ProcessedStripeEvent
         {
             Id = ev.Id,
@@ -154,8 +164,6 @@ public static class BillingEndpoints
             ProcessedAt = DateTime.UtcNow
         });
         await db.SaveChangesAsync(ct);
-
-        await stripe.HandleWebhookEventAsync(ev, ct);
         return Results.Ok();
     }
 

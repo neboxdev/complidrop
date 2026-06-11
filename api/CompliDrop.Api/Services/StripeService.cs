@@ -13,6 +13,14 @@ public interface IStripeService
     bool IsEnabled { get; }
     Task<string> CreateCheckoutSessionAsync(Guid organizationId, string priceId, string successUrl, string cancelUrl, CancellationToken ct);
     Task<string> CreatePortalSessionAsync(Guid organizationId, string returnUrl, CancellationToken ct);
+
+    /// <summary>
+    /// Implementations MUST be idempotent per event: the webhook endpoint marks an event
+    /// processed only after this returns (#268), so Stripe retries — and the crash window
+    /// between handler success and the dedupe insert — re-invoke it with the same event.
+    /// Keep handlers as state-upserts (re-applying the same event yields the same row state),
+    /// never as increments/appends.
+    /// </summary>
     Task HandleWebhookEventAsync(Event ev, CancellationToken ct);
     string MonthlyPriceId { get; }
     string AnnualPriceId { get; }
