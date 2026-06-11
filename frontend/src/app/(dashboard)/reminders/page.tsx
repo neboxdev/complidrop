@@ -72,7 +72,13 @@ export default function RemindersPage() {
       );
       // Capture ONLY the fields this mutation touches, for a targeted error
       // rollback — a full-row snapshot restore would clobber a sibling
-      // mutation's optimistic patch.
+      // mutation's optimistic patch. Known limit: the capture reflects sibling
+      // OPTIMISTIC state, so rollback exactness is guaranteed only for the
+      // single-pending-mutation case (same switch toggled twice in one flight
+      // window + both PUTs failing + refetch failing can restore a phantom
+      // value); the last-settler refetch owns repair in every multi-mutation
+      // corner. Don't "fix" by capturing differently — the correct rollback
+      // target depends on the sibling's outcome, unknowable at capture time.
       const previous = prevRow
         ? (Object.fromEntries(
             (Object.keys(vars.patch) as (keyof Reminder)[]).map((k) => [k, prevRow[k]]),
