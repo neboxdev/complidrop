@@ -109,6 +109,48 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     }
 
     [Fact]
+    public async Task Soft_deleted_vendor_with_a_stale_active_link_returns_404_not_500()
+    {
+        // #269 defense in depth: pre-fix deletions (or any path that misses the
+        // deactivate-on-delete write) leave the link active while the vendor Include
+        // materializes null. Both portal endpoints must die at the null-guard, not NRE.
+        var seeded = await SeedLinkAsync();
+        await using (var db = CreateSystemDb())
+            await db.Vendors.Where(v => v.Id == seeded.VendorId)
+                .ExecuteUpdateAsync(s => s.SetProperty(v => v.DeletedAt, DateTime.UtcNow));
+
+        var info = await CreateClient().GetAsync($"/api/portal/{seeded.Token}");
+        info.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(info)).Should().Be("vendor.portal_token_invalid");
+
+        var upload = await UploadAsync(CreateClient(), seeded.Token, PdfBytes(), "coi.pdf", "application/pdf");
+        upload.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(upload)).Should().Be("vendor.portal_token_invalid");
+    }
+
+    [Fact]
+    public async Task Soft_deleted_org_with_an_active_link_returns_404_and_accepts_no_uploads()
+    {
+        // Account deletion never touches vendor rows or portal links (#269). The org
+        // filter nulls the ThenInclude — and a direct POST that skips the info page must
+        // not keep inserting documents into the deleted tenant.
+        var seeded = await SeedLinkAsync();
+        await using (var db = CreateSystemDb())
+            await db.Organizations.Where(o => o.Id == seeded.OrgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(o => o.DeletedAt, DateTime.UtcNow));
+
+        var info = await CreateClient().GetAsync($"/api/portal/{seeded.Token}");
+        info.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(info)).Should().Be("vendor.portal_token_invalid");
+
+        var upload = await UploadAsync(CreateClient(), seeded.Token, PdfBytes(), "coi.pdf", "application/pdf");
+        upload.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        await using var db2 = CreateSystemDb();
+        (await db2.Documents.IgnoreQueryFilters().CountAsync(d => d.OrganizationId == seeded.OrgId))
+            .Should().Be(0, "a deleted tenant must not accumulate new documents");
+    }
+
+    [Fact]
     public async Task Unknown_token_is_404_and_leaks_no_tenant_data()
     {
         // A real link exists, but we query a completely different (unknown) token.

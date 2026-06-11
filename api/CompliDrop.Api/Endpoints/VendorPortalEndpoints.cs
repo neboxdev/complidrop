@@ -34,6 +34,14 @@ public static class VendorPortalEndpoints
         if (link.ExpiresAt is DateTime exp && exp < DateTime.UtcNow)
             return Error(410, "vendor.portal_token_expired", "This upload link has expired.");
 
+        // Defense in depth (#269): a soft-deleted vendor or org disappears behind the
+        // SystemDbContext query filters, so the Include materializes null. Treat such a
+        // link as dead instead of NRE-500ing — covers links that predate the
+        // deactivate-on-vendor-delete write, and account deletion (which never touches
+        // vendor rows or links).
+        if (link.Vendor?.Organization is null)
+            return Error(404, "vendor.portal_token_invalid", "This upload link is no longer active.");
+
         return Results.Ok(new
         {
             data = new
@@ -61,12 +69,19 @@ public static class VendorPortalEndpoints
         CancellationToken ct)
     {
         var link = await db.VendorPortalLinks
-            .Include(l => l.Vendor)
+            .Include(l => l.Vendor).ThenInclude(v => v.Organization)
             .FirstOrDefaultAsync(l => l.Token == token, ct);
         if (link is null || !link.IsActive)
             return Error(404, "vendor.portal_token_invalid", "This upload link is no longer active.");
         if (link.ExpiresAt is DateTime exp && exp < DateTime.UtcNow)
             return Error(410, "vendor.portal_token_expired", "This upload link has expired.");
+
+        // Defense in depth (#269): same dead-link treatment as PortalInfo — a soft-deleted
+        // vendor would NRE on link.Vendor below, and a soft-deleted ORG must not keep
+        // accepting uploads into its tenant via a direct POST that skips the info page.
+        if (link.Vendor?.Organization is null)
+            return Error(404, "vendor.portal_token_invalid", "This upload link is no longer active.");
+
         if (link.UploadCount >= link.MaxUploads)
         {
             // Already-at-cap: deactivate idempotently via atomic UPDATE so two concurrent at-cap

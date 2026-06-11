@@ -158,16 +158,49 @@ public static class ComplianceEndpoints
         Guid templateId,
         Guid ruleId,
         AppDbContext db,
+        IComplianceCheckService checker,
         IAuditLogger audit,
         CancellationToken ct)
     {
+        // Resolve through the tenant-filtered template set, excluding system templates —
+        // mirrors UpsertRule. ComplianceRule itself carries no OrganizationId (and so no
+        // tenant filter), so querying it directly would let a caller holding both GUIDs
+        // delete another org's rule — or mutate the SHARED system templates every org
+        // sees (#269).
+        var template = await db.ComplianceTemplates
+            .FirstOrDefaultAsync(t => t.Id == templateId && !t.IsSystemTemplate, ct);
+        if (template is null) return NotFound();
+
         var rule = await db.ComplianceRules
             .Where(r => r.Id == ruleId && r.ComplianceTemplateId == templateId)
             .FirstOrDefaultAsync(ct);
         if (rule is null) return NotFound();
+
+        // ComplianceCheck → ComplianceRule is ON DELETE RESTRICT, so the dependent check
+        // rows must be removed in the same SaveChanges or Postgres rejects the delete
+        // (#269: the rules-page trash button 500'd forever once any document had been
+        // evaluated against the rule). Affected documents are captured first and
+        // re-evaluated after the delete so their verdicts reflect the remaining rules
+        // (re-eval on rule EDITS / assignment changes stays #257's scope).
+        var affectedDocIds = await db.ComplianceChecks
+            .Where(c => c.ComplianceRuleId == ruleId)
+            .Select(c => c.DocumentId)
+            .Distinct()
+            .ToListAsync(ct);
+
+        var checks = await db.ComplianceChecks
+            .Where(c => c.ComplianceRuleId == ruleId)
+            .ToListAsync(ct);
+        db.ComplianceChecks.RemoveRange(checks);
         db.ComplianceRules.Remove(rule);
         await db.SaveChangesAsync(ct);
         await audit.LogAsync("complianceRule.deleted", nameof(ComplianceRule), ruleId);
+
+        // EvaluateAsync is tenant-filtered, so a foreign document id (possible only via a
+        // cross-org template assignment, see #273) resolves to nothing and is skipped.
+        foreach (var docId in affectedDocIds)
+            await checker.EvaluateAsync(docId, ct);
+
         return Results.Ok(new { data = new { id = ruleId }, error = (object?)null });
     }
 

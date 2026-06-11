@@ -4,6 +4,7 @@ using System.Text.Json;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CompliDrop.Api.Tests;
@@ -48,6 +49,27 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         resp.EnsureSuccessStatusCode();
         var data = await Data(resp);
         return (data.GetProperty("id").GetGuid(), data.GetProperty("token").GetString()!, data.GetProperty("url").GetString()!);
+    }
+
+    [Fact]
+    public async Task Deleting_a_vendor_deactivates_its_portal_links()
+    {
+        // #269: the soft-deleted vendor vanishes behind the query filter, so a still-active
+        // emailed link used to NRE-500 on every click. Deletion must kill the links with it.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Doomed LLC", "x@doomed.test");
+        var (linkId, token, _) = await GenerateLinkAsync(auth.Client, vendorId);
+
+        var del = await auth.Client.DeleteAsync($"/api/vendors/{vendorId}");
+        del.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using (var db = CreateSystemDb())
+            (await db.VendorPortalLinks.SingleAsync(l => l.Id == linkId)).IsActive.Should().BeFalse();
+
+        // The emailed link now dies cleanly at the IsActive gate — friendly 404, not a 500.
+        var portal = await CreateClient().GetAsync($"/api/portal/{token}");
+        portal.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await ErrorCode(portal)).Should().Be("vendor.portal_token_invalid");
     }
 
     [Fact]

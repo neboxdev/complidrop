@@ -121,9 +121,30 @@ public static class VendorEndpoints
     {
         var v = await db.Vendors.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (v is null) return NotFound();
+
+        // Deactivate the vendor's portal links and soft-delete the vendor atomically
+        // (#269): the soft-deleted vendor vanishes behind the query filter, which
+        // previously left emailed links "live" — every click materialized
+        // link.Vendor == null and NRE-500'd. ExecuteUpdate, NOT tracked entities:
+        // loading the links into the change tracker arms EF's client-side cascade, and
+        // Remove(vendor) would then HARD-delete the link rows at SaveChanges
+        // (VendorPortalLink has no DeletedAt for the interceptor's soft-delete
+        // translation). ExecuteUpdate bypasses the audit interceptor, so the link
+        // mutation gets an explicit audit row in the same transaction — mirrors the
+        // UploadViaPortal quota pattern.
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        var deactivated = await db.VendorPortalLinks
+            .Where(l => l.VendorId == id && l.IsActive)
+            .ExecuteUpdateAsync(s => s.SetProperty(l => l.IsActive, false), ct);
+
         db.Vendors.Remove(v);
         await db.SaveChangesAsync(ct);
+        if (deactivated > 0)
+            await audit.LogAsync(
+                "vendorPortalLink.deactivated_on_vendor_delete", nameof(VendorPortalLink), id,
+                after: new { count = deactivated });
         await audit.LogAsync("vendor.deleted", nameof(Vendor), id);
+        await tx.CommitAsync(ct);
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }
 
