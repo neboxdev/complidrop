@@ -59,6 +59,12 @@ export default defineConfig({
     ],
     env: {
       NEXT_PUBLIC_API_URL: "http://localhost:5292",
+      // Pin the test runner to a US timezone (#263): date-only fields arrive as
+      // UTC-midnight timestamps, and the one-day-early rendering bug is INVISIBLE
+      // in UTC+ zones (a bare toLocaleDateString renders same-day there) — which
+      // is exactly how it survived dev testing. Running the suite in a UTC− zone
+      // makes any regression to local-shifted date rendering fail loudly.
+      TZ: "America/New_York",
     },
   },
 });

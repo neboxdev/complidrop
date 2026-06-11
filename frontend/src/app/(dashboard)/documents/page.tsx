@@ -32,6 +32,7 @@ import {
 } from "@/hooks/useDocuments";
 import { DOCUMENT_TYPES, documentTypeLabel } from "@/lib/document-types";
 import { complianceStatusLabel } from "@/lib/display-labels";
+import { formatCalendarDate } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { isAuthError } from "@/lib/query-client";
@@ -567,7 +568,7 @@ export default function DocumentsPage() {
                       <ComplianceBadge status={d.complianceStatus} />
                     </td>
                     <td data-label="Expires" className="px-4 py-3 text-slate-600">
-                      {d.expirationDate ? new Date(d.expirationDate).toLocaleDateString() : "—"}
+                      {formatCalendarDate(d.expirationDate)}
                       {d.daysUntilExpiry != null && (
                         <span className={cn("ml-2 text-xs", d.daysUntilExpiry < 30 ? "text-rose-600" : "text-slate-500")}>
                           {d.daysUntilExpiry < 0 ? `${-d.daysUntilExpiry}d ago` : `in ${d.daysUntilExpiry}d`}

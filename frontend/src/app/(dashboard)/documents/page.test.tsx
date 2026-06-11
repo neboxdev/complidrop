@@ -700,6 +700,12 @@ describe("DocumentsPage — state matrix (#36)", () => {
     // CSS ::before from data-label, so they never collide with text queries).
     expect(table?.querySelector('td[data-label="Compliance"]')).not.toBeNull();
     expect(table?.querySelector('td[data-label="Expires"]')).not.toBeNull();
+    // #263: the Expires cell shows the CALENDAR date (fixture says 2026-12-31).
+    // Vitest runs pinned to America/New_York, where the old local-shifted
+    // rendering produced 12/30/2026.
+    expect(table?.querySelector('td[data-label="Expires"]')?.textContent).toContain(
+      new Date("2026-12-31T00:00:00Z").toLocaleDateString(undefined, { timeZone: "UTC" }),
+    );
     // The destructive control is reachable by its accessible name.
     expect(
       screen.getByRole("button", { name: /remove coi-completed\.pdf/i }),
