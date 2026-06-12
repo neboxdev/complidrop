@@ -105,7 +105,14 @@ checkout webhook 5xx-looped on "No API key provided".
 - The fence is per-`Subscription` row, not per event type: an applied newer event of
   *any* mutating type fences out stale events of *every* type. This is deliberate —
   all four event types converge on the same row state — but a future event type whose
-  handler writes disjoint fields must revisit clause 1.
+  handler writes disjoint fields must revisit clause 1. One known cross-*subscription-id*
+  residual of the per-row fence: if an org ends up with two Stripe subscriptions during a
+  webhook outage (double checkout — itself an anomaly requiring a Stripe-dashboard
+  cancel of the duplicate), the terminal `EndedAt` fence from the canceled sibling's
+  checkout retry can fence out the live sibling's earlier-created checkout retry,
+  leaving the live subscription unlinked. Accepted: the row lands on `canceled`, which
+  the 409 already-subscribed guard permits to re-checkout, and the duplicate already
+  required manual intervention; per-subscription-id fencing was rejected above.
 - `checkout.session.completed` handling now *depends* on the live fetch for terminal
   detection; a Stripe API outage during the fetch fails the handler (5xx → retry),
   which is the at-least-once recovery path working as designed (ADR 0020), not a new

@@ -262,6 +262,8 @@ public sealed class StripeServiceCheckoutLiveStateTests(IntegrationTestFixture f
         sub.Plan.Should().Be("pro");
         sub.DocumentLimit.Should().BeNull("a non-terminal subscription keeps the paid grant");
         sub.HasVendorPortal.Should().BeTrue();
+        sub.CurrentPeriodEnd.Should().BeNull(
+            "this fixture omits current_period_end — absent means 'not supplied', never the Unix epoch (pins the checkout-site sentinel)");
     }
 
     [Fact]
