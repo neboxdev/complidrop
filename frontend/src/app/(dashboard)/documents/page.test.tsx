@@ -29,6 +29,7 @@ import {
   sequencedResponses,
   dropFilesIn,
   makeFile,
+  toastError,
 } from "@/test";
 
 afterEach(() => {
@@ -1125,5 +1126,92 @@ describe("DocumentsPage — a11y live-region announcement (#189)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #265 — the dropzone must SAY why a file was refused (wrong type, oversize)
+// instead of silently swallowing it, and must accept the iPhone HEIC default
+// like the portal and backend already do.
+// ---------------------------------------------------------------------------
+describe("DocumentsPage — dropzone rejection feedback (#265)", () => {
+  let container: HTMLElement;
+
+  async function renderWithEmptyList() {
+    server.use(
+      http.get(url("/api/documents"), () =>
+        jsonOk(makeDocumentsResponse({ items: [], total: 0 })),
+      ),
+    );
+    ({ container } = renderWithProviders(<DocumentsPage />, { auth: authedMe }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to browse/i)).toBeInTheDocument(),
+    );
+  }
+
+  it("wrong file type: surfaces the friendly toast and stages nothing", async () => {
+    await renderWithEmptyList();
+
+    // A Word doc — the exact first-session document Pat's vendor emails her.
+    dropFilesIn(container, [
+      makeFile("certificate.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    ]);
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith(
+        expect.stringMatching(/can't read that file type/i),
+      ),
+    );
+    // Nothing staged → the details card never appears.
+    expect(screen.queryByText(/add details before uploading/i)).toBeNull();
+  });
+
+  it("oversize file: surfaces the 10 MB toast and stages nothing", async () => {
+    await renderWithEmptyList();
+
+    dropFilesIn(container, [makeFile("huge-scan.pdf", "application/pdf", 11 * 1024 * 1024)]);
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/over the 10 mb limit/i)),
+    );
+    expect(screen.queryByText(/add details before uploading/i)).toBeNull();
+  });
+
+  it("HEIC photo: accepted and staged like the portal and backend (#265 accept-list half)", async () => {
+    await renderWithEmptyList();
+
+    dropFilesIn(container, [makeFile("photo.heic", "image/heic")]);
+
+    await waitFor(() =>
+      expect(screen.getByText(/add details before uploading/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByText("photo.heic")).toBeInTheDocument();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("mixed drop: rejected file toasts while the valid file still stages", async () => {
+    await renderWithEmptyList();
+
+    dropFilesIn(container, [
+      makeFile("coi.pdf", "application/pdf"),
+      makeFile("notes.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    ]);
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith(
+        expect.stringMatching(/can't read that file type/i),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/add details before uploading/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByText("coi.pdf")).toBeInTheDocument();
+    expect(screen.queryByText("notes.docx")).toBeNull();
+  });
+
+  it("dropzone helper text names the HEIC format so the accept list and the copy agree", async () => {
+    await renderWithEmptyList();
+
+    expect(screen.getByText(/pdf, jpeg, png, or iphone photo \(heic\) · 10 mb max/i)).toBeInTheDocument();
   });
 });

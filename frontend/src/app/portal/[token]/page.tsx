@@ -5,6 +5,7 @@ import { useState, useCallback, useEffect } from "react";
 import { useDropzone, type FileRejection } from "react-dropzone";
 import { UploadCloud, CheckCircle2, ShieldCheck, RefreshCw } from "lucide-react";
 import { ApiEnvelope } from "@/lib/api";
+import { rejectionCopy, UPLOAD_ACCEPT, UPLOAD_MAX_BYTES } from "@/lib/upload-rejections";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5292";
 
@@ -57,31 +58,8 @@ type UploadError = {
   retryFile: File | null;
 };
 
-// Map react-dropzone's machine-readable rejection codes to vendor-facing
-// human copy. Keep the strings short — the portal target audience is a
-// non-technical user landing here once.
-function rejectionCopy(rejections: FileRejection[]): string | null {
-  if (rejections.length === 0) return null;
-  const first = rejections[0].errors[0];
-  switch (first?.code) {
-    case "file-invalid-type":
-      // HEIC/HEIF (the iPhone camera default) is now accepted and transcoded to
-      // JPEG server-side (#220), so the old "switch to Most Compatible" workaround
-      // is gone. This now only fires for genuinely unsupported types (a Word doc, a
-      // video, a .zip) — point at the formats that do work.
-      return "We can't read that file type. Please upload a PDF or a photo (JPEG, PNG, or HEIC).";
-    case "file-too-large":
-      // Drop the desktop "split/compress" language — on a phone-photo surface
-      // the actionable fix is to reshoot from further back or send a PDF. (#196 review)
-      return "That file is over the 10 MB limit. If it's a photo, try taking it again from a bit further back, or upload a PDF.";
-    case "file-too-small":
-      return "That file is empty.";
-    case "too-many-files":
-      return "Please drop one file at a time.";
-    default:
-      return first?.message ?? "That file couldn't be accepted.";
-  }
-}
+// rejectionCopy moved to @/lib/upload-rejections (#265) — the dashboard documents
+// dropzone now shares the same code→copy mapping and accept list.
 
 // Branded loading state that mirrors the portal shell (secure-upload brand +
 // a skeleton dropzone) instead of a bare unstyled "Loading…". The portal is a
@@ -275,16 +253,11 @@ export default function PortalPage() {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: {
-      "application/pdf": [".pdf"],
-      "image/jpeg": [".jpg", ".jpeg"],
-      "image/png": [".png"],
-      // iPhone "High Efficiency" photos. Accepted here and transcoded to JPEG
-      // server-side on ingest (#220) — no more "switch to Most Compatible" dead-end.
-      "image/heic": [".heic"],
-      "image/heif": [".heif"],
-    },
-    maxSize: 10 * 1024 * 1024,
+    // Shared accept list + size cap (@/lib/upload-rejections): PDF + the photo formats
+    // the backend admits, incl. HEIC/HEIF (iPhone "High Efficiency" photos, transcoded
+    // to JPEG server-side on ingest, #220).
+    accept: UPLOAD_ACCEPT,
+    maxSize: UPLOAD_MAX_BYTES,
     disabled: atQuota,
   });
 
