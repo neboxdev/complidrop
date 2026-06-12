@@ -29,4 +29,13 @@ export const defaultHandlers = [
   http.post(url("/api/auth/refresh"), () =>
     jsonError("auth.unauthorized", "Not authenticated", { status: 401 }),
   ),
+  // Same anonymous baseline for the subscription snapshot (#261): the shared
+  // useSubscription hook now fires from the dashboard checklist, the vendor
+  // detail page, AND settings, so without a default every test rendering those
+  // pages would have to redeclare it. 401 keeps the entitlement UNKNOWN
+  // (`data` undefined → no gating, plan-safe copy) — the do-nothing-surprising
+  // state. Tests that assert plan-dependent UI override with jsonOk({...}).
+  http.get(url("/api/billing/subscription"), () =>
+    jsonError("auth.unauthorized", "Not authenticated", { status: 401 }),
+  ),
 ];

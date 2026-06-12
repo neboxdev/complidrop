@@ -96,3 +96,72 @@ describe("GetStartedChecklist (#191)", () => {
     expect(screen.queryByText("Get started")).toBeNull();
   });
 });
+
+describe("GetStartedChecklist — plan-aware document hint (#261)", () => {
+  // Vendor upload links are a Pro entitlement (the server 403s link generation
+  // on Free), so the "Collect a document" hint must not recommend them to a
+  // Free org. The subscription default handler (handlers.ts) answers 401 —
+  // entitlement unknown — which must also fall back to the plan-safe copy.
+  const STATS_NO_DOCS = {
+    totalDocuments: 0,
+    compliant: 0,
+    nonCompliant: 0,
+    expiringSoon: 0,
+    expired: 0,
+    pendingExtraction: 0,
+    totalVendors: 1,
+    anyVendorWithRequirements: false,
+    complianceRate: 0,
+  };
+
+  function subscription(hasVendorPortal: boolean) {
+    return jsonOk({
+      plan: hasVendorPortal ? "pro" : "free",
+      status: "active",
+      documentLimit: hasVendorPortal ? null : 5,
+      documentsUsed: 0,
+      hasVendorPortal,
+      currentPeriodEnd: null,
+      extractionSpend: 0,
+    });
+  }
+
+  it("recommends the upload link when the plan includes the portal", async () => {
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS_NO_DOCS)),
+      http.get(url("/api/billing/subscription"), () => subscription(true)),
+    );
+
+    renderWithProviders(<ChecklistHarness />, { auth: authedMe });
+
+    // findByText waits for the subscription to resolve — the upload-link
+    // phrasing only renders once hasVendorPortal=true lands.
+    expect(
+      await screen.findByText(/upload a coi, or send the vendor an upload link/i),
+    ).toBeInTheDocument();
+  });
+
+  it("stays plan-safe for a Free org (no upload-link recommendation)", async () => {
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS_NO_DOCS)),
+      http.get(url("/api/billing/subscription"), () => subscription(false)),
+    );
+
+    renderWithProviders(<ChecklistHarness />, { auth: authedMe });
+
+    expect(await screen.findByText(/upload a coi you have on file/i)).toBeInTheDocument();
+    expect(screen.queryByText(/send the vendor an upload link/i)).toBeNull();
+  });
+
+  it("falls back to the plan-safe hint while the entitlement is unknown", async () => {
+    // No subscription override — the harness default answers 401 (anonymous),
+    // so the hook never learns the entitlement and must not recommend a
+    // feature the org may not have.
+    server.use(http.get(url("/api/dashboard/stats"), () => jsonOk(STATS_NO_DOCS)));
+
+    renderWithProviders(<ChecklistHarness />, { auth: authedMe });
+
+    expect(await screen.findByText(/upload a coi you have on file/i)).toBeInTheDocument();
+    expect(screen.queryByText(/send the vendor an upload link/i)).toBeNull();
+  });
+});

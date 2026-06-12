@@ -328,6 +328,91 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
     );
   });
 
+  it("gates Email/Copy behind the plan with an upgrade path when the portal is not included (#261)", async () => {
+    // The server 403s link generation/emailing for Free orgs; the page gates
+    // proactively so the user gets an upgrade path instead of a rejection toast.
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+      http.get(url("/api/billing/subscription"), () =>
+        jsonOk({
+          plan: "free",
+          status: "active",
+          documentLimit: 5,
+          documentsUsed: 0,
+          hasVendorPortal: false,
+          currentPeriodEnd: null,
+          extractionSpend: 0,
+        }),
+      ),
+    );
+
+    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
+
+    const emailBtn = await screen.findByRole("button", {
+      name: /email link to acme subcontractor/i,
+    });
+    // The gate lands when the subscription query resolves.
+    await waitFor(() => expect(emailBtn).toBeDisabled());
+    expect(screen.getByRole("button", { name: /^copy link$/i })).toBeDisabled();
+    expect(screen.getByText(/vendor upload links are a pro feature/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /upgrade your plan/i })).toHaveAttribute(
+      "href",
+      "/settings",
+    );
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("keeps Email/Copy enabled with no upgrade note when the plan includes the portal (#261)", async () => {
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+      http.get(url("/api/billing/subscription"), () =>
+        jsonOk({
+          plan: "pro",
+          status: "active",
+          documentLimit: null,
+          documentsUsed: 0,
+          hasVendorPortal: true,
+          currentPeriodEnd: null,
+          extractionSpend: 0,
+        }),
+      ),
+    );
+
+    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
+
+    const emailBtn = await screen.findByRole("button", {
+      name: /email link to acme subcontractor/i,
+    });
+    expect(emailBtn).toBeEnabled();
+    expect(screen.getByRole("button", { name: /^copy link$/i })).toBeEnabled();
+    expect(screen.queryByText(/vendor upload links are a pro feature/i)).toBeNull();
+  });
+
+  it("leaves the actions enabled while the entitlement is unknown (server stays the fence)", async () => {
+    // Subscription never resolves — only an explicit `false` gates, so a Pro
+    // user on a cold cache never sees a flash of "Pro feature" lockout.
+    const settled = new Promise<void>(() => {});
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+      http.get(url("/api/billing/subscription"), async () => {
+        await settled;
+        return jsonOk({});
+      }),
+    );
+
+    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
+
+    const emailBtn = await screen.findByRole("button", {
+      name: /email link to acme subcontractor/i,
+    });
+    expect(emailBtn).toBeEnabled();
+    expect(screen.getByRole("button", { name: /^copy link$/i })).toBeEnabled();
+    expect(screen.queryByText(/vendor upload links are a pro feature/i)).toBeNull();
+  });
+
   it("copy link surfaces a friendly toast (no browser jargon) when the clipboard write fails", async () => {
     const writeText = vi.fn().mockRejectedValue(new TypeError("Document is not focused"));
     Object.defineProperty(navigator, "clipboard", {
