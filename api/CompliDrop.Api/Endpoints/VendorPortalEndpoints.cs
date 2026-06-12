@@ -42,10 +42,10 @@ public static class VendorPortalEndpoints
         if (link.Vendor?.Organization is null)
             return Error(404, "vendor.portal_token_invalid", "This upload link is no longer active.");
 
-        // Monetization fence (#261): an org whose plan lost the portal entitlement
-        // (Stripe cancel flips HasVendorPortal=false) answers the SAME neutral message
-        // as a revoked link — a vendor must never learn the business's billing status.
-        // Before expiry for the dead-tenant reason above; fail-closed on a missing
+        // Monetization fence (#261, ADR 0024): an org whose plan lost the portal
+        // entitlement (Stripe cancel flips HasVendorPortal=false) answers the SAME neutral
+        // message as a revoked link — a vendor must never learn the business's billing
+        // status. Before expiry for the dead-tenant reason above; fail-closed on a missing
         // Subscription row (see VendorEndpoints.PortalIncludedInPlanAsync). Links are
         // NOT mutated: re-subscribing flips the flag back and they revive untouched.
         if (link.Vendor.Organization.Subscription is not { HasVendorPortal: true })
@@ -93,10 +93,10 @@ public static class VendorPortalEndpoints
         if (link.Vendor?.Organization is null)
             return Error(404, "vendor.portal_token_invalid", "This upload link is no longer active.");
 
-        // Monetization fence (#261), same as PortalInfo: a lapsed plan's links answer the
-        // neutral revoked-link message (no billing-status leak to the vendor), checked
-        // before expiry, links never mutated so re-subscribing revives them. A direct
-        // POST that skips the info page must hit the same wall.
+        // Monetization fence (#261, ADR 0024), same as PortalInfo: a lapsed plan's links
+        // answer the neutral revoked-link message (no billing-status leak to the vendor),
+        // checked before expiry, links never mutated so re-subscribing revives them. A
+        // direct POST that skips the info page must hit the same wall.
         if (link.Vendor.Organization.Subscription is not { HasVendorPortal: true } sub)
             return Error(404, "vendor.portal_token_invalid", "This upload link is no longer active.");
 

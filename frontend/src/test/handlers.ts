@@ -3,8 +3,10 @@
  * test starts from. Override per-test with `server.use(http.get(...))`.
  *
  * Defaults are intentionally minimal:
- *   - `/api/auth/me`        → 401 anonymous envelope (the most common state).
- *   - `/api/auth/refresh`   → 401 (no cookie, refresh fails).
+ *   - `/api/auth/me`               → 401 anonymous envelope (the most common state).
+ *   - `/api/auth/refresh`          → 401 (no cookie, refresh fails).
+ *   - `/api/billing/subscription`  → 401 (entitlement unknown → no plan gating,
+ *     plan-safe copy; #261). Tests asserting plan-dependent UI must override.
  *
  * Any other endpoint hit without an explicit override raises an unhandled
  * request in tests — that's a feature, not a gap: it forces each test to

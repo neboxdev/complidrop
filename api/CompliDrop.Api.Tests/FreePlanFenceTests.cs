@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
@@ -12,8 +14,8 @@ using static CompliDrop.Api.Tests.TestHelpers.UploadFixtures;
 namespace CompliDrop.Api.Tests;
 
 /// <summary>
-/// Pins the #261 free-plan fences end to end. The decision of record (issue #261 comment,
-/// 2026-06-12): the vendor portal is a paid entitlement gated on the
+/// Pins the #261 free-plan fences end to end. The decision of record (ADR 0024; decided
+/// on issue #261, 2026-06-12): the vendor portal is a paid entitlement gated on the
 /// <c>Subscription.HasVendorPortal</c> FLAG (never the plan string, so a founder comp keeps
 /// working); a lapsed plan kills existing links with the NEUTRAL revoked-link message (no
 /// billing-status leak to vendors) and re-subscribing revives them untouched; the portal
@@ -122,6 +124,38 @@ public sealed class FreePlanFenceTests(IntegrationTestFixture fixture) : Integra
     }
 
     [Fact]
+    public async Task Lapsed_org_gate_outranks_the_actionable_400s()
+    {
+        // EmailPortalLink orders the plan gate before vendor.no_contact_email /
+        // vendorPortalLink.inactive — a lapsed caller must not be instructed to "add a
+        // contact email" toward a feature their plan lacks. Mint while entitled for a
+        // vendor with NO contact email, lapse, then email: 403, not 400.
+        var auth = await RegisterAndLoginAsync();
+        var resp0 = await auth.Client.PostAsJsonAsync("/api/vendors", new
+        {
+            name = "No Contact LLC",
+            contactEmail = (string?)null,
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = (Guid?)null,
+        });
+        resp0.EnsureSuccessStatusCode();
+        var vendorId = (await Data(resp0)).GetProperty("id").GetGuid();
+        await SetPortalEntitlementAsync(auth.OrgId, on: true);
+        var mint = await auth.Client.PostAsync($"/api/vendors/{vendorId}/portal-link", null);
+        mint.EnsureSuccessStatusCode();
+        var linkId = (await Data(mint)).GetProperty("id").GetGuid();
+        await SetPortalEntitlementAsync(auth.OrgId, on: false, documentLimit: 5);
+
+        var resp = await auth.Client.PostAsync($"/api/vendors/{vendorId}/portal-link/{linkId}/email", null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await Error(resp)).GetProperty("code").GetString().Should().Be(
+            "plan.portal_not_included",
+            "the plan gate must outrank vendor.no_contact_email for a lapsed caller");
+    }
+
+    [Fact]
     public async Task Entitled_org_can_generate_and_email_a_portal_link()
     {
         // The gate must point the right way: granting the flag (what checkout does) unlocks
@@ -164,28 +198,41 @@ public sealed class FreePlanFenceTests(IntegrationTestFixture fixture) : Integra
     public async Task Lapsed_plan_makes_existing_links_answer_the_neutral_revoked_message()
     {
         // Decision of record: feature off = links off, but the vendor sees exactly what a
-        // revoked link shows — never "this business stopped paying".
-        var seeded = await SeedLinkAsync(hasVendorPortal: false, documentLimit: 5);
+        // revoked link shows — never "this business stopped paying". The parity is pinned
+        // live-vs-live (a real revoked link's response against a real lapsed link's
+        // response, info AND upload paths), not against a hardcoded literal — so editing
+        // one path's copy without the others fails here even if the literal moved.
+        var lapsed = await SeedLinkAsync(hasVendorPortal: false, documentLimit: 5);
+        var revoked = await SeedLinkAsync(isActive: false); // entitled org, link revoked
         var client = CreateClient();
 
-        var info = await client.GetAsync($"/api/portal/{seeded.Token}");
+        var info = await client.GetAsync($"/api/portal/{lapsed.Token}");
         info.StatusCode.Should().Be(HttpStatusCode.NotFound);
         var infoError = await Error(info);
         infoError.GetProperty("code").GetString().Should().Be("vendor.portal_token_invalid");
-        infoError.GetProperty("message").GetString().Should().Be("This upload link is no longer active.",
-            "the lapsed-plan message must be byte-identical to the revoked-link message — any " +
-            "divergence is a billing-status leak to vendors");
+        var lapsedInfoMessage = infoError.GetProperty("message").GetString();
         var raw = await info.Content.ReadAsStringAsync();
         raw.Should().NotContainAny("plan", "billing", "subscription", "upgrade", "Pro");
 
-        var upload = await UploadAsync(client, seeded.Token);
+        var revokedResp = await client.GetAsync($"/api/portal/{revoked.Token}");
+        revokedResp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        var revokedError = await Error(revokedResp);
+        revokedError.GetProperty("code").GetString().Should().Be("vendor.portal_token_invalid");
+        lapsedInfoMessage.Should().Be(revokedError.GetProperty("message").GetString(),
+            "the lapsed-plan message must be byte-identical to the revoked-link message — any " +
+            "divergence is a billing-status leak to vendors");
+
+        var upload = await UploadAsync(client, lapsed.Token);
         upload.StatusCode.Should().Be(HttpStatusCode.NotFound);
-        (await Error(upload)).GetProperty("code").GetString().Should().Be("vendor.portal_token_invalid");
+        var uploadError = await Error(upload);
+        uploadError.GetProperty("code").GetString().Should().Be("vendor.portal_token_invalid");
+        uploadError.GetProperty("message").GetString().Should().Be(lapsedInfoMessage,
+            "a direct POST that skips the info page must answer the same neutral copy");
 
         await using var db = CreateSystemDb();
-        (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.OrganizationId == seeded.OrgId))
+        (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.OrganizationId == lapsed.OrgId))
             .Should().Be(0, "a lapsed org must not keep accumulating documents");
-        (await db.VendorPortalLinks.SingleAsync(l => l.Id == seeded.LinkId)).UploadCount
+        (await db.VendorPortalLinks.SingleAsync(l => l.Id == lapsed.LinkId)).UploadCount
             .Should().Be(0, "a refused upload must not consume link quota");
     }
 
@@ -220,6 +267,60 @@ public sealed class FreePlanFenceTests(IntegrationTestFixture fixture) : Integra
 
         info.StatusCode.Should().Be(HttpStatusCode.NotFound);
         (await Error(info)).GetProperty("code").GetString().Should().Be("vendor.portal_token_invalid");
+    }
+
+    [Fact]
+    public async Task Signed_subscription_deleted_webhook_kills_the_orgs_portal_links_end_to_end()
+    {
+        // The cancel→dead-link chain without compositional gaps: the REAL webhook handler
+        // flips the flag on the same Subscription row the portal's Include navigates to.
+        // (StripeWebhookTests pins webhook→flag; the lapse tests above pin flag→404; this
+        // test guards the seam — the webhook resolving the row by StripeSubscriptionId
+        // while the portal resolves it via Organization.Subscription.)
+        var seeded = await SeedLinkAsync(); // entitled org with a working link
+        var stripeSubId = $"sub_{Guid.NewGuid():N}";
+        await using (var db = CreateSystemDb())
+            await db.Subscriptions.Where(s => s.OrganizationId == seeded.OrgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.StripeSubscriptionId, stripeSubId));
+        var client = CreateClient();
+        (await client.GetAsync($"/api/portal/{seeded.Token}")).StatusCode
+            .Should().Be(HttpStatusCode.OK, "sanity: the link works while paid");
+
+        var payload = JsonSerializer.Serialize(new
+        {
+            id = $"evt_{Guid.NewGuid():N}",
+            @object = "event",
+            api_version = Stripe.StripeConfiguration.ApiVersion,
+            created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            livemode = false,
+            pending_webhooks = 0,
+            request = new { id = (string?)null, idempotency_key = (string?)null },
+            type = "customer.subscription.deleted",
+            data = new { @object = new { id = stripeSubId, @object = "subscription", status = "canceled" } }
+        });
+        var webhook = await PostSignedWebhookAsync(payload);
+        webhook.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var info = await client.GetAsync($"/api/portal/{seeded.Token}");
+        info.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        (await Error(info)).GetProperty("code").GetString().Should().Be("vendor.portal_token_invalid");
+        (await UploadAsync(client, seeded.Token)).StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
+    // Mirrors StripeWebhookTests' signing helpers (the secret is pinned by
+    // CustomWebApplicationFactory's Stripe:WebhookSecret).
+    private async Task<HttpResponseMessage> PostSignedWebhookAsync(string payload)
+    {
+        var t = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes("whsec_test_secret_for_integration_tests"));
+        var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes($"{t}.{payload}"));
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/billing/webhook")
+        {
+            Content = new StringContent(payload, Encoding.UTF8, "application/json")
+        };
+        req.Headers.TryAddWithoutValidation(
+            "Stripe-Signature", $"t={t},v1={Convert.ToHexString(hash).ToLowerInvariant()}");
+        return await CreateClient().SendAsync(req);
     }
 
     [Fact]

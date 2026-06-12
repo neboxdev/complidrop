@@ -342,13 +342,14 @@ public static class VendorEndpoints
             "That requirement checklist no longer exists. Refresh the page and pick another.");
 
     /// <summary>
-    /// Monetization fence (#261): the vendor portal is a paid entitlement. Gates on the
-    /// <c>Subscription.HasVendorPortal</c> FLAG, never the <c>Plan</c> string — Stripe
-    /// webhooks own the plan→flag mapping (StripeService), and a founder comp (manual
-    /// flag flip, e.g. the demo org) must keep working without a Stripe subscription.
-    /// The tenant filter scopes the query to the caller's org. Fail-closed when the org
-    /// has no Subscription row: every org gets one at registration (AuthEndpoints), so a
-    /// missing row is corrupt state, not a free pass through a pricing fence.
+    /// Monetization fence (#261, ADR 0024): the vendor portal is a paid entitlement. Gates
+    /// on the <c>Subscription.HasVendorPortal</c> FLAG, never the <c>Plan</c> string —
+    /// Stripe webhooks own the plan→flag mapping (StripeService), and a founder comp
+    /// (manual flag flip, e.g. the demo org) must keep working without a Stripe
+    /// subscription. The tenant filter scopes the query to the caller's org. Fail-closed
+    /// when the org has no Subscription row: every org gets one at registration
+    /// (AuthEndpoints), so a missing row is corrupt state, not a free pass through a
+    /// pricing fence.
     /// </summary>
     private static async Task<bool> PortalIncludedInPlanAsync(AppDbContext db, CancellationToken ct) =>
         await db.Subscriptions.AnyAsync(s => s.HasVendorPortal, ct);

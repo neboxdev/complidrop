@@ -380,11 +380,20 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
       ),
     );
 
-    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
+    const { queryClient } = renderWithProviders(<VendorDetailPage />, {
+      auth: authedMe,
+      params: { id: "v_acme_01" },
+    });
 
     const emailBtn = await screen.findByRole("button", {
       name: /email link to acme subcontractor/i,
     });
+    // Settlement anchor: the loading state renders identically (enabled, no note),
+    // so wait for the entitlement to actually land before asserting — otherwise an
+    // inverted gate (gating on === true) could pass inside the race window.
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["billing", "subscription"])?.status).toBe("success"),
+    );
     expect(emailBtn).toBeEnabled();
     expect(screen.getByRole("button", { name: /^copy link$/i })).toBeEnabled();
     expect(screen.queryByText(/vendor upload links are a pro feature/i)).toBeNull();

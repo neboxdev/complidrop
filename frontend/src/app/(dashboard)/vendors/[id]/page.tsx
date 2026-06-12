@@ -212,16 +212,13 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
               <p className="text-xs text-slate-500">Share a link with {vendor.name} — they upload with no login.</p>
             </div>
             <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
+              {/* No title tooltips on the disabled states: the Button base applies
+                  disabled:pointer-events-none, so a disabled button never receives the
+                  hover that would show one — the visible notes below carry the reason
+                  instead (#261 review). */}
               <Button
                 onClick={emailLinkToVendor}
                 disabled={portalGated || !hasContactEmail || linkActionPending}
-                title={
-                  portalGated
-                    ? "Vendor upload links are a Pro feature."
-                    : hasContactEmail
-                      ? undefined
-                      : "Add a contact email above to email the link."
-                }
               >
                 <Mail className="w-4 h-4 mr-1" /> Email link to {vendor.name}
               </Button>
@@ -229,7 +226,6 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                 variant="outline"
                 onClick={copyLinkToClipboard}
                 disabled={portalGated || linkActionPending}
-                title={portalGated ? "Vendor upload links are a Pro feature." : undefined}
               >
                 <LinkIcon className="w-4 h-4 mr-1" /> Copy link
               </Button>
@@ -257,10 +253,15 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
               {vendor.portalLinks.map((l) => (
                 <li key={l.id} className="flex items-center gap-3 px-3 py-2 rounded-md border border-slate-100 bg-slate-50/50">
                   <Input value={l.fullUrl} readOnly className="flex-1 h-8 font-mono text-xs" />
+                  {/* Gated with the top-level actions (#261 review): a lapsed org
+                      hand-copying a row URL would distribute a link the portal
+                      answers 404 for. Revoke stays enabled — killing a link is a
+                      safety action, not a portal feature. */}
                   <Button
                     size="sm"
                     variant="outline"
                     aria-label="Copy upload link"
+                    disabled={portalGated}
                     onClick={async () => {
                       await navigator.clipboard.writeText(l.fullUrl);
                       toast.success("Copied");

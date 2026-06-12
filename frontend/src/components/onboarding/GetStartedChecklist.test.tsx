@@ -3,7 +3,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { http } from "msw";
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import {
   GetStartedChecklist,
   useOnboardingChecklist,
@@ -147,9 +147,16 @@ describe("GetStartedChecklist — plan-aware document hint (#261)", () => {
       http.get(url("/api/billing/subscription"), () => subscription(false)),
     );
 
-    renderWithProviders(<ChecklistHarness />, { auth: authedMe });
+    const { queryClient } = renderWithProviders(<ChecklistHarness />, { auth: authedMe });
 
-    expect(await screen.findByText(/upload a coi you have on file/i)).toBeInTheDocument();
+    // Settlement anchor: the plan-safe copy also renders while the subscription is
+    // in flight, so wait for hasVendorPortal=false to actually land — a regression
+    // that recommends the link to Free orgs post-resolution must not pass in the
+    // race window.
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["billing", "subscription"])?.status).toBe("success"),
+    );
+    expect(screen.getByText(/upload a coi you have on file/i)).toBeInTheDocument();
     expect(screen.queryByText(/send the vendor an upload link/i)).toBeNull();
   });
 
