@@ -355,6 +355,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         // emailed link used to NRE-500 on every click. Deletion must kill the links with it.
         var auth = await RegisterAndLoginAsync();
         var vendorId = await CreateVendorAsync(auth.Client, "Doomed LLC", "x@doomed.test");
+        await SetPortalEntitlementAsync(auth.OrgId, on: true); // #261: minting needs the portal entitlement
         var (linkId, token, _) = await GenerateLinkAsync(auth.Client, vendorId);
 
         var del = await auth.Client.DeleteAsync($"/api/vendors/{vendorId}");
@@ -407,6 +408,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     {
         var auth = await RegisterAndLoginAsync();
         var vendorId = await CreateVendorAsync(auth.Client, "Acme Catering", "ops@acme.test");
+        await SetPortalEntitlementAsync(auth.OrgId, on: true); // #261: minting needs the portal entitlement
         var (linkId, _, linkUrl) = await GenerateLinkAsync(auth.Client, vendorId);
         Email.Reset(); // drop the registration verification email so we assert only the portal send
 
@@ -428,6 +430,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     {
         var auth = await RegisterAndLoginAsync();
         var vendorId = await CreateVendorAsync(auth.Client, "No Contact LLC", contactEmail: null);
+        await SetPortalEntitlementAsync(auth.OrgId, on: true); // #261: minting needs the portal entitlement
         var (linkId, _, _) = await GenerateLinkAsync(auth.Client, vendorId);
         Email.Reset();
 
@@ -457,6 +460,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     {
         var auth = await RegisterAndLoginAsync();
         var vendorId = await CreateVendorAsync(auth.Client, "Acme", "ops@acme.test");
+        await SetPortalEntitlementAsync(auth.OrgId, on: true); // #261: minting needs the portal entitlement
         var (linkId, _, _) = await GenerateLinkAsync(auth.Client, vendorId);
         Email.Reset();
         Email.NextSendReturnsNull = true; // simulate Resend non-2xx → SendAsync returns null
@@ -477,6 +481,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         // `ex is not OperationCanceledException`) is what makes this pass.
         var auth = await RegisterAndLoginAsync();
         var vendorId = await CreateVendorAsync(auth.Client, "Acme", "ops@acme.test");
+        await SetPortalEntitlementAsync(auth.OrgId, on: true); // #261: minting needs the portal entitlement
         var (linkId, _, _) = await GenerateLinkAsync(auth.Client, vendorId);
         Email.Reset();
         Email.NextSendThrows = new TaskCanceledException("simulated 30s Resend timeout");
@@ -492,6 +497,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     {
         var auth = await RegisterAndLoginAsync();
         var vendorId = await CreateVendorAsync(auth.Client, "Acme", "ops@acme.test");
+        await SetPortalEntitlementAsync(auth.OrgId, on: true); // #261: minting needs the portal entitlement
         var (linkId, _, _) = await GenerateLinkAsync(auth.Client, vendorId);
         Email.Reset();
         Email.IsEnabled = false; // Resend not configured (no API key / from-email)
@@ -508,6 +514,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     {
         var auth = await RegisterAndLoginAsync();
         var vendorId = await CreateVendorAsync(auth.Client, "Acme", "ops@acme.test");
+        await SetPortalEntitlementAsync(auth.OrgId, on: true); // #261: minting needs the portal entitlement
         var (linkId, _, _) = await GenerateLinkAsync(auth.Client, vendorId);
         (await auth.Client.DeleteAsync($"/api/vendors/{vendorId}/portal-link/{linkId}")).EnsureSuccessStatusCode();
         Email.Reset();
@@ -525,6 +532,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         // Org A owns the vendor + link; Org B must not be able to email it.
         var orgA = await RegisterAndLoginAsync();
         var vendorId = await CreateVendorAsync(orgA.Client, "Acme", "ops@acme.test");
+        await SetPortalEntitlementAsync(orgA.OrgId, on: true); // #261: minting needs the portal entitlement
         var (linkId, _, _) = await GenerateLinkAsync(orgA.Client, vendorId);
 
         var orgB = await RegisterAndLoginAsync();

@@ -1,7 +1,8 @@
-using System.Net.Http.Json;
+﻿using System.Net.Http.Json;
 using System.Text.Json;
 using CompliDrop.Api.Auth;
 using CompliDrop.Api.Data;
+using CompliDrop.Api.Entities;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 
@@ -80,6 +81,83 @@ public abstract class IntegrationTestBase(IntegrationTestFixture fixture) : IAsy
             data.GetProperty("userId").GetGuid(),
             data.GetProperty("organizationId").GetGuid(),
             email);
+    }
+
+    /// <summary>
+    /// Flips the org's portal entitlement + document cap (#261). Registration seeds every
+    /// org as Free (HasVendorPortal=false, DocumentLimit=5), so tests that mint or email
+    /// portal links must grant the entitlement first — mirroring what the Stripe webhook
+    /// does on checkout (StripeService: portal on, cap removed). <c>on: false</c> mirrors
+    /// the cancel path (portal off; pass <paramref name="documentLimit"/> 5 to fully match).
+    /// </summary>
+    protected async Task SetPortalEntitlementAsync(Guid orgId, bool on, int? documentLimit = null)
+    {
+        await using var db = CreateSystemDb();
+        await db.Subscriptions.Where(s => s.OrganizationId == orgId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(x => x.HasVendorPortal, on)
+                .SetProperty(x => x.DocumentLimit, documentLimit));
+    }
+
+    protected sealed record SeededLink(Guid OrgId, Guid VendorId, Guid LinkId, string Token, string OrgName, string VendorName);
+
+    /// <summary>
+    /// Seeds an org + subscription + vendor + portal link directly via the system context (no
+    /// tenant filter). The subscription defaults to portal-entitled with no document cap — the
+    /// realistic state for an org holding a working link, since the #261 plan gate refuses both
+    /// link minting (403 at generation) and link use (the portal answers 404 for
+    /// <c>HasVendorPortal=false</c>). Fence tests override <paramref name="hasVendorPortal"/> /
+    /// <paramref name="documentLimit"/>, or set <paramref name="seedSubscription"/> false to pin
+    /// the fail-closed missing-row behavior.
+    /// </summary>
+    protected async Task<SeededLink> SeedLinkAsync(
+        bool isActive = true,
+        DateTime? expiresAt = null,
+        int maxUploads = 20,
+        int uploadCount = 0,
+        bool hasVendorPortal = true,
+        int? documentLimit = null,
+        bool seedSubscription = true)
+    {
+        var orgId = Guid.NewGuid();
+        var vendorId = Guid.NewGuid();
+        var linkId = Guid.NewGuid();
+        var token = $"tok-{Guid.NewGuid():N}";
+        var orgName = $"SecretOrg-{orgId:N}";
+        var vendorName = $"SecretVendor-{vendorId:N}";
+        var now = DateTime.UtcNow;
+
+        await using var db = CreateSystemDb();
+        db.Organizations.Add(new Organization { Id = orgId, Name = orgName, CreatedAt = now, UpdatedAt = now });
+        if (seedSubscription)
+        {
+            db.Subscriptions.Add(new Subscription
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = orgId,
+                Plan = hasVendorPortal ? "pro" : "free",
+                Status = "active",
+                HasVendorPortal = hasVendorPortal,
+                DocumentLimit = documentLimit,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        }
+        db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = orgId, Name = vendorName, CreatedAt = now, UpdatedAt = now });
+        db.VendorPortalLinks.Add(new VendorPortalLink
+        {
+            Id = linkId,
+            VendorId = vendorId,
+            Token = token,
+            IsActive = isActive,
+            ExpiresAt = expiresAt,
+            MaxUploads = maxUploads,
+            UploadCount = uploadCount,
+            CreatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        return new SeededLink(orgId, vendorId, linkId, token, orgName, vendorName);
     }
 
     /// <summary>
