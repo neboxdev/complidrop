@@ -77,12 +77,14 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         return orgId;
     }
 
-    private static object Envelope(string eventId, string type, object dataObject) => new
+    // `created` defaults to now; the ordering tests (#275, ADR 0023) pass explicit values to
+    // construct stale-retry sequences. Unix-second granularity mirrors the Stripe wire format.
+    private static object Envelope(string eventId, string type, object dataObject, DateTimeOffset? created = null) => new
     {
         id = eventId,
         @object = "event",
         api_version = StripeConfiguration.ApiVersion,
-        created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+        created = (created ?? DateTimeOffset.UtcNow).ToUnixTimeSeconds(),
         livemode = false,
         pending_webhooks = 0,
         request = new { id = (string?)null, idempotency_key = (string?)null },
@@ -90,14 +92,15 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         data = new { @object = dataObject }
     };
 
-    private static string DeletedEvent(string eventId, string subId) => JsonSerializer.Serialize(
+    private static string DeletedEvent(string eventId, string subId, DateTimeOffset? created = null) => JsonSerializer.Serialize(
         Envelope(eventId, "customer.subscription.deleted",
-            new { id = subId, @object = "subscription", status = "canceled" }));
+            new { id = subId, @object = "subscription", status = "canceled" }, created));
 
-    // `subscription: null` keeps FetchPriceIdFromSubscription from making an outbound
-    // Stripe API call (null price id → "pro" fallback), so the full checkout-completed
-    // handler runs network-free in the test host.
-    private static string CheckoutCompletedEvent(string eventId, Guid orgId, string? subscriptionId = null) => JsonSerializer.Serialize(
+    // `subscription: null` keeps the checkout handler's live-subscription fetch from making
+    // an outbound Stripe API call (no live truth → historical "completed ⇒ active" grant),
+    // so the full checkout-completed handler runs network-free in the test host. The live
+    // branch is covered by StripeServiceCheckoutLiveStateTests via the ClientOverride seam.
+    private static string CheckoutCompletedEvent(string eventId, Guid orgId, string? subscriptionId = null, DateTimeOffset? created = null) => JsonSerializer.Serialize(
         Envelope(eventId, "checkout.session.completed",
             new
             {
@@ -106,9 +109,9 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
                 client_reference_id = orgId.ToString(),
                 customer = "cus_test_123",
                 subscription = subscriptionId
-            }));
+            }, created));
 
-    private static string SubscriptionStateEvent(string eventId, string type, string subId, string status, string priceId) => JsonSerializer.Serialize(
+    private static string SubscriptionStateEvent(string eventId, string type, string subId, string status, string priceId, DateTimeOffset? created = null) => JsonSerializer.Serialize(
         Envelope(eventId, type,
         new
         {
@@ -120,7 +123,7 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
                 @object = "list",
                 data = new[] { new { id = "si_1", @object = "subscription_item", price = new { id = priceId, @object = "price" } } }
             }
-        }));
+        }, created));
 
     private static string SignatureFor(string payload)
     {
@@ -384,5 +387,123 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         sub.HasVendorPortal.Should().BeTrue();
         sub.StripeCustomerId.Should().Be("cus_test_123");
         (await ProcessedCountAsync(eventId)).Should().Be(1);
+    }
+
+    /// <summary>Truncates to whole seconds the way the Stripe wire format does, so fence
+    /// equality assertions compare exactly what round-tripped through the payload.</summary>
+    private static DateTimeOffset UnixSeconds(DateTimeOffset t) =>
+        DateTimeOffset.FromUnixTimeSeconds(t.ToUnixTimeSeconds());
+
+    [Fact]
+    public async Task Stale_retried_subscription_update_after_deleted_does_not_resurrect_state()
+    {
+        // THE #275 regression, end-to-end: updated(active) fails transiently on first
+        // delivery (unrecorded, ADR 0020) → customer cancels, deleted applies → Stripe
+        // retries the OLD updated event days later. Without the LastStripeEventAt fence
+        // (ADR 0023) the retry resurrected Plan/Status=active while DocumentLimit /
+        // HasVendorPortal stayed free-tier — an incoherent persistent state no future
+        // event corrects (the subscription is deleted; Stripe sends nothing more).
+        var subId = await SeedSubscriptionAsync(plan: "pro", status: "active", hasPortal: true);
+        var staleCreated = UnixSeconds(DateTimeOffset.UtcNow.AddDays(-2));
+        var deletedCreated = UnixSeconds(DateTimeOffset.UtcNow);
+
+        var staleEventId = $"evt_{Guid.NewGuid():N}";
+        var stalePayload = SubscriptionStateEvent(
+            staleEventId, "customer.subscription.updated", subId, "active", "price_annual_test", created: staleCreated);
+
+        FakeStripe.FailNextWebhookHandling = true;
+        (await PostWebhook(stalePayload, SignatureFor(stalePayload)))
+            .StatusCode.Should().Be(HttpStatusCode.InternalServerError, "first delivery fails transiently and stays unrecorded");
+
+        var deletedPayload = DeletedEvent($"evt_{Guid.NewGuid():N}", subId, created: deletedCreated);
+        (await PostWebhook(deletedPayload, SignatureFor(deletedPayload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var retry = await PostWebhook(stalePayload, SignatureFor(stalePayload));
+
+        retry.StatusCode.Should().Be(HttpStatusCode.OK, "a stale event is acknowledged so Stripe stops retrying");
+        (await ProcessedCountAsync(staleEventId)).Should().Be(1, "acknowledged means recorded");
+        var sub = await ReloadAsync(subId);
+        sub.Plan.Should().Be("free", "the stale retry must not resurrect the canceled subscription");
+        sub.Status.Should().Be("canceled");
+        sub.DocumentLimit.Should().Be(5);
+        sub.HasVendorPortal.Should().BeFalse();
+        sub.LastStripeEventAt.Should().Be(deletedCreated.UtcDateTime, "the fence stays at the newest applied event");
+    }
+
+    [Fact]
+    public async Task Stale_retried_checkout_after_deleted_keeps_canceled_state_but_backfills_identity()
+    {
+        // Fence skip for checkout.session.completed + the ticket's named caveat: the skipped
+        // stale checkout must still backfill identity fields later events never re-supply
+        // (StripeCustomerId — billing-portal session creation breaks on null), while NOT
+        // touching entitlement state and NOT overwriting the existing subscription link.
+        var subId = await SeedSubscriptionAsync(plan: "pro", status: "active", hasPortal: true);
+        var orgId = (await ReloadAsync(subId)).OrganizationId;
+        (await ReloadAsync(subId)).StripeCustomerId.Should().BeNull("seed precondition: customer id starts unset");
+
+        var deletedCreated = UnixSeconds(DateTimeOffset.UtcNow);
+        var deletedPayload = DeletedEvent($"evt_{Guid.NewGuid():N}", subId, created: deletedCreated);
+        (await PostWebhook(deletedPayload, SignatureFor(deletedPayload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var staleEventId = $"evt_{Guid.NewGuid():N}";
+        var stalePayload = CheckoutCompletedEvent(
+            staleEventId, orgId, subscriptionId: null, created: UnixSeconds(DateTimeOffset.UtcNow.AddHours(-3)));
+
+        var resp = await PostWebhook(stalePayload, SignatureFor(stalePayload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await ProcessedCountAsync(staleEventId)).Should().Be(1);
+        var sub = await ReloadAsync(subId);
+        sub.Plan.Should().Be("free", "a stale checkout retry must not re-grant paid state");
+        sub.Status.Should().Be("canceled");
+        sub.DocumentLimit.Should().Be(5);
+        sub.HasVendorPortal.Should().BeFalse();
+        sub.StripeCustomerId.Should().Be("cus_test_123", "identity is backfilled even on a stale skip");
+        sub.StripeSubscriptionId.Should().Be(subId, "an existing subscription link is never clobbered");
+        sub.LastStripeEventAt.Should().Be(deletedCreated.UtcDateTime, "a skipped event does not move the fence");
+    }
+
+    [Fact]
+    public async Task Same_second_events_apply_in_arrival_order()
+    {
+        // Ties are NOT stale (ADR 0023): Stripe `created` is second-granularity, so two
+        // distinct same-second events must both land (last-arrival-wins) — strictly-newer-only
+        // skipping would drop the second of a same-second pair and break ADR 0020's
+        // crash-window re-apply (same event, same created, re-delivered).
+        var subId = await SeedSubscriptionAsync(plan: "free", status: "active");
+        var t = UnixSeconds(DateTimeOffset.UtcNow);
+
+        var first = SubscriptionStateEvent($"evt_{Guid.NewGuid():N}", "customer.subscription.updated", subId, "past_due", "price_monthly_test", created: t);
+        (await PostWebhook(first, SignatureFor(first))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var second = SubscriptionStateEvent($"evt_{Guid.NewGuid():N}", "customer.subscription.updated", subId, "active", "price_annual_test", created: t);
+        (await PostWebhook(second, SignatureFor(second))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var sub = await ReloadAsync(subId);
+        sub.Status.Should().Be("active", "an equal-created event applies");
+        sub.Plan.Should().Be("annual");
+        sub.LastStripeEventAt.Should().Be(t.UtcDateTime);
+    }
+
+    [Fact]
+    public async Task Stale_retried_deleted_is_skipped_after_a_newer_update()
+    {
+        // Pins that the fence is wired on the DELETED handler too. The same-id trigger is
+        // synthetic — deleted is always a subscription's newest event on Stripe's side (a
+        // stale deleted for a PREVIOUS subscription no-ops on the row lookup instead) — but
+        // the ADR 0023 contract is uniform: every mutating handler skips strictly-older
+        // events, and only this test fails if the guard is dropped from the deleted path.
+        var subId = await SeedSubscriptionAsync(plan: "pro", status: "active", hasPortal: true);
+        var newerCreated = UnixSeconds(DateTimeOffset.UtcNow);
+        var newer = SubscriptionStateEvent($"evt_{Guid.NewGuid():N}", "customer.subscription.updated", subId, "active", "price_annual_test", created: newerCreated);
+        (await PostWebhook(newer, SignatureFor(newer))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var stale = DeletedEvent($"evt_{Guid.NewGuid():N}", subId, created: UnixSeconds(DateTimeOffset.UtcNow.AddMinutes(-30)));
+        (await PostWebhook(stale, SignatureFor(stale))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var sub = await ReloadAsync(subId);
+        sub.Status.Should().Be("active", "the stale deleted must not re-cancel newer state");
+        sub.Plan.Should().Be("annual");
+        sub.LastStripeEventAt.Should().Be(newerCreated.UtcDateTime);
     }
 }
