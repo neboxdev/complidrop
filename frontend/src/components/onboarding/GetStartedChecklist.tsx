@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Check, ChevronRight } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { useDashboardStats } from "@/hooks/useDashboard";
+import { useSubscription } from "@/hooks/useSubscription";
 
 export type ChecklistStep = {
   key: string;
@@ -34,27 +35,47 @@ export function useOnboardingChecklist(): OnboardingChecklist {
   const stats = useDashboardStats();
   const s = stats.data;
 
+  // Done-flags derive from stats alone, so they can gate the subscription fetch below.
+  const vendorDone = (s?.totalVendors ?? 0) > 0;
+  const requirementsDone = s?.anyVendorWithRequirements ?? false;
+  const documentDone = (s?.totalDocuments ?? 0) > 0;
+  const allDone = vendorDone && requirementsDone && documentDone; // reminders pre-checked
+
+  // Plan gate (#261): vendor upload links are a Pro entitlement, so the "Collect a
+  // document" hint must not recommend them to a Free org (whose link generation the
+  // server 403s). Only an explicit `true` unlocks the upload-link phrasing — while
+  // the subscription is loading, the plan-safe copy shows. Deliberately NOT part of
+  // the checklist's isLoading: the hint wording is cosmetic and must not delay the
+  // card (or flash it away) for the sake of billing data. The fetch only runs while
+  // the card can actually render (stats loaded, steps incomplete) — a fully-onboarded
+  // org's dashboard must not pay a billing query for a hint that never shows (#261
+  // review). Settings / vendor detail share the cache entry via the same query key.
+  const subscription = useSubscription({ enabled: s !== undefined && !allDone });
+  const hasPortal = subscription.data?.hasVendorPortal === true;
+
   const steps: ChecklistStep[] = [
     {
       key: "vendor",
       label: "Add your first vendor",
       hint: "The business whose documents you track.",
       href: "/vendors",
-      done: (s?.totalVendors ?? 0) > 0,
+      done: vendorDone,
     },
     {
       key: "requirements",
       label: "Choose what they must prove",
       hint: "Pick a requirement checklist for the vendor.",
       href: "/vendors",
-      done: s?.anyVendorWithRequirements ?? false,
+      done: requirementsDone,
     },
     {
       key: "document",
       label: "Collect a document",
-      hint: "Upload a COI, or send the vendor an upload link.",
+      hint: hasPortal
+        ? "Upload a COI, or send the vendor an upload link."
+        : "Upload a COI you have on file.",
       href: "/documents",
-      done: (s?.totalDocuments ?? 0) > 0,
+      done: documentDone,
     },
     {
       key: "reminders",

@@ -16,6 +16,7 @@ import {
   useUpdateVendor,
   type VendorDetail,
 } from "@/hooks/useVendors";
+import { useSubscription } from "@/hooks/useSubscription";
 import { useQuery } from "@tanstack/react-query";
 import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { useId, useState } from "react";
@@ -53,6 +54,15 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
   const savedEmail = vendor.contactEmail?.trim() ?? "";
   const hasContactEmail = savedEmail.length > 0;
   const linkActionPending = generate.isPending || emailLink.isPending;
+
+  // Plan gate (#261): upload links are a Pro entitlement — the server 403s link
+  // generation/emailing for plans without it. Gate the affordances proactively so
+  // a Free user gets an upgrade path instead of a rejection toast. Only an explicit
+  // `false` gates: while the subscription is loading (undefined) the buttons stay
+  // enabled — the server is the real fence, and briefly-enabled is better than
+  // flashing a "Pro feature" notice at every Pro user on a cold cache.
+  const subscription = useSubscription();
+  const portalGated = subscription.data?.hasVendorPortal === false;
 
   // Resolve the link to act on: reuse the vendor's most recent ACTIVE link if one exists
   // (portalLinks is ordered newest-first by the server), otherwise mint a fresh one. Reusing
@@ -202,19 +212,35 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
               <p className="text-xs text-slate-500">Share a link with {vendor.name} — they upload with no login.</p>
             </div>
             <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
+              {/* No title tooltips on the disabled states: the Button base applies
+                  disabled:pointer-events-none, so a disabled button never receives the
+                  hover that would show one — the visible notes below carry the reason
+                  instead (#261 review). */}
               <Button
                 onClick={emailLinkToVendor}
-                disabled={!hasContactEmail || linkActionPending}
-                title={hasContactEmail ? undefined : "Add a contact email above to email the link."}
+                disabled={portalGated || !hasContactEmail || linkActionPending}
               >
                 <Mail className="w-4 h-4 mr-1" /> Email link to {vendor.name}
               </Button>
-              <Button variant="outline" onClick={copyLinkToClipboard} disabled={linkActionPending}>
+              <Button
+                variant="outline"
+                onClick={copyLinkToClipboard}
+                disabled={portalGated || linkActionPending}
+              >
                 <LinkIcon className="w-4 h-4 mr-1" /> Copy link
               </Button>
             </div>
           </div>
-          {!hasContactEmail && (
+          {portalGated && (
+            <p role="status" className="text-xs text-amber-700">
+              Vendor upload links are a Pro feature.{" "}
+              <Link href="/settings" className="font-medium text-sky-700 hover:underline">
+                Upgrade your plan
+              </Link>{" "}
+              to collect documents straight from {vendor.name}.
+            </p>
+          )}
+          {!portalGated && !hasContactEmail && (
             <p className="text-xs text-amber-700">
               Add a contact email above and save to email the upload link to {vendor.name}.
             </p>
@@ -227,10 +253,15 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
               {vendor.portalLinks.map((l) => (
                 <li key={l.id} className="flex items-center gap-3 px-3 py-2 rounded-md border border-slate-100 bg-slate-50/50">
                   <Input value={l.fullUrl} readOnly className="flex-1 h-8 font-mono text-xs" />
+                  {/* Gated with the top-level actions (#261 review): a lapsed org
+                      hand-copying a row URL would distribute a link the portal
+                      answers 404 for. Revoke stays enabled — killing a link is a
+                      safety action, not a portal feature. */}
                   <Button
                     size="sm"
                     variant="outline"
                     aria-label="Copy upload link"
+                    disabled={portalGated}
                     onClick={async () => {
                       await navigator.clipboard.writeText(l.fullUrl);
                       toast.success("Copied");

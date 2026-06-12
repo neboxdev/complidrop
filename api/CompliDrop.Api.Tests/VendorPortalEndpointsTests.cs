@@ -34,42 +34,6 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     private static async Task<JsonElement> Data(HttpResponseMessage resp) =>
         (await resp.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("data");
 
-    private sealed record SeededLink(Guid OrgId, Guid VendorId, Guid LinkId, string Token, string OrgName, string VendorName);
-
-    /// <summary>Seeds an org + vendor + portal link directly via the system context (no tenant filter).</summary>
-    private async Task<SeededLink> SeedLinkAsync(
-        bool isActive = true,
-        DateTime? expiresAt = null,
-        int maxUploads = 20,
-        int uploadCount = 0)
-    {
-        var orgId = Guid.NewGuid();
-        var vendorId = Guid.NewGuid();
-        var linkId = Guid.NewGuid();
-        var token = $"tok-{Guid.NewGuid():N}";
-        var orgName = $"SecretOrg-{orgId:N}";
-        var vendorName = $"SecretVendor-{vendorId:N}";
-        var now = DateTime.UtcNow;
-
-        await using var db = CreateSystemDb();
-        db.Organizations.Add(new Organization { Id = orgId, Name = orgName, CreatedAt = now, UpdatedAt = now });
-        db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = orgId, Name = vendorName, CreatedAt = now, UpdatedAt = now });
-        db.VendorPortalLinks.Add(new VendorPortalLink
-        {
-            Id = linkId,
-            VendorId = vendorId,
-            Token = token,
-            IsActive = isActive,
-            ExpiresAt = expiresAt,
-            MaxUploads = maxUploads,
-            UploadCount = uploadCount,
-            CreatedAt = now,
-        });
-        await db.SaveChangesAsync();
-
-        return new SeededLink(orgId, vendorId, linkId, token, orgName, vendorName);
-    }
-
     /// <summary>A one-off host with the rate limiter ENABLED (the shared fixture disables it).</summary>
     private CustomWebApplicationFactory RateLimitedFactory() =>
         new(Fixture.ConnectionString, new Dictionary<string, string?> { ["RateLimiting:Enabled"] = "true" });

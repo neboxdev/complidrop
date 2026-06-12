@@ -179,6 +179,11 @@ public static class VendorEndpoints
         var v = await db.Vendors.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (v is null) return NotFound();
 
+        // Monetization fence (#261): minting upload links is a Pro entitlement. Gated
+        // AFTER the vendor lookup so cross-tenant probes keep answering the identical
+        // 404 they always did — the 403 only ever fires for the caller's own vendor.
+        if (!await PortalIncludedInPlanAsync(db, ct)) return PortalNotIncluded();
+
         var token = GenerateToken();
         var link = new VendorPortalLink
         {
@@ -244,6 +249,12 @@ public static class VendorEndpoints
 
         var link = await db.VendorPortalLinks.FirstOrDefaultAsync(l => l.Id == linkId && l.VendorId == id, ct);
         if (link is null) return NotFoundLink();
+
+        // Same #261 fence as GeneratePortalLink: a lapsed plan must not keep distributing
+        // links it pre-minted while paid (the public portal rejects them anyway — emailing
+        // one would hand the vendor a dead link). Checked before the actionable 400s below,
+        // which would otherwise instruct the caller toward a feature their plan lacks.
+        if (!await PortalIncludedInPlanAsync(db, ct)) return PortalNotIncluded();
 
         if (string.IsNullOrWhiteSpace(vendor.ContactEmail))
             return Error(400, "vendor.no_contact_email",
@@ -329,6 +340,23 @@ public static class VendorEndpoints
     private static IResult TemplateNotFound() =>
         Error(400, "complianceTemplate.not_found",
             "That requirement checklist no longer exists. Refresh the page and pick another.");
+
+    /// <summary>
+    /// Monetization fence (#261, ADR 0024): the vendor portal is a paid entitlement. Gates
+    /// on the <c>Subscription.HasVendorPortal</c> FLAG, never the <c>Plan</c> string —
+    /// Stripe webhooks own the plan→flag mapping (StripeService), and a founder comp
+    /// (manual flag flip, e.g. the demo org) must keep working without a Stripe
+    /// subscription. The tenant filter scopes the query to the caller's org. Fail-closed
+    /// when the org has no Subscription row: every org gets one at registration
+    /// (AuthEndpoints), so a missing row is corrupt state, not a free pass through a
+    /// pricing fence.
+    /// </summary>
+    private static async Task<bool> PortalIncludedInPlanAsync(AppDbContext db, CancellationToken ct) =>
+        await db.Subscriptions.AnyAsync(s => s.HasVendorPortal, ct);
+
+    private static IResult PortalNotIncluded() =>
+        Error(403, "plan.portal_not_included",
+            "Vendor upload links are a Pro feature. Upgrade your plan to collect documents straight from your vendors.");
 
     private static string GenerateToken()
     {

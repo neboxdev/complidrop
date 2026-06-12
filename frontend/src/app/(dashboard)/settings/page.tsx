@@ -1,12 +1,13 @@
 "use client";
 
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useMe, useUpdateOrganization, type Me } from "@/hooks/useAuth";
+import { useSubscription } from "@/hooks/useSubscription";
 import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { listTimeZones, describeNextSend } from "@/lib/timezones";
@@ -19,16 +20,6 @@ import {
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useId, useMemo, useState } from "react";
 import { requestTourRestart, resetOnboardingTips } from "@/lib/onboarding";
-
-type SubscriptionInfo = {
-  plan: string;
-  status: string;
-  documentLimit: number | null;
-  documentsUsed: number;
-  hasVendorPortal: boolean;
-  currentPeriodEnd: string | null;
-  extractionSpend: number;
-};
 
 // Map the raw Stripe subscription status to friendly copy — never interpolate
 // "past_due" / "incomplete_expired" into the UI. The default branch catches any
@@ -67,10 +58,7 @@ function billingStatusNotice(
 export default function SettingsPage() {
   const me = useMe();
   const params = useSearchParams();
-  const subscription = useQuery<SubscriptionInfo>({
-    queryKey: ["billing", "subscription"],
-    queryFn: ({ signal }) => api.get<SubscriptionInfo>("/api/billing/subscription", { signal }),
-  });
+  const subscription = useSubscription();
 
   const checkout = useMutation({
     // The wire vocab matches `KNOWN_CHECKOUT_PLAN_IDS` (#147, ADR 0011).
