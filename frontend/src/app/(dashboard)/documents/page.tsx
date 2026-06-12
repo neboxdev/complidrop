@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import Link from "next/link";
-import { useDropzone } from "react-dropzone";
+import { useDropzone, type FileRejection } from "react-dropzone";
 import { toast } from "sonner";
 import {
   UploadCloud,
@@ -35,6 +35,12 @@ import { complianceStatusLabel } from "@/lib/display-labels";
 import { formatCalendarDate } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import {
+  rejectionCopy,
+  UPLOAD_ACCEPT,
+  UPLOAD_MAX_BYTES,
+  UPLOAD_PICKER_ACCEPT,
+} from "@/lib/upload-policy";
 import { isAuthError } from "@/lib/query-client";
 import { PageTip } from "@/components/onboarding/PageTip";
 import { TIP_IDS } from "@/lib/onboarding";
@@ -130,7 +136,14 @@ export default function DocumentsPage() {
   const vendorInputId = useId();
   const typeSelectId = useId();
 
-  const onDrop = useCallback((accepted: File[]) => {
+  const onDrop = useCallback((accepted: File[], rejected: FileRejection[]) => {
+    // Surface why nothing happened for rejected files (wrong type, over 10 MB) —
+    // the dropzone used to swallow them silently and the page just sat there,
+    // which reads as "the product is broken" in a first session (#265). Toast is
+    // this page's idiom for transient upload feedback; accepted files in the same
+    // drop still stage below.
+    const rejectionMessage = rejectionCopy(rejected);
+    if (rejectionMessage) toast.error(rejectionMessage);
     if (accepted.length === 0) return;
     // Append rather than replace so a second drop adds to the batch instead of
     // discarding the first; the staging card lets the user remove any file.
@@ -139,12 +152,12 @@ export default function DocumentsPage() {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: {
-      "application/pdf": [".pdf"],
-      "image/jpeg": [".jpg", ".jpeg"],
-      "image/png": [".png"],
-    },
-    maxSize: 10 * 1024 * 1024,
+    // Shared accept list + size cap (@/lib/upload-policy): PDF + the photo formats
+    // the backend admits, incl. HEIC/HEIF (iPhone "High Efficiency" photos, transcoded
+    // to JPEG server-side on ingest, #220) — the dashboard used to reject the iPhone
+    // default format the portal and backend already accepted (#265).
+    accept: UPLOAD_ACCEPT,
+    maxSize: UPLOAD_MAX_BYTES,
   });
 
   async function handleUpload() {
@@ -237,12 +250,16 @@ export default function DocumentsPage() {
               isDragActive ? "border-sky-500 bg-sky-50" : "border-slate-200 hover:border-sky-300 hover:bg-sky-50/50",
             )}
           >
-            <input {...getInputProps()} />
+            {/* `accept` MUST stay AFTER the `{...getInputProps()}` spread — react-dropzone
+                injects its own narrower `accept` and last-prop-wins is what lets the
+                shared picker override win (see UPLOAD_PICKER_ACCEPT's doc). Mirrors the
+                portal dropzone (#265). */}
+            <input {...getInputProps()} accept={UPLOAD_PICKER_ACCEPT} />
             <UploadCloud className="w-10 h-10 mx-auto text-sky-500" />
             <p className="mt-3 text-sm font-medium text-slate-700">
               {isDragActive ? "Drop to add…" : "Drag a file here or click to browse"}
             </p>
-            <p className="text-xs text-slate-500">PDF, JPEG, PNG · 10 MB max</p>
+            <p className="text-xs text-slate-500">PDF, JPEG, PNG, or iPhone photo (HEIC) · 10 MB max</p>
           </div>
         </CardContent>
       </Card>

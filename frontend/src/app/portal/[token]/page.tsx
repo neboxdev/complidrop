@@ -5,6 +5,12 @@ import { useState, useCallback, useEffect } from "react";
 import { useDropzone, type FileRejection } from "react-dropzone";
 import { UploadCloud, CheckCircle2, ShieldCheck, RefreshCw } from "lucide-react";
 import { ApiEnvelope } from "@/lib/api";
+import {
+  rejectionCopy,
+  UPLOAD_ACCEPT,
+  UPLOAD_MAX_BYTES,
+  UPLOAD_PICKER_ACCEPT,
+} from "@/lib/upload-policy";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5292";
 
@@ -57,31 +63,8 @@ type UploadError = {
   retryFile: File | null;
 };
 
-// Map react-dropzone's machine-readable rejection codes to vendor-facing
-// human copy. Keep the strings short — the portal target audience is a
-// non-technical user landing here once.
-function rejectionCopy(rejections: FileRejection[]): string | null {
-  if (rejections.length === 0) return null;
-  const first = rejections[0].errors[0];
-  switch (first?.code) {
-    case "file-invalid-type":
-      // HEIC/HEIF (the iPhone camera default) is now accepted and transcoded to
-      // JPEG server-side (#220), so the old "switch to Most Compatible" workaround
-      // is gone. This now only fires for genuinely unsupported types (a Word doc, a
-      // video, a .zip) — point at the formats that do work.
-      return "We can't read that file type. Please upload a PDF or a photo (JPEG, PNG, or HEIC).";
-    case "file-too-large":
-      // Drop the desktop "split/compress" language — on a phone-photo surface
-      // the actionable fix is to reshoot from further back or send a PDF. (#196 review)
-      return "That file is over the 10 MB limit. If it's a photo, try taking it again from a bit further back, or upload a PDF.";
-    case "file-too-small":
-      return "That file is empty.";
-    case "too-many-files":
-      return "Please drop one file at a time.";
-    default:
-      return first?.message ?? "That file couldn't be accepted.";
-  }
-}
+// rejectionCopy moved to @/lib/upload-policy (#265) — the dashboard documents
+// dropzone now shares the same code→copy mapping and accept list.
 
 // Branded loading state that mirrors the portal shell (secure-upload brand +
 // a skeleton dropzone) instead of a bare unstyled "Loading…". The portal is a
@@ -275,16 +258,11 @@ export default function PortalPage() {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: {
-      "application/pdf": [".pdf"],
-      "image/jpeg": [".jpg", ".jpeg"],
-      "image/png": [".png"],
-      // iPhone "High Efficiency" photos. Accepted here and transcoded to JPEG
-      // server-side on ingest (#220) — no more "switch to Most Compatible" dead-end.
-      "image/heic": [".heic"],
-      "image/heif": [".heif"],
-    },
-    maxSize: 10 * 1024 * 1024,
+    // Shared accept list + size cap (@/lib/upload-policy): PDF + the photo formats
+    // the backend admits, incl. HEIC/HEIF (iPhone "High Efficiency" photos, transcoded
+    // to JPEG server-side on ingest, #220).
+    accept: UPLOAD_ACCEPT,
+    maxSize: UPLOAD_MAX_BYTES,
     disabled: atQuota,
   });
 
@@ -366,16 +344,14 @@ export default function PortalPage() {
                 : "border-slate-200 hover:border-sky-300 hover:bg-sky-50/30 cursor-pointer"
           }`}
         >
-          {/* Override react-dropzone's input `accept` to include `image/*` so the
-              native file picker on iOS/Android surfaces "Take Photo" — a vendor
-              photographing a paper certificate is the common mobile case. The
-              dropzone's own onDrop still validates against PDF/JPEG/PNG/HEIC + 10 MB
-              (HEIC is transcoded to JPEG server-side, #220), so a non-document pick
-              (a video, a .zip) is rejected with clear copy. NOTE: the explicit
-              `accept` MUST stay AFTER the `{...getInputProps()}` spread — react-dropzone
-              injects its own narrower `accept` and last-prop-wins is what lets this
-              override take effect. (#196) */}
-          <input {...getInputProps()} accept="image/*,application/pdf" />
+          {/* The shared picker override surfaces "Take Photo" on iOS/Android — a vendor
+              photographing a paper certificate is the common mobile case; the dropzone's
+              own onDrop still validates the pick (UPLOAD_ACCEPT + 10 MB; HEIC transcodes
+              server-side, #220) so a non-document pick is rejected with clear copy.
+              NOTE: `accept` MUST stay AFTER the `{...getInputProps()}` spread —
+              react-dropzone injects its own narrower `accept` and last-prop-wins is what
+              lets this override take effect. (#196) */}
+          <input {...getInputProps()} accept={UPLOAD_PICKER_ACCEPT} />
           <UploadCloud className="w-12 h-12 mx-auto text-sky-500" />
           <p className="mt-3 text-base font-medium text-slate-800">
             {atQuota ? (

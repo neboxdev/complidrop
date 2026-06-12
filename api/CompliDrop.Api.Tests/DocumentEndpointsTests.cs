@@ -167,6 +167,34 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
+    public async Task Upload_with_no_file_field_returns_400()
+    {
+        // Mirrors the portal's pin (#265 review): a multipart body that carries other
+        // fields but omits "file" — a real client that filled metadata and forgot the
+        // attachment — must 400 with the validation.file code, not 500.
+        var auth = await RegisterAndLoginAsync();
+
+        var form = new MultipartFormDataContent { { new StringContent("coi"), "documentType" } };
+        var resp = await auth.Client.PostAsync("/api/documents/upload", form);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("validation.file");
+    }
+
+    [Fact]
+    public async Task Upload_with_zero_byte_file_returns_400()
+    {
+        var auth = await RegisterAndLoginAsync();
+
+        var resp = await auth.Client.PostAsync("/api/documents/upload", UploadForm([], "empty.pdf", "application/pdf"));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("validation.file");
+    }
+
+    [Fact]
     public async Task Upload_accepts_a_heic_photo_and_stores_it_as_jpeg()
     {
         var auth = await RegisterAndLoginAsync();
