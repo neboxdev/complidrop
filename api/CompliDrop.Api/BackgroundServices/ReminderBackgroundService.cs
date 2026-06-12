@@ -15,15 +15,6 @@ public class ReminderBackgroundService(
 {
     private const int TargetLocalHour = 8;
 
-    /// <summary><see cref="ReminderLog.Status"/> values this worker writes. <c>failed</c> means
-    /// Resend returned non-2xx and never accepted the mail — the recipient was not served, so the
-    /// row is excluded from dedupe and retried in place on a later tick the same local day
-    /// (ADR 0025). <c>sent</c> means accepted; the inbound webhook may advance it further
-    /// (delivered / bounced / … — see <c>ReminderStatusPrecedence</c>), and every advanced status
-    /// keeps counting as served.</summary>
-    internal const string StatusSent = "sent";
-    internal const string StatusFailed = "failed";
-
     /// <summary>
     /// Trailing window for the editable-time-zone double-send guard (#205). The org time zone
     /// became user-editable in #185; changing it around the local 08:00 window can open a
@@ -108,7 +99,8 @@ public class ReminderBackgroundService(
                     .ToListAsync(ct);
                 if (reminders.Count == 0) continue;
 
-                var localDate = DateOnly.FromDateTime(ToLocal(org.TimeZone, nowUtc));
+                var localNow = ToLocal(org.TimeZone, nowUtc);
+                var localDate = DateOnly.FromDateTime(localNow);
 
                 // Per-(org, sendDate) coordination across replicas. If another instance is currently
                 // processing this same tuple, skip — its work will populate the ReminderLog rows
@@ -167,12 +159,17 @@ public class ReminderBackgroundService(
                     // signup typo that bounces every reminder silently. We still SEND (soft-gate
                     // — never withhold a paying org's reminders over a verification gap), but
                     // surface the risk in logs so a forming dead-letter is visible to an operator
-                    // instead of invisible. Fires at most once per org per local-08:00 tick.
+                    // instead of invisible. Gated to the org's 08:00 hour so it keeps firing at
+                    // most once per org per local day — the ADR 0025 catch-up window re-qualifies
+                    // the org on every later tick, and repeating an operator signal (which embeds
+                    // the addresses) ~16x/day is noise, not visibility. A day whose 08:00 tick
+                    // was missed skips the warning rather than repeating it; the flag is a
+                    // visibility aid, not delivery-critical.
                     var unverifiedInternal = internalRecipients
                         .Where(r => r.EmailVerifiedAt is null)
                         .Select(r => r.Email)
                         .ToList();
-                    if (unverifiedInternal.Count > 0)
+                    if (unverifiedInternal.Count > 0 && localNow.Hour == TargetLocalHour)
                         logger.LogWarning(
                             "Reminder tick: org {OrgId} has {Count} unverified internal recipient(s); reminders may dead-letter to {Emails}.",
                             org.Id, unverifiedInternal.Count, string.Join(", ", unverifiedInternal));
@@ -262,7 +259,7 @@ public class ReminderBackgroundService(
                             // complained, opened, clicked) — describes accepted mail and stays
                             // deduped; in particular a hard bounce must never auto-resend.
                             var alreadyServed = priorLogs
-                                .Where(l => l.Status != StatusFailed)
+                                .Where(l => l.Status != ReminderLogStatus.Failed)
                                 .Select(l => l.RecipientEmail)
                                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -275,7 +272,7 @@ public class ReminderBackgroundService(
                             // not, so case-variant rows written across days could otherwise collide
                             // on the dictionary key.
                             var failedToday = priorLogs
-                                .Where(l => l.Status == StatusFailed && l.SendDate == sendDate)
+                                .Where(l => l.Status == ReminderLogStatus.Failed && l.SendDate == sendDate)
                                 .GroupBy(l => l.RecipientEmail, StringComparer.OrdinalIgnoreCase)
                                 .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
@@ -283,16 +280,20 @@ public class ReminderBackgroundService(
                             {
                                 if (alreadyServed.Contains(recipient)) continue;
 
+                                failedToday.TryGetValue(recipient, out var failedRow);
+
                                 try
                                 {
                                     var subject = reminder.EmailSubjectTemplate
                                                   ?? $"[{org.Name}] {doc.OriginalFileName} expires in {reminder.DaysBefore} days";
                                     var body = BuildBody(org.Name, doc, reminder.DaysBefore);
-                                    var messageId = await email.SendAsync(recipient, subject, body, ct);
+                                    var idempotencyKey = BuildSendIdempotencyKey(
+                                        reminder.Id, doc.Id, sendDate, recipient, failedRow?.SentAt);
+                                    var messageId = await email.SendAsync(recipient, subject, body, ct, idempotencyKey);
                                     var attemptedAt = timeProvider.GetUtcNow().UtcDateTime;
-                                    var status = messageId is null ? StatusFailed : StatusSent;
+                                    var status = messageId is null ? ReminderLogStatus.Failed : ReminderLogStatus.Sent;
 
-                                    if (failedToday.TryGetValue(recipient, out var failedRow))
+                                    if (failedRow is not null)
                                     {
                                         // Retry path: heal (or re-stamp) the existing row in place.
                                         // SentAt records the LATEST attempt instant (ADR 0025).
@@ -327,24 +328,23 @@ public class ReminderBackgroundService(
                                 // Defensive: the per-(org, sendDate) advisory lock above makes this
                                 // path nearly unreachable in multi-instance deploys — the only residual
                                 // trigger is a hashtextextended collision in the lock key space (2^63).
-                                // We keep the catch + detach because the cost is zero and the recovery
-                                // shape is the same one we'd want if a future code path were to bypass
-                                // the lock.
+                                // We keep the catch because the cost is zero and the recovery shape is
+                                // the same one we'd want if a future code path were to bypass the lock.
                                 logger.LogWarning(ex, "Reminder log upsert conflict (likely concurrent tick) for doc {DocumentId}", doc.Id);
-
-                                // After a failed SaveChanges the pending ReminderLog entries (Added
-                                // inserts and Modified retry heals) stay in the change tracker. The
-                                // next doc iteration's SaveChangesAsync would re-attempt them and
-                                // throw again — cascading the failure to every doc remaining in this
-                                // tick. Detach them so each doc gets a clean slate; a detached retry
-                                // heal is re-attempted naturally on the next qualifying tick.
-                                foreach (var entry in db.ChangeTracker.Entries<ReminderLog>()
-                                             .Where(e => e.State is EntityState.Added or EntityState.Modified)
-                                             .ToList())
-                                {
-                                    entry.State = EntityState.Detached;
-                                }
                             }
+
+                            // One Clear() does two jobs. Recovery: after a failed save the pending
+                            // Added/Modified ReminderLog entries would be re-attempted by the NEXT
+                            // doc's SaveChangesAsync and cascade the failure to every doc remaining
+                            // in this tick; clearing gives each doc a clean slate (a dropped retry
+                            // heal is re-attempted naturally on the next qualifying tick). Bounding:
+                            // this context spans every org in the tick, and saved rows would
+                            // otherwise linger as Unchanged — with the catch-up window the tracker
+                            // would grow with the whole day's send volume and each per-doc save's
+                            // DetectChanges sweep would re-scan all of it. Nothing references the
+                            // tracked entities past this point: every doc iteration re-queries its
+                            // own priorLogs.
+                            db.ChangeTracker.Clear();
                         }
                     }
                 }
@@ -392,6 +392,31 @@ public class ReminderBackgroundService(
     /// </summary>
     internal static string BuildOrgDayLockKey(Guid orgId, DateOnly sendDate) =>
         $"reminder:{orgId:N}:{sendDate:yyyyMMdd}";
+
+    /// <summary>
+    /// Deterministic Resend <c>Idempotency-Key</c> for one reminder send. Retries are
+    /// at-least-once (ADR 0025): a transport throw after Resend accepted the mail, or a crash
+    /// between the accept and the per-doc SaveChanges, leaves no usable record — the next
+    /// qualifying tick re-attempts. That re-attempt recomputes the SAME key (its predecessor
+    /// recorded nothing, so <paramref name="priorFailedAttemptAt"/> is unchanged) and Resend
+    /// dedupes it server-side instead of double-delivering. A retry after a RECORDED failure
+    /// salts the key with that attempt's <c>SentAt</c>, so it reaches Resend as a fresh request —
+    /// Resend's docs don't specify whether an error response is cached against its key, and a
+    /// genuine retry must never be served a cached error. Correct under either caching semantic.
+    /// <para/>
+    /// The recipient is lowercased so the worker's case-insensitive recipient dedupe can't mint
+    /// two keys for the same human. SHA-256 keeps the key short (73 chars, Resend cap 256) and
+    /// recipient-opaque; Resend retains keys for 24h, and the SendDate component scopes the key
+    /// to the org-local day regardless.
+    /// </summary>
+    internal static string BuildSendIdempotencyKey(
+        Guid reminderId, Guid documentId, DateOnly sendDate, string recipient, DateTime? priorFailedAttemptAt)
+    {
+        var tuple = $"reminder:{reminderId:N}:{documentId:N}:{sendDate:yyyyMMdd}" +
+                    $":{recipient.ToLowerInvariant()}:{priorFailedAttemptAt?.Ticks ?? 0}";
+        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(tuple));
+        return $"reminder-{Convert.ToHexStringLower(hash)}";
+    }
 
     /// <summary>An org's internal (admin) recipient plus its verification state, projected for the
     /// dead-letter-visibility check (#184). EmailVerifiedAt == null ⇒ a possibly-typo'd address.</summary>

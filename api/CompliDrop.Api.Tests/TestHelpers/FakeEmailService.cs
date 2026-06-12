@@ -41,7 +41,7 @@ public sealed class FakeEmailService : IEmailService
         NextSendThrows = null;
     }
 
-    public Task<string?> SendAsync(string toEmail, string subject, string htmlBody, CancellationToken ct)
+    public Task<string?> SendAsync(string toEmail, string subject, string htmlBody, CancellationToken ct, string? idempotencyKey = null)
     {
         if (!IsEnabled) return Task.FromResult<string?>(null);
 
@@ -54,14 +54,14 @@ public sealed class FakeEmailService : IEmailService
         if (NextSendReturnsNull)
         {
             NextSendReturnsNull = false;
-            _sends.Enqueue(new Sent(toEmail, subject, htmlBody, MessageId: null));
+            _sends.Enqueue(new Sent(toEmail, subject, htmlBody, MessageId: null, idempotencyKey));
             return Task.FromResult<string?>(null);
         }
 
         var id = $"resend_test_{Interlocked.Increment(ref _counter):D6}";
-        _sends.Enqueue(new Sent(toEmail, subject, htmlBody, id));
+        _sends.Enqueue(new Sent(toEmail, subject, htmlBody, id, idempotencyKey));
         return Task.FromResult<string?>(id);
     }
 
-    public sealed record Sent(string ToEmail, string Subject, string HtmlBody, string? MessageId);
+    public sealed record Sent(string ToEmail, string Subject, string HtmlBody, string? MessageId, string? IdempotencyKey = null);
 }

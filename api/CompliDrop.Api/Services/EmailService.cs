@@ -9,7 +9,16 @@ namespace CompliDrop.Api.Services;
 public interface IEmailService
 {
     bool IsEnabled { get; }
-    Task<string?> SendAsync(string toEmail, string subject, string htmlBody, CancellationToken ct);
+
+    /// <summary>
+    /// Sends one email via Resend; returns the Resend message id, or null when the send was not
+    /// accepted. <paramref name="idempotencyKey"/>, when set, is forwarded as Resend's
+    /// <c>Idempotency-Key</c> header (24h server-side TTL): a re-attempt carrying the key of an
+    /// already-accepted request is deduped at Resend instead of double-delivering. Callers whose
+    /// sends can be retried (the reminder worker, ADR 0025) pass a deterministic key; one-shot
+    /// transactional sends (verify / reset emails) may leave it null.
+    /// </summary>
+    Task<string?> SendAsync(string toEmail, string subject, string htmlBody, CancellationToken ct, string? idempotencyKey = null);
 }
 
 public class ResendEmailService(
@@ -22,7 +31,7 @@ public class ResendEmailService(
     public bool IsEnabled =>
         !string.IsNullOrWhiteSpace(_cfg.ApiKey) && !string.IsNullOrWhiteSpace(_cfg.FromEmail);
 
-    public async Task<string?> SendAsync(string toEmail, string subject, string htmlBody, CancellationToken ct)
+    public async Task<string?> SendAsync(string toEmail, string subject, string htmlBody, CancellationToken ct, string? idempotencyKey = null)
     {
         if (!IsEnabled)
         {
@@ -44,6 +53,8 @@ public class ResendEmailService(
             Content = JsonContent.Create(payload)
         };
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _cfg.ApiKey);
+        if (!string.IsNullOrEmpty(idempotencyKey))
+            req.Headers.Add("Idempotency-Key", idempotencyKey);
 
         using var resp = await client.SendAsync(req, ct);
         var body = await resp.Content.ReadAsStringAsync(ct);

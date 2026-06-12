@@ -49,6 +49,13 @@ target dates, and a late send for *yesterday's* target would carry body copy ("e
 — that's N days from today") that is no longer true. Cross-day catch-up would be a send-semantics
 and template question, not a robustness patch; it stays out of scope.
 
+This revises the **one-qualifying-tick-per-(org, local day)** premise stated as load-bearing in
+ADR 0007's and ADR 0008's Context sections. Both *decisions* survive unchanged: every qualifying
+tick of one org-local day derives the same `localDate`, so all of a day's sends still share one
+`SendDate` (ADR 0007's invariant) and one advisory-lock key (ADR 0008's serialization unit). The
+premise becomes "all qualifying ticks of a local day agree on `localDate`", which is what those
+decisions actually needed.
+
 ### Half B — failed sends retry in place
 
 The worker's pre-send dedupe lookup now counts only rows with `Status != "failed"` as "already
@@ -71,6 +78,16 @@ the wrong response to a complaint).
 Retry cadence is the catch-up window itself: one attempt per hourly tick while the org-local hour
 is ≥ 8, ceasing at local midnight — at most ~16 attempts for a send that keeps failing, each one
 HTTP call to Resend (failed attempts are not billed sends).
+
+Retries make delivery **at-least-once**: a transport throw after Resend already accepted the
+mail, or a crash between the accept and the per-doc save, leaves no usable record, and the next
+tick re-attempts a send the recipient may already have received. Each send therefore carries a
+deterministic Resend `Idempotency-Key` (24h server-side TTL) hashed from
+`(ReminderId, DocumentId, SendDate, recipient)`: the re-attempt after an accepted-but-unrecorded
+send recomputes the same key and is deduped at Resend instead of double-delivering. A retry after
+a **recorded** failure salts the key with that attempt's `SentAt` — Resend's docs don't specify
+whether error responses are cached against their key, and a genuine retry must never be served a
+cached error — so the scheme is correct under either caching semantic.
 
 This formally supersedes ADR 0002's Neutral clause ("failed rows are treated identically to sent
 for dedupe") and ADR 0015's carry-over of it. The unique index, the per-recipient semantics
@@ -119,8 +136,15 @@ guard is retained as defense-in-depth and still covers prior sends recorded on a
   page semantics shift from "when it failed" to "when it last failed", which is the more
   actionable reading anyway.
 - An outage spanning an org's entire 08:00–24:00 local window still drops that day's reminders —
-  the residual accepted risk. Mitigation remains the worker-heartbeat monitor (tech doc §11), not
-  cross-day catch-up.
+  the residual accepted risk. Mitigation remains the worker-heartbeat monitor (tech doc §15,
+  Monitoring & Observability), not cross-day catch-up.
+- Duplicate-send protection on the at-least-once paths leans on Resend honoring the
+  `Idempotency-Key` header (24h TTL). If Resend ever dropped or shortened that guarantee, the
+  worst case reverts to one duplicate email per accepted-but-unrecorded incident — bounded, and
+  strictly better than the pre-#270 alternative of dropping the day.
+- The #184 unverified-recipient warning stays gated to the org's 08:00 hour so it keeps its
+  once-per-local-day cadence under the widened window; a day whose 08:00 tick was missed skips
+  the warning entirely (the catch-up send still goes out — only the operator signal is skipped).
 
 ### Neutral
 
@@ -128,9 +152,23 @@ guard is retained as defense-in-depth and still covers prior sends recorded on a
   deliveries. That is the correct customer-facing reading (the reminder *was* delivered); operator
   visibility of the transient failure lives in structured logs. The #241 history work can add
   attempt counts if it proves to matter.
-- The audit interceptor records the in-place update as a normal entity mutation (Before/After
-  JSON), so the failed→sent transition is reconstructible from the audit log even though the
-  reminder history shows only the final state.
+- The failed→sent transition is **not** recorded in the audit log: `AuditSaveChangesInterceptor`
+  requires an authenticated principal's `OrganizationId` (it returns early without one), and the
+  worker's service scope has no HttpContext — so no worker mutation, insert or heal, produces an
+  `AuditLog` row (pre-existing behavior, unchanged here). The transition is visible in structured
+  logs (the Resend non-2xx error log and the send-failure log). If system-actor audit rows are
+  ever wanted, that is its own ticket, not a side effect of this one.
+- Evening catch-up sends can disagree with the dashboard's day count for a few hours: the email
+  computes "N days from today" in org-local terms while `daysUntilExpiry` on the documents API
+  uses UTC dates (#263 convention). A NY send at 20:00 local (01:00 UTC next day) says "14 days"
+  while the dashboard shows 13 until the UTC day catches up. The email is correct in wall-clock
+  terms; aligning the display side is #263-family follow-up work, not a reminder bug.
+- The pre-existing lost-webhook window (a Resend status event arriving between `SendAsync`
+  acceptance and the per-doc save matches zero rows and is dropped with a 200) is unchanged by
+  this ADR: the window count equals the send count, exactly as before the catch-up window.
+  Returning non-2xx on zero-row matches to force Svix retries was considered and rejected — the
+  same Resend account sends auth emails whose message ids legitimately have no `ReminderLog` row,
+  and those would retry pointlessly forever.
 
 ## Alternatives considered
 
@@ -180,7 +218,18 @@ All in [ReminderBackgroundServiceTests](../../api/CompliDrop.Api.Tests/ReminderB
   regression.
 - `Catch_up_tick_does_not_resend_what_08_already_sent` — idempotency of the widened window.
 - `Before_local_08_nothing_is_sent` — the window still opens at 08:00, not earlier.
+- `Catch_up_still_fires_at_the_last_hour_of_the_local_day` and
+  `Yesterdays_missed_target_is_not_caught_up_the_next_local_day` — both edges of the window's
+  close (open through 23:59; never across local midnight).
+- `Window_fallback_for_unresolvable_time_zone_uses_utc_hours` — the `TryFindTimeZone == null`
+  defensive branch carries the same catch-up semantic.
 - `Send_throw_leaves_no_row_and_a_later_tick_retries` — the throw-path gap.
+- `Unverified_recipient_warning_fires_only_during_the_08_hour` — the #184 operator signal keeps
+  its once-per-day cadence under the widened window.
+- `BuildSendIdempotencyKey_is_deterministic_and_varies_by_tuple_and_failure_salt`,
+  `Reminder_sends_carry_a_deterministic_resend_idempotency_key`,
+  `Retry_after_a_throw_reuses_the_predecessors_idempotency_key`,
+  `Retry_after_recorded_failure_uses_a_fresh_idempotency_key` — the at-least-once dedupe scheme.
 
 ## References
 

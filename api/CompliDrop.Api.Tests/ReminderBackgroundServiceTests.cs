@@ -218,6 +218,165 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
     }
 
+    [Fact]
+    public async Task Catch_up_still_fires_at_the_last_hour_of_the_local_day()
+    {
+        // Pins the window's CLOSING edge: open through 23:59 org-local. 04:00 UTC Jan 16 is
+        // 23:00 NY Jan 15 — still localDate Jan 15, so the same target day catches up.
+        var seed = await SeedReminderAsync(NyEightAm);
+        var elevenPmNy = new DateTimeOffset(2026, 1, 16, 4, 0, 0, TimeSpan.Zero);
+
+        await BuildWorker(elevenPmNy).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle().Which.ToEmail.Should().Be("owner@example.com");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Yesterdays_missed_target_is_not_caught_up_the_next_local_day()
+    {
+        // ADR 0025's deliberate bound: catch-up ends at org-local midnight. A day with NO
+        // qualifying tick at all (outage spanning 08:00–24:00 local) stays dropped — the next
+        // local day derives a different target date and must not late-send yesterday's reminder
+        // with now-false "N days from today" copy.
+        var seed = await SeedReminderAsync(NyEightAm); // doc targets NY-local Jan 15
+
+        // First tick ever runs the NEXT local day, 09:00 NY Jan 16.
+        var nineAmNextDay = new DateTimeOffset(2026, 1, 16, 14, 0, 0, TimeSpan.Zero);
+        await BuildWorker(nineAmNextDay).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().BeEmpty("yesterday's target must not be late-sent on a different local day");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Window_fallback_for_unresolvable_time_zone_uses_utc_hours()
+    {
+        // The TryFindTimeZone == null branch of IsLocalSendWindow falls back to UTC and must
+        // carry the same `>=` catch-up semantic as the resolved path. No writer produces an
+        // unresolvable zone today (NormalizeTimeZone validates at signup/update), so this is the
+        // defensive branch — pinned here because it changed in #270 and nothing else covers it.
+        // overrideExpirationUtc bypasses the seed helper's CLR zone lookup, which would throw.
+        var faceDate = new DateTime(2026, 2, 14, 0, 0, 0, DateTimeKind.Utc); // UTC Jan 15 + 30
+        var seed = await SeedReminderAsync(
+            new DateTimeOffset(2026, 1, 15, 7, 0, 0, TimeSpan.Zero),
+            timeZone: "Mars/Olympus",
+            overrideExpirationUtc: faceDate);
+
+        // 07:00 UTC — before the fallback window opens.
+        await BuildWorker(new DateTimeOffset(2026, 1, 15, 7, 0, 0, TimeSpan.Zero))
+            .ProcessHourlyTickAsync(CancellationToken.None);
+        Email.Sends.Should().BeEmpty();
+
+        // 11:00 UTC — inside the fallback catch-up window; the missed 08:00 is caught up.
+        await BuildWorker(new DateTimeOffset(2026, 1, 15, 11, 0, 0, TimeSpan.Zero))
+            .ProcessHourlyTickAsync(CancellationToken.None);
+        Email.Sends.Should().ContainSingle().Which.ToEmail.Should().Be("owner@example.com");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Unverified_recipient_warning_fires_only_during_the_08_hour()
+    {
+        // The #184 dead-letter warning embeds recipient addresses; under the catch-up window it
+        // stays gated to the org's 08:00 hour so it keeps its at-most-once-per-local-day cadence
+        // instead of repeating on every qualifying tick (~16x/day). The send itself still
+        // catches up — only the operator signal is gated.
+        var seed = await SeedReminderAsync(NyEightAm, internalEmail: "owner@example.com", internalEmailVerified: false);
+        var logger = new ListLogger<ReminderBackgroundService>();
+
+        await BuildWorker(NyEightAm.AddHours(3), logger).ProcessHourlyTickAsync(CancellationToken.None); // 11:00 NY
+
+        Email.Sends.Should().ContainSingle("the catch-up send must not be withheld");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+        logger.Entries.Should().NotContain(e =>
+            e.Level == LogLevel.Warning && e.Message.Contains("unverified"));
+    }
+
+    // ----- ADR 0025: Resend idempotency keys on reminder sends --------------------------------
+    // Retries are at-least-once: a throw after Resend accepted, or a crash between the accept
+    // and the per-doc save, leaves no usable record and the next tick re-attempts. The
+    // deterministic Idempotency-Key makes Resend dedupe exactly those re-attempts, while a retry
+    // after a RECORDED failure gets a fresh (salted) key so it can never be served a cached
+    // error response.
+
+    [Fact]
+    public void BuildSendIdempotencyKey_is_deterministic_and_varies_by_tuple_and_failure_salt()
+    {
+        var reminderId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var docId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+        var day = new DateOnly(2026, 1, 15);
+
+        var key = ReminderBackgroundService.BuildSendIdempotencyKey(reminderId, docId, day, "owner@example.com", null);
+
+        // Deterministic, case-insensitive on the recipient, within Resend's 256-char cap.
+        key.Should().Be(ReminderBackgroundService.BuildSendIdempotencyKey(reminderId, docId, day, "OWNER@example.com", null));
+        key.Length.Should().BeLessThan(256);
+        key.Should().NotContain("owner", "the key must not leak the recipient address");
+
+        // Every tuple component and the failure salt mint a distinct key.
+        ReminderBackgroundService.BuildSendIdempotencyKey(Guid.NewGuid(), docId, day, "owner@example.com", null)
+            .Should().NotBe(key);
+        ReminderBackgroundService.BuildSendIdempotencyKey(reminderId, Guid.NewGuid(), day, "owner@example.com", null)
+            .Should().NotBe(key);
+        ReminderBackgroundService.BuildSendIdempotencyKey(reminderId, docId, day.AddDays(1), "owner@example.com", null)
+            .Should().NotBe(key);
+        ReminderBackgroundService.BuildSendIdempotencyKey(reminderId, docId, day, "other@example.com", null)
+            .Should().NotBe(key);
+        ReminderBackgroundService.BuildSendIdempotencyKey(reminderId, docId, day, "owner@example.com", NyEightAm.UtcDateTime)
+            .Should().NotBe(key);
+    }
+
+    [Fact]
+    public async Task Reminder_sends_carry_a_deterministic_resend_idempotency_key()
+    {
+        var seed = await SeedReminderAsync(NyEightAm);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        var expected = ReminderBackgroundService.BuildSendIdempotencyKey(
+            seed.ReminderId, seed.DocumentId, new DateOnly(2026, 1, 15), "owner@example.com", null);
+        Email.Sends.Should().ContainSingle().Which.IdempotencyKey.Should().Be(expected);
+    }
+
+    [Fact]
+    public async Task Retry_after_a_throw_reuses_the_predecessors_idempotency_key()
+    {
+        // The marquee dedupe case: tick 1's send throws after (for all we know) Resend accepted
+        // it — no row is written. Tick 2 recomputes the SAME key, so if the mail was accepted,
+        // Resend replays the original response instead of double-delivering.
+        var seed = await SeedReminderAsync(NyEightAm);
+        Email.NextSendThrows = new HttpRequestException("timeout after accept");
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+        await BuildWorker(NyEightAm.AddHours(1)).ProcessHourlyTickAsync(CancellationToken.None);
+
+        var baseKey = ReminderBackgroundService.BuildSendIdempotencyKey(
+            seed.ReminderId, seed.DocumentId, new DateOnly(2026, 1, 15), "owner@example.com", null);
+        Email.Sends.Should().ContainSingle().Which.IdempotencyKey.Should().Be(baseKey);
+    }
+
+    [Fact]
+    public async Task Retry_after_recorded_failure_uses_a_fresh_idempotency_key()
+    {
+        // A RECORDED failure (Status='failed', SentAt stamped) means Resend answered non-2xx.
+        // The retry salts the key with that attempt's SentAt so it reaches Resend as a fresh
+        // request — never a replay of a possibly-cached error response.
+        var seed = await SeedReminderAsync(NyEightAm);
+        Email.NextSendReturnsNull = true;
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+        await BuildWorker(NyEightAm.AddHours(1)).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().HaveCount(2);
+        var day = new DateOnly(2026, 1, 15);
+        Email.Sends[0].IdempotencyKey.Should().Be(ReminderBackgroundService.BuildSendIdempotencyKey(
+            seed.ReminderId, seed.DocumentId, day, "owner@example.com", null));
+        Email.Sends[1].IdempotencyKey.Should().Be(ReminderBackgroundService.BuildSendIdempotencyKey(
+            seed.ReminderId, seed.DocumentId, day, "owner@example.com", NyEightAm.UtcDateTime));
+        Email.Sends[1].IdempotencyKey.Should().NotBe(Email.Sends[0].IdempotencyKey);
+    }
+
     // ----- #184: unverified internal recipient dead-letter flag ------------------------------
 
     [Fact]
@@ -1034,8 +1193,10 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         var kiritimatiTick = new DateTimeOffset(2026, 1, 16, 18, 0, 0, TimeSpan.Zero); // Kiritimati 08:00 Jan 17
         await BuildWorker(kiritimatiTick).ProcessHourlyTickAsync(CancellationToken.None);
 
-        // localDate Jan 17 (a 2-day shift); without the SentAt guard it would double-send. The
-        // 23h-old prior send is inside the 26h window → suppressed.
+        // localDate Jan 17 (a 2-day shift). Post-#270 the Jan 17 UTC-day bracket is disjoint from
+        // the doc's Jan 15 face date (structural no-send); the 23h-old prior send inside the 26h
+        // SentAt window is the defense-in-depth layer behind it, pinned directly by the
+        // 25h/27h/48h width theory above.
         Email.Sends.Should().ContainSingle("a 2-day SendDate shift from an extreme zone edit must not re-send");
         (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
     }
@@ -1243,6 +1404,8 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
     [InlineData("bounced")]
     [InlineData("complained")]
     [InlineData("delivered")]
+    [InlineData("opened")]
+    [InlineData("clicked")]
     public async Task Non_failed_statuses_block_retry(string status)
     {
         // Only "failed" (Resend never accepted the mail) retries. Webhook-advanced statuses

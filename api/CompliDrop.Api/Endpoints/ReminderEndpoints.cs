@@ -144,11 +144,11 @@ public static class ReminderEndpoints
 
         var status = type switch
         {
-            "email.delivered" => "delivered",
-            "email.bounced" => "bounced",
-            "email.complained" => "complained",
-            "email.opened" => "opened",
-            "email.clicked" => "clicked",
+            "email.delivered" => ReminderLogStatus.Delivered,
+            "email.bounced" => ReminderLogStatus.Bounced,
+            "email.complained" => ReminderLogStatus.Complained,
+            "email.opened" => ReminderLogStatus.Opened,
+            "email.clicked" => ReminderLogStatus.Clicked,
             _ => null
         };
         if (status is null) return Results.Ok(new { data = (object?)null, error = (object?)null });
