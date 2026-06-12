@@ -49,11 +49,14 @@ public class Subscription
     // so existing lifetime counters were forgiven on deploy and a fresh row starts at zero.
     public DateOnly SpendMonthStart { get; set; } = DateOnly.MinValue;
     public DateTime? CurrentPeriodEnd { get; set; }
-    // Stripe `created` of the newest APPLIED webhook event (#275, ADR 0023). Handlers skip
-    // state application for events strictly older than this fence, so a failed-then-retried
-    // event (up to Stripe's ~3-day retry window, ADR 0020) cannot overwrite newer state.
-    // Null = no event applied yet (fence open). Ties apply: `created` is second-granularity,
-    // and equal-timestamp re-application is what keeps ADR 0020's crash-window re-apply benign.
+    // Order-resilience fence (#275, ADR 0023): the as-of moment of the newest applied
+    // subscription state — the Stripe `created` of the newest applied webhook event, or the
+    // live subscription's EndedAt when a checkout applied already-terminal live truth.
+    // Handlers skip state application for events strictly older than this fence, so a
+    // failed-then-retried event (up to Stripe's ~3-day retry window, ADR 0020) cannot
+    // overwrite newer state. Null = no event applied yet (fence open). Ties apply: `created`
+    // is second-granularity, and equal-timestamp re-application is what keeps ADR 0020's
+    // crash-window re-apply benign.
     public DateTime? LastStripeEventAt { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }

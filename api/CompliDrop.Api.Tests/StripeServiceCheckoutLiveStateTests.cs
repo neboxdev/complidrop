@@ -81,13 +81,14 @@ public sealed class StripeServiceCheckoutLiveStateTests(IntegrationTestFixture f
         },
     };
 
-    private static string LiveSubscriptionJson(string status, string priceId = "price_annual_test", long? currentPeriodEnd = null) =>
+    private static string LiveSubscriptionJson(string status, string priceId = "price_annual_test", long? currentPeriodEnd = null, long? endedAt = null) =>
         $$"""
         {
           "id": "{{LiveSubId}}",
           "object": "subscription",
           "status": "{{status}}",
           {{(currentPeriodEnd is { } cpe ? $"\"current_period_end\": {cpe}," : "")}}
+          {{(endedAt is { } ea ? $"\"ended_at\": {ea}," : "")}}
           "items": {
             "object": "list",
             "data": [
@@ -96,6 +97,25 @@ public sealed class StripeServiceCheckoutLiveStateTests(IntegrationTestFixture f
           }
         }
         """;
+
+    private static Event SubscriptionUpdatedEvent(DateTime created, string status, string priceId = "price_annual_test") => new()
+    {
+        Id = $"evt_{Guid.NewGuid():N}",
+        Type = "customer.subscription.updated",
+        Created = created,
+        Data = new EventData
+        {
+            Object = new Stripe.Subscription
+            {
+                Id = LiveSubId,
+                Status = status,
+                Items = new StripeList<SubscriptionItem>
+                {
+                    Data = [new SubscriptionItem { Id = "si_1", Price = new Price { Id = priceId } }],
+                },
+            },
+        },
+    };
 
     private async Task<Subscription> ReloadAsync(Guid orgId)
     {
@@ -119,7 +139,7 @@ public sealed class StripeServiceCheckoutLiveStateTests(IntegrationTestFixture f
         stub.LastRequest!.RequestUri!.AbsolutePath.Should().EndWith($"/v1/subscriptions/{LiveSubId}");
         var sub = await ReloadAsync(orgId);
         sub.Plan.Should().Be("annual", "the plan derives from the live price id");
-        sub.Status.Should().Be("active", "the status derives from the live subscription, not a hardcoded literal");
+        sub.Status.Should().Be("active");
         sub.DocumentLimit.Should().BeNull();
         sub.HasVendorPortal.Should().BeTrue();
         sub.StripeCustomerId.Should().Be(LiveCustomerId);
@@ -152,6 +172,61 @@ public sealed class StripeServiceCheckoutLiveStateTests(IntegrationTestFixture f
         sub.LastStripeEventAt.Should().NotBeNull("the terminal-state application still moves the fence");
     }
 
+    [Fact]
+    public async Task Terminal_checkout_stamps_the_fence_at_the_live_ended_at_not_the_stale_checkout_created()
+    {
+        // Review finding on #275 (security + correctness, converged): stamping the fence at
+        // the stale checkout's own `created` left every event created between the checkout
+        // and the Stripe-side cancel un-fenced — a pending retried subscription.updated
+        // ("active", pre-cancel) would re-apply onto the now-linked row and resurrect an
+        // active/paid status on a dead subscription, wedging the 409 already-subscribed
+        // guard against any re-checkout. The fence must land at the subscription's death.
+        var orgId = await SeedFreeOrgAsync();
+        var checkoutCreated = DateTime.UtcNow.AddDays(-2);
+        checkoutCreated = new DateTime(checkoutCreated.Ticks - checkoutCreated.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc);
+        var endedAt = checkoutCreated.AddHours(6);
+        var stub = new StubHttpMessageHandler(HttpStatusCode.OK,
+            LiveSubscriptionJson("canceled", endedAt: new DateTimeOffset(endedAt).ToUnixTimeSeconds()));
+
+        await using var db = CreateSystemDb();
+        await NewService(db, stub).HandleWebhookEventAsync(CheckoutEvent(orgId, checkoutCreated), CancellationToken.None);
+
+        var sub = await ReloadAsync(orgId);
+        sub.LastStripeEventAt.Should().Be(endedAt,
+            "the fence is the as-of moment of the applied live truth — the subscription's end, not the checkout's created");
+    }
+
+    [Fact]
+    public async Task Pre_cancel_update_retry_is_fenced_out_after_a_terminal_checkout_applied()
+    {
+        // The full residual sequence, end-to-end at the service level: checkout (T0) and
+        // subscription.updated(active, T0+5min) both fail delivery during an outage; the
+        // customer cancels (Stripe-side ended_at = T0+6h); deleted no-ops on the unlinked
+        // row and is recorded; the checkout retry lands first → terminal branch applies
+        // free tier, links the row, fences at ended_at; the updated(active) retry — created
+        // BEFORE the cancel — must now read as stale instead of resurrecting active/paid.
+        var orgId = await SeedFreeOrgAsync();
+        var checkoutCreated = DateTime.UtcNow.AddDays(-2);
+        checkoutCreated = new DateTime(checkoutCreated.Ticks - checkoutCreated.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc);
+        var endedAt = checkoutCreated.AddHours(6);
+        var stub = new StubHttpMessageHandler(HttpStatusCode.OK,
+            LiveSubscriptionJson("canceled", endedAt: new DateTimeOffset(endedAt).ToUnixTimeSeconds()));
+
+        await using (var db = CreateSystemDb())
+            await NewService(db, stub).HandleWebhookEventAsync(CheckoutEvent(orgId, checkoutCreated), CancellationToken.None);
+
+        // The retried pre-cancel update needs no outbound call — a fresh service without a
+        // queued stub response proves the subscription-state path stays network-free.
+        await using (var db = CreateSystemDb())
+            await NewService(db, new StubHttpMessageHandler()).HandleWebhookEventAsync(
+                SubscriptionUpdatedEvent(checkoutCreated.AddMinutes(5), "active"), CancellationToken.None);
+
+        var sub = await ReloadAsync(orgId);
+        sub.Status.Should().Be("canceled", "a pre-cancel update retry must not resurrect status on a dead subscription");
+        sub.Plan.Should().Be("free");
+        sub.LastStripeEventAt.Should().Be(endedAt, "the skipped event does not move the fence");
+    }
+
     [Theory]
     [InlineData("incomplete_expired")]
     public async Task Checkout_for_an_expired_incomplete_subscription_keeps_free_tier(string terminalStatus)
@@ -166,6 +241,27 @@ public sealed class StripeServiceCheckoutLiveStateTests(IntegrationTestFixture f
         sub.Plan.Should().Be("free");
         sub.Status.Should().Be("canceled");
         sub.HasVendorPortal.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Checkout_with_a_non_terminal_non_active_live_status_records_that_status_with_the_paid_grant()
+    {
+        // Falsifies "the status derives from the live subscription": with only 'active'
+        // fixtures, reverting to the pre-#275 hardcoded literal passed the whole suite
+        // (review finding). A subscription already past_due at handling time keeps the paid
+        // entitlement grant (finer status handling stays the job of subscription.updated)
+        // but must record the REAL status.
+        var orgId = await SeedFreeOrgAsync();
+        var stub = new StubHttpMessageHandler(HttpStatusCode.OK, LiveSubscriptionJson("past_due", priceId: "price_monthly_test"));
+
+        await using var db = CreateSystemDb();
+        await NewService(db, stub).HandleWebhookEventAsync(CheckoutEvent(orgId, DateTime.UtcNow), CancellationToken.None);
+
+        var sub = await ReloadAsync(orgId);
+        sub.Status.Should().Be("past_due", "the live status is recorded, not a hardcoded 'active'");
+        sub.Plan.Should().Be("pro");
+        sub.DocumentLimit.Should().BeNull("a non-terminal subscription keeps the paid grant");
+        sub.HasVendorPortal.Should().BeTrue();
     }
 
     [Fact]

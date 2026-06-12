@@ -16,10 +16,16 @@ public interface IStripeService
 
     /// <summary>
     /// Implementations MUST be idempotent per event: the webhook endpoint marks an event
-    /// processed only after this returns (#268), so Stripe retries — and the crash window
-    /// between handler success and the dedupe insert — re-invoke it with the same event.
-    /// Keep handlers as state-upserts (re-applying the same event yields the same row state),
-    /// never as increments/appends.
+    /// processed only after this returns (#268, ADR 0020), so Stripe retries — and the crash
+    /// window between handler success and the dedupe insert — re-invoke it with the same
+    /// event. Keep handlers as state-upserts (re-applying the same event yields the same row
+    /// state, except the checkout handler, which deliberately converges on LIVE Stripe truth
+    /// at handling time — still a pure upsert), never as increments/appends/one-shot effects.
+    /// <para/>
+    /// Handlers MUST also be order-resilient (#275, ADR 0023): every subscription-mutating
+    /// handler skips events created strictly before <c>Subscription.LastStripeEventAt</c>
+    /// (<see cref="StripeService.IsStaleEvent"/>; ties apply) and stamps that fence on every
+    /// applied event — at-least-once retries can deliver an event days after newer ones.
     /// </summary>
     Task HandleWebhookEventAsync(Event ev, CancellationToken ct);
 
@@ -284,6 +290,14 @@ public class StripeService(
             sub.Status = "canceled";
             sub.DocumentLimit = 5;
             sub.HasVendorPortal = false;
+            // Fence past the Stripe-side death, not at this (possibly days-old) checkout's
+            // own `created`: the live truth applied here is as-of the subscription's end, so
+            // pending retries of pre-cancel events (subscription.created/updated "active",
+            // created after this checkout but before the cancel) must read as stale —
+            // otherwise they re-link active/paid onto the dead subscription and re-create
+            // the exact #275 resurrection through the side door.
+            var terminalAt = live.EndedAt ?? live.CanceledAt ?? eventCreated;
+            sub.LastStripeEventAt = terminalAt > eventCreated ? terminalAt : eventCreated;
             logger.LogWarning(
                 "checkout.session.completed for org {OrgId} references subscription {SubscriptionId} already {Status} on Stripe — recorded identity, kept free tier",
                 orgId, session.SubscriptionId, live.Status);
@@ -294,10 +308,12 @@ public class StripeService(
             sub.Status = live?.Status ?? "active";
             sub.DocumentLimit = null;
             sub.HasVendorPortal = true;
-            if (live is not null)
-                sub.CurrentPeriodEnd = live.CurrentPeriodEnd == default(DateTime) ? sub.CurrentPeriodEnd : live.CurrentPeriodEnd;
+            // Stripe.net deserializes ABSENT date fields to the Unix epoch (the property
+            // default), never to default(DateTime) — epoch-or-earlier means "not supplied".
+            if (live is not null && live.CurrentPeriodEnd > DateTime.UnixEpoch)
+                sub.CurrentPeriodEnd = live.CurrentPeriodEnd;
+            sub.LastStripeEventAt = eventCreated;
         }
-        sub.LastStripeEventAt = eventCreated;
         sub.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
     }
@@ -330,7 +346,10 @@ public class StripeService(
         }
         sub.Status = s.Status;
         sub.Plan = ResolvePlanFromPriceId(s.Items?.Data?.FirstOrDefault()?.Price?.Id, _cfg);
-        sub.CurrentPeriodEnd = s.CurrentPeriodEnd == default(DateTime) ? null : s.CurrentPeriodEnd;
+        // Epoch-or-earlier = field absent from the payload (Stripe.net deserializes missing
+        // dates to the Unix epoch, never default(DateTime) — the old `== default` guard was
+        // dead code and silently wrote 1970-01-01 for absent fields).
+        sub.CurrentPeriodEnd = s.CurrentPeriodEnd > DateTime.UnixEpoch ? s.CurrentPeriodEnd : null;
         sub.LastStripeEventAt = eventCreated;
         sub.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);

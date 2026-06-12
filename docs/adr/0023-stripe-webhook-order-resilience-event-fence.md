@@ -52,13 +52,24 @@ which is Option 2's mechanism applied exactly where an outbound call already exi
    already fetched the subscription from Stripe for the price id; it now uses the same
    response's `status` and `current_period_end` too. If the live subscription is
    terminal (`canceled` / `incomplete_expired`), the handler records identity and lands
-   on the same free-tier state the deleted-handler writes, instead of granting paid.
+   on the same free-tier state the deleted-handler writes, instead of granting paid —
+   and stamps the fence at the *live subscription's* `EndedAt`/`CanceledAt` (not the
+   checkout's own possibly-days-old `created`), so pending retries of pre-cancel events
+   (`subscription.created/updated` "active", created after the checkout but before the
+   cancel) read as stale rather than resurrecting active/paid through the side door.
+   The fence is therefore "the as-of moment of the newest applied state", which the
+   event `created` equals in every other path.
    This closes the sequence the fence *cannot see*: when the original checkout delivery
    failed, the row was never linked, so `customer.subscription.deleted` no-oped and no
    fence exists when the stale checkout retry arrives. Only live truth stops that
    resurrection. When no live state is available (no subscription id on the session, or
    Stripe unconfigured), the handler falls back to the historical "completed ⇒ active"
    grant.
+
+   This clause refines ADR 0020's "re-applying the same event yields the same row
+   state" wording for the checkout handler: a re-apply converges on live truth *at
+   handling time* (which only ever moves toward terminal for a given subscription id).
+   It remains a pure state-upsert — never increments, appends, or one-shot effects.
 
 The fetch helper also fixes a latent bug found here: it now sets the Stripe API key
 itself (via the `ClientOverride` seam, mirroring `CancelSubscriptionAsync`) —
@@ -80,6 +91,17 @@ checkout webhook 5xx-looped on "No API key provided".
 - Same-second out-of-order events can still apply in arrival order (accepted: that is
   the pre-existing jitter window, and strictly-newer-only ties would break ADR 0020's
   re-apply contract and drop same-second checkout/created pairs).
+- The fence is read-check-write with no row lock or concurrency token, so *concurrent*
+  delivery of two different events for the same row can bypass it within the handler's
+  read-to-commit span (~ms): both read the old fence, the staler event commits last,
+  state and fence regress — and nothing retries, since both events get recorded. This
+  race predates #275 (previously the entire window was exposed, not just concurrent
+  interleavings), and the residual guarantee is honestly "tie-second OR concurrent
+  interleave", not the 1-second window alone. Accepted at current webhook volume: a
+  `SELECT … FOR UPDATE` row lock (the `ExtractionWorker` precedent) is the escalation
+  path if volume grows, but for the checkout handler it would hold a transaction open
+  across the outbound Stripe fetch — the exact thing ADR 0020's Option A was rejected
+  for — so it would need a fetch-before-lock restructure, not a drop-in.
 - The fence is per-`Subscription` row, not per event type: an applied newer event of
   *any* mutating type fences out stale events of *every* type. This is deliberate —
   all four event types converge on the same row state — but a future event type whose
