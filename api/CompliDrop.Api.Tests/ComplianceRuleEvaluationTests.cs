@@ -98,6 +98,140 @@ public class ComplianceRuleEvaluationTests
         note.Should().Be("Expected to contain 'property'.");
     }
 
+    // ---------------- contains: additional_insured checkbox fallback (#272) ----------------
+
+    private static Document CoiWith(object? additionalInsured, string? certificateHolder = null, string? operations = null)
+    {
+        var fields = new Dictionary<string, object>();
+        if (additionalInsured is not null) fields["additional_insured"] = additionalInsured;
+        if (certificateHolder is not null) fields["certificate_holder"] = certificateHolder;
+        if (operations is not null) fields["description_of_operations"] = operations;
+        return new Document { ExtractionFields = JsonSerializer.SerializeToDocument(fields) };
+    }
+
+    [Theory]
+    [InlineData("Y")]
+    [InlineData(" y ")]
+    [InlineData("X")]
+    [InlineData("true")]
+    [InlineData("YES")]
+    public void Additional_insured_affirmative_flag_falls_back_to_certificate_holder(string flag)
+    {
+        // The ACORD ADDL INSD column reading: the certificate says additional-insured
+        // exists but names nobody — the name lives in the certificate-holder box.
+        var doc = CoiWith(flag, certificateHolder: "Riverside Event Hall\n123 Main St");
+
+        var (passed, actual, note) = ComplianceCheckService.EvaluateRule(
+            doc, Rule("contains", "additional_insured", "Riverside Event Hall"));
+
+        passed.Should().BeTrue();
+        actual.Should().Be(flag, "the check row shows the field's true value; the note explains the fallback");
+        note.Should().Contain("certificate holder");
+    }
+
+    [Fact]
+    public void Additional_insured_affirmative_flag_falls_back_to_description_of_operations()
+    {
+        var doc = CoiWith("Y", certificateHolder: "Somebody Else LLC",
+            operations: "Riverside Event Hall is named as additional insured per attached endorsement.");
+
+        var (passed, _, _) = ComplianceCheckService.EvaluateRule(
+            doc, Rule("contains", "additional_insured", "Riverside Event Hall"));
+
+        passed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Additional_insured_affirmative_flag_fails_when_name_is_nowhere()
+    {
+        var doc = CoiWith("Y", certificateHolder: "Somebody Else LLC", operations: "General liability per project.");
+
+        var (passed, _, note) = ComplianceCheckService.EvaluateRule(
+            doc, Rule("contains", "additional_insured", "Riverside Event Hall"));
+
+        passed.Should().BeFalse();
+        note.Should().Be("The additional-insured box is checked, but 'Riverside Event Hall' was not found in the certificate holder or description of operations.");
+    }
+
+    [Fact]
+    public void Additional_insured_json_boolean_true_takes_the_fallback_path()
+    {
+        // LookupValue serializes a JSON boolean via GetRawText() → "true" — must be treated
+        // as the checkbox reading, not matched literally.
+        var doc = CoiWith(true, certificateHolder: "Riverside Event Hall");
+
+        var (passed, _, _) = ComplianceCheckService.EvaluateRule(
+            doc, Rule("contains", "additional_insured", "Riverside Event Hall"));
+
+        passed.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData("N")]
+    [InlineData("false")]
+    [InlineData("no")]
+    public void Additional_insured_negative_flag_fails_without_fallback(string flag)
+    {
+        // A negative flag means the certificate says NOT additional insured — looking in
+        // the holder box anyway would pass a certificate that disclaims the provision.
+        var doc = CoiWith(flag, certificateHolder: "Riverside Event Hall");
+
+        var (passed, _, note) = ComplianceCheckService.EvaluateRule(
+            doc, Rule("contains", "additional_insured", "Riverside Event Hall"));
+
+        passed.Should().BeFalse();
+        note.Should().Be("Expected to contain 'Riverside Event Hall'.");
+    }
+
+    [Fact]
+    public void Additional_insured_missing_field_fails_without_fallback()
+    {
+        // Absence must FAIL, not fall back: the certificate-holder box almost always names
+        // the venue, so falling back on a missing field would pass certificates with no
+        // additional-insured provision at all (#257's vacuous-Compliant class).
+        var doc = CoiWith(null, certificateHolder: "Riverside Event Hall");
+
+        var (passed, _, _) = ComplianceCheckService.EvaluateRule(
+            doc, Rule("contains", "additional_insured", "Riverside Event Hall"));
+
+        passed.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Additional_insured_party_name_text_takes_the_normal_contains_path()
+    {
+        // The v2 prompt emits party names as text — plain substring match, no fallback,
+        // no explanatory note.
+        var doc = CoiWith("Riverside Event Hall; Acme Property Mgmt", certificateHolder: "Unrelated Co");
+
+        var (passed, _, note) = ComplianceCheckService.EvaluateRule(
+            doc, Rule("contains", "additional_insured", "riverside event hall"));
+
+        passed.Should().BeTrue();
+        note.Should().BeNull();
+    }
+
+    [Fact]
+    public void Affirmative_flag_on_another_field_does_not_trigger_the_fallback()
+    {
+        // The fallback is scoped to additional_insured — a "Y" in any other field keeps
+        // the plain contains semantics.
+        var doc = new Document
+        {
+            ExtractionFields = JsonSerializer.SerializeToDocument(new Dictionary<string, object>
+            {
+                ["some_flag"] = "Y",
+                ["certificate_holder"] = "Riverside Event Hall"
+            })
+        };
+
+        var (passed, _, note) = ComplianceCheckService.EvaluateRule(
+            doc, Rule("contains", "some_flag", "Riverside Event Hall"));
+
+        passed.Should().BeFalse();
+        note.Should().Be("Expected to contain 'Riverside Event Hall'.");
+    }
+
     // ---------------- min_value ----------------
 
     [Theory]
@@ -120,6 +254,20 @@ public class ComplianceRuleEvaluationTests
 
         passed.Should().BeFalse();
         note.Should().Be("Unable to parse numeric comparison.");
+    }
+
+    [Fact]
+    public void MinValue_fails_with_field_missing_note_when_field_absent()
+    {
+        // The pre-#272 behavior surfaced a missing coverage line as the jargon note
+        // "Unable to parse numeric comparison" — a missing field now reads like the
+        // other operators' missing case.
+        var (passed, actual, note) = ComplianceCheckService.EvaluateRule(
+            DocWithField("other", "x"), Rule("min_value", "professional_liability_limit", "1000000"));
+
+        passed.Should().BeFalse();
+        actual.Should().BeNull();
+        note.Should().Be("Field missing.");
     }
 
     [Fact]

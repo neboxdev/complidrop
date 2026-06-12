@@ -6,10 +6,15 @@ on:
     paths:
       - "frontend/**"
       - ".github/workflows/frontend-ci.yml"
+      # The requirement-catalog ⊆ extraction-prompt contract test (#272,
+      # src/lib/requirements-extraction-contract.test.ts) reads this backend file, so a
+      # prompt-side edit (e.g. removing a field the catalog offers) must run frontend tests.
+      - "api/CompliDrop.Api/Services/Extraction/ExtractionPrompts.cs"
   pull_request:
     paths:
       - "frontend/**"
       - ".github/workflows/frontend-ci.yml"
+      - "api/CompliDrop.Api/Services/Extraction/ExtractionPrompts.cs"
 
 jobs:
   build:

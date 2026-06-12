@@ -2,7 +2,7 @@ namespace CompliDrop.Api.Services.Extraction;
 
 public static class ExtractionPrompts
 {
-    public const string Version = "v1-2026-04-16-ocr-first";
+    public const string Version = "v2-2026-06-12-eo-addl-insured";
 
     public const string SystemPrompt = """
 You extract structured data from a compliance document (Certificate of Insurance, license, permit, certification, or similar).
@@ -24,7 +24,8 @@ DOCUMENT TYPES
 FIELDS TO EXTRACT WHEN PRESENT
 COI:           policyholder_name, insurer_name, policy_number, effective_date, expiration_date,
                general_liability_limit, workers_comp_limit, auto_liability_limit, umbrella_limit,
-               certificate_holder, description_of_operations, additional_insured
+               professional_liability_limit, certificate_holder, description_of_operations,
+               additional_insured
 License:       holder_name, license_number, license_type, issuing_authority, issue_date,
                expiration_date, state
 Permit:        permit_number, permit_type, issuing_authority, issue_date, expiration_date,
@@ -37,6 +38,13 @@ For every document, always extract any date that looks like an expiration or ren
 FORMATTING RULES
 - Dates: YYYY-MM-DD
 - Currency: plain integer, no currency symbol, no commas (e.g. "1000000" not "$1,000,000")
+- professional_liability_limit: the Professional Liability / Errors & Omissions (E&O)
+  per-occurrence or per-claim limit, when that coverage line appears on the certificate
+- additional_insured: emit the NAMES of the additional-insured parties as text — they
+  usually appear in the description-of-operations box ("X is named as additional insured")
+  or an attached endorsement. If the certificate only marks additional-insured with a
+  checkbox or Y/N column and names no party, emit the certificate-holder text instead.
+  NEVER emit a bare flag like "Y", "X", or "true".
 - Confidence: 1.0 clearly readable, 0.8 mostly confident, 0.5 uncertain, 0.3 guessing
 - Omit fields you cannot find — do NOT emit low-confidence guesses for mandatory fields
 - Document type: default to "other" if unclear

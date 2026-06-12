@@ -139,11 +139,38 @@ public class ComplianceCheckService(
                     actual is null ? "Field missing." : null);
 
             case "contains":
+                // ACORD checkbox door (#272): when `additional_insured` arrives as a bare
+                // affirmative flag ("Y", "X", "true" — the per-coverage ADDL INSD column
+                // reading, common in pre-v2-prompt extractions), the certificate SAYS the
+                // provision exists but names no party, so a contains-venue-name check would
+                // flag honest certificates. Look for the expected name where certificates
+                // customarily put it instead: the certificate-holder box and the
+                // description-of-operations text. A missing or negative flag never falls
+                // back — the holder box almost always names the venue, so falling back on
+                // absence would pass certificates with no additional-insured provision at
+                // all (the #257 vacuous-Compliant class).
+                if (string.Equals(rule.FieldName, "additional_insured", StringComparison.OrdinalIgnoreCase)
+                    && IsAffirmativeFlag(actual))
+                {
+                    var holder = LookupValue(doc, "certificate_holder");
+                    var operations = LookupValue(doc, "description_of_operations");
+                    var fallbackHit = rule.ExpectedValue is not null
+                        && (holder?.Contains(rule.ExpectedValue, StringComparison.OrdinalIgnoreCase) == true
+                            || operations?.Contains(rule.ExpectedValue, StringComparison.OrdinalIgnoreCase) == true);
+                    return (fallbackHit, actual, fallbackHit
+                        ? "The additional-insured box is checked; matched the name in the certificate holder / description of operations."
+                        : $"The additional-insured box is checked, but '{rule.ExpectedValue}' was not found in the certificate holder or description of operations.");
+                }
                 var hasValue = actual is not null && rule.ExpectedValue is not null
                     && actual.Contains(rule.ExpectedValue, StringComparison.OrdinalIgnoreCase);
                 return (hasValue, actual, hasValue ? null : $"Expected to contain '{rule.ExpectedValue}'.");
 
             case "min_value":
+                // Distinguish "the document doesn't show this coverage" from "we couldn't
+                // read the number" — the missing case previously surfaced as the jargon
+                // note "Unable to parse numeric comparison" (#272).
+                if (string.IsNullOrWhiteSpace(actual))
+                    return (false, actual, "Field missing.");
                 if (!decimal.TryParse(actual, NumberStyles.Any, CultureInfo.InvariantCulture, out var a)
                     || !decimal.TryParse(rule.ExpectedValue, NumberStyles.Any, CultureInfo.InvariantCulture, out var min))
                     return (false, actual, "Unable to parse numeric comparison.");
@@ -153,6 +180,16 @@ public class ComplianceCheckService(
                 return (false, actual, $"Unknown operator '{rule.Operator}'.");
         }
     }
+
+    // The checkbox readings a model may emit for `additional_insured` when the certificate
+    // marks the provision without naming a party (ACORD 25's per-coverage Y/N column, a
+    // bare ✓, or a literal boolean serialized to text). Deliberately NOT including "yes
+    // ..." prefixes of longer strings — only an exact (trimmed) flag triggers the
+    // certificate-holder fallback; any actual party-name text takes the normal contains path.
+    private static readonly string[] AffirmativeFlags = ["y", "yes", "true", "x", "✓", "checked"];
+
+    internal static bool IsAffirmativeFlag(string? value) =>
+        value is not null && AffirmativeFlags.Contains(value.Trim(), StringComparer.OrdinalIgnoreCase);
 
     internal static string? LookupValue(Document doc, string? fieldName)
     {
