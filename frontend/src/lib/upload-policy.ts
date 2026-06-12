@@ -46,3 +46,12 @@ export const UPLOAD_ACCEPT: Accept = {
 
 /** Mirrors the backend's Kestrel/request cap — see CLAUDE.md "10 MB cap at Kestrel". */
 export const UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+
+/**
+ * The native file-input `accept` override both dropzones place AFTER the
+ * `{...getInputProps()}` spread (last-prop-wins over react-dropzone's narrower injected
+ * accept). `image/*` makes the mobile photo picker offer the camera roll — HEIC included —
+ * instead of a files-only view; the dropzone's own `UPLOAD_ACCEPT` validation still runs
+ * on whatever gets picked.
+ */
+export const UPLOAD_PICKER_ACCEPT = "image/*,application/pdf";

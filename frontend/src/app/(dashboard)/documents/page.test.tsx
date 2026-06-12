@@ -1214,4 +1214,30 @@ describe("DocumentsPage — dropzone rejection feedback (#265)", () => {
 
     expect(screen.getByText(/pdf, jpeg, png, or iphone photo \(heic\) · 10 mb max/i)).toBeInTheDocument();
   });
+
+  it("file exactly at the 10 MB cap stages (the limit is inclusive)", async () => {
+    // Pins which side of the boundary "exactly 10 MB" lands on — react-dropzone
+    // rejects only file.size > maxSize, so the cap is inclusive.
+    await renderWithEmptyList();
+
+    dropFilesIn(container, [makeFile("exact.pdf", "application/pdf", 10 * 1024 * 1024)]);
+
+    await waitFor(() =>
+      expect(screen.getByText(/add details before uploading/i)).toBeInTheDocument(),
+    );
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("the file input carries the mobile photo-picker accept override (#265)", async () => {
+    // jsdom never validates against the input's accept attribute (validation runs in
+    // onDrop), so only this attribute assertion catches the override being removed or
+    // moved BEFORE the {...getInputProps()} spread — react-dropzone injects its own
+    // narrower accept and last-prop-wins is the load-bearing detail. Mirrors the
+    // portal's pin ("surfaces the camera on mobile", #196).
+    await renderWithEmptyList();
+
+    const input = container.querySelector('input[type="file"]')!;
+    expect(input.getAttribute("accept")).toMatch(/image\/\*/);
+    expect(input.getAttribute("accept")).toMatch(/application\/pdf/);
+  });
 });

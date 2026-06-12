@@ -354,7 +354,10 @@ public static class DocumentEndpoints
         var form = await http.Request.ReadFormAsync(ct);
         var file = form.Files.GetFile("file");
         if (file is null || file.Length == 0)
-            return Error(400, "validation.file", "Upload a PDF, JPEG, or PNG file.");
+            // Names HEIC like the dashboard dropzone's caption (#265). The portal's
+            // sibling message stays format-neutral per ADR 0018 §Neutral (vendors don't
+            // reason in format names).
+            return Error(400, "validation.file", "Upload a PDF, JPEG, PNG, or HEIC file.");
 
         Guid? vendorId = null;
         if (Guid.TryParse(form["vendorId"].ToString(), out var parsedVendorId))

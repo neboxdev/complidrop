@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import type { FileRejection } from "react-dropzone";
 
-import { rejectionCopy, UPLOAD_ACCEPT, UPLOAD_MAX_BYTES } from "@/lib/upload-rejections";
+import { rejectionCopy, UPLOAD_ACCEPT, UPLOAD_MAX_BYTES } from "@/lib/upload-policy";
 
 function rejection(code: string, message = "machine message"): FileRejection {
   return {
@@ -49,15 +49,12 @@ describe("rejectionCopy (#265)", () => {
 });
 
 describe("UPLOAD_ACCEPT / UPLOAD_MAX_BYTES (#265)", () => {
-  it("accepts PDF, JPEG, PNG, and the iPhone HEIC/HEIF formats the backend admits", () => {
-    expect(Object.keys(UPLOAD_ACCEPT)).toEqual(
-      expect.arrayContaining([
-        "application/pdf",
-        "image/jpeg",
-        "image/png",
-        "image/heic",
-        "image/heif",
-      ]),
+  it("accepts EXACTLY the formats the backend's magic-byte validation admits", () => {
+    // Exact set, not arrayContaining: an addition (say image/gif) would pass the
+    // client but fail magic-byte validation at upload — on BOTH surfaces at once now
+    // that the map is shared — re-creating the silent-failure class #265 kills.
+    expect(Object.keys(UPLOAD_ACCEPT).sort()).toEqual(
+      ["application/pdf", "image/heic", "image/heif", "image/jpeg", "image/png"].sort(),
     );
   });
 

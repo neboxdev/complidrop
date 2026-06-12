@@ -35,7 +35,12 @@ import { complianceStatusLabel } from "@/lib/display-labels";
 import { formatCalendarDate } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
-import { rejectionCopy, UPLOAD_ACCEPT, UPLOAD_MAX_BYTES } from "@/lib/upload-rejections";
+import {
+  rejectionCopy,
+  UPLOAD_ACCEPT,
+  UPLOAD_MAX_BYTES,
+  UPLOAD_PICKER_ACCEPT,
+} from "@/lib/upload-policy";
 import { isAuthError } from "@/lib/query-client";
 import { PageTip } from "@/components/onboarding/PageTip";
 import { TIP_IDS } from "@/lib/onboarding";
@@ -147,7 +152,7 @@ export default function DocumentsPage() {
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    // Shared accept list + size cap (@/lib/upload-rejections): PDF + the photo formats
+    // Shared accept list + size cap (@/lib/upload-policy): PDF + the photo formats
     // the backend admits, incl. HEIC/HEIF (iPhone "High Efficiency" photos, transcoded
     // to JPEG server-side on ingest, #220) — the dashboard used to reject the iPhone
     // default format the portal and backend already accepted (#265).
@@ -245,14 +250,11 @@ export default function DocumentsPage() {
               isDragActive ? "border-sky-500 bg-sky-50" : "border-slate-200 hover:border-sky-300 hover:bg-sky-50/50",
             )}
           >
-            {/* Override react-dropzone's input `accept` to include `image/*` so the
-                mobile photo picker offers the camera roll (HEIC included) instead of a
-                files-only view; the dropzone's own validation still runs against
-                PDF/JPEG/PNG/HEIC + 10 MB on selection. `accept` MUST stay AFTER the
-                `{...getInputProps()}` spread — react-dropzone injects its own narrower
-                `accept` and last-prop-wins is what lets this override it. Mirrors the
+            {/* `accept` MUST stay AFTER the `{...getInputProps()}` spread — react-dropzone
+                injects its own narrower `accept` and last-prop-wins is what lets the
+                shared picker override win (see UPLOAD_PICKER_ACCEPT's doc). Mirrors the
                 portal dropzone (#265). */}
-            <input {...getInputProps()} accept="image/*,application/pdf" />
+            <input {...getInputProps()} accept={UPLOAD_PICKER_ACCEPT} />
             <UploadCloud className="w-10 h-10 mx-auto text-sky-500" />
             <p className="mt-3 text-sm font-medium text-slate-700">
               {isDragActive ? "Drop to add…" : "Drag a file here or click to browse"}
