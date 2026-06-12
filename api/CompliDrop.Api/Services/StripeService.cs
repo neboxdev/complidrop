@@ -16,10 +16,16 @@ public interface IStripeService
 
     /// <summary>
     /// Implementations MUST be idempotent per event: the webhook endpoint marks an event
-    /// processed only after this returns (#268), so Stripe retries — and the crash window
-    /// between handler success and the dedupe insert — re-invoke it with the same event.
-    /// Keep handlers as state-upserts (re-applying the same event yields the same row state),
-    /// never as increments/appends.
+    /// processed only after this returns (#268, ADR 0020), so Stripe retries — and the crash
+    /// window between handler success and the dedupe insert — re-invoke it with the same
+    /// event. Keep handlers as state-upserts (re-applying the same event yields the same row
+    /// state, except the checkout handler, which deliberately converges on LIVE Stripe truth
+    /// at handling time — still a pure upsert), never as increments/appends/one-shot effects.
+    /// <para/>
+    /// Handlers MUST also be order-resilient (#275, ADR 0023): every subscription-mutating
+    /// handler skips events created strictly before <c>Subscription.LastStripeEventAt</c>
+    /// (<see cref="StripeService.IsStaleEvent"/>; ties apply) and stamps that fence on every
+    /// applied event — at-least-once retries can deliver an event days after newer ones.
     /// </summary>
     Task HandleWebhookEventAsync(Event ev, CancellationToken ct);
 
@@ -175,14 +181,14 @@ public class StripeService(
         switch (ev.Type)
         {
             case "checkout.session.completed":
-                if (ev.Data.Object is Session session) await ApplyCheckoutCompletedAsync(session, ct);
+                if (ev.Data.Object is Session session) await ApplyCheckoutCompletedAsync(session, ev.Created, ct);
                 break;
             case "customer.subscription.updated":
             case "customer.subscription.created":
-                if (ev.Data.Object is Stripe.Subscription created) await ApplySubscriptionStateAsync(created, ct);
+                if (ev.Data.Object is Stripe.Subscription created) await ApplySubscriptionStateAsync(created, ev.Created, ct);
                 break;
             case "customer.subscription.deleted":
-                if (ev.Data.Object is Stripe.Subscription deleted) await ApplySubscriptionDeletedAsync(deleted, ct);
+                if (ev.Data.Object is Stripe.Subscription deleted) await ApplySubscriptionDeletedAsync(deleted, ev.Created, ct);
                 break;
             case "invoice.payment_failed":
                 logger.LogWarning("Stripe invoice payment failed {Id}", ev.Id);
@@ -190,7 +196,18 @@ public class StripeService(
         }
     }
 
-    private async Task ApplyCheckoutCompletedAsync(Session session, CancellationToken ct)
+    // Order-resilience fence (#275, ADR 0023). At-least-once delivery (ADR 0020) widened
+    // the out-of-order window from delivery jitter to Stripe's ~3-day retry schedule: a
+    // stale retried event must not overwrite state a newer event already applied. An event
+    // is stale when it was created strictly BEFORE the newest applied event. Equal
+    // timestamps are NOT stale — Stripe `created` is second-granularity, and ties must
+    // re-apply so ADR 0020's crash-window re-delivery stays a benign re-apply and a
+    // same-second checkout + subscription.created pair both land. Internal-static + tested
+    // directly via InternalsVisibleTo — same precedent as ResolvePlanFromPriceId.
+    internal static bool IsStaleEvent(Entities.Subscription sub, DateTime eventCreated) =>
+        sub.LastStripeEventAt is { } fence && eventCreated < fence;
+
+    private async Task ApplyCheckoutCompletedAsync(Session session, DateTime eventCreated, CancellationToken ct)
     {
         if (!Guid.TryParse(session.ClientReferenceId, out var orgId)) return;
 
@@ -221,43 +238,139 @@ public class StripeService(
 
         var sub = await db.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == orgId, ct);
         if (sub is null) return;
+
+        if (IsStaleEvent(sub, eventCreated))
+        {
+            // A newer event already applied — never let this stale retry overwrite state.
+            // But DO backfill identity links the newer events can't supply (#275, ADR 0023):
+            // checkout is the only event carrying the org→subscription link
+            // (client_reference_id), so skipping it wholesale would leave the row unlinked —
+            // every later customer.subscription.* event no-ops (lookup is by
+            // StripeSubscriptionId) and billing-portal session creation breaks on a null
+            // StripeCustomerId. `??=` only fills nulls: a row already linked to a newer
+            // subscription is never clobbered by a stale one.
+            var backfilled = false;
+            if (sub.StripeCustomerId is null && session.CustomerId is not null)
+            {
+                sub.StripeCustomerId = session.CustomerId;
+                backfilled = true;
+            }
+            if (sub.StripeSubscriptionId is null && session.SubscriptionId is not null)
+            {
+                sub.StripeSubscriptionId = session.SubscriptionId;
+                backfilled = true;
+            }
+            if (backfilled)
+            {
+                sub.UpdatedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(ct);
+            }
+            logger.LogInformation(
+                "Skipped stale checkout.session.completed for org {OrgId} (event created {EventCreated:O} < fence {Fence:O})",
+                orgId, eventCreated, sub.LastStripeEventAt);
+            return;
+        }
+
         sub.StripeCustomerId = session.CustomerId ?? sub.StripeCustomerId;
         sub.StripeSubscriptionId = session.SubscriptionId ?? sub.StripeSubscriptionId;
-        sub.Plan = ResolvePlanFromPriceId(await FetchPriceIdFromSubscription(session.SubscriptionId, ct), _cfg);
-        sub.Status = "active";
-        sub.DocumentLimit = null;
-        sub.HasVendorPortal = true;
+
+        // Entitlements derive from the LIVE subscription, not from "checkout completed ⇒
+        // active" (#275, ADR 0023). The fence above cannot see the reviewer's primary
+        // sequence — original checkout delivery fails, customer cancels, the deleted event
+        // no-ops (row never linked), so no fence exists when the stale checkout retry
+        // arrives — only live truth can stop that resurrection. The outbound call was
+        // already here for the price id; status + period end now ride along.
+        var live = await FetchSubscriptionAsync(session.SubscriptionId, ct);
+        if (live is { Status: "canceled" or "incomplete_expired" })
+        {
+            // The subscription this checkout minted is already terminal on Stripe's side.
+            // Record identity (billing-portal access to invoice history keeps working) but
+            // land on the same free-tier state ApplySubscriptionDeletedAsync would have left.
+            sub.Plan = "free";
+            sub.Status = "canceled";
+            sub.DocumentLimit = 5;
+            sub.HasVendorPortal = false;
+            // Fence past the Stripe-side death, not at this (possibly days-old) checkout's
+            // own `created`: the live truth applied here is as-of the subscription's end, so
+            // pending retries of pre-cancel events (subscription.created/updated "active",
+            // created after this checkout but before the cancel) must read as stale —
+            // otherwise they re-link active/paid onto the dead subscription and re-create
+            // the exact #275 resurrection through the side door.
+            var terminalAt = live.EndedAt ?? live.CanceledAt ?? eventCreated;
+            sub.LastStripeEventAt = terminalAt > eventCreated ? terminalAt : eventCreated;
+            logger.LogWarning(
+                "checkout.session.completed for org {OrgId} references subscription {SubscriptionId} already {Status} on Stripe — recorded identity, kept free tier",
+                orgId, session.SubscriptionId, live.Status);
+        }
+        else
+        {
+            sub.Plan = ResolvePlanFromPriceId(live?.Items?.Data?.FirstOrDefault()?.Price?.Id, _cfg);
+            sub.Status = live?.Status ?? "active";
+            sub.DocumentLimit = null;
+            sub.HasVendorPortal = true;
+            // Stripe.net deserializes ABSENT date fields to the Unix epoch (the property
+            // default), never to default(DateTime) — epoch-or-earlier means "not supplied".
+            if (live is not null && live.CurrentPeriodEnd > DateTime.UnixEpoch)
+                sub.CurrentPeriodEnd = live.CurrentPeriodEnd;
+            sub.LastStripeEventAt = eventCreated;
+        }
         sub.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
     }
 
-    private async Task<string?> FetchPriceIdFromSubscription(string? subscriptionId, CancellationToken ct)
+    // Live snapshot for the checkout handler. Routed through NewSubscriptionService so the
+    // ClientOverride seam covers it, and sets the API key itself: HandleWebhookEventAsync
+    // never touched the global StripeConfiguration, so on a fresh process whose FIRST
+    // Stripe operation was a checkout webhook this fetch threw "No API key provided" and
+    // 5xx-looped until some other code path set the key (latent bug found in #275).
+    // Unconfigured Stripe (IsEnabled false — test harness, dev without keys) skips the
+    // fetch instead of throwing; callers treat null as "no live truth available".
+    private async Task<Stripe.Subscription?> FetchSubscriptionAsync(string? subscriptionId, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(subscriptionId)) return null;
-        var svc = new Stripe.SubscriptionService();
-        var s = await svc.GetAsync(subscriptionId, cancellationToken: ct);
-        return s.Items?.Data?.FirstOrDefault()?.Price?.Id;
+        if (string.IsNullOrWhiteSpace(subscriptionId) || !IsEnabled) return null;
+        if (ClientOverride is null) StripeConfiguration.ApiKey = _cfg.SecretKey;
+        var svc = NewSubscriptionService();
+        return await svc.GetAsync(subscriptionId, cancellationToken: ct);
     }
 
-    private async Task ApplySubscriptionStateAsync(Stripe.Subscription s, CancellationToken ct)
+    private async Task ApplySubscriptionStateAsync(Stripe.Subscription s, DateTime eventCreated, CancellationToken ct)
     {
         var sub = await db.Subscriptions.FirstOrDefaultAsync(x => x.StripeSubscriptionId == s.Id, ct);
         if (sub is null) return;
+        if (IsStaleEvent(sub, eventCreated))
+        {
+            logger.LogInformation(
+                "Skipped stale customer.subscription state event for subscription {SubscriptionId} (event created {EventCreated:O} < fence {Fence:O})",
+                s.Id, eventCreated, sub.LastStripeEventAt);
+            return;
+        }
         sub.Status = s.Status;
         sub.Plan = ResolvePlanFromPriceId(s.Items?.Data?.FirstOrDefault()?.Price?.Id, _cfg);
-        sub.CurrentPeriodEnd = s.CurrentPeriodEnd == default(DateTime) ? null : s.CurrentPeriodEnd;
+        // Epoch-or-earlier = field absent from the payload (Stripe.net deserializes missing
+        // dates to the Unix epoch, never default(DateTime) — the old `== default` guard was
+        // dead code and silently wrote 1970-01-01 for absent fields).
+        sub.CurrentPeriodEnd = s.CurrentPeriodEnd > DateTime.UnixEpoch ? s.CurrentPeriodEnd : null;
+        sub.LastStripeEventAt = eventCreated;
         sub.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
     }
 
-    private async Task ApplySubscriptionDeletedAsync(Stripe.Subscription s, CancellationToken ct)
+    private async Task ApplySubscriptionDeletedAsync(Stripe.Subscription s, DateTime eventCreated, CancellationToken ct)
     {
         var sub = await db.Subscriptions.FirstOrDefaultAsync(x => x.StripeSubscriptionId == s.Id, ct);
         if (sub is null) return;
+        if (IsStaleEvent(sub, eventCreated))
+        {
+            logger.LogInformation(
+                "Skipped stale customer.subscription.deleted for subscription {SubscriptionId} (event created {EventCreated:O} < fence {Fence:O})",
+                s.Id, eventCreated, sub.LastStripeEventAt);
+            return;
+        }
         sub.Plan = "free";
         sub.Status = "canceled";
         sub.DocumentLimit = 5;
         sub.HasVendorPortal = false;
+        sub.LastStripeEventAt = eventCreated;
         sub.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
     }

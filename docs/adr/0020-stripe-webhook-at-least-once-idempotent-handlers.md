@@ -1,6 +1,6 @@
 # 0020. Stripe webhook dedupe is at-least-once with idempotent handlers
 
-- **Status:** accepted
+- **Status:** accepted — extended by [ADR 0023](0023-stripe-webhook-order-resilience-event-fence.md) (order-resilience fence)
 - **Date:** 2026-06-11
 - **Deciders:** Ruben G., Claude
 
@@ -54,7 +54,7 @@ contract.
   Stripe's multi-day retry schedule. Handlers are idempotent per event but not
   order-resilient across events — a stale retried `checkout.session.completed` after a
   `customer.subscription.deleted` can resurrect paid state. Tracked as its own
-  data-semantics decision in #275.
+  data-semantics decision in #275 — *resolved by ADR 0023 (last-applied-event fence)*.
 
 ### Neutral
 - Concurrent duplicate deliveries may run the handler twice (same values re-applied);
