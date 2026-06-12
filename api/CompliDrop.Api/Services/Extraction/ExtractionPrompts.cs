@@ -42,9 +42,11 @@ FORMATTING RULES
   per-occurrence or per-claim limit, when that coverage line appears on the certificate
 - additional_insured: emit the NAMES of the additional-insured parties as text — they
   usually appear in the description-of-operations box ("X is named as additional insured")
-  or an attached endorsement. If the certificate only marks additional-insured with a
-  checkbox or Y/N column and names no party, emit the certificate-holder text instead.
-  NEVER emit a bare flag like "Y", "X", or "true".
+  or an attached endorsement. If the certificate marks additional-insured AFFIRMATIVELY
+  (a checked box, or Y in the ADDL INSD column) but names no party, emit the
+  certificate-holder text instead. If the column reads N, is blank, or the provision is
+  absent, OMIT the field entirely — do not emit the certificate holder. NEVER emit a
+  bare flag like "Y", "X", or "true".
 - Confidence: 1.0 clearly readable, 0.8 mostly confident, 0.5 uncertain, 0.3 guessing
 - Omit fields you cannot find — do NOT emit low-confidence guesses for mandatory fields
 - Document type: default to "other" if unclear

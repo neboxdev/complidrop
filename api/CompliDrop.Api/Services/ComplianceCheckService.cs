@@ -104,8 +104,13 @@ public class ComplianceCheckService(
                 DocumentId = doc.Id,
                 ComplianceRuleId = rule.Id,
                 IsPassed = passed,
-                ActualValue = actualValue,
-                Notes = note,
+                // Both columns are varchar(500) and Npgsql does NOT truncate — an oversize
+                // value (a long description_of_operations as the actual, or a note embedding
+                // a near-500-char ExpectedValue) threw 22001 at evaluation time: request-path
+                // evaluations 500ed and the worker-path swallow left checks silently
+                // un-updated (#272 review).
+                ActualValue = ClampToColumn(actualValue),
+                Notes = ClampToColumn(note),
                 CheckedAt = nowUtc
             });
             if (!passed) allPassed = false;
@@ -180,6 +185,12 @@ public class ComplianceCheckService(
                 return (false, actual, $"Unknown operator '{rule.Operator}'.");
         }
     }
+
+    // Matches ComplianceCheck.ActualValue / .Notes HasMaxLength(500) in ModelConfiguration.
+    private const int CheckColumnMaxLength = 500;
+
+    internal static string? ClampToColumn(string? value) =>
+        value is { Length: > CheckColumnMaxLength } ? value[..CheckColumnMaxLength] : value;
 
     // The checkbox readings a model may emit for `additional_insured` when the certificate
     // marks the provision without naming a party (ACORD 25's per-coverage Y/N column, a

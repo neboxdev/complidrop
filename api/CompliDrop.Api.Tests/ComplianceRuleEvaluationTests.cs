@@ -115,6 +115,8 @@ public class ComplianceRuleEvaluationTests
     [InlineData("X")]
     [InlineData("true")]
     [InlineData("YES")]
+    [InlineData("✓")]
+    [InlineData("checked")]
     public void Additional_insured_affirmative_flag_falls_back_to_certificate_holder(string flag)
     {
         // The ACORD ADDL INSD column reading: the certificate says additional-insured
@@ -130,10 +132,36 @@ public class ComplianceRuleEvaluationTests
     }
 
     [Fact]
+    public void Additional_insured_fallback_matches_certificate_holder_case_insensitively()
+    {
+        // A user who typed lowercase into "Name to look for" must still match the
+        // certificate's casing — a regression to Ordinal here re-creates the exact
+        // honest-certificate-flagged class #272 fixes.
+        var doc = CoiWith("Y", certificateHolder: "RIVERSIDE EVENT HALL");
+
+        var (passed, _, _) = ComplianceCheckService.EvaluateRule(
+            doc, Rule("contains", "additional_insured", "riverside event hall"));
+
+        passed.Should().BeTrue();
+    }
+
+    [Fact]
     public void Additional_insured_affirmative_flag_falls_back_to_description_of_operations()
     {
         var doc = CoiWith("Y", certificateHolder: "Somebody Else LLC",
             operations: "Riverside Event Hall is named as additional insured per attached endorsement.");
+
+        var (passed, _, _) = ComplianceCheckService.EvaluateRule(
+            doc, Rule("contains", "additional_insured", "Riverside Event Hall"));
+
+        passed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Additional_insured_fallback_matches_description_of_operations_case_insensitively()
+    {
+        var doc = CoiWith("Y", certificateHolder: "Somebody Else LLC",
+            operations: "riverside event hall is named as additional insured.");
 
         var (passed, _, _) = ComplianceCheckService.EvaluateRule(
             doc, Rule("contains", "additional_insured", "Riverside Event Hall"));
@@ -299,6 +327,22 @@ public class ComplianceRuleEvaluationTests
 
         ComplianceCheckService.EvaluateRule(DocWithField("license_number", "X"), rule).passed.Should().BeTrue();
         ComplianceCheckService.EvaluateRule(DocWithField("other", "X"), rule).passed.Should().BeFalse();
+    }
+
+    // ---------------- check-column clamping (#272 review) ----------------
+
+    [Fact]
+    public void ClampToColumn_truncates_oversize_values_to_the_column_length()
+    {
+        // ComplianceCheck.ActualValue / .Notes are varchar(500) and Npgsql does not
+        // truncate — an oversize actual (long description_of_operations) or note
+        // (embedding a near-500-char ExpectedValue) threw 22001 at evaluation time.
+        var oversize = new string('a', 600);
+
+        ComplianceCheckService.ClampToColumn(oversize).Should().HaveLength(500);
+        ComplianceCheckService.ClampToColumn(new string('b', 500)).Should().HaveLength(500);
+        ComplianceCheckService.ClampToColumn("short").Should().Be("short");
+        ComplianceCheckService.ClampToColumn(null).Should().BeNull();
     }
 
     // ---------------- LookupValue ----------------
