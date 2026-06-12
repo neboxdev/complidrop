@@ -46,7 +46,10 @@ const fieldListSection = promptSource.slice(
 
 /** Word-boundary containment: 'liability_limit' must NOT pass via 'general_liability_limit'. */
 function sectionNamesField(fieldName: string): boolean {
-  return new RegExp(`(^|[^a-z0-9_])${fieldName}([^a-z0-9_]|$)`, "im").test(fieldListSection);
+  // Escaped so a future fieldName with a regex metacharacter fails loudly instead of
+  // silently matching something else ('policy.number' must not match 'policy_number').
+  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^a-z0-9_])${escaped}([^a-z0-9_]|$)`, "im").test(fieldListSection);
 }
 
 describe("requirement catalog ⊆ extraction prompt (#272)", () => {

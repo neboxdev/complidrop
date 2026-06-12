@@ -189,8 +189,18 @@ public class ComplianceCheckService(
     // Matches ComplianceCheck.ActualValue / .Notes HasMaxLength(500) in ModelConfiguration.
     private const int CheckColumnMaxLength = 500;
 
-    internal static string? ClampToColumn(string? value) =>
-        value is { Length: > CheckColumnMaxLength } ? value[..CheckColumnMaxLength] : value;
+    internal static string? ClampToColumn(string? value)
+    {
+        if (value is not { Length: > CheckColumnMaxLength }) return value;
+        // Back off one code unit when the cut would split a surrogate pair (an emoji in
+        // vendor-typed text straddling index 499/500): a lone high surrogate is an invalid
+        // string that Npgsql's strict UTF-8 encoder rejects at SaveChangesAsync — the very
+        // write-path failure this clamp exists to remove.
+        var cut = char.IsHighSurrogate(value[CheckColumnMaxLength - 1])
+            ? CheckColumnMaxLength - 1
+            : CheckColumnMaxLength;
+        return value[..cut];
+    }
 
     // The checkbox readings a model may emit for `additional_insured` when the certificate
     // marks the provision without naming a party (ACORD 25's per-coverage Y/N column, a

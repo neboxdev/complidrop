@@ -160,6 +160,37 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     }
 
     [Fact]
+    public async Task Oversize_extracted_value_is_clamped_to_the_check_column_not_thrown()
+    {
+        // Pins the ClampToColumn CALL SITE (#272 review): ActualValue/Notes are varchar(500)
+        // and Npgsql does not truncate, so a >500-char extracted value (a long
+        // description_of_operations) used to throw 22001 at SaveChangesAsync — request-path
+        // evaluations 500ed, the worker-path swallow left checks silently un-updated. The
+        // helper has its own unit tests; this test fails (22001 on real Postgres) if a
+        // refactor drops the wrapper calls.
+        var id = await SeedAsync(
+            expiration: Anchor.AddDays(365),
+            docType: "coi",
+            rules: ("coi", "description_of_operations", "required", null));
+        var oversize = new string('x', 600);
+        await using (var db = CreateSystemDb())
+        {
+            var doc = await db.Documents.FirstAsync(d => d.Id == id);
+            doc.ExtractionFields = System.Text.Json.JsonSerializer.SerializeToDocument(
+                new Dictionary<string, string> { ["description_of_operations"] = oversize });
+            await db.SaveChangesAsync();
+        }
+
+        var status = await EvaluateForSystem(id);
+
+        status.Should().Be(ComplianceStatus.Compliant);
+        await using var verify = CreateSystemDb();
+        var check = await verify.ComplianceChecks.SingleAsync(c => c.DocumentId == id);
+        check.IsPassed.Should().BeTrue();
+        check.ActualValue.Should().HaveLength(500, "the oversize value is clamped to the column length");
+    }
+
+    [Fact]
     public async Task A_failing_rule_yields_NonCompliant()
     {
         var id = await SeedAsync(

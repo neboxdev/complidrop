@@ -345,6 +345,21 @@ public class ComplianceRuleEvaluationTests
         ComplianceCheckService.ClampToColumn(null).Should().BeNull();
     }
 
+    [Fact]
+    public void ClampToColumn_never_splits_a_surrogate_pair_at_the_cut()
+    {
+        // An emoji straddling index 499/500 must not leave a lone high surrogate — that is
+        // an invalid string Npgsql's strict UTF-8 encoder rejects at SaveChangesAsync.
+        var straddling = new string('a', 499) + "\U0001F600" + new string('b', 100);
+
+        var clamped = ComplianceCheckService.ClampToColumn(straddling)!;
+
+        clamped.Should().HaveLength(499);
+        clamped.Should().EndWith("a");
+        var act = () => new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true).GetBytes(clamped);
+        act.Should().NotThrow("the clamped value must stay valid Unicode");
+    }
+
     // ---------------- LookupValue ----------------
 
     [Fact]
