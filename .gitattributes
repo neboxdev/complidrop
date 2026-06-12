@@ -1,0 +1,6 @@
+# Force LF for ES-module scripts regardless of core.autocrlf.
+# vitest/vite-node mishandles a shebang line that ends in CRLF, so a Windows
+# checkout (autocrlf=true) broke collection of e2e/scripts/*.test.mjs (#277).
+# All tracked .mjs files were already LF in the index; this pins the working
+# tree to match. Node, editors, and CI are all LF-safe.
+*.mjs text eol=lf
