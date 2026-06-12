@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Check, ChevronRight } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { useDashboardStats } from "@/hooks/useDashboard";
+import { useSubscription } from "@/hooks/useSubscription";
 
 export type ChecklistStep = {
   key: string;
@@ -34,6 +35,15 @@ export function useOnboardingChecklist(): OnboardingChecklist {
   const stats = useDashboardStats();
   const s = stats.data;
 
+  // Plan gate (#261): vendor upload links are a Pro entitlement, so the "Collect a
+  // document" hint must not recommend them to a Free org (whose link generation the
+  // server 403s). Only an explicit `true` unlocks the upload-link phrasing — while
+  // the subscription is loading, the plan-safe copy shows. Deliberately NOT part of
+  // the checklist's isLoading: the hint wording is cosmetic and must not delay the
+  // card (or flash it away) for the sake of billing data.
+  const subscription = useSubscription();
+  const hasPortal = subscription.data?.hasVendorPortal === true;
+
   const steps: ChecklistStep[] = [
     {
       key: "vendor",
@@ -52,7 +62,9 @@ export function useOnboardingChecklist(): OnboardingChecklist {
     {
       key: "document",
       label: "Collect a document",
-      hint: "Upload a COI, or send the vendor an upload link.",
+      hint: hasPortal
+        ? "Upload a COI, or send the vendor an upload link."
+        : "Upload a COI you have on file.",
       href: "/documents",
       done: (s?.totalDocuments ?? 0) > 0,
     },
