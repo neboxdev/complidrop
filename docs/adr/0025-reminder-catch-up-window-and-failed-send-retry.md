@@ -169,7 +169,10 @@ All in [ReminderBackgroundServiceTests](../../api/CompliDrop.Api.Tests/ReminderB
   which codified the old behavior and named itself the canonical place to flip).
 - `Failed_retry_that_fails_again_keeps_status_failed_and_updates_the_attempt_instant` — the
   retry loop's failure path stays a single row.
-- `Bounced_status_is_not_retried` — webhook statuses count as served; hard bounces never re-send.
+- `Non_failed_statuses_block_retry` (theory: bounced / complained / delivered) — webhook statuses
+  count as served; hard bounces and complaints never re-send.
+- `Only_the_failed_recipient_is_retried_not_the_already_served_one` — partial failure inside one
+  (reminder, doc): the retry stays per-recipient.
 - `Failed_row_within_the_26h_guard_window_does_not_suppress_a_send` — the failed-row exclusion
   applies to the guard arm too; the historical failed row (earlier `SendDate`) survives untouched
   while today's send inserts a fresh row.
