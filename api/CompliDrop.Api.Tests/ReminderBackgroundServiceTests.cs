@@ -309,10 +309,16 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
 
         var key = ReminderBackgroundService.BuildSendIdempotencyKey(reminderId, docId, day, "owner@example.com", null);
 
-        // Deterministic, case-insensitive on the recipient, within Resend's 256-char cap.
+        // Deterministic, ASCII-case-insensitive on the recipient, within Resend's 256-char cap.
         key.Should().Be(ReminderBackgroundService.BuildSendIdempotencyKey(reminderId, docId, day, "OWNER@example.com", null));
         key.Length.Should().BeLessThan(256);
         key.Should().NotContain("owner", "the key must not leak the recipient address");
+
+        // U+0130 ('İ') is OrdinalIgnoreCase-DISTINCT from 'i' — the worker sends to both — so
+        // their keys must differ too. ASCII-only folding guarantees this; ToLowerInvariant
+        // would collapse them onto one key and let Resend swallow the second send.
+        ReminderBackgroundService.BuildSendIdempotencyKey(reminderId, docId, day, "İrem@example.com", null)
+            .Should().NotBe(ReminderBackgroundService.BuildSendIdempotencyKey(reminderId, docId, day, "irem@example.com", null));
 
         // Every tuple component and the failure salt mint a distinct key.
         ReminderBackgroundService.BuildSendIdempotencyKey(Guid.NewGuid(), docId, day, "owner@example.com", null)

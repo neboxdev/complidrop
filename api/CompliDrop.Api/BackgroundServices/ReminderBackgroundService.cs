@@ -404,19 +404,41 @@ public class ReminderBackgroundService(
     /// Resend's docs don't specify whether an error response is cached against its key, and a
     /// genuine retry must never be served a cached error. Correct under either caching semantic.
     /// <para/>
-    /// The recipient is lowercased so the worker's case-insensitive recipient dedupe can't mint
-    /// two keys for the same human. SHA-256 keeps the key short (73 chars, Resend cap 256) and
-    /// recipient-opaque; Resend retains keys for 24h, and the SendDate component scopes the key
-    /// to the org-local day regardless.
+    /// The recipient is ASCII-case-folded so the worker's case-insensitive recipient dedupe
+    /// can't mint two keys for the same human. SHA-256 keeps the key short (73 chars, Resend
+    /// cap 256) and recipient-opaque; Resend retains keys for 24h, and the SendDate component
+    /// scopes the key to the org-local day regardless.
     /// </summary>
     internal static string BuildSendIdempotencyKey(
         Guid reminderId, Guid documentId, DateOnly sendDate, string recipient, DateTime? priorFailedAttemptAt)
     {
         var tuple = $"reminder:{reminderId:N}:{documentId:N}:{sendDate:yyyyMMdd}" +
-                    $":{recipient.ToLowerInvariant()}:{priorFailedAttemptAt?.Ticks ?? 0}";
+                    $":{FoldAsciiLower(recipient)}:{priorFailedAttemptAt?.Ticks ?? 0}";
         var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(tuple));
         return $"reminder-{Convert.ToHexStringLower(hash)}";
     }
+
+    /// <summary>
+    /// ASCII-only case folding for the idempotency-key recipient component: 'A'–'Z' lowercase,
+    /// every other code point verbatim. Deliberately NOT <see cref="string.ToLowerInvariant"/>:
+    /// the worker's recipient identity is OrdinalIgnoreCase (Unicode simple folding), under
+    /// which e.g. U+0130 ('İ') is DISTINCT from 'i' and both get sent — but ToLowerInvariant
+    /// maps U+0130 → 'i', which would mint the SAME key for two recipients the worker treats as
+    /// different (worst case at Resend: the second send is replayed from the first and silently
+    /// never delivered). ASCII folding merges every case-variant pair the dedupe merges in
+    /// practice while guaranteeing two OrdinalIgnoreCase-distinct recipients never share a key;
+    /// the residual edge for exotic fold-equal pairs flips to a bounded duplicate email on a
+    /// cross-tick representation change — strictly better than silent non-delivery.
+    /// </summary>
+    private static string FoldAsciiLower(string s) =>
+        string.Create(s.Length, s, static (span, src) =>
+        {
+            for (var i = 0; i < src.Length; i++)
+            {
+                var c = src[i];
+                span[i] = c is >= 'A' and <= 'Z' ? (char)(c + 32) : c;
+            }
+        });
 
     /// <summary>An org's internal (admin) recipient plus its verification state, projected for the
     /// dead-letter-visibility check (#184). EmailVerifiedAt == null ⇒ a possibly-typo'd address.</summary>
