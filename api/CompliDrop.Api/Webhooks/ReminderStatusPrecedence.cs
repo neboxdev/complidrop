@@ -1,3 +1,5 @@
+using static CompliDrop.Api.Entities.ReminderLogStatus;
+
 namespace CompliDrop.Api.Webhooks;
 
 /// <summary>
@@ -30,12 +32,9 @@ namespace CompliDrop.Api.Webhooks;
 /// </summary>
 internal static class ReminderStatusPrecedence
 {
-    private const string Sent = "sent";
-    private const string Delivered = "delivered";
-    private const string Opened = "opened";
-    private const string Clicked = "clicked";
-    private const string Bounced = "bounced";
-    private const string Complained = "complained";
+    // Status strings come from the shared ReminderLogStatus vocabulary (using static above) —
+    // the worker's retry dedupe, this precedence table, and the schema default all read from
+    // the same definition site.
 
     /// <summary>
     /// Returns true when <paramref name="incoming"/> should overwrite <paramref name="current"/>.

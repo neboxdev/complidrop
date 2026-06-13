@@ -30,3 +30,6 @@ Use `/adr <title>` to scaffold a new one.
 - [0020](0020-stripe-webhook-at-least-once-idempotent-handlers.md) — Stripe webhook dedupe is at-least-once with idempotent handlers
 - [0021](0021-extraction-budget-lazy-utc-month-reset.md) — Extraction budget resets lazily on a UTC-month anchor (deliberate UTC divergence from 0007's org-local convention)
 - [0022](0022-document-bytes-only-via-authenticated-proxy.md) — Document bytes are served only via the authenticated API proxy — no SAS, no public container
+- [0023](0023-stripe-webhook-order-resilience-event-fence.md) — Stripe webhook order-resilience via last-applied-event fence
+- [0024](0024-paid-entitlements-gate-on-subscription-flags.md) — Paid entitlements gate on Subscription flags; portal lapse is neutral and reversible
+- [0025](0025-reminder-catch-up-window-and-failed-send-retry.md) — Reminder sends catch up within the org-local day; failed sends retry in place (supersedes 0002 / 0015 failed-row Neutral clauses)

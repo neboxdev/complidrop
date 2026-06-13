@@ -27,7 +27,7 @@ public class ReminderLog
     public DateTime SentAt { get; set; }
     public DateOnly SendDate { get; set; }
     public string? ResendMessageId { get; set; }
-    public string Status { get; set; } = "sent";
+    public string Status { get; set; } = ReminderLogStatus.Sent;
 
     public Reminder Reminder { get; set; } = null!;
 }

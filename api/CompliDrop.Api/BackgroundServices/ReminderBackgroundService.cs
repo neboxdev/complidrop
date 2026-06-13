@@ -30,6 +30,12 @@ public class ReminderBackgroundService(
     /// most a zone edit can shift the local calendar day. A 26h trailing guard therefore catches
     /// the re-fire with margin while staying far short of a reminder's once-per-document cadence,
     /// so it cannot suppress a legitimately distinct future occurrence. See ADR 0015.
+    /// <para/>
+    /// Since #270 switched the document-match window to the UTC calendar day of the face date,
+    /// two ticks on different org-local days target disjoint UTC-day brackets, so the original
+    /// re-fire trigger is structurally unreachable; the guard is retained as defense-in-depth
+    /// (it still suppresses any prior accepted send recorded under a different SendDate within
+    /// the window). See ADR 0025 §"Interaction".
     /// </summary>
     private static readonly TimeSpan TzEditDedupeWindow = TimeSpan.FromHours(26);
 
@@ -74,9 +80,9 @@ public class ReminderBackgroundService(
         await db.Database.OpenConnectionAsync(ct);
         try
         {
-            // AsNoTracking on read-only queries: this worker only writes ReminderLog inserts (which
-            // are tracked explicitly via db.ReminderLogs.Add). Tracking orgs / reminders / docs /
-            // users buys us nothing and inflates the change tracker.
+            // AsNoTracking on read-only queries: this worker only writes ReminderLog rows (inserts
+            // via Add, in-place retry heals via the tracked priorLogs query below). Tracking orgs /
+            // reminders / docs / users buys us nothing and inflates the change tracker.
             var orgs = await db.Organizations
                 .AsNoTracking()
                 .Where(o => o.DeletedAt == null)
@@ -93,7 +99,8 @@ public class ReminderBackgroundService(
                     .ToListAsync(ct);
                 if (reminders.Count == 0) continue;
 
-                var localDate = DateOnly.FromDateTime(ToLocal(org.TimeZone, nowUtc));
+                var localNow = ToLocal(org.TimeZone, nowUtc);
+                var localDate = DateOnly.FromDateTime(localNow);
 
                 // Per-(org, sendDate) coordination across replicas. If another instance is currently
                 // processing this same tuple, skip — its work will populate the ReminderLog rows
@@ -134,10 +141,6 @@ public class ReminderBackgroundService(
 
                 try
                 {
-                    // Resolved once per org so the worker doesn't re-throw on TZ lookup inside the
-                    // reminder loop; ToLocal already proved the id resolves.
-                    var orgTzInfo = TryFindTimeZone(org.TimeZone);
-
                     // Hoisted out of the reminder loop: the internal-user list is identical for every
                     // reminder under the same org, so we resolve it once and reuse. OrderBy keeps the
                     // recipient order stable across runs (Postgres returns rows in physical order
@@ -156,12 +159,17 @@ public class ReminderBackgroundService(
                     // signup typo that bounces every reminder silently. We still SEND (soft-gate
                     // — never withhold a paying org's reminders over a verification gap), but
                     // surface the risk in logs so a forming dead-letter is visible to an operator
-                    // instead of invisible. Fires at most once per org per local-08:00 tick.
+                    // instead of invisible. Gated to the org's 08:00 hour so it keeps firing at
+                    // most once per org per local day — the ADR 0025 catch-up window re-qualifies
+                    // the org on every later tick, and repeating an operator signal (which embeds
+                    // the addresses) ~16x/day is noise, not visibility. A day whose 08:00 tick
+                    // was missed skips the warning rather than repeating it; the flag is a
+                    // visibility aid, not delivery-critical.
                     var unverifiedInternal = internalRecipients
                         .Where(r => r.EmailVerifiedAt is null)
                         .Select(r => r.Email)
                         .ToList();
-                    if (unverifiedInternal.Count > 0)
+                    if (unverifiedInternal.Count > 0 && localNow.Hour == TargetLocalHour)
                         logger.LogWarning(
                             "Reminder tick: org {OrgId} has {Count} unverified internal recipient(s); reminders may dead-letter to {Emails}.",
                             org.Id, unverifiedInternal.Count, string.Join(", ", unverifiedInternal));
@@ -169,28 +177,23 @@ public class ReminderBackgroundService(
                     foreach (var reminder in reminders)
                     {
                         var targetDate = localDate.AddDays(reminder.DaysBefore);
-                        // Bracket the org's local target day, converted to UTC via the org's own TZ.
-                        // The previous .ToUniversalTime() on an Unspecified-kind value silently used the
-                        // SERVER's local zone, so the window matched a different UTC range depending on
-                        // where the worker ran. Going through TimeZoneInfo.ConvertTimeToUtc makes the
-                        // window host-independent and aligned with the org's wall clock.
-                        var targetStart = orgTzInfo is null
-                            ? DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MinValue), DateTimeKind.Utc)
-                            : TimeZoneInfo.ConvertTimeToUtc(
-                                DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified),
-                                orgTzInfo);
-                        var targetEnd = orgTzInfo is null
-                            ? DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MaxValue), DateTimeKind.Utc)
-                            : TimeZoneInfo.ConvertTimeToUtc(
-                                DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MaxValue), DateTimeKind.Unspecified),
-                                orgTzInfo);
+                        // ExpirationDate stores the document's FACE date at UTC midnight
+                        // (CanonicalDocumentFields.ParseUtcDate, AssumeUniversal) — a date, not an
+                        // instant in any zone. Match it on the UTC calendar day of targetDate,
+                        // consistent with Document.IsExpired / DaysUntilExpiry and the display side
+                        // (#263). The pre-#270 code converted the org-local day to UTC instead,
+                        // shifting the bracket by the UTC offset: for every UTC-negative org the
+                        // UTC-midnight expiry fell into the PREVIOUS local day's bracket, so the
+                        // "N days before" email fired N+1 days out while the body claimed N.
+                        var targetStart = DateTime.SpecifyKind(targetDate.ToDateTime(TimeOnly.MinValue), DateTimeKind.Utc);
+                        var targetEnd = targetStart.AddDays(1);
 
                         var docs = await db.Documents
                             .AsNoTracking()
                             .Where(d => d.OrganizationId == org.Id
                                         && d.DeletedAt == null
                                         && d.ExpirationDate >= targetStart
-                                        && d.ExpirationDate <= targetEnd)
+                                        && d.ExpirationDate < targetEnd)
                             .Include(d => d.Vendor)
                             .ToListAsync(ct);
                         if (docs.Count == 0) continue;
@@ -222,9 +225,11 @@ public class ReminderBackgroundService(
                             // See ADR 0007 (revises the SendDate Neutral consequence in ADR 0002).
                             var sendDate = localDate;
 
-                            // Pull the set of recipients we've already logged for this (reminder, doc,
-                            // day) so multi-recipient reminders dedupe per recipient instead of skipping
-                            // the doc once any recipient has been sent.
+                            // Pull the prior log rows for this (reminder, doc) within the dedupe
+                            // horizon so multi-recipient reminders dedupe per recipient instead of
+                            // skipping the doc once any recipient has been sent. Tracked (no
+                            // AsNoTracking) deliberately: a same-day "failed" row is healed in
+                            // place on retry below.
                             //
                             // Two predicates, OR'd:
                             //   (a) l.SendDate == sendDate — the same-org-local-day dedupe of ADR 0002 /
@@ -241,36 +246,75 @@ public class ReminderBackgroundService(
                             // — a single (reminder, doc) accrues at most a handful of log rows over its
                             // lifetime — so the added SentAt predicate needs no separate index.
                             var tzEditGuardStart = nowUtc - TzEditDedupeWindow;
-                            var alreadySent = (await db.ReminderLogs
+                            var priorLogs = await db.ReminderLogs
                                 .Where(l => l.ReminderId == reminder.Id
                                             && l.DocumentId == doc.Id
                                             && (l.SendDate == sendDate || l.SentAt >= tzEditGuardStart))
+                                .ToListAsync(ct);
+
+                            // Only rows Resend actually accepted count as served (ADR 0025): a
+                            // "failed" row records an attempt that never left the building, so the
+                            // recipient hasn't been served and this tick retries. Every other
+                            // status — "sent" plus the webhook-advanced ones (delivered, bounced,
+                            // complained, opened, clicked) — describes accepted mail and stays
+                            // deduped; in particular a hard bounce must never auto-resend.
+                            var alreadyServed = priorLogs
+                                .Where(l => l.Status != ReminderLogStatus.Failed)
                                 .Select(l => l.RecipientEmail)
-                                .ToListAsync(ct))
                                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                            // Same-day failed rows, keyed per recipient for in-place reuse: the
+                            // (ReminderId, DocumentId, SendDate, RecipientEmail) unique index admits
+                            // one row per tuple, so the retry must UPDATE, not insert. A failed row
+                            // from an earlier SendDate (visible only via the guard arm) keys a
+                            // different tuple — today's send inserts fresh and leaves it untouched.
+                            // GroupBy is defensive: the index is case-sensitive while this lookup is
+                            // not, so case-variant rows written across days could otherwise collide
+                            // on the dictionary key.
+                            var failedToday = priorLogs
+                                .Where(l => l.Status == ReminderLogStatus.Failed && l.SendDate == sendDate)
+                                .GroupBy(l => l.RecipientEmail, StringComparer.OrdinalIgnoreCase)
+                                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
                             foreach (var recipient in recipients)
                             {
-                                if (alreadySent.Contains(recipient)) continue;
+                                if (alreadyServed.Contains(recipient)) continue;
+
+                                failedToday.TryGetValue(recipient, out var failedRow);
 
                                 try
                                 {
                                     var subject = reminder.EmailSubjectTemplate
                                                   ?? $"[{org.Name}] {doc.OriginalFileName} expires in {reminder.DaysBefore} days";
                                     var body = BuildBody(org.Name, doc, reminder.DaysBefore);
-                                    var messageId = await email.SendAsync(recipient, subject, body, ct);
+                                    var idempotencyKey = BuildSendIdempotencyKey(
+                                        reminder.Id, doc.Id, sendDate, recipient, failedRow?.SentAt);
+                                    var messageId = await email.SendAsync(recipient, subject, body, ct, idempotencyKey);
+                                    var attemptedAt = timeProvider.GetUtcNow().UtcDateTime;
+                                    var status = messageId is null ? ReminderLogStatus.Failed : ReminderLogStatus.Sent;
 
-                                    db.ReminderLogs.Add(new ReminderLog
+                                    if (failedRow is not null)
                                     {
-                                        Id = Guid.NewGuid(),
-                                        ReminderId = reminder.Id,
-                                        DocumentId = doc.Id,
-                                        RecipientEmail = recipient,
-                                        SentAt = timeProvider.GetUtcNow().UtcDateTime,
-                                        SendDate = sendDate,
-                                        ResendMessageId = messageId,
-                                        Status = messageId is null ? "failed" : "sent"
-                                    });
+                                        // Retry path: heal (or re-stamp) the existing row in place.
+                                        // SentAt records the LATEST attempt instant (ADR 0025).
+                                        failedRow.SentAt = attemptedAt;
+                                        failedRow.ResendMessageId = messageId;
+                                        failedRow.Status = status;
+                                    }
+                                    else
+                                    {
+                                        db.ReminderLogs.Add(new ReminderLog
+                                        {
+                                            Id = Guid.NewGuid(),
+                                            ReminderId = reminder.Id,
+                                            DocumentId = doc.Id,
+                                            RecipientEmail = recipient,
+                                            SentAt = attemptedAt,
+                                            SendDate = sendDate,
+                                            ResendMessageId = messageId,
+                                            Status = status
+                                        });
+                                    }
                                 }
                                 catch (Exception ex)
                                 {
@@ -284,22 +328,23 @@ public class ReminderBackgroundService(
                                 // Defensive: the per-(org, sendDate) advisory lock above makes this
                                 // path nearly unreachable in multi-instance deploys — the only residual
                                 // trigger is a hashtextextended collision in the lock key space (2^63).
-                                // We keep the catch + detach because the cost is zero and the recovery
-                                // shape is the same one we'd want if a future code path were to bypass
-                                // the lock.
+                                // We keep the catch because the cost is zero and the recovery shape is
+                                // the same one we'd want if a future code path were to bypass the lock.
                                 logger.LogWarning(ex, "Reminder log upsert conflict (likely concurrent tick) for doc {DocumentId}", doc.Id);
-
-                                // After a failed SaveChanges the pending Added ReminderLog entries stay
-                                // in the change tracker. The next doc iteration's SaveChangesAsync would
-                                // re-attempt them and throw again — cascading the failure to every doc
-                                // remaining in this tick. Detach them so each doc gets a clean slate.
-                                foreach (var entry in db.ChangeTracker.Entries<ReminderLog>()
-                                             .Where(e => e.State == EntityState.Added)
-                                             .ToList())
-                                {
-                                    entry.State = EntityState.Detached;
-                                }
                             }
+
+                            // One Clear() does two jobs. Recovery: after a failed save the pending
+                            // Added/Modified ReminderLog entries would be re-attempted by the NEXT
+                            // doc's SaveChangesAsync and cascade the failure to every doc remaining
+                            // in this tick; clearing gives each doc a clean slate (a dropped retry
+                            // heal is re-attempted naturally on the next qualifying tick). Bounding:
+                            // this context spans every org in the tick, and saved rows would
+                            // otherwise linger as Unchanged — with the catch-up window the tracker
+                            // would grow with the whole day's send volume and each per-doc save's
+                            // DetectChanges sweep would re-scan all of it. Nothing references the
+                            // tracked entities past this point: every doc iteration re-queries its
+                            // own priorLogs.
+                            db.ChangeTracker.Clear();
                         }
                     }
                 }
@@ -348,6 +393,53 @@ public class ReminderBackgroundService(
     internal static string BuildOrgDayLockKey(Guid orgId, DateOnly sendDate) =>
         $"reminder:{orgId:N}:{sendDate:yyyyMMdd}";
 
+    /// <summary>
+    /// Deterministic Resend <c>Idempotency-Key</c> for one reminder send. Retries are
+    /// at-least-once (ADR 0025): a transport throw after Resend accepted the mail, or a crash
+    /// between the accept and the per-doc SaveChanges, leaves no usable record — the next
+    /// qualifying tick re-attempts. That re-attempt recomputes the SAME key (its predecessor
+    /// recorded nothing, so <paramref name="priorFailedAttemptAt"/> is unchanged) and Resend
+    /// dedupes it server-side instead of double-delivering. A retry after a RECORDED failure
+    /// salts the key with that attempt's <c>SentAt</c>, so it reaches Resend as a fresh request —
+    /// Resend's docs don't specify whether an error response is cached against its key, and a
+    /// genuine retry must never be served a cached error. Correct under either caching semantic.
+    /// <para/>
+    /// The recipient is ASCII-case-folded so the worker's case-insensitive recipient dedupe
+    /// can't mint two keys for the same human. SHA-256 keeps the key short (73 chars, Resend
+    /// cap 256) and recipient-opaque; Resend retains keys for 24h, and the SendDate component
+    /// scopes the key to the org-local day regardless.
+    /// </summary>
+    internal static string BuildSendIdempotencyKey(
+        Guid reminderId, Guid documentId, DateOnly sendDate, string recipient, DateTime? priorFailedAttemptAt)
+    {
+        var tuple = $"reminder:{reminderId:N}:{documentId:N}:{sendDate:yyyyMMdd}" +
+                    $":{FoldAsciiLower(recipient)}:{priorFailedAttemptAt?.Ticks ?? 0}";
+        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(tuple));
+        return $"reminder-{Convert.ToHexStringLower(hash)}";
+    }
+
+    /// <summary>
+    /// ASCII-only case folding for the idempotency-key recipient component: 'A'–'Z' lowercase,
+    /// every other code point verbatim. Deliberately NOT <see cref="string.ToLowerInvariant"/>:
+    /// the worker's recipient identity is OrdinalIgnoreCase (Unicode simple folding), under
+    /// which e.g. U+0130 ('İ') is DISTINCT from 'i' and both get sent — but ToLowerInvariant
+    /// maps U+0130 → 'i', which would mint the SAME key for two recipients the worker treats as
+    /// different (worst case at Resend: the second send is replayed from the first and silently
+    /// never delivered). ASCII folding merges every case-variant pair the dedupe merges in
+    /// practice while guaranteeing two OrdinalIgnoreCase-distinct recipients never share a key;
+    /// the residual edge for exotic fold-equal pairs flips to a bounded duplicate email on a
+    /// cross-tick representation change — strictly better than silent non-delivery.
+    /// </summary>
+    private static string FoldAsciiLower(string s) =>
+        string.Create(s.Length, s, static (span, src) =>
+        {
+            for (var i = 0; i < src.Length; i++)
+            {
+                var c = src[i];
+                span[i] = c is >= 'A' and <= 'Z' ? (char)(c + 32) : c;
+            }
+        });
+
     /// <summary>An org's internal (admin) recipient plus its verification state, projected for the
     /// dead-letter-visibility check (#184). EmailVerifiedAt == null ⇒ a possibly-typo'd address.</summary>
     private sealed record InternalRecipient(string Email, DateTime? EmailVerifiedAt);
@@ -394,12 +486,21 @@ public class ReminderBackgroundService(
         cmd.Parameters.Add(p);
     }
 
+    /// <summary>
+    /// True from org-local 08:00 through the end of the org-local day. The window is open-ended
+    /// (>= rather than ==) so a tick missed during the 08:00 hour — deploy, crash, stuck
+    /// instance, or a DST transition that skips the wall-clock hour — is caught up by any later
+    /// tick the same local day; the per-recipient dedupe makes the extra qualifying ticks
+    /// idempotent, and a failed send gets its retry vehicle. Catch-up deliberately ends at local
+    /// midnight: the next day derives different target dates and the email copy ("N days from
+    /// today") would no longer be true. See ADR 0025.
+    /// </summary>
     private static bool IsLocalSendWindow(string tz, DateTime nowUtc)
     {
         var info = TryFindTimeZone(tz);
-        if (info is null) return nowUtc.Hour == TargetLocalHour;
+        if (info is null) return nowUtc.Hour >= TargetLocalHour;
         var local = TimeZoneInfo.ConvertTimeFromUtc(nowUtc, info);
-        return local.Hour == TargetLocalHour;
+        return local.Hour >= TargetLocalHour;
     }
 
     private static DateTime ToLocal(string tz, DateTime utc)
