@@ -20,7 +20,7 @@ public sealed class TenantIsolationTests(IntegrationTestFixture fixture) : Integ
 {
     private sealed record SeededOrg(
         Guid OrgId, Guid VendorId, Guid DocumentId, Guid TemplateId, Guid RuleId,
-        Guid LinkId, Guid ReminderId, string LogRecipient);
+        Guid LinkId, string LogRecipient);
 
     /// <summary>
     /// Registers a fresh org and seeds one of every tenant-owned entity (vendor, document, template
@@ -61,7 +61,7 @@ public sealed class TenantIsolationTests(IntegrationTestFixture fixture) : Integ
         });
         await db.SaveChangesAsync();
 
-        return new SeededOrg(owner.OrgId, vendorId, docId, templateId, ruleId, linkId, reminder.Id, logRecipient);
+        return new SeededOrg(owner.OrgId, vendorId, docId, templateId, ruleId, linkId, logRecipient);
     }
 
     // ---------------- the two cross-tenant defects this audit fixed ----------------
@@ -169,5 +169,21 @@ public sealed class TenantIsolationTests(IntegrationTestFixture fixture) : Integ
 
         await using var db = CreateSystemDb();
         (await db.ComplianceRules.AnyAsync(r => r.Id == b.RuleId)).Should().BeTrue("org A must not delete org B's rule");
+    }
+
+    [Fact]
+    public async Task Export_vendor_package_cross_tenant_does_not_export()
+    {
+        // The vendor-package export is scoped by an EXPLICIT predicate (v.Id == vendorId &&
+        // v.OrganizationId == organizationId), not the query filter — exactly the kind that silently
+        // regresses if the org half is dropped. Org A requesting org B's vendor must not get a PDF.
+        var b = await SeedOrgAsync("v@b.example");
+        var a = await RegisterAndLoginAsync();
+
+        var resp = await a.Client.GetAsync($"/api/export/vendor/{b.VendorId}");
+
+        resp.StatusCode.Should().NotBe(HttpStatusCode.OK, "org A must not export org B's vendor package");
+        resp.Content.Headers.ContentType?.MediaType.Should().NotBe("application/pdf",
+            "no cross-tenant PDF bytes may be returned");
     }
 }

@@ -287,11 +287,16 @@ builder.Services.AddRateLimiter(opts =>
         PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
             PortalRateLimit.Classify(ctx.Request.Method, ctx.Request.Path) switch
             {
+                // Distinct key PREFIXES per kind: the limiter caches one bucket per key and the
+                // options factory runs only on first sight of a key, so a shared "portal-ip:"+IP key
+                // would collapse uploads (30/hr) and reads (240/hr) into ONE bucket whose limit is
+                // whichever request type opened the window first — silently lifting the upload cap to
+                // 240 or capping polling at 30. The per-kind prefix keeps the two windows independent.
                 PortalRateLimit.Kind.Upload => RateLimitPartition.GetFixedWindowLimiter(
-                    "portal-ip:" + (ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown"),
+                    "portal-ip-upload:" + (ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown"),
                     _ => new FixedWindowRateLimiterOptions { PermitLimit = 30, Window = TimeSpan.FromHours(1) }),
                 PortalRateLimit.Kind.Read => RateLimitPartition.GetFixedWindowLimiter(
-                    "portal-ip:" + (ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown"),
+                    "portal-ip-read:" + (ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown"),
                     _ => new FixedWindowRateLimiterOptions { PermitLimit = 240, Window = TimeSpan.FromHours(1) }),
                 _ => RateLimitPartition.GetNoLimiter("non-portal-ip")
             }));

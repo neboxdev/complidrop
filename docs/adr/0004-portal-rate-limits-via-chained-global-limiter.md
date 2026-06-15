@@ -98,9 +98,37 @@ The discriminator-pair invariant — `rate_limit.exceeded` (transient, retry-nex
 
 The hook checks `Response.HasStarted` before writing — defensive parity with `ExceptionHandlingMiddleware`. A pipeline change that started the response earlier than the limiter trips would now no-op rather than throw `InvalidOperationException` inside the limiter middleware.
 
+## Addendum ([#242](https://github.com/neboxdev/complidrop/issues/242) / [#308](https://github.com/neboxdev/complidrop/issues/308)) — the limiter now covers the portal READ routes too
+
+The #242 tenant-isolation audit found that the global limiter gated **only** `POST …/upload` (the
+`IsPortalUpload` check), so the two PUBLIC, unauthenticated portal GET routes — info
+(`GET /api/portal/{token}`) and upload status (`GET /api/portal/{token}/status/{uploadId}`) — fell
+through to the no-op partition and were **entirely unthrottled** (no per-token AND no per-IP cap), an
+unbounded DB-load surface on routes that take untrusted input. Excluding the GETs from the *strict*
+10/hr token budget was deliberate (a vendor polling status must not burn the upload budget — see
+`Portal_GET_endpoints_allow_generous_polling`), but "no limit at all" was the unintended consequence.
+
+The gate generalised from the inline `IsPortalUpload` boolean to a unit-tested classifier,
+[`PortalRateLimit.Classify`](../../api/CompliDrop.Api/PortalRateLimit.cs) → `Upload` / `Read` / `None`
+(this is the "endpoint-metadata marker the moment a second portal-shaped path appears" the original
+Negative consequence #2 anticipated). The limits are now:
+
+- **Upload** — per token 10/hr (`portal-token:`) + per IP 30/hr (`portal-ip-upload:`). Unchanged caps.
+- **Read** — **uncapped per token** (polling is not throttled) + per IP **240/hr** (`portal-ip-read:`),
+  a generous single-IP backstop far above any legitimate polling burst. A distributed flood is an
+  edge/infra concern, not the in-app limiter's job.
+- **None** (non-portal) — no-op partition, as before. Named policies still apply additively.
+
+Implementation note: the per-IP Upload and Read partitions use **distinct key prefixes**
+(`portal-ip-upload:` vs `portal-ip-read:`). A shared `portal-ip:`+IP key would collapse the two into
+one cached bucket whose limit is set by whichever request type opened the window first — silently
+lifting the upload cap to 240 or capping polling at 30. Pinned by
+`Portal_read_and_upload_per_ip_limits_are_independent`. CLAUDE.md's portal description was corrected
+to match.
+
 ## References
 
-- Tickets: [#10](https://github.com/neboxdev/complidrop/issues/10) (surfaced during AC2 test writing), [#45](https://github.com/neboxdev/complidrop/issues/45) (envelope-disambiguation followup)
+- Tickets: [#10](https://github.com/neboxdev/complidrop/issues/10) (surfaced during AC2 test writing), [#45](https://github.com/neboxdev/complidrop/issues/45) (envelope-disambiguation followup), [#242](https://github.com/neboxdev/complidrop/issues/242) / [#308](https://github.com/neboxdev/complidrop/issues/308) (read-route coverage, this addendum)
 - Endpoint: `api/CompliDrop.Api/Endpoints/VendorPortalEndpoints.cs`
 - Composition: `api/CompliDrop.Api/Program.cs` (rate-limiting section + `OnRejected` hook)
 - Tests: `api/CompliDrop.Api.Tests/VendorPortalEndpointsTests.cs` (`Exceeding_the_portal_token_rate_limit_returns_429`, `Exceeding_the_portal_ip_rate_limit_returns_429`, `Rate_limit_and_quota_429_codes_are_distinguishable_to_clients`, `Rate_limit_envelope_carries_the_full_documented_shape`), `api/CompliDrop.Api.Tests/AuthEndpointsTests.cs` (`Exceeding_the_auth_strict_rate_limit_returns_the_rate_limit_envelope`)

@@ -763,4 +763,27 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
                 $"GET /api/portal/{{token}}/status iteration {i + 1}/35 should not be rate-limited");
         }
     }
+
+    [Fact]
+    public async Task Portal_read_and_upload_per_ip_limits_are_independent()
+    {
+        // Regression for the per-IP key collision (#242 review): the upload (30/hr) and read (240/hr)
+        // per-IP buckets MUST use separate keys. If they shared one key, the first upload would open a
+        // 30-cap bucket and a vendor's status polling would 429 at ~30 reads. Interleave one upload +
+        // 40 reads from one client (one IP) and assert every read succeeds: 40 is under the 240 read
+        // cap but well over the 30 upload cap a shared bucket would wrongly impose.
+        var seeded = await SeedLinkAsync(maxUploads: 100);
+        await using var factory = RateLimitedFactory();
+        var client = factory.CreateClient();
+
+        (await UploadAsync(client, seeded.Token, PdfBytes(), "u.pdf", "application/pdf"))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        for (var i = 0; i < 40; i++)
+        {
+            var info = await client.GetAsync($"/api/portal/{seeded.Token}");
+            info.StatusCode.Should().Be(HttpStatusCode.OK,
+                $"read {i + 1}/40 must not be throttled by the upload's per-IP bucket — the buckets are independent");
+        }
+    }
 }
