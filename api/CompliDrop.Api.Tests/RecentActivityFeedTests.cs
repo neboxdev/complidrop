@@ -151,4 +151,58 @@ public sealed class RecentActivityFeedTests(IntegrationTestFixture fixture) : In
         (await db.AuditLogs.CountAsync(a => a.Action == "vendor.created" && a.EntityId == vendorId))
             .Should().Be(2, "the table keeps both the interceptor and explicit rows — export is unchanged");
     }
+
+    [Fact]
+    public async Task Case_mismatched_twin_still_collapses_on_the_entity_key()
+    {
+        // The portal-link twin (#252 AC1) is the case where the interceptor lowercases the action
+        // ("vendorportallink.created") while the explicit logger preserves camelCase
+        // ("vendorPortalLink.created"). They still collapse because the dedup keys on
+        // (CorrelationId, EntityType, EntityId) — EntityType is PascalCase "VendorPortalLink" for
+        // both — NOT on the differently-cased Action. Pins that the key is entity-based.
+        var auth = await RegisterAndLoginAsync();
+        var linkId = Guid.NewGuid();
+        var corr = Guid.NewGuid().ToString("N");
+        await SeedAsync(auth.OrgId,
+            ("vendorportallink.created", "VendorPortalLink", linkId, corr, 5),
+            ("vendorPortalLink.created", "VendorPortalLink", linkId, corr, 5));
+
+        var feed = await FeedAsync(auth);
+
+        CountFor(feed, linkId).Should().Be(1, "case-mismatched interceptor/explicit twins still collapse on the entity key");
+    }
+
+    [Fact]
+    public async Task Rows_without_a_correlation_id_are_never_collapsed()
+    {
+        // Background / non-request audit rows have a null CorrelationId; they must each stay distinct
+        // (the collapse only folds request-path twins that share a correlation id).
+        var auth = await RegisterAndLoginAsync();
+        var entityId = Guid.NewGuid();
+        await SeedAsync(auth.OrgId,
+            ("reminder.sent", "Reminder", entityId, null, 30),
+            ("reminder.sent", "Reminder", entityId, null, 10));
+
+        var feed = await FeedAsync(auth);
+
+        CountFor(feed, entityId).Should().Be(2, "null-correlation rows must not be collapsed together");
+    }
+
+    [Fact]
+    public async Task Feed_is_capped_at_20_and_ordered_newest_first()
+    {
+        // 25 distinct events: the feed must cap at 20 (the collapse runs over the 60-row buffer BEFORE
+        // the Take(20), so distinct events aren't lost to the cap) and be newest-first.
+        var auth = await RegisterAndLoginAsync();
+        var rows = Enumerable.Range(0, 25)
+            .Select(i => ("vendor.created", "Vendor", (Guid?)Guid.NewGuid(), Guid.NewGuid().ToString("N"), i + 1))
+            .ToArray();
+        await SeedAsync(auth.OrgId, rows);
+
+        var feed = await FeedAsync(auth);
+
+        feed.Length.Should().Be(20, "the feed caps at 20 rows");
+        feed.Select(a => a.GetProperty("createdAt").GetDateTime())
+            .Should().BeInDescendingOrder("the feed is ordered newest-first");
+    }
 }
