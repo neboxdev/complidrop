@@ -264,26 +264,37 @@ builder.Services.AddRateLimiter(opts =>
         ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromHours(1) }));
 
-    // Vendor portal upload — TWO independent limits (10/hr per token + 30/hr per ip). Two chained
-    // .RequireRateLimiting("portal-token").RequireRateLimiting("portal-ip") calls do NOT work:
-    // ASP.NET reads only a single EnableRateLimitingAttribute via GetMetadata<T>() (last wins), so
-    // the first policy is silently dropped. We instead register the chained limiter as the global
-    // limiter and gate it to portal uploads; all other requests get a no-op partition. Named
-    // policies (auth-strict, waitlist, default-authed) on other endpoints still apply additively
-    // alongside the global limiter. See ADR 0004.
+    // Vendor portal limits. Two dimensions, partitioned by request kind (PortalRateLimit.Classify):
+    //   * Per TOKEN: only the expensive, state-changing UPLOAD is capped (10/hr). Portal READS (the
+    //     public info + upload-status GETs) are deliberately NOT capped per-token — a vendor polling
+    //     status must not burn a token budget (see Portal_GET_endpoints_*).
+    //   * Per IP: uploads 30/hr; reads a GENEROUS 240/hr — far above any legitimate polling burst,
+    //     but a ceiling so a single IP can't run an UNBOUNDED flood / probe against the public,
+    //     unauthenticated portal read routes (#242: those GETs previously had no limit at all). A
+    //     distributed flood is an edge/infra concern; this is the in-app single-IP backstop.
+    // Two chained .RequireRateLimiting(...) calls do NOT work: ASP.NET reads only a single
+    // EnableRateLimitingAttribute via GetMetadata<T>() (last wins), so the first policy is silently
+    // dropped. We instead register the chained limiter as the global limiter; non-portal requests get
+    // a no-op partition. Named policies (auth-strict, waitlist, default-authed) still apply
+    // additively alongside the global limiter. See ADR 0004.
     opts.GlobalLimiter = PartitionedRateLimiter.CreateChained(
         PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
-            IsPortalUpload(ctx)
+            PortalRateLimit.Classify(ctx.Request.Method, ctx.Request.Path) == PortalRateLimit.Kind.Upload
                 ? RateLimitPartition.GetFixedWindowLimiter(
                     "portal-token:" + (ctx.Request.RouteValues["token"]?.ToString() ?? "unknown"),
                     _ => new FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromHours(1) })
-                : RateLimitPartition.GetNoLimiter("non-portal")),
+                : RateLimitPartition.GetNoLimiter("non-portal-token")),
         PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
-            IsPortalUpload(ctx)
-                ? RateLimitPartition.GetFixedWindowLimiter(
+            PortalRateLimit.Classify(ctx.Request.Method, ctx.Request.Path) switch
+            {
+                PortalRateLimit.Kind.Upload => RateLimitPartition.GetFixedWindowLimiter(
                     "portal-ip:" + (ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown"),
-                    _ => new FixedWindowRateLimiterOptions { PermitLimit = 30, Window = TimeSpan.FromHours(1) })
-                : RateLimitPartition.GetNoLimiter("non-portal")));
+                    _ => new FixedWindowRateLimiterOptions { PermitLimit = 30, Window = TimeSpan.FromHours(1) }),
+                PortalRateLimit.Kind.Read => RateLimitPartition.GetFixedWindowLimiter(
+                    "portal-ip:" + (ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown"),
+                    _ => new FixedWindowRateLimiterOptions { PermitLimit = 240, Window = TimeSpan.FromHours(1) }),
+                _ => RateLimitPartition.GetNoLimiter("non-portal-ip")
+            }));
 
     opts.AddPolicy("default-authed", ctx =>
     {
@@ -300,14 +311,6 @@ builder.Services.AddRateLimiter(opts =>
         Convert.ToHexString(
             System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value)));
 
-    static bool IsPortalUpload(HttpContext ctx) =>
-        HttpMethods.IsPost(ctx.Request.Method)
-            && ctx.Request.Path.StartsWithSegments("/api/portal")
-            && ctx.Request.Path.Value is { } p
-            // ASP.NET routing matches MapPost("/{token}/upload") case-insensitively, so the gate
-            // must too. An ordinal compare would let `POST /api/portal/{token}/Upload` skip BOTH
-            // limits while still reaching the handler.
-            && p.EndsWith("/upload", StringComparison.OrdinalIgnoreCase);
 });
 
 // ============================================================

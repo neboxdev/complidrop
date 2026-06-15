@@ -739,13 +739,14 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     }
 
     [Fact]
-    public async Task Portal_GET_endpoints_are_not_rate_limited()
+    public async Task Portal_GET_endpoints_allow_generous_polling()
     {
-        // The IsPortalUpload gate intentionally excludes GETs (info + status). If a regression
-        // broadened the gate (e.g. "lock everything down on the portal" rewriting it to match any
-        // verb on the prefix), a vendor refreshing the page or polling status would burn the
-        // 10/hr token budget. We interleave info + status GETs at 35 iterations each (70 total) —
-        // past BOTH portal limits (10/hr token, 30/hr ip) — and assert none get a 429.
+        // Portal READS (info + status) are deliberately NOT capped per-token — a vendor refreshing
+        // the page or polling status must not burn the 10/hr upload token budget. They DO carry a
+        // generous 240/hr PER-IP backstop so a single IP can't flood the public read routes (#242),
+        // but legitimate polling stays well under it. We interleave info + status GETs at 35
+        // iterations each (70 total) — past BOTH upload limits (10/hr token, 30/hr ip) and within the
+        // 240/hr read-IP backstop — and assert none get a 429.
         var seeded = await SeedLinkAsync(maxUploads: 50);
         await using var factory = RateLimitedFactory();
         var client = factory.CreateClient();

@@ -19,7 +19,7 @@ Canonical tech reference: `C:\NewStart\Company documents\complidrop-technical-ar
 - **Extraction pipeline (§5 of tech doc, see revision history)**: two-stage. Always-on Document AI OCR → configurable LLM (`Extraction:Provider = "gemini" | "anthropic"`; Gemini Flash via Vertex AI is default). Structured output via JSON schema (Gemini) / tool-use (Anthropic). System prompt is provider-agnostic. Every document records `ExtractionPromptVersion`.
 - **Background workers**: `ExtractionWorker` polls DB every 5s using `FOR UPDATE SKIP LOCKED` with 5-minute zombie reclaim; `ReminderBackgroundService` ticks hourly and fires per-org from the org's local 08:00 onward (catch-up until local midnight; failed sends retry in place — see [ADR 0025](docs/adr/0025-reminder-catch-up-window-and-failed-send-retry.md)), deduped per recipient by the `(ReminderId, DocumentId, SendDate, RecipientEmail)` unique index.
 - **File uploads**: magic-byte validated (PDF / JPEG / PNG), 10 MB cap at Kestrel.
-- **Vendor portal**: PUBLIC `/api/portal/{token}` routes with `portal-token` (10/hr) + `portal-ip` (30/hr) rate limits, per-link `MaxUploads` quota, and per-org monthly cost ceiling.
+- **Vendor portal**: PUBLIC `/api/portal/{token}` routes. The UPLOAD route is rate-limited `portal-token` (10/hr) + `portal-ip` (30/hr); the read routes (info + upload-status GETs) are uncapped per-token — so a vendor polling status isn't throttled — but carry a generous `portal-ip` 240/hr backstop so a single IP can't flood the public read routes (#242, classified by `PortalRateLimit`). Plus a per-link `MaxUploads` quota and a per-org monthly cost ceiling.
 - **Stripe webhook**: verify signature, dedupe via `ProcessedStripeEvent`.
 
 ## Commands

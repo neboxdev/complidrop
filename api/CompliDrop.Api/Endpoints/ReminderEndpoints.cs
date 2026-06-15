@@ -59,7 +59,13 @@ public static class ReminderEndpoints
 
     private static async Task<IResult> ListHistory(AppDbContext db, CancellationToken ct)
     {
+        // ReminderLog has no OrganizationId and no global query filter (it's reached via its parent
+        // Reminder). Scope to the caller's org by EXISTS against the tenant-filtered Reminders set —
+        // without this, the global most-recent-200 logs of EVERY org (recipient emails, document +
+        // reminder ids) leaked to any authenticated user (#242). db.Reminders carries the
+        // OrganizationId == CurrentOrgId filter, so the subquery is org-scoped.
         var logs = await db.ReminderLogs
+            .Where(l => db.Reminders.Any(r => r.Id == l.ReminderId))
             .OrderByDescending(l => l.SentAt)
             .Take(200)
             .Select(l => new
