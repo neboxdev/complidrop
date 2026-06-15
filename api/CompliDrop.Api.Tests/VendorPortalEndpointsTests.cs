@@ -739,13 +739,14 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     }
 
     [Fact]
-    public async Task Portal_GET_endpoints_are_not_rate_limited()
+    public async Task Portal_GET_endpoints_allow_generous_polling()
     {
-        // The IsPortalUpload gate intentionally excludes GETs (info + status). If a regression
-        // broadened the gate (e.g. "lock everything down on the portal" rewriting it to match any
-        // verb on the prefix), a vendor refreshing the page or polling status would burn the
-        // 10/hr token budget. We interleave info + status GETs at 35 iterations each (70 total) —
-        // past BOTH portal limits (10/hr token, 30/hr ip) — and assert none get a 429.
+        // Portal READS (info + status) are deliberately NOT capped per-token — a vendor refreshing
+        // the page or polling status must not burn the 10/hr upload token budget. They DO carry a
+        // generous 240/hr PER-IP backstop so a single IP can't flood the public read routes (#242),
+        // but legitimate polling stays well under it. We interleave info + status GETs at 35
+        // iterations each (70 total) — past BOTH upload limits (10/hr token, 30/hr ip) and within the
+        // 240/hr read-IP backstop — and assert none get a 429.
         var seeded = await SeedLinkAsync(maxUploads: 50);
         await using var factory = RateLimitedFactory();
         var client = factory.CreateClient();
@@ -760,6 +761,29 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
             var status = await client.GetAsync($"/api/portal/{seeded.Token}/status/{Guid.NewGuid()}");
             status.StatusCode.Should().Be(HttpStatusCode.NotFound,
                 $"GET /api/portal/{{token}}/status iteration {i + 1}/35 should not be rate-limited");
+        }
+    }
+
+    [Fact]
+    public async Task Portal_read_and_upload_per_ip_limits_are_independent()
+    {
+        // Regression for the per-IP key collision (#242 review): the upload (30/hr) and read (240/hr)
+        // per-IP buckets MUST use separate keys. If they shared one key, the first upload would open a
+        // 30-cap bucket and a vendor's status polling would 429 at ~30 reads. Interleave one upload +
+        // 40 reads from one client (one IP) and assert every read succeeds: 40 is under the 240 read
+        // cap but well over the 30 upload cap a shared bucket would wrongly impose.
+        var seeded = await SeedLinkAsync(maxUploads: 100);
+        await using var factory = RateLimitedFactory();
+        var client = factory.CreateClient();
+
+        (await UploadAsync(client, seeded.Token, PdfBytes(), "u.pdf", "application/pdf"))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        for (var i = 0; i < 40; i++)
+        {
+            var info = await client.GetAsync($"/api/portal/{seeded.Token}");
+            info.StatusCode.Should().Be(HttpStatusCode.OK,
+                $"read {i + 1}/40 must not be throttled by the upload's per-IP bucket — the buckets are independent");
         }
     }
 }

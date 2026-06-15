@@ -229,6 +229,12 @@ public static class VendorEndpoints
         IAuditLogger audit,
         CancellationToken ct)
     {
+        // Verify the vendor belongs to the caller's org via the tenant-filtered set BEFORE touching
+        // the (filter-less) VendorPortalLinks — otherwise a caller could revoke ANOTHER org's link by
+        // passing its (vendorId, linkId) pair, since the link query alone isn't tenant-scoped (#242).
+        // Mirrors EmailPortalLink's vendor-first lookup.
+        if (!await db.Vendors.AnyAsync(v => v.Id == id, ct)) return NotFound();
+
         var link = await db.VendorPortalLinks.FirstOrDefaultAsync(l => l.Id == linkId && l.VendorId == id, ct);
         if (link is null) return NotFound();
         link.IsActive = false;
