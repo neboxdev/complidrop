@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.Extensions.Options;
 
 namespace CompliDrop.Api.Configuration;
@@ -34,11 +35,20 @@ public sealed class FrontendSettingsValidator(IHostEnvironment env) : IValidateO
             return ValidateOptionsResult.Fail(
                 $"Frontend:BaseUrl must be an absolute http(s) URL, but was '{raw}'.");
 
-        // Uri.IsLoopback covers localhost, 127.0.0.1, and ::1; the explicit host check is
-        // belt-and-suspenders for any resolver edge.
-        if (uri.IsLoopback || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase))
+        // Reject every host that cannot route to a real user. Uri.IsLoopback catches the common
+        // localhost / 127.0.0.1 / ::1 forms, but it MISSES the FQDN-rooted "localhost." / "127.0.0.1."
+        // (trailing dot) and the wildcard bind addresses 0.0.0.0 / [::] — all of which boot fine yet
+        // mint dead links to real vendors (#301). Normalize the trailing dot and IPv6 brackets, then
+        // parse-check the IP explicitly so those edge forms are rejected too.
+        var host = uri.Host.Trim('[', ']').TrimEnd('.');
+        var unroutable =
+            uri.IsLoopback
+            || string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
+            || (IPAddress.TryParse(host, out var ip)
+                && (IPAddress.IsLoopback(ip) || ip.Equals(IPAddress.Any) || ip.Equals(IPAddress.IPv6Any)));
+        if (unroutable)
             return ValidateOptionsResult.Fail(
-                $"Frontend:BaseUrl is a localhost/loopback URL ('{raw}') outside Development — every "
+                $"Frontend:BaseUrl is a localhost/loopback/wildcard URL ('{raw}') outside Development — every "
                 + "portal/verify/reset link would be dead for real users. Set it to the public site origin.");
 
         return ValidateOptionsResult.Success;

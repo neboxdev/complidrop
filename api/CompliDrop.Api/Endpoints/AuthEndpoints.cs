@@ -747,6 +747,14 @@ public static class AuthEndpoints
         if (await db.Users.AnyAsync(u => u.Email == newEmail))
             return Error(409, "auth.email_taken", "That email address is already in use.");
 
+        // Don't mint a change token and claim "we sent the link" when the email subsystem can't
+        // deliver (#302) — the link goes to the NEW address and there is no Resend affordance for a
+        // pending email change, so a false "sent" strands the user worse than the registration case
+        // #249 fixed. Fail honestly before minting anything, mirroring resend-verification.
+        if (!email.IsEnabled)
+            return Error(503, "email.not_configured",
+                "Email isn't set up yet, so we couldn't send the confirmation link to that address. Please try again later, or contact support.");
+
         var now = DateTime.UtcNow;
         // Invalidate any prior outstanding verification tokens (a pending signup
         // confirmation or an earlier change request) so only the newest applies.
@@ -759,8 +767,14 @@ public static class AuthEndpoints
         db.EmailVerificationTokens.Add(token);
         await db.SaveChangesAsync();
 
-        // The confirmation link goes to the NEW address (proving the user owns it).
-        await SendVerificationEmailAsync(email, frontendOpts.Value, newEmail, raw, logger, http.RequestAborted);
+        // The confirmation link goes to the NEW address (proving the user owns it). Report a send
+        // failure honestly (#302) instead of claiming "sent": the token row is left in place so a
+        // re-submit of the form re-mints (invalidating it above), exactly like resend.
+        var sent = await SendVerificationEmailAsync(email, frontendOpts.Value, newEmail, raw, logger, http.RequestAborted);
+        if (!sent)
+            return Error(502, "email.send_failed",
+                "We couldn't send the confirmation link to that address just now. Please try again in a few minutes.");
+
         await audit.LogAsync(
             "user.email_change_requested",
             nameof(User), user.Id,

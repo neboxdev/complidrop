@@ -46,6 +46,12 @@ public sealed class FrontendSettingsValidatorTests
     [InlineData("http://127.0.0.1:3000")]
     [InlineData("https://localhost")]
     [InlineData("http://[::1]:3000")]
+    // #301: trailing-dot (FQDN-rooted) and wildcard bind addresses bypassed the old Uri.IsLoopback /
+    // exact-"localhost" check and booted fine in prod, minting dead links. Pin them as rejected.
+    [InlineData("http://localhost.:3000")]
+    [InlineData("http://127.0.0.1.:3000")]
+    [InlineData("http://0.0.0.0:3000")]
+    [InlineData("http://[::]:3000")]
     public void Non_development_rejects_loopback_hosts(string url)
     {
         Validate("Production", url).Fails();
@@ -113,7 +119,16 @@ public sealed class FrontendBaseUrlLinkTests(IntegrationTestFixture fixture) : I
         // Production with the unset/localhost default must abort startup with a clear message. A
         // regression that dropped .ValidateOnStart() or the IValidateOptions registration would make
         // this throw nothing (#250 AC1).
-        using var factory = new CustomWebApplicationFactory(Fixture.ConnectionString)
+        using var factory = new CustomWebApplicationFactory(
+                Fixture.ConnectionString,
+                new Dictionary<string, string?>
+                {
+                    // Valid Azure config so the FrontendSettings guard is the ONLY validator that fails;
+                    // otherwise the #248 AzureStorage guard also fires and *localhost* would be matching
+                    // an aggregated message. Mirrors the #248 boot-fail test's isolation discipline.
+                    ["AzureStorage:ConnectionString"] = TestConfig.WellFormedAzureConnectionString,
+                    ["AzureStorage:ContainerName"] = "documents",
+                })
             .WithWebHostBuilder(b => b.UseEnvironment("Production"));
 
         var act = () => factory.CreateClient(); // builds + starts the host → runs ValidateOnStart
@@ -164,5 +179,18 @@ public sealed class FrontendBaseUrlLinkTests(IntegrationTestFixture fixture) : I
         var url = (await linkResp.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("data").GetProperty("url").GetString();
 
         url.Should().StartWith($"{Origin}/portal/").And.NotContain("localhost");
+
+        // Password-reset is the other email-borne link minted from BaseUrl (#250 AC2). The AC asked
+        // for "at least portal + verify", but reset shares the same single-origin design, so pin it
+        // too so a regression that hard-coded a different origin in the reset path is caught.
+        // forgot-password does its work (incl. the send) on a DETACHED background scope so response
+        // time can't leak account existence (#183), so the reset email lands AFTER the 200 — poll for it.
+        var forgot = await client.PostAsJsonAsync("/api/auth/forgot-password", new { email = userEmail });
+        forgot.EnsureSuccessStatusCode();
+        for (var i = 0; i < 500 && !email.Sends.Any(s => s.HtmlBody.Contains("/reset-password?token=")); i++)
+            await Task.Delay(20);
+        email.Sends.Single(s => s.HtmlBody.Contains("/reset-password?token=")).HtmlBody
+            .Should().Contain($"{Origin}/reset-password?token=")
+            .And.NotContain("localhost");
     }
 }

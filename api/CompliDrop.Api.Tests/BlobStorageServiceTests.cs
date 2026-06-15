@@ -1,4 +1,5 @@
 using Azure.Core;
+using Azure.Storage.Blobs;
 using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Services;
 using FluentAssertions;
@@ -69,5 +70,36 @@ public sealed class BlobStorageServiceTests
         var act = async () => await sut.UploadAsync("org/2026-06/doc.pdf", content, "application/pdf", cts.Token);
 
         await act.Should().ThrowAsync<BlobStorageUnavailableException>();
+    }
+
+    [Fact]
+    public async Task EnsureContainerAsync_retries_after_a_failure_then_caches_the_success()
+    {
+        // #248 follow-up: the lazy container-create must NOT cache a failure (else every later upload
+        // would 500 forever) and MUST cache a success (so it isn't re-attempted per upload). Drive the
+        // injected create op directly via the internal test seam — no live Azure / loopback listener.
+        var calls = 0;
+        var failFirst = true;
+        // Parse-only container client (no network); EnsureContainerAsync only uses the injected op.
+        var container = new BlobServiceClient(UnreachableConnectionString).GetBlobContainerClient("documents");
+        var sut = new BlobStorageService(container, _ =>
+        {
+            calls++;
+            if (failFirst) { failFirst = false; throw new InvalidOperationException("simulated create failure"); }
+            return Task.CompletedTask;
+        });
+
+        // First attempt fails and must leave the state uncached so the next upload can retry.
+        var first = async () => await sut.EnsureContainerAsync(CancellationToken.None);
+        await first.Should().ThrowAsync<InvalidOperationException>();
+        calls.Should().Be(1);
+
+        // Second attempt runs the create AGAIN (retry-after-failure) and succeeds → caches.
+        await sut.EnsureContainerAsync(CancellationToken.None);
+        calls.Should().Be(2);
+
+        // Third attempt is a no-op (once-per-process caching): the create is not invoked again.
+        await sut.EnsureContainerAsync(CancellationToken.None);
+        calls.Should().Be(2, "a successful ensure caches and is not re-attempted");
     }
 }

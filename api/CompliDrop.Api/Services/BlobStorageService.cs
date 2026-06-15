@@ -32,6 +32,7 @@ public sealed class BlobStorageUnavailableException(string message, Exception in
 public class BlobStorageService : IBlobStorageService
 {
     private readonly BlobContainerClient _container;
+    private readonly Func<CancellationToken, Task> _ensureContainerOnce;
     private readonly SemaphoreSlim _ensureLock = new(1, 1);
     private bool _containerEnsured;
 
@@ -47,21 +48,35 @@ public class BlobStorageService : IBlobStorageService
         var cfg = settings.Value;
         var client = new BlobServiceClient(cfg.ConnectionString, BuildClientOptions());
         _container = client.GetBlobContainerClient(cfg.ContainerName);
+        _ensureContainerOnce = ct => _container.CreateIfNotExistsAsync(PublicAccessType.None, cancellationToken: ct);
+    }
+
+    /// <summary>
+    /// Test-only seam (#248 follow-up): injects the one-time container-create operation so the
+    /// retry-after-failure / once-per-process caching of <see cref="EnsureContainerAsync"/> can be
+    /// unit-tested without a live Azure account or a loopback HTTP listener. The runtime always uses
+    /// the public constructor above, which wires the create to the real container client.
+    /// </summary>
+    internal BlobStorageService(BlobContainerClient container, Func<CancellationToken, Task> ensureContainerOnce)
+    {
+        _container = container;
+        _ensureContainerOnce = ensureContainerOnce;
     }
 
     /// <summary>
     /// Creates the container once per process on first use (replaces the ctor's network call, #248).
     /// Guarded by a semaphore so concurrent first uploads don't race; on failure <c>_containerEnsured</c>
-    /// stays false so the next upload retries rather than caching a permanently-failed state.
+    /// stays false so the next upload retries rather than caching a permanently-failed state. Internal
+    /// so the regression suite can pin the retry-after-failure + once-per-process semantics directly.
     /// </summary>
-    private async Task EnsureContainerAsync(CancellationToken ct)
+    internal async Task EnsureContainerAsync(CancellationToken ct)
     {
         if (_containerEnsured) return;
         await _ensureLock.WaitAsync(ct);
         try
         {
             if (_containerEnsured) return;
-            await _container.CreateIfNotExistsAsync(PublicAccessType.None, cancellationToken: ct);
+            await _ensureContainerOnce(ct);
             _containerEnsured = true;
         }
         finally
