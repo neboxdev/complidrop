@@ -4,6 +4,7 @@ using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CompliDrop.Api.Tests;
 
@@ -87,7 +88,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
         var user = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = _orgId };
         await using var appDb = CreateAppDb(user);
         await using var sysDb = CreateSystemDb();
-        return await new ComplianceCheckService(appDb, sysDb, new FixedTimeProvider(FixedNow))
+        return await new ComplianceCheckService(appDb, sysDb, new FixedTimeProvider(FixedNow), NullLogger<ComplianceCheckService>.Instance)
             .EvaluateForSystemAsync(documentId, default);
     }
 
@@ -204,13 +205,15 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
     [Fact]
     public async Task Rules_for_other_document_types_are_skipped()
     {
-        // Document is a 'license'; the only rule targets 'coi' → no applicable rules → vacuously Compliant.
+        // Document is a 'license'; the only rule targets 'coi' → no applicable rules. Pre-#257 this
+        // left allPassed=true → a vacuous Compliant. It must now read Pending ("no requirements
+        // apply"), not green, and certify no checks.
         var id = await SeedAsync(
             expiration: Anchor.AddDays(365),
             docType: "license",
             rules: ("coi", "general_liability_limit", "min_value", "1000000"));
 
-        (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.Compliant);
+        (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.Pending);
 
         await using var db = CreateSystemDb();
         (await db.ComplianceChecks.CountAsync(c => c.DocumentId == id)).Should().Be(0);
@@ -263,7 +266,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
         await using var appDb = CreateAppDb(otherOrgUser);
         await using var sysDb = CreateSystemDb();
 
-        var status = await new ComplianceCheckService(appDb, sysDb, new FixedTimeProvider(FixedNow))
+        var status = await new ComplianceCheckService(appDb, sysDb, new FixedTimeProvider(FixedNow), NullLogger<ComplianceCheckService>.Instance)
             .EvaluateAsync(id, default);
 
         status.Should().Be(ComplianceStatus.Pending);
@@ -332,5 +335,39 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
         await using var verify = CreateSystemDb();
         (await verify.ComplianceChecks.AnyAsync(c => c.DocumentId == id)).Should().BeFalse(
             "previously-leaked foreign-rule check rows must be cleared on re-evaluation");
+    }
+
+    // ---------------- #257: no rule governs this doc type → Pending, never vacuously Compliant ----
+
+    [Fact]
+    public async Task Document_type_governed_by_no_rule_is_Pending_not_vacuously_Compliant()
+    {
+        // The assigned template HAS a rule, but it targets "coi" while the doc is "other" — zero
+        // rules apply to this type. Pre-#257 the loop ran zero times, left allPassed=true, and the
+        // doc went green (a menu PDF uploaded as "Other" reads Compliant). "No requirements apply"
+        // must read Pending, and certify nothing.
+        var id = await SeedAsync(
+            expiration: Anchor.AddDays(365),
+            docType: "other",
+            rules: ("coi", "general_liability_limit", "min_value", "1000000"));
+
+        (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.Pending);
+
+        await using var db = CreateSystemDb();
+        (await db.ComplianceChecks.CountAsync(c => c.DocumentId == id)).Should().Be(0,
+            "a doc no rule governs must not have certified check rows");
+    }
+
+    [Fact]
+    public async Task No_applicable_rule_but_expiring_soon_still_reads_ExpiringSoon()
+    {
+        // The date overlay still applies when no rule governs the type: a soon-to-expire "Other"
+        // doc surfaces the date urgency rather than a flat Pending.
+        var id = await SeedAsync(
+            expiration: Anchor.AddDays(10),
+            docType: "other",
+            rules: ("coi", "general_liability_limit", "min_value", "1000000"));
+
+        (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.ExpiringSoon);
     }
 }

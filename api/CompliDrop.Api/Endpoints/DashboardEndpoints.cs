@@ -23,12 +23,28 @@ public static class DashboardEndpoints
 
         var docs = db.Documents;
         var totalDocs = await docs.CountAsync(ct);
-        var compliant = await docs.CountAsync(d => d.ComplianceStatus == Entities.ComplianceStatus.Compliant, ct);
-        var nonCompliant = await docs.CountAsync(d => d.ComplianceStatus == Entities.ComplianceStatus.NonCompliant, ct);
+        // The headline buckets must be mutually exclusive on the EFFECTIVE (date-overlaid) status,
+        // or a date-expired-but-stored-Compliant doc gets counted as BOTH compliant AND expired —
+        // two answers on one screen (#257). Expired/ExpiringSoon are date-driven; compliant and
+        // nonCompliant exclude any doc the date buckets already claim.
+        var compliant = await docs.CountAsync(d =>
+            d.ComplianceStatus == Entities.ComplianceStatus.Compliant
+            && (d.ExpirationDate == null || d.ExpirationDate > in30), ct);
+        var nonCompliant = await docs.CountAsync(d =>
+            d.ComplianceStatus == Entities.ComplianceStatus.NonCompliant
+            && (d.ExpirationDate == null || d.ExpirationDate >= today), ct);
+        // ExpiringSoon must use the SAME stored-status eligibility as ComplianceStatusDeriver and the
+        // documents-list ExpiringSoon filter: a NonCompliant doc expiring soon stays NonCompliant
+        // (its hard fail isn't softened by the date), so it must NOT also be counted here — otherwise
+        // it double-counts under both nonCompliant and expiringSoon. Expired stays status-agnostic
+        // (Expired is top precedence; the compliant/nonCompliant arms already exclude past-date docs).
         var expiringSoon = await docs.CountAsync(d =>
             d.ExpirationDate != null
             && d.ExpirationDate >= today
-            && d.ExpirationDate <= in30, ct);
+            && d.ExpirationDate <= in30
+            && (d.ComplianceStatus == Entities.ComplianceStatus.Compliant
+                || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon
+                || d.ComplianceStatus == Entities.ComplianceStatus.Pending), ct);
         var expired = await docs.CountAsync(d => d.ExpirationDate != null && d.ExpirationDate < today, ct);
         var pendingExtraction = await docs.CountAsync(d =>
             d.ExtractionStatus == Entities.ExtractionStatus.Pending

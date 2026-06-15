@@ -10,18 +10,77 @@ public interface IComplianceCheckService
 {
     Task<ComplianceStatus> EvaluateAsync(Guid documentId, CancellationToken ct);
     Task<ComplianceStatus> EvaluateForSystemAsync(Guid documentId, CancellationToken ct);
+
+    /// <summary>
+    /// Re-evaluates every document whose vendor is assigned the given template. The fan-out that
+    /// keeps verdicts fresh after a rule/template MUTATION — pure DB work, no LLM cost (#257).
+    /// </summary>
+    Task ReevaluateForTemplateAsync(Guid templateId, CancellationToken ct);
+
+    /// <summary>
+    /// Re-evaluates every document belonging to the given vendor. The fan-out for a checklist
+    /// (re)assignment — so portal-first onboarding (upload, then assign a checklist) no longer
+    /// leaves documents stuck at "Awaiting review" forever (#257).
+    /// </summary>
+    Task ReevaluateForVendorAsync(Guid vendorId, CancellationToken ct);
 }
 
 public class ComplianceCheckService(
     AppDbContext db,
     SystemDbContext sysDb,
-    TimeProvider timeProvider) : IComplianceCheckService
+    TimeProvider timeProvider,
+    ILogger<ComplianceCheckService> logger) : IComplianceCheckService
 {
     public Task<ComplianceStatus> EvaluateAsync(Guid documentId, CancellationToken ct) =>
         EvaluateInternalAsync(db, documentId, timeProvider.GetUtcNow().UtcDateTime, ct);
 
     public Task<ComplianceStatus> EvaluateForSystemAsync(Guid documentId, CancellationToken ct) =>
         EvaluateInternalAsync(sysDb, documentId, timeProvider.GetUtcNow().UtcDateTime, ct);
+
+    public async Task ReevaluateForTemplateAsync(Guid templateId, CancellationToken ct)
+    {
+        // Tenant-filtered db: only the caller org's documents are touched. The vendor → template
+        // link is the join; a doc with no vendor (or a vendor on another template) is excluded.
+        var docIds = await db.Documents
+            .Where(d => d.Vendor != null && d.Vendor.ComplianceTemplateId == templateId)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        await ReevaluateEachAsync(docIds, ct);
+    }
+
+    public async Task ReevaluateForVendorAsync(Guid vendorId, CancellationToken ct)
+    {
+        var docIds = await db.Documents
+            .Where(d => d.VendorId == vendorId)
+            .Select(d => d.Id)
+            .ToListAsync(ct);
+        await ReevaluateEachAsync(docIds, ct);
+    }
+
+    // Best-effort fan-out: one document failing to re-evaluate must not fail the mutation that
+    // triggered it (a rule edit / checklist assignment). Mirrors the inline best-effort recompute
+    // on the document-edit endpoints. A swallowed doc keeps its prior verdict until the nightly
+    // sweep or a manual "Check again" — never a 500 that, on the rule-create path, would duplicate
+    // the rule on retry. Cancellation still propagates (a shutdown isn't a per-doc failure).
+    private async Task ReevaluateEachAsync(IReadOnlyList<Guid> docIds, CancellationToken ct)
+    {
+        foreach (var id in docIds)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                await EvaluateInternalAsync(db, id, timeProvider.GetUtcNow().UtcDateTime, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError(ex, "Re-evaluation fan-out failed for document {DocumentId}", id);
+                // Drop the failed doc's half-applied tracked changes so they don't ride along on the
+                // NEXT doc's SaveChanges and corrupt it. The triggering mutation (rule/vendor save)
+                // already committed before this fan-out began, so clearing the tracker can't lose it.
+                db.ChangeTracker.Clear();
+            }
+        }
+    }
 
     // nowUtc is injected (via TimeProvider) instead of read from DateTime.UtcNow so the
     // expiration / expiring-soon date boundaries are deterministically testable.
@@ -93,6 +152,20 @@ public class ComplianceCheckService(
         var applicableRules = template.Rules
             .Where(r => string.IsNullOrEmpty(r.DocumentType) || r.DocumentType == doc.DocumentType)
             .ToList();
+
+        if (applicableRules.Count == 0)
+        {
+            // The template has rules, but NONE govern this document's type — e.g. a menu PDF
+            // uploaded as "Other" against a COI-only checklist. Zero applicable rules left the loop
+            // below with allPassed=true → a vacuous Compliant (#257). "No requirements apply" must
+            // read Pending, never Compliant. (The stale-check rows were already cleared by the
+            // RemoveRange above, so there's nothing to certify.) Preserve a date-driven ExpiringSoon.
+            if (doc.ComplianceStatus != ComplianceStatus.ExpiringSoon)
+                doc.ComplianceStatus = ComplianceStatus.Pending;
+            doc.UpdatedAt = nowUtc;
+            await context.SaveChangesAsync(ct);
+            return doc.ComplianceStatus;
+        }
 
         bool allPassed = true;
         foreach (var rule in applicableRules)

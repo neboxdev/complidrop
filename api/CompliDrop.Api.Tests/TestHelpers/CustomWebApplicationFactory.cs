@@ -69,11 +69,17 @@ public sealed class CustomWebApplicationFactory(
 
         builder.ConfigureTestServices(services =>
         {
-            // Stop the DB-polling workers from running during tests.
+            // Stop the DB-polling workers from running during tests. ComplianceSweepBackgroundService
+            // is included: left running it would sweep the shared test DB on startup and hourly,
+            // racing other tests and risking silent vacuity in the on-read-overlay tests (a sweep
+            // could persist the derived status into the stored column, so those tests would pass off
+            // the swept value even if the overlay were reverted). ComplianceSweepBackgroundServiceTests
+            // drives SweepAsync directly with a fixed clock instead.
             var workers = services
                 .Where(d => d.ServiceType == typeof(IHostedService)
                     && (d.ImplementationType == typeof(ExtractionWorker)
-                        || d.ImplementationType == typeof(ReminderBackgroundService)))
+                        || d.ImplementationType == typeof(ReminderBackgroundService)
+                        || d.ImplementationType == typeof(ComplianceSweepBackgroundService)))
                 .ToList();
             foreach (var descriptor in workers)
                 services.Remove(descriptor);

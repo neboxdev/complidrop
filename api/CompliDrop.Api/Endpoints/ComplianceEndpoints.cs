@@ -99,6 +99,7 @@ public static class ComplianceEndpoints
     private static async Task<IResult> DeleteTemplate(
         Guid id,
         AppDbContext db,
+        IComplianceCheckService checker,
         IAuditLogger audit,
         CancellationToken ct)
     {
@@ -143,6 +144,14 @@ public static class ComplianceEndpoints
                 "vendor.template_cleared_on_template_delete", nameof(ComplianceTemplate), id,
                 after: new { count = vendorIds.Count, vendorIds });
         await audit.LogAsync("complianceTemplate.deleted", nameof(ComplianceTemplate), id);
+
+        // Re-evaluation fan-out (#257): the affected vendors now have no checklist, so their
+        // documents must drop from any rule verdict to "no requirements apply" (Pending) and shed
+        // the now-orphaned check rows. Runs after commit — the template is gone and the assignments
+        // are cleared, so each evaluation takes the no-governing-rules path.
+        foreach (var vendorId in vendorIds)
+            await checker.ReevaluateForVendorAsync(vendorId, ct);
+
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }
 
@@ -150,6 +159,7 @@ public static class ComplianceEndpoints
         Guid templateId,
         UpsertRuleRequest req,
         AppDbContext db,
+        IComplianceCheckService checker,
         IAuditLogger audit,
         CancellationToken ct)
     {
@@ -186,6 +196,12 @@ public static class ComplianceEndpoints
         }
 
         await db.SaveChangesAsync(ct);
+
+        // Re-evaluation fan-out (#257): a rule add/edit changes the verdict for every document whose
+        // vendor uses this template. Without this, the rules page saves and the documents keep their
+        // stale Compliant/NonCompliant badge until something else happens to re-trigger evaluation.
+        await checker.ReevaluateForTemplateAsync(template.Id, ct);
+
         await audit.LogAsync("complianceRule.upserted", nameof(ComplianceRule), rule.Id);
         return Results.Ok(new { data = new { id = rule.Id }, error = (object?)null });
     }

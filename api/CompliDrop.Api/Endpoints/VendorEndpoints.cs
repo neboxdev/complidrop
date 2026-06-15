@@ -98,6 +98,7 @@ public static class VendorEndpoints
         Guid id,
         VendorUpsertRequest req,
         AppDbContext db,
+        IComplianceCheckService checker,
         IAuditLogger audit,
         CancellationToken ct)
     {
@@ -109,6 +110,7 @@ public static class VendorEndpoints
         var v = await db.Vendors.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (v is null) return NotFound();
         if (!await TemplateIsAssignable(req.ComplianceTemplateId, db, ct)) return TemplateNotFound();
+        var templateChanged = v.ComplianceTemplateId != req.ComplianceTemplateId;
         v.Name = req.Name.Trim();
         v.ContactEmail = req.ContactEmail;
         v.ContactPhone = req.ContactPhone;
@@ -116,6 +118,14 @@ public static class VendorEndpoints
         v.ComplianceTemplateId = req.ComplianceTemplateId;
         v.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        // Re-evaluation fan-out (#257): assigning (or changing) the checklist must immediately
+        // re-grade this vendor's documents — the vendor page's amber hint promises exactly that.
+        // Portal-first onboarding (upload, THEN assign a checklist) otherwise leaves docs stuck at
+        // "Awaiting review" forever. Only fan out when the assignment actually changed.
+        if (templateChanged)
+            await checker.ReevaluateForVendorAsync(id, ct);
+
         await audit.LogAsync("vendor.updated", nameof(Vendor), id);
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }

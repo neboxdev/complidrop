@@ -60,11 +60,36 @@ public static class DocumentEndpoints
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
 
+        var today = DateTime.UtcNow.Date;
+        var in30 = today.AddDays(ComplianceStatusDeriver.ExpiringSoonWindowDays);
+
         var query = db.Documents.AsQueryable();
         if (!string.IsNullOrWhiteSpace(status))
         {
+            // Filter on the EFFECTIVE (date-overlaid) status, not the stored cache, so the result
+            // set matches the badge each row renders and the dashboard counts — the #257 fix for
+            // "the Expired filter finds nothing while the dashboard shows one." Each arm mirrors
+            // ComplianceStatusDeriver.Effective in SQL (C#-computed date bounds, no AT TIME ZONE).
             if (Enum.TryParse<ComplianceStatus>(status, ignoreCase: true, out var cs))
-                query = query.Where(d => d.ComplianceStatus == cs);
+                query = cs switch
+                {
+                    ComplianceStatus.Expired => query.Where(d =>
+                        d.ExpirationDate != null && d.ExpirationDate < today),
+                    ComplianceStatus.ExpiringSoon => query.Where(d =>
+                        d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate <= in30
+                        && (d.ComplianceStatus == ComplianceStatus.Compliant
+                            || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
+                            || d.ComplianceStatus == ComplianceStatus.Pending)),
+                    ComplianceStatus.Compliant => query.Where(d =>
+                        d.ComplianceStatus == ComplianceStatus.Compliant
+                        && (d.ExpirationDate == null || d.ExpirationDate > in30)),
+                    ComplianceStatus.NonCompliant => query.Where(d =>
+                        d.ComplianceStatus == ComplianceStatus.NonCompliant
+                        && (d.ExpirationDate == null || d.ExpirationDate >= today)),
+                    _ => query.Where(d => // Pending — but not if a date overlay would make it Expiring/Expired
+                        d.ComplianceStatus == ComplianceStatus.Pending
+                        && (d.ExpirationDate == null || d.ExpirationDate > in30)),
+                };
         }
         if (!string.IsNullOrWhiteSpace(type))
             query = query.Where(d => d.DocumentType == type);
@@ -72,8 +97,11 @@ public static class DocumentEndpoints
             query = query.Where(d => d.VendorId == vendorId);
         if (expiresWithin is int days && days > 0)
         {
-            var cutoff = DateTime.UtcNow.Date.AddDays(days);
-            query = query.Where(d => d.ExpirationDate != null && d.ExpirationDate <= cutoff);
+            // Upper AND lower bound: "expiring within N days" is a future window, so exclude
+            // already-expired docs — without the lower bound the "Expiring in 30 days" filter also
+            // returned long-expired documents (#257). Already-expired docs live under status=Expired.
+            var cutoff = today.AddDays(days);
+            query = query.Where(d => d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate <= cutoff);
         }
         if (!string.IsNullOrWhiteSpace(search))
         {
@@ -108,25 +136,42 @@ public static class DocumentEndpoints
         pageSize = Math.Clamp(pageSize, 1, 100);
 
         var total = await query.CountAsync(ct);
-        var items = await query
+        // Project the raw columns (server-side, narrow), then build the DTO in memory so the
+        // displayed ComplianceStatus is the date-overlaid EFFECTIVE status (#257) — the same value
+        // the filter above selects on, so a row's badge always matches the filter it came back under.
+        var rows = await query
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
-            .Select(d => new DocumentListItem(
+            .Select(d => new
+            {
                 d.Id,
                 d.OriginalFileName,
                 d.DocumentType,
-                d.Vendor != null ? d.Vendor.Name : null,
+                VendorName = d.Vendor != null ? d.Vendor.Name : null,
                 d.VendorId,
-                d.ExtractionStatus.ToString(),
+                d.ExtractionStatus,
                 d.ExtractionConfidence,
-                d.ComplianceStatus.ToString(),
+                d.ComplianceStatus,
                 d.EffectiveDate,
                 d.ExpirationDate,
-                d.ExpirationDate != null
-                    ? (int?)(d.ExpirationDate.Value.Date - DateTime.UtcNow.Date).TotalDays
-                    : null,
-                d.CreatedAt))
+                d.CreatedAt
+            })
             .ToListAsync(ct);
+        var items = rows.Select(d => new DocumentListItem(
+            d.Id,
+            d.OriginalFileName,
+            d.DocumentType,
+            d.VendorName,
+            d.VendorId,
+            d.ExtractionStatus.ToString(),
+            d.ExtractionConfidence,
+            ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today).ToString(),
+            d.EffectiveDate,
+            d.ExpirationDate,
+            d.ExpirationDate != null
+                ? (int?)(d.ExpirationDate.Value.Date - today).TotalDays
+                : null,
+            d.CreatedAt)).ToList();
 
         return Results.Ok(new
         {
@@ -158,6 +203,10 @@ public static class DocumentEndpoints
         if (doc.ExtractionFields is not null)
             extractionFields = System.Text.Json.JsonSerializer.Deserialize<object>(doc.ExtractionFields.RootElement.GetRawText());
 
+        // Overlay the date-driven verdict so the detail badge is live truth as of today, not the
+        // value frozen at the last evaluation (#257). The sweep keeps the stored column fresh too,
+        // but deriving on read removes even the up-to-an-hour gap between sweeps.
+        var today = DateTime.UtcNow.Date;
         var detail = new DocumentDetail(
             doc.Id,
             doc.OriginalFileName,
@@ -168,11 +217,11 @@ public static class DocumentEndpoints
             doc.VendorId,
             doc.ExtractionStatus.ToString(),
             doc.ExtractionConfidence,
-            doc.ComplianceStatus.ToString(),
+            ComplianceStatusDeriver.Effective(doc.ComplianceStatus, doc.ExpirationDate, today).ToString(),
             doc.EffectiveDate,
             doc.ExpirationDate,
             doc.ExpirationDate != null
-                ? (int?)(doc.ExpirationDate.Value.Date - DateTime.UtcNow.Date).TotalDays
+                ? (int?)(doc.ExpirationDate.Value.Date - today).TotalDays
                 : null,
             doc.IsManuallyVerified,
             doc.UploadedBy,

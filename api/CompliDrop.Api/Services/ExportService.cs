@@ -84,6 +84,9 @@ public class ExportService(SystemDbContext db) : IExportService
             .ToDictionary(u => u.Id, u => DisplayName(u.FullName, u.Email));
 
         var reportDate = DateTime.UtcNow.ToString("MMMM d, yyyy");
+        // Derive the date-driven verdict at GENERATION time so the audit-ready report can never
+        // certify an expired document as Compliant off a stale cache (#257).
+        var today = DateTime.UtcNow.Date;
 
         return QuestPDF.Fluent.Document.Create(container =>
         {
@@ -122,7 +125,8 @@ public class ExportService(SystemDbContext db) : IExportService
                                     r.RelativeItem(2).Text(d.Vendor?.Name ?? "—").FontSize(9);
                                     r.RelativeItem(2).Text(DisplayLabels.DocumentType(d.DocumentType)).FontSize(9);
                                     r.RelativeItem(2).Text(d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "—").FontSize(9);
-                                    r.RelativeItem(2).Text(DisplayLabels.Compliance(d.ComplianceStatus)).FontSize(9);
+                                    r.RelativeItem(2).Text(DisplayLabels.Compliance(
+                                        ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today))).FontSize(9);
                                 });
                             }
                         }));
@@ -233,6 +237,7 @@ public class ExportService(SystemDbContext db) : IExportService
         await using var writer = new StreamWriter(ms, leaveOpen: true);
         var config = new CsvConfiguration(CultureInfo.InvariantCulture) { HasHeaderRecord = true };
         await using var csv = new CsvWriter(writer, config);
+        var today = DateTime.UtcNow.Date; // date-overlay the verdict at generation time (#257)
 
         csv.WriteField("Id");
         csv.WriteField("FileName");
@@ -254,7 +259,8 @@ public class ExportService(SystemDbContext db) : IExportService
             csv.WriteField(d.Vendor?.Name ?? "");
             csv.WriteField(DisplayLabels.DocumentType(d.DocumentType));
             csv.WriteField(DisplayLabels.Extraction(d.ExtractionStatus));
-            csv.WriteField(DisplayLabels.Compliance(d.ComplianceStatus));
+            csv.WriteField(DisplayLabels.Compliance(
+                ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today)));
             csv.WriteField(d.EffectiveDate?.ToString("yyyy-MM-dd"));
             csv.WriteField(d.ExpirationDate?.ToString("yyyy-MM-dd"));
             csv.WriteField(d.GeneralLiabilityLimit?.ToString(CultureInfo.InvariantCulture));
@@ -273,6 +279,7 @@ public class ExportService(SystemDbContext db) : IExportService
             .FirstOrDefaultAsync(v => v.Id == vendorId && v.OrganizationId == organizationId, ct)
             ?? throw new InvalidOperationException("Vendor not found.");
 
+        var today = DateTime.UtcNow.Date; // date-overlay the verdict at generation time (#257)
         return QuestPDF.Fluent.Document.Create(container =>
         {
             container.Page(page =>
@@ -290,7 +297,7 @@ public class ExportService(SystemDbContext db) : IExportService
                     col.Item().Text($"Documents: {vendor.Documents.Count}");
                     foreach (var d in vendor.Documents.OrderBy(d => d.ExpirationDate))
                     {
-                        col.Item().PaddingTop(6).Text($"• {d.OriginalFileName} — {DisplayLabels.DocumentType(d.DocumentType)} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {DisplayLabels.Compliance(d.ComplianceStatus)}");
+                        col.Item().PaddingTop(6).Text($"• {d.OriginalFileName} — {DisplayLabels.DocumentType(d.DocumentType)} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {DisplayLabels.Compliance(ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today))}");
                     }
                 });
             });
