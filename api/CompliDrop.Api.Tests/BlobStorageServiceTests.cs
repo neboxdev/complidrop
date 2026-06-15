@@ -60,8 +60,13 @@ public sealed class BlobStorageServiceTests
         // exception (so the endpoints can answer a friendly 503), not leak the Azure SDK type (#248).
         var sut = Build(UnreachableConnectionString);
         using var content = new MemoryStream([1, 2, 3, 4]);
+        // Bound the test in case a pathological CI blackholes the SYN to 127.0.0.1:1 instead of
+        // refusing it (loopback normally RSTs immediately). A genuine cancellation propagates as OCE
+        // (UploadAsync deliberately doesn't wrap caller-cancellation), so a timeout fails loudly
+        // rather than hanging the suite — but the expected, near-instant path is connection-refused.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
 
-        var act = async () => await sut.UploadAsync("org/2026-06/doc.pdf", content, "application/pdf", default);
+        var act = async () => await sut.UploadAsync("org/2026-06/doc.pdf", content, "application/pdf", cts.Token);
 
         await act.Should().ThrowAsync<BlobStorageUnavailableException>();
     }

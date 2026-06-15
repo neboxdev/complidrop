@@ -1,3 +1,4 @@
+using Azure.Storage.Blobs;
 using Microsoft.Extensions.Options;
 
 namespace CompliDrop.Api.Configuration;
@@ -30,6 +31,22 @@ public sealed class AzureStorageSettingsValidator(IHostEnvironment env) : IValid
 
         if (string.IsNullOrWhiteSpace(options.ContainerName))
             return ValidateOptionsResult.Fail("AzureStorage:ContainerName must be set outside Development.");
+
+        // "absent OR MALFORMED" (the ticket's words): a non-empty-but-garbled connection string would
+        // pass the checks above, then throw FormatException in BlobServiceClient's constructor on
+        // FIRST UPLOAD — outside UploadAsync's try/catch, so it would surface as the generic 500 this
+        // ticket exists to remove. Parse it here (the BlobServiceClient ctor parses with NO network
+        // call) so a malformed string also fails the boot. The message names the key, never the value.
+        try
+        {
+            _ = new BlobServiceClient(options.ConnectionString);
+        }
+        catch (Exception ex) when (ex is FormatException or ArgumentException)
+        {
+            return ValidateOptionsResult.Fail(
+                "AzureStorage:ConnectionString is malformed and could not be parsed. Check the storage "
+                + "account connection string.");
+        }
 
         return ValidateOptionsResult.Success;
     }

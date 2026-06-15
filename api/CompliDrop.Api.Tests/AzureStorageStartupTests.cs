@@ -41,19 +41,36 @@ public sealed class AzureStorageSettingsValidatorTests
         result.FailureMessage.Should().Contain("ConnectionString");
     }
 
+    // A well-formed connection string with a valid base64 AccountKey (the SDK validates the key
+    // format when it parses) — used for the "container name empty" and "accepted" cases so they
+    // reach/pass the parse check rather than tripping it.
+    private const string WellFormed =
+        "DefaultEndpointsProtocol=https;AccountName=acct;" +
+        "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;" +
+        "EndpointSuffix=core.windows.net";
+
     [Fact]
     public void Non_development_rejects_an_empty_container_name()
     {
-        var result = Validate("Production", "DefaultEndpointsProtocol=https;AccountName=x;AccountKey=y;", "");
+        var result = Validate("Production", WellFormed, "");
         result.Failed.Should().BeTrue();
         result.FailureMessage.Should().Contain("ContainerName");
     }
 
     [Fact]
+    public void Non_development_rejects_a_malformed_connection_string()
+    {
+        // "absent OR malformed" (AC1): a non-empty garbage string passes the non-empty check but must
+        // fail the parse check at boot, not throw a generic 500 on first upload.
+        var result = Validate("Production", "this-is-not-a-valid-connection-string", "documents");
+        result.Failed.Should().BeTrue();
+        result.FailureMessage.Should().Contain("malformed");
+    }
+
+    [Fact]
     public void Non_development_accepts_a_populated_config()
     {
-        Validate("Production", "DefaultEndpointsProtocol=https;AccountName=x;AccountKey=y;EndpointSuffix=core.windows.net", "documents")
-            .Succeeded.Should().BeTrue();
+        Validate("Production", WellFormed, "documents").Succeeded.Should().BeTrue();
     }
 
     private sealed class FakeEnv(string envName) : IHostEnvironment
@@ -117,7 +134,10 @@ public sealed class BlobStorageFailureTests(IntegrationTestFixture fixture) : In
         resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
         body.GetProperty("error").GetProperty("code").GetString().Should().Be("storage.unavailable");
-        body.GetProperty("error").GetProperty("message").GetString()
-            .Should().NotContainEquivalentOf("unexpected error");
+        var message = body.GetProperty("error").GetProperty("message").GetString();
+        message.Should().NotContainEquivalentOf("unexpected error");
+        // Pin the external-persona (vendor) copy specifically — distinct from the dashboard's "store"
+        // wording — so a regression that swapped in the internal copy is caught.
+        message.Should().Contain("save your file");
     }
 }

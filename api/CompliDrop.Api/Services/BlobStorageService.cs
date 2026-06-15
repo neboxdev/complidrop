@@ -37,11 +37,13 @@ public class BlobStorageService : IBlobStorageService
 
     public BlobStorageService(IOptions<AzureStorageSettings> settings)
     {
-        // Construction is pure: BlobServiceClient + GetBlobContainerClient parse config but make NO
-        // network call. The old ctor's CreateIfNotExists() was a blocking network call inside a lazy
-        // singleton, so a transient Azure error at first upload poisoned construction and re-threw an
-        // opaque 500 on every subsequent request (#248). Container creation now happens lazily on
-        // first upload (EnsureContainerAsync) with a clear, mappable failure.
+        // Construction makes NO network call: BlobServiceClient + GetBlobContainerClient only parse
+        // config (the ctor throws on an empty/malformed connection string, but the startup
+        // AzureStorageSettingsValidator rejects both outside Development, and tests use the fake — so
+        // in practice this runs only with a well-formed string). The old ctor's CreateIfNotExists()
+        // was a blocking network call inside a lazy singleton, so a transient Azure error at first
+        // upload poisoned construction and re-threw an opaque 500 on every subsequent request (#248).
+        // Container creation now happens lazily on first upload (EnsureContainerAsync), mappable to 503.
         var cfg = settings.Value;
         var client = new BlobServiceClient(cfg.ConnectionString, BuildClientOptions());
         _container = client.GetBlobContainerClient(cfg.ContainerName);
