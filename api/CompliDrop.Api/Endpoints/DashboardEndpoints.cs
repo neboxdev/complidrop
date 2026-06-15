@@ -98,9 +98,50 @@ public static class DashboardEndpoints
         });
     }
 
+    /// <summary>How many rows to over-fetch before collapsing twins down to the 20 shown.</summary>
+    private const int RecentActivityBuffer = 60;
+
+    /// <summary>
+    /// Internal-flag mutations with no user-meaningful label — they would render as raw
+    /// "Entity - Operation" entity-speak in the feed (#252). The canonical case is the interceptor's
+    /// bare <c>user.updated</c> from the welcome-tour <c>HasCompletedOnboarding</c> flip; meaningful
+    /// user events (sign-in, password/email change, account delete) have their own explicit, labelled
+    /// actions, and a <c>user.updated</c> that twins one of those is already dropped by the
+    /// per-request/entity collapse below in favour of the specific action.
+    /// </summary>
+    private static readonly HashSet<string> FeedHiddenActions = new(StringComparer.Ordinal)
+    {
+        "user.updated",
+    };
+
+    /// <summary>The interceptor's generic update action for an entity type, e.g. <c>vendor.updated</c>.</summary>
+    private static bool IsGenericUpdate(string action, string entityType) =>
+        string.Equals(action, $"{entityType.ToLowerInvariant()}.updated", StringComparison.Ordinal);
+
     private static async Task<IResult> RecentActivity(AppDbContext db, CancellationToken ct)
     {
-        var logs = await db.AuditLogs
+        // Over-fetch, then collapse the audit "twin" in the FEED — the AuditLog TABLE keeps both rows
+        // so the audit export is unchanged (#252). In ONE request, a single entity mutation can emit
+        // BOTH the AuditSaveChangesInterceptor's generic "{type}.created/updated/deleted" row AND an
+        // explicit IAuditLogger row — identical-named (vendor.created x2) or refined (document.verified
+        // vs the interceptor's document.updated). Keep ONE row per (request, entity), preferring the
+        // more specific action (the generic "...updated" loses). Rows with no correlation id or entity
+        // id (background jobs, non-entity events) are never collapsed.
+        var buffer = await db.AuditLogs
+            .OrderByDescending(a => a.CreatedAt)
+            .Take(RecentActivityBuffer)
+            .Select(a => new { a.Id, a.Action, a.EntityType, a.EntityId, a.CorrelationId, a.CreatedAt })
+            .ToListAsync(ct);
+
+        var logs = buffer
+            .GroupBy(a => a.CorrelationId != null && a.EntityId != null
+                ? $"{a.CorrelationId}|{a.EntityType}|{a.EntityId}"
+                : a.Id.ToString("N")) // ungroupable rows each stay their own group
+            .Select(g => g
+                .OrderBy(a => IsGenericUpdate(a.Action, a.EntityType) ? 1 : 0) // specific action wins the twin
+                .ThenByDescending(a => a.CreatedAt)
+                .First())
+            .Where(a => !FeedHiddenActions.Contains(a.Action))
             .OrderByDescending(a => a.CreatedAt)
             .Take(20)
             .Select(a => new
@@ -111,7 +152,7 @@ public static class DashboardEndpoints
                 entityId = a.EntityId,
                 createdAt = a.CreatedAt
             })
-            .ToListAsync(ct);
+            .ToList();
         return Results.Ok(new { data = logs, error = (object?)null });
     }
 }
