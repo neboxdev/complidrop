@@ -946,7 +946,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         // count one genuine failure, and return the doc to Pending for another attempt — never let it
         // sit wedged in Processing forever.
         var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
-        Extraction.ExtractDelay = TimeSpan.FromSeconds(30); // far longer than the attempt budget below
+        Extraction.ExtractDelay = TimeSpan.FromSeconds(3); // far longer than the attempt budget below, short enough that a regression fails fast
         var worker = BuildWorker(attemptTimeout: TimeSpan.FromMilliseconds(250));
 
         (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
@@ -972,7 +972,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             failedAttempts: ExtractionWorker.MaxAttempts - 1,
             processingStartedAt: DateTime.UtcNow,
             subscriptionSpendUsd: 0m);
-        Extraction.ExtractDelay = TimeSpan.FromSeconds(30);
+        Extraction.ExtractDelay = TimeSpan.FromSeconds(3);
         var worker = BuildWorker(attemptTimeout: TimeSpan.FromMilliseconds(250));
 
         await worker.ProcessClaimedAsync(docId, CancellationToken.None);
@@ -1043,12 +1043,13 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     public async Task Wedged_OCR_stage_is_also_timed_out_and_requeued()
     {
         // The per-attempt timeout must bound the WHOLE attempt, not just the LLM step. Here OCR is the
-        // wedged stage (enabled + delayed); the cancellation must still propagate out of
-        // ProcessDocumentAsync (its `when (ex is not OperationCanceledException)` catch must not
-        // swallow it) and route through the timeout handler, identically to a wedged extraction.
+        // wedged stage (enabled + delayed): the attempt is timed out, requeued as a counted failure,
+        // and extraction is never reached — identically to a wedged LLM call. (End-to-end behavior; it
+        // does not isolate the `when (ex is not OperationCanceledException)` filter, since a cancelled
+        // SaveChanges in the generic catch would re-throw the same OCE into the timeout handler too.)
         var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
         Ocr.IsEnabled = true;
-        Ocr.OcrDelay = TimeSpan.FromSeconds(30);
+        Ocr.OcrDelay = TimeSpan.FromSeconds(3);
         var worker = BuildWorker(attemptTimeout: TimeSpan.FromMilliseconds(250));
 
         (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
