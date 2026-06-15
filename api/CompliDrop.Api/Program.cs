@@ -106,7 +106,25 @@ builder.Services.AddDbContext<AppDbContext>((sp, options) =>
 
 builder.Services.AddDbContext<SystemDbContext>((sp, options) =>
 {
-    options.UseNpgsql(builder.Configuration.GetConnectionString("Database"));
+    // SystemDbContext backs the background workers. Pin a server-side
+    // idle_in_transaction_session_timeout on its (separate) connection pool: if a worker connection
+    // is ever left idle INSIDE a transaction holding a row lock, Postgres terminates it and releases
+    // the lock, so the extraction zombie-reclaim can proceed instead of FOR UPDATE SKIP LOCKED
+    // skipping the orphaned-locked row forever (#259, problem 4). The request-path AppDbContext
+    // keeps the bare connection string. 120s is far above any real worker transaction (sub-second
+    // SaveChanges).
+    //
+    // The connection string MUST be read here, INSIDE the lambda — not hoisted to a top-level
+    // statement. The lambda runs at resolve time (after the full configuration is composed), so a
+    // test host's in-memory override of ConnectionStrings:Database wins; an eager top-level read
+    // would bind the dev/prod user-secret value and silently point background workers at the wrong
+    // database (#271).
+    var systemConnectionString = new Npgsql.NpgsqlConnectionStringBuilder(
+        builder.Configuration.GetConnectionString("Database"))
+    {
+        Options = "-c idle_in_transaction_session_timeout=120000",
+    }.ConnectionString;
+    options.UseNpgsql(systemConnectionString);
     options.AddInterceptors(new AuditSaveChangesInterceptor(
         () => sp.GetService<ICurrentUser>()));
 });

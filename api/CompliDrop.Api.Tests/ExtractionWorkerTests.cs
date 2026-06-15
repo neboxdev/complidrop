@@ -38,11 +38,20 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     /// <summary>Mirrors the per-document amount ExtractionWorker passes to CanSpendAsync.</summary>
     private const decimal PlannedPerDocUsd = 0.01m;
 
-    /// <summary>Builds a worker bound to the host's DI (so it resolves the test DB + fakes).</summary>
-    private ExtractionWorker BuildWorker() =>
-        new(
+    /// <summary>
+    /// Builds a worker bound to the host's DI (so it resolves the test DB + fakes). The optional
+    /// <paramref name="attemptTimeout"/> overrides the per-attempt timeout so the timeout-path tests
+    /// can use a sub-second budget instead of the production minimum.
+    /// </summary>
+    private ExtractionWorker BuildWorker(TimeSpan? attemptTimeout = null)
+    {
+        var worker = new ExtractionWorker(
             Fixture.Factory.Services.GetRequiredService<IServiceScopeFactory>(),
+            Options.Create(new ExtractionSettings()),
             NullLogger<ExtractionWorker>.Instance);
+        if (attemptTimeout is { } t) worker.AttemptTimeout = t;
+        return worker;
+    }
 
     /// <summary>
     /// Seeds an org (and optionally its subscription) plus a single document in the given state.
@@ -52,6 +61,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     private async Task<(Guid OrgId, Guid DocId)> SeedDocAsync(
         ExtractionStatus status = ExtractionStatus.Pending,
         int attempts = 0,
+        int failedAttempts = 0,
         string? blobPath = "blob/path/doc.pdf",
         DateTime? processingStartedAt = null,
         DateTime? createdAt = null,
@@ -98,6 +108,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             ContentType = "application/pdf",
             ExtractionStatus = status,
             ProcessingAttempts = attempts,
+            FailedAttempts = failedAttempts,
             ProcessingStartedAt = processingStartedAt,
             CreatedAt = createdAt ?? now,
             UpdatedAt = now,
@@ -181,6 +192,9 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
 
         var doc = await GetDocAsync(docId);
         doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed);
+        // Each cycle is one claim (ProcessingAttempts++) and one genuine failure (FailedAttempts++),
+        // so both reach the budget here. It's FailedAttempts that gates the stop (#259, problem 2).
+        doc.FailedAttempts.Should().Be(ExtractionWorker.MaxAttempts);
         doc.ProcessingAttempts.Should().Be(ExtractionWorker.MaxAttempts);
         doc.ProcessingError.Should().StartWith("extraction.failed");
     }
@@ -188,13 +202,16 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     // ----- AC2: up-front zombie guard --------------------------------------------------------
 
     [Fact]
-    public async Task Document_past_the_attempt_cap_is_failed_up_front_without_reprocessing()
+    public async Task Document_past_the_claims_backstop_is_failed_up_front_without_reprocessing()
     {
-        // ProcessingAttempts already over the cap (e.g. the process crashed mid-extraction in prior
-        // attempts so the catch block never ran). The guard must fail it before any OCR/LLM work.
+        // ProcessingAttempts (total claims) over the crash-loop backstop — e.g. the doc kills the
+        // process mid-extraction every time, so the failure handler never runs and FailedAttempts
+        // stays 0. The up-front backstop must fail it before any OCR/LLM work, on the claim count
+        // alone, even though it has zero genuine failures (#259, problem 2).
         var (_, docId) = await SeedDocAsync(
             status: ExtractionStatus.Processing,
-            attempts: ExtractionWorker.MaxAttempts + 1,
+            attempts: ExtractionWorker.MaxClaims + 1,
+            failedAttempts: 0,
             processingStartedAt: DateTime.UtcNow,
             subscriptionSpendUsd: 0m);
         var worker = BuildWorker();
@@ -204,7 +221,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         var doc = await GetDocAsync(docId);
         doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed);
         doc.ProcessingError.Should().StartWith("extraction.too_many_attempts");
-        Extraction.ExtractCallCount.Should().Be(0, "the zombie guard must short-circuit before extraction");
+        Extraction.ExtractCallCount.Should().Be(0, "the backstop must short-circuit before extraction");
         Ocr.OcrCallCount.Should().Be(0);
     }
 
@@ -757,6 +774,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         await using var sp = services.BuildServiceProvider();
         var worker = new ExtractionWorker(
             sp.GetRequiredService<IServiceScopeFactory>(),
+            Options.Create(new ExtractionSettings()),
             NullLogger<ExtractionWorker>.Instance);
 
         // Same seed shape as the SQL-level fresh-doc test: ProcessingStartedAt 1 min ago, well
@@ -784,27 +802,27 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     // ----- Boundary + branch coverage (from review) ------------------------------------------
 
     [Fact]
-    public async Task Document_at_exactly_the_attempt_cap_is_still_processed_not_guarded_up_front()
+    public async Task Document_at_exactly_the_claims_backstop_is_still_processed_not_guarded_up_front()
     {
-        // The up-front zombie guard is `> MaxAttempts` (strict), while the failure path is
-        // `>= MaxAttempts`. A doc sitting at exactly MaxAttempts must still get its final attempt — it
-        // must NOT be failed up-front. Pins the boundary against a `>`->`>=` regression that would
-        // silently drop the legitimate last attempt. (AC2 covers the over-cap side at MaxAttempts+1.)
+        // The up-front backstop is `> MaxClaims` (strict). A doc sitting at exactly MaxClaims must
+        // still get processed — it must NOT be failed up-front. Pins the boundary against a `>`->`>=`
+        // regression that would silently drop a legitimate attempt. (The over-cap side at
+        // MaxClaims+1 is covered above.)
         var (_, docId) = await SeedDocAsync(
             status: ExtractionStatus.Processing,
-            attempts: ExtractionWorker.MaxAttempts,
+            attempts: ExtractionWorker.MaxClaims,
             processingStartedAt: DateTime.UtcNow,
             subscriptionSpendUsd: 0m);
         var worker = BuildWorker();
 
-        // Call process directly so attempts stays at exactly MaxAttempts (a claim would increment it).
+        // Call process directly so attempts stays at exactly MaxClaims (a claim would increment it).
         await worker.ProcessDocumentAsync(docId, CancellationToken.None);
 
-        Extraction.ExtractCallCount.Should().Be(1, "a doc at exactly the cap still gets its final attempt");
+        Extraction.ExtractCallCount.Should().Be(1, "a doc at exactly the backstop still gets processed");
         var doc = await GetDocAsync(docId);
         doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
-        // The success path clears ProcessingError; had the up-front guard fired instead it would read
-        // "extraction.too_many_attempts: ...". Null therefore proves the guard did NOT trip at the cap.
+        // The success path clears ProcessingError; had the up-front backstop fired instead it would
+        // read "extraction.too_many_attempts: ...". Null proves the backstop did NOT trip at the cap.
         doc.ProcessingError.Should().BeNull();
     }
 
@@ -891,5 +909,109 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
 
         var sub = await GetSubscriptionAsync(orgId);
         sub.ExtractionSpendThisMonthUsd.Should().Be(Extraction.Result.Usage!.EstimatedCostUsd);
+    }
+
+    // ----- #259 problem 1: deterministic failures fail fast, never retry -----------------------
+
+    [Fact]
+    public async Task Non_retryable_extraction_failure_is_failed_immediately_without_retrying()
+    {
+        // A NonRetryableExtractionException (e.g. token-cap truncation) is deterministic — retrying
+        // the byte-identical request would fail the same way. The worker must mark the doc Failed on
+        // the FIRST occurrence and never re-run OCR/LLM, and it must NOT consume the retry budget
+        // (FailedAttempts stays 0 — the fail is immediate, not a counted retry).
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.ThrowNonRetryable = true;
+        var worker = BuildWorker();
+
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed);
+        doc.ProcessingError.Should().StartWith("extraction.token_limit");
+        doc.FailedAttempts.Should().Be(0, "a deterministic fail is immediate, not a counted retry");
+        Extraction.ExtractCallCount.Should().Be(1, "a deterministic failure must never be retried");
+
+        // And it must not be re-claimable — it's terminal.
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().BeNull();
+    }
+
+    // ----- #259 problem 3: per-attempt timeout requeues/fails a wedged attempt -----------------
+
+    [Fact]
+    public async Task Wedged_attempt_is_timed_out_and_requeued_as_a_counted_failure()
+    {
+        // The extraction boundary hangs; the per-attempt timeout (set tiny here) must cancel it,
+        // count one genuine failure, and return the doc to Pending for another attempt — never let it
+        // sit wedged in Processing forever.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.ExtractDelay = TimeSpan.FromSeconds(30); // far longer than the attempt budget below
+        var worker = BuildWorker(attemptTimeout: TimeSpan.FromMilliseconds(250));
+
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessClaimedAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "a timed-out attempt below the budget is retried");
+        doc.ProcessingStartedAt.Should().BeNull("the requeue clears the claim timestamp");
+        doc.ProcessingError.Should().Contain("timeout");
+        doc.FailedAttempts.Should().Be(1, "a timeout is a genuine, counted failure");
+        Extraction.ExtractCallCount.Should().Be(1, "the boundary was entered once before timing out");
+    }
+
+    [Fact]
+    public async Task Wedged_attempt_at_the_budget_edge_is_failed_not_requeued()
+    {
+        // FailedAttempts one short of the budget: the next timed-out attempt spends the budget and
+        // must mark the doc Failed, not requeue it. Pins that the timeout path shares the same retry
+        // accounting as ordinary failures.
+        var (_, docId) = await SeedDocAsync(
+            status: ExtractionStatus.Processing,
+            attempts: 1,
+            failedAttempts: ExtractionWorker.MaxAttempts - 1,
+            processingStartedAt: DateTime.UtcNow,
+            subscriptionSpendUsd: 0m);
+        Extraction.ExtractDelay = TimeSpan.FromSeconds(30);
+        var worker = BuildWorker(attemptTimeout: TimeSpan.FromMilliseconds(250));
+
+        await worker.ProcessClaimedAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed, "the last attempt's timeout spends the budget");
+        doc.FailedAttempts.Should().Be(ExtractionWorker.MaxAttempts);
+        doc.ProcessingError.Should().StartWith("extraction.timeout");
+    }
+
+    // ----- #259 problem 2: a graceful shutdown mid-attempt doesn't burn the budget -------------
+
+    [Fact]
+    public async Task Graceful_shutdown_mid_attempt_requeues_without_counting_a_failure()
+    {
+        // Simulate a deploy interrupting an in-flight attempt: the stopping token is already
+        // cancelled when processing begins. The worker must return the doc to Pending, UNDO the
+        // claim's increment (so repeated deploys can't climb the claim count), and leave the retry
+        // budget untouched — a restart is an interruption, not an extraction failure.
+        var (_, docId) = await SeedDocAsync(
+            status: ExtractionStatus.Processing,
+            attempts: 1,
+            failedAttempts: 0,
+            processingStartedAt: DateTime.UtcNow,
+            subscriptionSpendUsd: 0m);
+        var worker = BuildWorker();
+
+        using var stopping = new CancellationTokenSource();
+        await stopping.CancelAsync();
+
+        // The graceful-shutdown branch rethrows so ExecuteAsync's loop breaks.
+        var act = async () => await worker.ProcessClaimedAsync(docId, stopping.Token);
+        await act.Should().ThrowAsync<OperationCanceledException>();
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "an interrupted doc must be requeued, not stranded in Processing");
+        doc.ProcessingStartedAt.Should().BeNull();
+        doc.ProcessingAttempts.Should().Be(0, "the interrupted claim's increment is undone");
+        doc.FailedAttempts.Should().Be(0, "an interruption is not a counted failure");
+        Extraction.ExtractCallCount.Should().Be(0, "extraction never ran — it was interrupted at the start");
     }
 }

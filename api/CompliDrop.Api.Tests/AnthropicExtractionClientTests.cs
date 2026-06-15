@@ -258,4 +258,24 @@ public sealed class AnthropicExtractionClientTests
         result.Fields.Should().BeEmpty();
         result.NeedsReprocessing.Should().BeFalse();
     }
+
+    // ---- #259 problem 1: token-cap truncation fails fast (non-retryable) ----
+
+    [Fact]
+    public async Task Truncated_response_at_token_cap_throws_non_retryable()
+    {
+        // stop_reason=max_tokens leaves the forced-tool input incomplete; a byte-identical retry hits
+        // the same wall. The client must raise NonRetryableExtractionException so the worker fails the
+        // doc immediately rather than retrying to the cap (#259, problem 1).
+        var response = new JsonObject
+        {
+            ["stop_reason"] = "max_tokens",
+            ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = "Here is the partial extraction" } },
+        };
+        var client = ExtractionClientBuilder.Anthropic(new StubHttpMessageHandler(HttpStatusCode.OK, Json(response)));
+
+        Func<Task> act = () => client.ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
+
+        (await act.Should().ThrowAsync<NonRetryableExtractionException>()).Which.Code.Should().Be("extraction.token_limit");
+    }
 }

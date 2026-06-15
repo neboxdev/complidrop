@@ -327,4 +327,67 @@ public sealed class GeminiExtractionClientTests
         result.Fields.Should().BeEmpty();
         result.NeedsReprocessing.Should().BeFalse();
     }
+
+    // ---- #259 problem 1: token-cap truncation + content blocks fail fast (non-retryable) ----
+
+    [Fact]
+    public async Task Truncated_response_at_token_cap_throws_non_retryable()
+    {
+        // finishReason=MAX_TOKENS with only partial (unparseable) JSON — the pre-fix client threw a
+        // generic JsonException on the partial text and the worker retried the byte-identical request
+        // until the cap. The fix detects the truncation and raises a NonRetryableExtractionException
+        // so the worker fails the doc immediately instead of burning its retry budget.
+        var response = new JsonObject
+        {
+            ["candidates"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["finishReason"] = "MAX_TOKENS",
+                    ["content"] = new JsonObject
+                    {
+                        ["parts"] = new JsonArray { new JsonObject { ["text"] = "{\"documentType\":\"coi\",\"fields\":[{\"name\":\"pol" } },
+                    },
+                },
+            },
+        };
+        var client = ExtractionClientBuilder.Gemini(new StubHttpMessageHandler(HttpStatusCode.OK, Json(response)));
+
+        Func<Task> act = () => client.ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
+
+        (await act.Should().ThrowAsync<NonRetryableExtractionException>()).Which.Code.Should().Be("extraction.token_limit");
+    }
+
+    [Fact]
+    public async Task Content_block_with_no_parts_throws_non_retryable()
+    {
+        // A safety/recitation block returns a candidate with a non-STOP finishReason and no content
+        // parts. Retrying won't change a deterministic block, so the client raises non-retryable
+        // rather than letting a NullReference/KeyNotFound surface as a retryable failure.
+        var response = new JsonObject
+        {
+            ["candidates"] = new JsonArray { new JsonObject { ["finishReason"] = "SAFETY" } },
+        };
+        var client = ExtractionClientBuilder.Gemini(new StubHttpMessageHandler(HttpStatusCode.OK, Json(response)));
+
+        Func<Task> act = () => client.ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
+
+        (await act.Should().ThrowAsync<NonRetryableExtractionException>()).Which.Code.Should().Be("extraction.blocked");
+    }
+
+    [Fact]
+    public async Task FinishReason_STOP_parses_normally()
+    {
+        // The common terminal reason must NOT be mistaken for a failure: a STOP candidate with valid
+        // JSON parses as usual. Guards the truncation check against over-firing on healthy responses.
+        var payload = ExtractionFixtureHarness.StructuredPayload(ExtractionFixtureHarness.Minimal());
+        var response = ExtractionFixtureHarness.GeminiResponseFromPayload(payload);
+        ((JsonObject)response["candidates"]!.AsArray()[0]!)["finishReason"] = "STOP";
+        var client = ExtractionClientBuilder.Gemini(new StubHttpMessageHandler(HttpStatusCode.OK, Json(response)));
+
+        var result = await client.ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", "coi", default);
+
+        result.DocumentType.Should().Be("coi");
+        result.Fields.Should().NotBeEmpty();
+    }
 }

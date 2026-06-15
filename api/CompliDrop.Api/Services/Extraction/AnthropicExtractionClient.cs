@@ -89,6 +89,15 @@ public class AnthropicExtractionClient(
         }
 
         using var doc = JsonDocument.Parse(responseBody);
+
+        // A response truncated at the token cap (stop_reason=max_tokens) leaves the forced-tool input
+        // incomplete — a byte-identical retry would hit the same wall, so fail fast as deterministic
+        // rather than burning the worker's retry budget (#259, problem 1).
+        var stopReason = doc.RootElement.TryGetProperty("stop_reason", out var sr) ? sr.GetString() : null;
+        if (string.Equals(stopReason, "max_tokens", StringComparison.OrdinalIgnoreCase))
+            throw new NonRetryableExtractionException("extraction.token_limit",
+                $"Anthropic truncated the response at the {cfg.MaxTokens}-token cap; the extraction is incomplete. Raise Anthropic:MaxTokens.");
+
         var contentArr = doc.RootElement.GetProperty("content");
         JsonElement toolUse = default;
         foreach (var item in contentArr.EnumerateArray())

@@ -27,9 +27,26 @@ public class BlobStorageService : IBlobStorageService
     public BlobStorageService(IOptions<AzureStorageSettings> settings)
     {
         var cfg = settings.Value;
-        var client = new BlobServiceClient(cfg.ConnectionString);
+        var client = new BlobServiceClient(cfg.ConnectionString, BuildClientOptions());
         _container = client.GetBlobContainerClient(cfg.ContainerName);
         _container.CreateIfNotExists(PublicAccessType.None);
+    }
+
+    /// <summary>
+    /// Fail-fast retry policy. The Azure SDK default (many retries with long back-off) makes an
+    /// unreachable-storage upload hang ~25s before surfacing — unacceptable on the interactive upload
+    /// path, the product's most important request (#259, problem 5). Two short retries bound the
+    /// worst case to a few seconds; the upload endpoint can then fail quickly with a friendly message.
+    /// </summary>
+    private static BlobClientOptions BuildClientOptions()
+    {
+        var options = new BlobClientOptions();
+        options.Retry.MaxRetries = 2;
+        options.Retry.Mode = Azure.Core.RetryMode.Exponential;
+        options.Retry.Delay = TimeSpan.FromMilliseconds(500);
+        options.Retry.MaxDelay = TimeSpan.FromSeconds(2);
+        options.Retry.NetworkTimeout = TimeSpan.FromSeconds(10);
+        return options;
     }
 
     public async Task<BlobUploadResult> UploadAsync(string blobName, Stream content, string contentType, CancellationToken ct)
