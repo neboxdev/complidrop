@@ -1,4 +1,5 @@
 using System.Reflection;
+using CompliDrop.Api.Data;
 using CompliDrop.Api.Data.Seed;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Migrations;
@@ -7,6 +8,7 @@ using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
+using Npgsql;
 
 namespace CompliDrop.Api.Tests.Migrations;
 
@@ -58,61 +60,68 @@ public sealed class RenameSystemTemplatesToVenueTypesTests(IntegrationTestFixtur
         var tenantOrgId = Guid.NewGuid();
         var tenantTemplateId = Guid.NewGuid();
 
+        // The rename target ("Caterer") collides with the boot-seeded "Caterer" under #251's partial
+        // unique index on live system templates. Run under a transaction that DROPS the guard and
+        // ROLLS BACK — restoring the index and undoing the seeded test rows (no leaked duplicate),
+        // since Postgres DDL is transactional. (The boot "Caterer" lives outside this transaction and
+        // is untouched.)
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
         try
         {
-            // A legacy SYSTEM template (old name) + a TENANT template that happens to
-            // share the same old name.
-            await using (var db = CreateSystemDb())
+            await ExecAsync(conn, tx, "DROP INDEX \"IX_ComplianceTemplates_Name_SystemUnique\"");
+
+            // A legacy SYSTEM template (old name) + a TENANT template that happens to share the name.
+            await using (var db = new SystemDbContext(
+                new DbContextOptionsBuilder<SystemDbContext>().UseNpgsql(conn).Options))
             {
+                await db.Database.UseTransactionAsync(tx);
                 db.ComplianceTemplates.Add(new ComplianceTemplate
                 {
-                    Id = systemId,
-                    OrganizationId = ComplianceTemplateSeed.SystemOrgId,
-                    Name = "General Sub Contractor",
-                    IsSystemTemplate = true,
-                    CreatedAt = now,
+                    Id = systemId, OrganizationId = ComplianceTemplateSeed.SystemOrgId,
+                    Name = "General Sub Contractor", IsSystemTemplate = true, CreatedAt = now,
                 });
                 db.Organizations.Add(new Organization { Id = tenantOrgId, Name = "Tenant", CreatedAt = now, UpdatedAt = now });
                 db.ComplianceTemplates.Add(new ComplianceTemplate
                 {
-                    Id = tenantTemplateId,
-                    OrganizationId = tenantOrgId,
-                    Name = "General Sub Contractor",
-                    IsSystemTemplate = false,
-                    CreatedAt = now,
+                    Id = tenantTemplateId, OrganizationId = tenantOrgId,
+                    Name = "General Sub Contractor", IsSystemTemplate = false, CreatedAt = now,
                 });
                 await db.SaveChangesAsync();
             }
 
-            // Re-execute the migration's Up() effect (UpdateData → this parameter-free
-            // equivalent, with the load-bearing IsSystemTemplate guard).
-            await using (var db = CreateSystemDb())
-            {
-                await db.Database.ExecuteSqlRawAsync(
-                    "UPDATE \"ComplianceTemplates\" SET \"Name\" = 'Caterer' " +
-                    "WHERE \"Name\" = 'General Sub Contractor' AND \"IsSystemTemplate\" = true;");
-            }
+            // Re-execute the migration's Up() effect (UpdateData → this parameter-free equivalent,
+            // with the load-bearing IsSystemTemplate guard).
+            await ExecAsync(conn, tx,
+                "UPDATE \"ComplianceTemplates\" SET \"Name\" = 'Caterer' " +
+                "WHERE \"Name\" = 'General Sub Contractor' AND \"IsSystemTemplate\" = true;");
 
-            await using (var db = CreateSystemDb())
-            {
-                (await db.ComplianceTemplates.IgnoreQueryFilters().FirstAsync(t => t.Id == systemId))
-                    .Name.Should().Be("Caterer", "the system row is renamed");
-                (await db.ComplianceTemplates.IgnoreQueryFilters().FirstAsync(t => t.Id == tenantTemplateId))
-                    .Name.Should().Be("General Sub Contractor", "a tenant row sharing the name must NOT be renamed");
-            }
+            (await ScalarStringAsync(conn, tx, $"SELECT \"Name\" FROM \"ComplianceTemplates\" WHERE \"Id\" = '{systemId}'"))
+                .Should().Be("Caterer", "the system row is renamed");
+            (await ScalarStringAsync(conn, tx, $"SELECT \"Name\" FROM \"ComplianceTemplates\" WHERE \"Id\" = '{tenantTemplateId}'"))
+                .Should().Be("General Sub Contractor", "a tenant row sharing the name must NOT be renamed");
         }
         finally
         {
-            // The system row survives Respawn (ComplianceTemplates is preserved for the
-            // seed), so hard-delete the test rows to avoid leaking a duplicate "Caterer".
-            await using var cleanup = CreateSystemDb();
-            await cleanup.ComplianceTemplates.IgnoreQueryFilters()
-                .Where(t => t.Id == systemId || t.Id == tenantTemplateId)
-                .ExecuteDeleteAsync();
-            await cleanup.Organizations.IgnoreQueryFilters()
-                .Where(o => o.Id == tenantOrgId)
-                .ExecuteDeleteAsync();
+            await tx.RollbackAsync(); // restores the dropped index and undoes the seeded test rows
         }
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string sql)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<string?> ScalarStringAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string sql)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = sql;
+        return (string?)await cmd.ExecuteScalarAsync();
     }
 }
 

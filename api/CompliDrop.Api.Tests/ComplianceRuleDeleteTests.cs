@@ -291,7 +291,11 @@ public sealed class ComplianceRuleDeleteTests(IntegrationTestFixture fixture) : 
         // but mutating them would change the SHARED checklist every org sees — the
         // !IsSystemTemplate clause in UpsertRule's lookup is the guard.
         var auth = await RegisterAndLoginAsync();
-        var s = await SeedAsync(ComplianceTemplateSeed.SystemOrgId, isSystem: true, twoRules: false);
+        // Own a system-flagged template under the caller's org (not SystemOrgId): the !IsSystemTemplate
+        // guard keys on the flag, not the owner, so this still exercises the share-protection — and a
+        // caller-org row is cascade-cleaned by ResetAsync, whereas a SystemOrgId row would survive the
+        // wipe and (since #251's partial unique index) collide with the sibling system-template test.
+        var s = await SeedAsync(auth.OrgId, isSystem: true, twoRules: false);
 
         var resp = await auth.Client.PostAsJsonAsync($"/api/compliance/templates/{s.TemplateId}/rules", new
         {
