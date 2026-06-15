@@ -136,6 +136,19 @@ public sealed class ComplianceSweepBackgroundServiceTests(IntegrationTestFixture
     }
 
     [Fact]
+    public async Task Sweep_flips_a_midnight_expiry_on_the_30_day_boundary_to_ExpiringSoon()
+    {
+        // The canonical case — extraction stores dates at UTC midnight — is in-window under BOTH the
+        // old and new bound. Pins that the exclusive-bound fix didn't regress the already-correct
+        // midnight boundary (Anchor.Date strips the noon component so this is exactly today+30 00:00).
+        var id = await SeedAsync(ComplianceStatus.Compliant, Anchor.Date.AddDays(30));
+
+        await BuildSweep().SweepAsync(CancellationToken.None);
+
+        (await StatusAsync(id)).Should().Be(ComplianceStatus.ExpiringSoon);
+    }
+
+    [Fact]
     public async Task Sweep_leaves_a_time_bearing_expiry_just_past_the_window_Compliant()
     {
         // The exclusive bound must not over-reach: a noon expiry on day 31 is beyond the 30-day

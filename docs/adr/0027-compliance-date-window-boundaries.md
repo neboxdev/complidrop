@@ -93,10 +93,19 @@ We explicitly **did not** canonicalize `ExpirationDate` on write (the alternativ
   correct primitive to reach for instead of re-deriving `<= today+N`.
 
 ### Negative
-- The date-window logic now lives in two equivalent forms — the deriver's `exp.Date <= today+N` and
-  the SQL helper's `exp < today+(N+1)`. A future change to the window semantics must update both.
-  Mitigated by the helper's doc-comment stating the equivalence and by boundary regression tests
-  (`ComplianceDateBoundaryTests`) that fail if any site drifts from the deriver.
+- The date window now lives in more than one form: the deriver's date comparison
+  (`ComplianceStatusDeriver.Effective`, `exp.Date <= today + N`), the SQL helper's instant-exclusive
+  bound (`WindowUpperBoundExclusive`, `exp < today + (N + 1)`), and the write-/eval-time date form in
+  `ComplianceCheckService.ComputeOutcome` (`exp.Date <= today + N`, the verdict at evaluation time).
+  A future change to the window semantics must keep them aligned. Mitigated three ways: the single
+  `ExpiringSoonWindowDays` constant is now the only literal for the day count (all three sites
+  reference it — `ComputeOutcome`'s previously-hardcoded `30` was switched to the constant in the
+  #294 review); the helper's doc-comment states the date↔instant equivalence; and boundary
+  regression tests fail if any site drifts — `ComplianceStatusDeriverTests`
+  (`WindowUpperBoundExclusive_is_the_instant_equivalent_of_the_date_window`),
+  `ComplianceSweepBackgroundServiceTests` (the day-30 / day-31 sweep tests), and
+  `ComplianceVerdictFreshnessTests` (`A_time_bearing_expiry_on_the_30_day_boundary_reads_ExpiringSoon_everywhere`,
+  plus the expiry-pipeline boundary test).
 - A reviewer must understand the `+1` is intentional (not an off-by-one). The helper name and the
   per-site comments carry that.
 

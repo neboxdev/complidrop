@@ -102,6 +102,10 @@ public static class DocumentEndpoints
             query = query.Where(d => d.VendorId == vendorId);
         if (expiresWithin is int days && days > 0)
         {
+            // Clamp to a sane maximum (~10 years) so a hostile/absurd value can't push the C#
+            // date arithmetic below out of DateTime's range and turn a malformed query param into a
+            // 500 (#294 review). Anything past a decade is "everything not yet expired" anyway.
+            days = Math.Min(days, 3650);
             // Upper AND lower bound: "expiring within N days" is a future window, so exclude
             // already-expired docs — without the lower bound the "Expiring in 30 days" filter also
             // returned long-expired documents (#257). Already-expired docs live under status=Expired.

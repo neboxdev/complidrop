@@ -219,7 +219,10 @@ public class ComplianceCheckService(
         if (doc.ExpirationDate is DateTime exp && exp.Date < today)
             return new EvaluationOutcome(ComplianceStatus.Expired, [], ClearExistingChecks: false);
 
-        var expiringSoon = doc.ExpirationDate is DateTime exp2 && exp2.Date <= today.AddDays(30);
+        // Same 30-day window as ComplianceStatusDeriver / the SQL read sites — reference the shared
+        // constant so the number lives in one place (#294 review).
+        var expiringSoon = doc.ExpirationDate is DateTime exp2
+            && exp2.Date <= today.AddDays(ComplianceStatusDeriver.ExpiringSoonWindowDays);
 
         var template = doc.Vendor?.ComplianceTemplate;
 
