@@ -941,7 +941,7 @@ describe("DocumentDetailPage — recheck (Check again) mutation (#257)", () => {
         jsonOk(makeDocumentDetail({ extractionStatus: "Completed" })),
       ),
       http.post(url("/api/compliance/check/:id"), () =>
-        jsonError("compliance.failed", "We couldn't re-check this document. Try again.", 500),
+        jsonError("compliance.failed", "We couldn't re-check this document. Try again.", { status: 500 }),
       ),
     );
 
