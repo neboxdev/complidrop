@@ -278,4 +278,20 @@ public sealed class AnthropicExtractionClientTests
 
         (await act.Should().ThrowAsync<NonRetryableExtractionException>()).Which.Code.Should().Be("extraction.token_limit");
     }
+
+    [Fact]
+    public async Task Normal_stop_reason_parses_without_firing_the_truncation_guard()
+    {
+        // Symmetric guard against the truncation check over-firing: a healthy forced-tool response
+        // carries stop_reason="tool_use" and must parse normally, never be mistaken for max_tokens.
+        var payload = ExtractionFixtureHarness.StructuredPayload(ExtractionFixtureHarness.Minimal());
+        var response = ExtractionFixtureHarness.AnthropicResponseFromPayload(payload);
+        response["stop_reason"] = "tool_use";
+        var client = ExtractionClientBuilder.Anthropic(new StubHttpMessageHandler(HttpStatusCode.OK, Json(response)));
+
+        var result = await client.ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", "coi", default);
+
+        result.DocumentType.Should().Be("coi");
+        result.Fields.Should().NotBeEmpty();
+    }
 }

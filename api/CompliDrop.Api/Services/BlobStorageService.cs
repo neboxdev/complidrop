@@ -35,17 +35,22 @@ public class BlobStorageService : IBlobStorageService
     /// <summary>
     /// Fail-fast retry policy. The Azure SDK default (many retries with long back-off) makes an
     /// unreachable-storage upload hang ~25s before surfacing — unacceptable on the interactive upload
-    /// path, the product's most important request (#259, problem 5). Two short retries bound the
-    /// worst case to a few seconds; the upload endpoint can then fail quickly with a friendly message.
+    /// path, the product's most important request (#259, problem 5). The retry-storm bound (the
+    /// actual cause of the ~25s hang) is <see cref="Azure.Core.RetryOptions.MaxRetries"/> = 2 with a
+    /// short exponential back-off. NetworkTimeout is the PER-TRY transfer bound and is kept generous
+    /// (30s) on purpose: it must accommodate a legitimately-slow upload of a 10 MB file (the upload
+    /// cap) on a modest connection, so it is NOT used as the fail-fast lever. The overall request is
+    /// additionally bounded by the caller's CancellationToken. Internal so the regression suite can
+    /// pin these values against a silent revert to the SDK defaults.
     /// </summary>
-    private static BlobClientOptions BuildClientOptions()
+    internal static BlobClientOptions BuildClientOptions()
     {
         var options = new BlobClientOptions();
         options.Retry.MaxRetries = 2;
         options.Retry.Mode = Azure.Core.RetryMode.Exponential;
         options.Retry.Delay = TimeSpan.FromMilliseconds(500);
         options.Retry.MaxDelay = TimeSpan.FromSeconds(2);
-        options.Retry.NetworkTimeout = TimeSpan.FromSeconds(10);
+        options.Retry.NetworkTimeout = TimeSpan.FromSeconds(30);
         return options;
     }
 

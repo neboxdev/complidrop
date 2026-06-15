@@ -1014,4 +1014,51 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         doc.FailedAttempts.Should().Be(0, "an interruption is not a counted failure");
         Extraction.ExtractCallCount.Should().Be(0, "extraction never ran — it was interrupted at the start");
     }
+
+    [Fact]
+    public async Task Shutdown_requeue_leaves_a_doc_that_already_reached_a_terminal_state_untouched()
+    {
+        // Pins RequeueInterruptedAsync's idempotent early-return: if the doc reached a terminal state
+        // (e.g. a concurrent path completed it) before the shutdown requeue runs, the `ExtractionStatus
+        // == Processing` guard must NOT resurrect it to Pending nor decrement its claim count.
+        var (_, docId) = await SeedDocAsync(
+            status: ExtractionStatus.Completed,
+            attempts: 3,
+            failedAttempts: 1);
+        var worker = BuildWorker();
+
+        using var stopping = new CancellationTokenSource();
+        await stopping.CancelAsync();
+
+        var act = async () => await worker.ProcessClaimedAsync(docId, stopping.Token);
+        await act.Should().ThrowAsync<OperationCanceledException>();
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed, "a terminal doc must not be resurrected to Pending");
+        doc.ProcessingAttempts.Should().Be(3, "the claim count must not be decremented for a terminal doc");
+        doc.FailedAttempts.Should().Be(1, "untouched");
+    }
+
+    [Fact]
+    public async Task Wedged_OCR_stage_is_also_timed_out_and_requeued()
+    {
+        // The per-attempt timeout must bound the WHOLE attempt, not just the LLM step. Here OCR is the
+        // wedged stage (enabled + delayed); the cancellation must still propagate out of
+        // ProcessDocumentAsync (its `when (ex is not OperationCanceledException)` catch must not
+        // swallow it) and route through the timeout handler, identically to a wedged extraction.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Ocr.IsEnabled = true;
+        Ocr.OcrDelay = TimeSpan.FromSeconds(30);
+        var worker = BuildWorker(attemptTimeout: TimeSpan.FromMilliseconds(250));
+
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessClaimedAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "a timeout during OCR is a counted failure below the budget");
+        doc.ProcessingError.Should().Contain("timeout");
+        doc.FailedAttempts.Should().Be(1);
+        Ocr.OcrCallCount.Should().Be(1, "OCR was entered before timing out");
+        Extraction.ExtractCallCount.Should().Be(0, "extraction is never reached when OCR wedges");
+    }
 }

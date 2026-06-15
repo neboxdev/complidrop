@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
@@ -1422,5 +1423,46 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         saved.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
         (await verify.DocumentFields.FirstAsync(f => f.DocumentId == docId && f.FieldName == "general_liability_limit"))
             .FieldValue.Should().Be("1500000");
+    }
+
+    [Fact]
+    public async Task Reextract_resets_both_the_claim_count_and_the_retry_budget()
+    {
+        // A doc that previously exhausted its retry budget (Failed, FailedAttempts at the cap). A
+        // manual re-extract is a deliberate fresh start, so it must clear BOTH ProcessingAttempts
+        // (claims) and FailedAttempts (the budget gate introduced in #259) — otherwise the worker
+        // would re-fail it on the first hiccup with no real retries.
+        var auth = await RegisterAndLoginAsync();
+        var docId = Guid.NewGuid();
+        await using (var db = CreateSystemDb())
+        {
+            db.Documents.Add(new Document
+            {
+                Id = docId,
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "failed.pdf",
+                BlobStorageUrl = "blob://failed",
+                BlobStoragePath = "blob/failed.pdf",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                ExtractionStatus = ExtractionStatus.Failed,
+                ProcessingAttempts = ExtractionWorker.MaxClaims,
+                FailedAttempts = ExtractionWorker.MaxAttempts,
+                ProcessingError = "extraction.failed: boom",
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var resp = await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var verify = CreateSystemDb();
+        var doc = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending);
+        doc.ProcessingAttempts.Should().Be(0);
+        doc.FailedAttempts.Should().Be(0, "a manual re-extract must restore the full retry budget");
+        doc.ProcessingError.Should().BeNull();
     }
 }

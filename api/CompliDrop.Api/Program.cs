@@ -114,6 +114,11 @@ builder.Services.AddDbContext<SystemDbContext>((sp, options) =>
     // keeps the bare connection string. 120s is far above any real worker transaction (sub-second
     // SaveChanges).
     //
+    // Note this 120s bounds only a connection sitting IDLE inside an open transaction — NOT an
+    // actively-running extraction attempt (that work holds the connection but isn't idle). The
+    // attempt itself is bounded separately by ExtractionWorker.AttemptTimeout (≤240s), so it is fine
+    // that 120s < the 240s attempt ceiling; the two timeouts govern different states.
+    //
     // The connection string MUST be read here, INSIDE the lambda — not hoisted to a top-level
     // statement. The lambda runs at resolve time (after the full configuration is composed), so a
     // test host's in-memory override of ConnectionStrings:Database wins; an eager top-level read

@@ -550,6 +550,11 @@ public static class DocumentEndpoints
         doc.ProcessingStartedAt = null;
         doc.ProcessingError = null;
         doc.ProcessingAttempts = 0;
+        // Reset BOTH counters: a manual re-extract is a deliberate fresh start, so it must restore
+        // the full retry budget (FailedAttempts) as well as the claim count — otherwise a document
+        // that previously exhausted its budget would re-fail on the first hiccup with no real
+        // retries (#259 introduced FailedAttempts as the budget gate).
+        doc.FailedAttempts = 0;
         doc.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         await audit.LogAsync("document.reextract_queued", nameof(Document), doc.Id);

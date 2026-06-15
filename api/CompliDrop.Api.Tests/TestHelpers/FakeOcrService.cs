@@ -22,10 +22,18 @@ public sealed class FakeOcrService : IOcrService
     /// <summary>Result returned when <see cref="IsEnabled"/> is true.</summary>
     public OcrResult Result { get; set; } = Empty;
 
-    public Task<OcrResult> OcrAsync(Stream content, string contentType, CancellationToken ct)
+    /// <summary>
+    /// When &gt; zero, <see cref="OcrAsync"/> awaits this delay (honoring the cancellation token)
+    /// before returning — lets a test land the worker's per-attempt timeout inside the OCR stage.
+    /// </summary>
+    public TimeSpan OcrDelay { get; set; } = TimeSpan.Zero;
+
+    public async Task<OcrResult> OcrAsync(Stream content, string contentType, CancellationToken ct)
     {
         OcrCallCount++;
-        return Task.FromResult(Result);
+        if (OcrDelay > TimeSpan.Zero)
+            await Task.Delay(OcrDelay, ct); // throws OperationCanceledException when the attempt times out
+        return Result;
     }
 
     public void Reset()
@@ -33,5 +41,6 @@ public sealed class FakeOcrService : IOcrService
         OcrCallCount = 0;
         IsEnabled = false;
         Result = Empty;
+        OcrDelay = TimeSpan.Zero;
     }
 }

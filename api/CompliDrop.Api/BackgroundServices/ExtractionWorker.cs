@@ -37,14 +37,26 @@ public class ExtractionWorker(
     public const int MaxClaims = 15;
 
     /// <summary>
-    /// Per-attempt wall-clock bound (from <c>Extraction:AttemptTimeoutSeconds</c>), clamped into a
-    /// range that stays comfortably below the 5-minute zombie-reclaim threshold so a timed-out
-    /// attempt cancels and requeues before a second worker could reclaim the same row (#259,
-    /// problems 3 &amp; 4). Internal so the regression suite can drive the timeout path with a short
-    /// budget.
+    /// Upper bound (seconds) on the configurable per-attempt timeout. Sits below the 300s
+    /// (5-minute) zombie-reclaim threshold baked into <see cref="ClaimSql"/>'s
+    /// <c>interval '5 minutes'</c>, with a 60s margin so a timed-out attempt can cancel AND requeue
+    /// before a second worker could reclaim the same row. The whole point of the clamp is to keep
+    /// the timeout strictly under that threshold regardless of misconfiguration.
+    /// </summary>
+    internal const int AttemptTimeoutCeilingSeconds = 240; // = 300s zombie threshold − 60s margin
+
+    private const int AttemptTimeoutFloorSeconds = 60;
+
+    /// <summary>
+    /// Per-attempt wall-clock bound (from <c>Extraction:AttemptTimeoutSeconds</c>), clamped into
+    /// [<see cref="AttemptTimeoutFloorSeconds"/>, <see cref="AttemptTimeoutCeilingSeconds"/>] so it
+    /// stays below the 5-minute zombie-reclaim threshold and a timed-out attempt cancels and
+    /// requeues before a second worker could reclaim the same row (#259, problems 3 &amp; 4).
+    /// Internal so the regression suite can drive the timeout path with a short budget.
     /// </summary>
     internal TimeSpan AttemptTimeout { get; set; } =
-        TimeSpan.FromSeconds(Math.Clamp(extractionOptions.Value.AttemptTimeoutSeconds, 60, 240));
+        TimeSpan.FromSeconds(Math.Clamp(
+            extractionOptions.Value.AttemptTimeoutSeconds, AttemptTimeoutFloorSeconds, AttemptTimeoutCeilingSeconds));
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -110,12 +122,12 @@ public class ExtractionWorker(
         catch (OperationCanceledException)
         {
             // The attempt timeout fired (NOT shutdown): the attempt is wedged. Count it as a failed
-            // attempt and requeue/fail with a FRESH (non-cancelled) token. Bounding the attempt also
-            // releases any row lock the wedged work was holding — the #259 unreclaimed-claims symptom.
+            // attempt and requeue/fail. Bounding the attempt also releases any row lock the wedged
+            // work was holding — the #259 unreclaimed-claims symptom.
             logger.LogWarning("Extraction attempt for {DocumentId} timed out after {Seconds}s.",
                 documentId, AttemptTimeout.TotalSeconds);
             await FailOrRequeueAsync(documentId, "extraction.timeout",
-                $"Attempt exceeded the {AttemptTimeout.TotalSeconds:0}s per-attempt timeout.", stoppingToken);
+                $"Attempt exceeded the {AttemptTimeout.TotalSeconds:0}s per-attempt timeout.");
         }
     }
 
@@ -308,18 +320,20 @@ public class ExtractionWorker(
 
     /// <summary>
     /// Loads the document in a fresh scope and records a counted failure (used by the per-attempt
-    /// timeout path, which runs outside <see cref="ProcessDocumentAsync"/>'s scope). Uses the
-    /// supplied non-cancelled token so the bookkeeping write itself can't be torn down by the same
-    /// cancellation that triggered it.
+    /// timeout path, which runs outside <see cref="ProcessDocumentAsync"/>'s scope). Runs on its own
+    /// fresh, bounded token — NOT the worker's stopping token — so a shutdown that races the timeout
+    /// can't tear down the bookkeeping write and strand the document in <c>Processing</c> (it would
+    /// then only self-heal via the 5-minute zombie reclaim).
     /// </summary>
-    private async Task FailOrRequeueAsync(Guid documentId, string code, string message, CancellationToken ct)
+    private async Task FailOrRequeueAsync(Guid documentId, string code, string message)
     {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<SystemDbContext>();
-        var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == documentId, ct);
+        var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == documentId, cts.Token);
         if (doc is null) return;
         RecordFailedAttempt(doc, code, message);
-        await db.SaveChangesAsync(ct);
+        await db.SaveChangesAsync(cts.Token);
     }
 
     /// <summary>
