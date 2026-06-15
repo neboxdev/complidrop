@@ -100,6 +100,8 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
         // test that flips ThrowOnExtract or IsEnabled doesn't leak that into the next one.
         Factory.Services.GetService<FakeExtractionClient>()?.Reset();
         Factory.Services.GetService<FakeOcrService>()?.Reset();
+        if (Factory.Services.GetService<IBlobStorageService>() is FakeBlobStorageService blobs)
+            blobs.Reset();
 
         // FakeStripeService — clear captured Checkouts/Portals queues + restore IsEnabled=true
         // between tests so a test that toggled IsEnabled doesn't leak into the next one.

@@ -152,7 +152,19 @@ public static class VendorPortalEndpoints
 
         var orgId = link.Vendor.OrganizationId;
         var blobName = $"{orgId}/{DateTime.UtcNow:yyyy-MM}/portal-{Guid.NewGuid()}-{SanitizeFileName(file.FileName)}";
-        var upload = await blobs.UploadAsync(blobName, storedStream, storedContentType, ct);
+        BlobUploadResult upload;
+        try
+        {
+            upload = await blobs.UploadAsync(blobName, storedStream, storedContentType, ct);
+        }
+        catch (BlobStorageUnavailableException)
+        {
+            // Storage outage → friendly 503 for the external vendor persona, not the generic 500
+            // (#248). No internal jargon; the upload consumed no quota (it failed before the permit
+            // transaction below).
+            return Error(503, "storage.unavailable",
+                "We couldn't save your file just now. Please try again in a few minutes.");
+        }
 
         var doc = new Document
         {
