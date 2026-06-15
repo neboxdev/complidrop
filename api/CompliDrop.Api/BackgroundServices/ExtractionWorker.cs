@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
@@ -6,21 +7,56 @@ using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Services.Ocr;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.Extensions.Options;
 
 namespace CompliDrop.Api.BackgroundServices;
 
 public class ExtractionWorker(
     IServiceScopeFactory scopeFactory,
+    IOptions<ExtractionSettings> extractionOptions,
     ILogger<ExtractionWorker> logger) : BackgroundService
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(5);
 
     /// <summary>
-    /// Hard cap on extraction attempts per document. Enforced both up-front (zombie guard) and in
-    /// the failure path. Public so the regression suite asserts the retry budget against the source
-    /// of truth rather than a hard-coded literal.
+    /// Retry budget: the number of GENUINELY-FAILED attempts (<see cref="Document.FailedAttempts"/>)
+    /// before a document is marked <c>Failed</c>. Interrupted-by-restart claims do NOT count toward
+    /// this — only attempts where extraction actually ran and failed (or timed out). Public so the
+    /// regression suite asserts the budget against the source of truth, not a hard-coded literal.
     /// </summary>
     public const int MaxAttempts = 5;
+
+    /// <summary>
+    /// Crash-loop backstop: the maximum number of times a document may be CLAIMED
+    /// (<see cref="Document.ProcessingAttempts"/>) before it is failed up-front, regardless of how
+    /// few of those claims produced a genuine failure. Guards the pathological case where a document
+    /// kills the process before any failure handler runs (so <see cref="Document.FailedAttempts"/>
+    /// never advances) — without it, such a document would be reclaimed forever. Set well above
+    /// <see cref="MaxAttempts"/> so ordinary restarts/deploys can't trip it (#259, problem 2).
+    /// </summary>
+    public const int MaxClaims = 15;
+
+    /// <summary>
+    /// Upper bound (seconds) on the configurable per-attempt timeout. Sits below the 300s
+    /// (5-minute) zombie-reclaim threshold baked into <see cref="ClaimSql"/>'s
+    /// <c>interval '5 minutes'</c>, with a 60s margin so a timed-out attempt can cancel AND requeue
+    /// before a second worker could reclaim the same row. The whole point of the clamp is to keep
+    /// the timeout strictly under that threshold regardless of misconfiguration.
+    /// </summary>
+    internal const int AttemptTimeoutCeilingSeconds = 240; // = 300s zombie threshold − 60s margin
+
+    private const int AttemptTimeoutFloorSeconds = 60;
+
+    /// <summary>
+    /// Per-attempt wall-clock bound (from <c>Extraction:AttemptTimeoutSeconds</c>), clamped into
+    /// [<see cref="AttemptTimeoutFloorSeconds"/>, <see cref="AttemptTimeoutCeilingSeconds"/>] so it
+    /// stays below the 5-minute zombie-reclaim threshold and a timed-out attempt cancels and
+    /// requeues before a second worker could reclaim the same row (#259, problems 3 &amp; 4).
+    /// Internal so the regression suite can drive the timeout path with a short budget.
+    /// </summary>
+    internal TimeSpan AttemptTimeout { get; set; } =
+        TimeSpan.FromSeconds(Math.Clamp(
+            extractionOptions.Value.AttemptTimeoutSeconds, AttemptTimeoutFloorSeconds, AttemptTimeoutCeilingSeconds));
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -45,11 +81,12 @@ public class ExtractionWorker(
                 continue;
             }
 
-            // Claim's scope is fully disposed before this point. Process in a fresh scope.
+            // Claim's scope is fully disposed before this point. Process in a fresh scope, bounded
+            // by the per-attempt timeout (and requeued cleanly on a graceful shutdown mid-attempt).
             try
             {
                 logger.LogInformation("Claimed document {DocumentId}, beginning processing.", claimedId.Value);
-                await ProcessDocumentAsync(claimedId.Value, stoppingToken);
+                await ProcessClaimedAsync(claimedId.Value, stoppingToken);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
@@ -58,6 +95,40 @@ public class ExtractionWorker(
             }
         }
         logger.LogInformation("ExtractionWorker stopping.");
+    }
+
+    /// <summary>
+    /// Runs one processing attempt under a hard per-attempt timeout. A timeout requeues/fails the
+    /// document as a counted failure; a graceful-shutdown interruption requeues it WITHOUT counting
+    /// (so a deploy can't burn the retry budget) and rethrows so the loop stops. Internal so the
+    /// regression suite can drive the timeout + shutdown paths directly with a short budget.
+    /// </summary>
+    internal async Task ProcessClaimedAsync(Guid documentId, CancellationToken stoppingToken)
+    {
+        using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        attemptCts.CancelAfter(AttemptTimeout);
+        try
+        {
+            await ProcessDocumentAsync(documentId, attemptCts.Token);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Graceful shutdown mid-attempt (the common case on a Railway deploy): the attempt never
+            // got to finish, so it's an interruption, not a failure. Requeue it without burning the
+            // budget, then rethrow so ExecuteAsync's loop breaks.
+            await RequeueInterruptedAsync(documentId);
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            // The attempt timeout fired (NOT shutdown): the attempt is wedged. Count it as a failed
+            // attempt and requeue/fail. Bounding the attempt also releases any row lock the wedged
+            // work was holding — the #259 unreclaimed-claims symptom.
+            logger.LogWarning("Extraction attempt for {DocumentId} timed out after {Seconds}s.",
+                documentId, AttemptTimeout.TotalSeconds);
+            await FailOrRequeueAsync(documentId, "extraction.timeout",
+                $"Attempt exceeded the {AttemptTimeout.TotalSeconds:0}s per-attempt timeout.");
+        }
     }
 
     /// <summary>
@@ -134,13 +205,14 @@ public class ExtractionWorker(
         var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == documentId, ct);
         if (doc is null) return;
 
-        // Defense-in-depth: if the doc has been claimed too many times (e.g. process
-        // crashed mid-extraction in earlier attempts and the catch block never ran),
-        // mark Failed up-front so we don't keep paying OCR/LLM costs in a zombie loop.
-        if (doc.ProcessingAttempts > MaxAttempts)
+        // Crash-loop backstop: if the doc has been CLAIMED far more times than the retry budget (e.g.
+        // it kills the process mid-extraction every time, so the failure handler never runs and
+        // FailedAttempts never advances), fail it up-front so we don't reclaim it forever. Ordinary
+        // restarts can't trip this — MaxClaims sits well above MaxAttempts (#259, problem 2).
+        if (doc.ProcessingAttempts > MaxClaims)
         {
             await MarkFailed(db, doc, "extraction.too_many_attempts",
-                $"Exceeded {MaxAttempts} attempts ({doc.ProcessingAttempts} so far).", ct);
+                $"Exceeded {MaxClaims} claims ({doc.ProcessingAttempts} so far).", ct);
             return;
         }
 
@@ -205,21 +277,95 @@ public class ExtractionWorker(
             logger.LogInformation("Extraction complete for {DocumentId} — {FieldCount} fields, avg conf {Conf:0.00}",
                 doc.Id, extraction.Fields.Count, doc.ExtractionConfidence);
         }
+        catch (NonRetryableExtractionException ex)
+        {
+            // Deterministic failure (e.g. token-cap truncation, content block): a byte-identical
+            // retry would fail the same way, so fail immediately instead of burning the retry budget
+            // on doomed re-runs of OCR + LLM (#259, problem 1).
+            logger.LogError(ex, "Non-retryable extraction failure for {DocumentId} ({Code})", doc.Id, ex.Code);
+            await MarkFailed(db, doc, ex.Code, ex.Message, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A genuine, possibly-transient failure: count it toward the retry budget and requeue
+            // (or fail if the budget is spent). OperationCanceledException is deliberately NOT caught
+            // here — a per-attempt timeout or graceful shutdown must propagate to ProcessClaimedAsync,
+            // which records it correctly (a shutdown is an interruption, not a counted failure).
+            logger.LogError(ex, "Extraction failed for {DocumentId}", doc.Id);
+            RecordFailedAttempt(doc, "extraction.failed", ex.Message);
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    /// <summary>
+    /// Records one genuine failure against the retry budget: increments <see cref="Document.FailedAttempts"/>
+    /// and either marks the document <c>Failed</c> (budget spent) or returns it to <c>Pending</c> for
+    /// another attempt. Does not save — the caller owns the unit of work.
+    /// </summary>
+    private static void RecordFailedAttempt(Document doc, string code, string message)
+    {
+        doc.FailedAttempts += 1;
+        doc.ProcessingError = $"{code}: {message}";
+        doc.UpdatedAt = DateTime.UtcNow;
+        if (doc.FailedAttempts >= MaxAttempts)
+        {
+            doc.ExtractionStatus = ExtractionStatus.Failed;
+        }
+        else
+        {
+            doc.ExtractionStatus = ExtractionStatus.Pending;
+            doc.ProcessingStartedAt = null;
+        }
+    }
+
+    /// <summary>
+    /// Loads the document in a fresh scope and records a counted failure (used by the per-attempt
+    /// timeout path, which runs outside <see cref="ProcessDocumentAsync"/>'s scope). Runs on its own
+    /// fresh, bounded token — NOT the worker's stopping token — so a shutdown that races the timeout
+    /// can't tear down the bookkeeping write and strand the document in <c>Processing</c> (it would
+    /// then only self-heal via the 5-minute zombie reclaim).
+    /// </summary>
+    private async Task FailOrRequeueAsync(Guid documentId, string code, string message)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<SystemDbContext>();
+        var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == documentId, cts.Token);
+        if (doc is null) return;
+        RecordFailedAttempt(doc, code, message);
+        await db.SaveChangesAsync(cts.Token);
+    }
+
+    /// <summary>
+    /// Returns an interrupted-by-shutdown document to <c>Pending</c> and UNDOES its claim increment,
+    /// so a deploy that interrupts an in-flight extraction neither burns the retry budget nor strands
+    /// the document in <c>Processing</c> for the 5-minute zombie window (#259, problem 2). Runs during
+    /// the shutdown grace window on a fresh bounded token, since the worker's stopping token is
+    /// already cancelled.
+    /// </summary>
+    private async Task RequeueInterruptedAsync(Guid documentId)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<SystemDbContext>();
+            var doc = await db.Documents.FirstOrDefaultAsync(
+                d => d.Id == documentId && d.ExtractionStatus == ExtractionStatus.Processing, cts.Token);
+            if (doc is null) return; // already terminal or never flipped to Processing — nothing to undo.
+
+            doc.ExtractionStatus = ExtractionStatus.Pending;
+            doc.ProcessingStartedAt = null;
+            if (doc.ProcessingAttempts > 0) doc.ProcessingAttempts -= 1; // this claim didn't really run
+            doc.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(cts.Token);
+            logger.LogInformation("Requeued interrupted document {DocumentId} on shutdown.", documentId);
+        }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Extraction failed for {DocumentId}", doc.Id);
-            if (doc.ProcessingAttempts >= MaxAttempts)
-            {
-                await MarkFailed(db, doc, "extraction.failed", ex.Message, ct);
-            }
-            else
-            {
-                doc.ExtractionStatus = ExtractionStatus.Pending;
-                doc.ProcessingStartedAt = null;
-                doc.ProcessingError = ex.Message;
-                doc.UpdatedAt = DateTime.UtcNow;
-                await db.SaveChangesAsync(ct);
-            }
+            // Best-effort: if the requeue can't complete in the grace window the zombie reclaim still
+            // recovers the doc after the timeout — just slower. Don't let it block shutdown.
+            logger.LogWarning(ex, "Failed to requeue interrupted document {DocumentId} on shutdown.", documentId);
         }
     }
 

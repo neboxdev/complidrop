@@ -42,7 +42,22 @@ public class Document
     public DateTime? ExtractionCompletedAt { get; set; }
 
     public DateTime? ProcessingStartedAt { get; set; }
+
+    /// <summary>
+    /// Total times this document has been CLAIMED (incremented in the worker's claim SQL, including
+    /// zombie reclaims). A crash-loop backstop — not the retry budget — so a document that kills the
+    /// process before any handler runs can't be reclaimed forever. Restarts/deploys bump this, so it
+    /// must NOT gate ordinary retries; that's <see cref="FailedAttempts"/>. See ExtractionWorker (#259).
+    /// </summary>
     public int ProcessingAttempts { get; set; } = 0;
+
+    /// <summary>
+    /// Count of GENUINELY-FAILED attempts (extraction ran and threw, or timed out). This — not
+    /// <see cref="ProcessingAttempts"/> — is the retry budget: a restart/deploy that interrupts an
+    /// in-flight attempt is not a failure and never bumps this, so deploys alone can no longer fail a
+    /// document that never had a real extraction error (#259, problem 2).
+    /// </summary>
+    public int FailedAttempts { get; set; } = 0;
     public string? ProcessingError { get; set; }
 
     public DateTime? EffectiveDate { get; set; }

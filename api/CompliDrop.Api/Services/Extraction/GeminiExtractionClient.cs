@@ -107,8 +107,32 @@ public class GeminiExtractionClient(
 
         using var doc = JsonDocument.Parse(responseBody);
         var candidates = doc.RootElement.GetProperty("candidates");
+        if (candidates.ValueKind != JsonValueKind.Array || candidates.GetArrayLength() == 0)
+            throw new InvalidOperationException("Gemini response contained no candidates.");
         var firstCandidate = candidates[0];
-        var parts = firstCandidate.GetProperty("content").GetProperty("parts");
+
+        // A truncated response (finishReason=MAX_TOKENS) carries only PARTIAL JSON — JsonDocument.Parse
+        // below would throw, and the worker would retry the byte-identical request until the cap, never
+        // succeeding (#259, problem 1). Detect it here and fail fast as a deterministic failure so the
+        // worker stops immediately instead of burning OCR + LLM cost on doomed retries.
+        var finishReason = firstCandidate.TryGetProperty("finishReason", out var fr) ? fr.GetString() : null;
+        if (string.Equals(finishReason, "MAX_TOKENS", StringComparison.OrdinalIgnoreCase))
+            throw new NonRetryableExtractionException("extraction.token_limit",
+                $"Gemini truncated the response at the {cfg.MaxTokens}-token output cap; the extracted JSON is incomplete. Raise Gemini:MaxTokens.");
+
+        if (!firstCandidate.TryGetProperty("content", out var content)
+            || !content.TryGetProperty("parts", out var parts)
+            || parts.ValueKind != JsonValueKind.Array || parts.GetArrayLength() == 0)
+        {
+            // No text content. A non-STOP finishReason (SAFETY / RECITATION / BLOCKLIST / …) is a
+            // content block — deterministic, so don't retry. An absent/STOP reason with no parts is an
+            // odd-but-possibly-transient shape, so let it stay an ordinary (retryable) failure.
+            if (!string.IsNullOrEmpty(finishReason) && !string.Equals(finishReason, "STOP", StringComparison.OrdinalIgnoreCase))
+                throw new NonRetryableExtractionException("extraction.blocked",
+                    $"Gemini returned no usable content (finishReason: {finishReason}).");
+            throw new InvalidOperationException("Gemini response missing content parts.");
+        }
+
         var jsonText = parts[0].GetProperty("text").GetString()
             ?? throw new InvalidOperationException("Gemini response missing text content.");
 

@@ -32,10 +32,22 @@ public sealed class FakeExtractionClient : IExtractionClient
     /// <summary>When true, every call throws — simulates an extraction boundary that always fails.</summary>
     public bool ThrowOnExtract { get; set; }
 
+    /// <summary>
+    /// When true, every call throws a <see cref="NonRetryableExtractionException"/> — simulates a
+    /// deterministic failure (e.g. token-cap truncation) the worker must fail fast on, not retry.
+    /// </summary>
+    public bool ThrowNonRetryable { get; set; }
+
+    /// <summary>
+    /// When &gt; zero, the call awaits this delay (honoring the cancellation token) before returning —
+    /// lets a test drive the worker's per-attempt timeout by hanging the extraction boundary.
+    /// </summary>
+    public TimeSpan ExtractDelay { get; set; } = TimeSpan.Zero;
+
     /// <summary>Result returned on a successful (non-throwing) call.</summary>
     public ExtractionResult Result { get; set; } = DefaultResult;
 
-    public Task<ExtractionResult> ExtractAsync(
+    public async Task<ExtractionResult> ExtractAsync(
         OcrResult ocr,
         Stream? imageStream,
         string imageContentType,
@@ -43,15 +55,21 @@ public sealed class FakeExtractionClient : IExtractionClient
         CancellationToken ct)
     {
         ExtractCallCount++;
+        if (ThrowNonRetryable)
+            throw new NonRetryableExtractionException("extraction.token_limit", "Simulated deterministic failure.");
+        if (ExtractDelay > TimeSpan.Zero)
+            await Task.Delay(ExtractDelay, ct); // throws OperationCanceledException when the attempt times out
         if (ThrowOnExtract)
             throw new InvalidOperationException("Simulated extraction failure.");
-        return Task.FromResult(Result);
+        return Result;
     }
 
     public void Reset()
     {
         ExtractCallCount = 0;
         ThrowOnExtract = false;
+        ThrowNonRetryable = false;
+        ExtractDelay = TimeSpan.Zero;
         Result = DefaultResult;
     }
 }
