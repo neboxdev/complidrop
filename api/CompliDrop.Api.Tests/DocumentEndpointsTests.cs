@@ -724,7 +724,9 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
                 ContentType = "application/pdf",
                 DocumentType = "coi",
                 ComplianceStatus = ComplianceStatus.Compliant,
-                ExpirationDate = now.AddDays(20),
+                // Far future so the date overlay leaves it genuinely Compliant (a +20d doc would now
+                // read ExpiringSoon and correctly drop out of the Compliant filter — #257).
+                ExpirationDate = now.AddDays(200),
                 CreatedAt = now,
                 UpdatedAt = now
             });
@@ -738,7 +740,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
                 ContentType = "application/pdf",
                 DocumentType = "permit",
                 ComplianceStatus = ComplianceStatus.NonCompliant,
-                ExpirationDate = now.AddDays(60),
+                ExpirationDate = now.AddDays(20),
                 CreatedAt = now,
                 UpdatedAt = now
             });
@@ -753,15 +755,15 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         byType.GetProperty("total").GetInt32().Should().Be(1);
         byType.GetProperty("items")[0].GetProperty("originalFileName").GetString().Should().Be("b-permit.pdf");
 
-        // status filter
+        // status filter — a-coi is genuinely Compliant (far-future expiry), b-permit is NonCompliant.
         var byStatus = await Items("status=Compliant");
         byStatus.GetProperty("total").GetInt32().Should().Be(1);
         byStatus.GetProperty("items")[0].GetProperty("originalFileName").GetString().Should().Be("a-coi.pdf");
 
-        // expiresWithin filter: the +20d doc is within 30 days, the +60d one is not.
+        // expiresWithin filter: the +20d permit is within 30 days, the +200d coi is not.
         var byExpiry = await Items("expiresWithin=30");
         byExpiry.GetProperty("total").GetInt32().Should().Be(1);
-        byExpiry.GetProperty("items")[0].GetProperty("originalFileName").GetString().Should().Be("a-coi.pdf");
+        byExpiry.GetProperty("items")[0].GetProperty("originalFileName").GetString().Should().Be("b-permit.pdf");
     }
 
     [Fact]

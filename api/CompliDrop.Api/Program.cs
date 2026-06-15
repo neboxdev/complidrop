@@ -94,6 +94,7 @@ builder.Services.AddSingleton<IExtractionClientFactory, ExtractionClientFactory>
 
 builder.Services.AddHostedService<ExtractionWorker>();
 builder.Services.AddHostedService<ReminderBackgroundService>();
+builder.Services.AddHostedService<ComplianceSweepBackgroundService>();
 
 builder.Services.AddCookieJwtAuth();
 

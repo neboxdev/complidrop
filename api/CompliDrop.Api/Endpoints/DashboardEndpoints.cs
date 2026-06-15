@@ -23,8 +23,16 @@ public static class DashboardEndpoints
 
         var docs = db.Documents;
         var totalDocs = await docs.CountAsync(ct);
-        var compliant = await docs.CountAsync(d => d.ComplianceStatus == Entities.ComplianceStatus.Compliant, ct);
-        var nonCompliant = await docs.CountAsync(d => d.ComplianceStatus == Entities.ComplianceStatus.NonCompliant, ct);
+        // The headline buckets must be mutually exclusive on the EFFECTIVE (date-overlaid) status,
+        // or a date-expired-but-stored-Compliant doc gets counted as BOTH compliant AND expired —
+        // two answers on one screen (#257). Expired/ExpiringSoon are date-driven; compliant and
+        // nonCompliant exclude any doc the date buckets already claim.
+        var compliant = await docs.CountAsync(d =>
+            d.ComplianceStatus == Entities.ComplianceStatus.Compliant
+            && (d.ExpirationDate == null || d.ExpirationDate > in30), ct);
+        var nonCompliant = await docs.CountAsync(d =>
+            d.ComplianceStatus == Entities.ComplianceStatus.NonCompliant
+            && (d.ExpirationDate == null || d.ExpirationDate >= today), ct);
         var expiringSoon = await docs.CountAsync(d =>
             d.ExpirationDate != null
             && d.ExpirationDate >= today
