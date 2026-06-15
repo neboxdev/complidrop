@@ -125,6 +125,16 @@ internal static class ModelConfiguration
             e.Property(ct => ct.Description).HasMaxLength(500);
             e.HasOne(ct => ct.Organization).WithMany(o => o.ComplianceTemplates)
                 .HasForeignKey(ct => ct.OrganizationId).OnDelete(DeleteBehavior.Cascade);
+            // Recurrence guard for #251: the system-template seed is idempotent BY NAME, but nothing
+            // stopped a seed/rename mismatch from inserting a second live row per venue type (it did,
+            // in the #192 manual-migration era). A partial unique index on Name over LIVE system rows
+            // makes any future duplication fail loudly at write time instead of silently doubling the
+            // "Suggested checklists" list. Scoped to IsSystemTemplate (org templates may legitimately
+            // reuse a name) and DeletedAt IS NULL (a soft-deleted system row must not block re-seeding).
+            e.HasIndex(ct => ct.Name)
+                .IsUnique()
+                .HasFilter("\"IsSystemTemplate\" AND \"DeletedAt\" IS NULL")
+                .HasDatabaseName("IX_ComplianceTemplates_Name_SystemUnique");
         });
 
         builder.Entity<ComplianceRule>(e =>
