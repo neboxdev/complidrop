@@ -21,7 +21,9 @@ namespace CompliDrop.Api.Data;
 /// </summary>
 public static class SystemTemplateDedup
 {
-    public const string DedupeSql = """
+    // internal (not public) — only the migration (same assembly) and the test project
+    // (via InternalsVisibleTo) consume it. Mirrors the ExtractionWorker.ClaimSql precedent.
+    internal const string DedupeSql = """
         CREATE TEMP TABLE _complidrop_sys_tpl_dupes ON COMMIT DROP AS
         WITH refs AS (
             SELECT t."Id", t."Name", t."CreatedAt",

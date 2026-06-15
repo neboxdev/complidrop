@@ -118,6 +118,52 @@ public sealed class SystemTemplateDedupTests(IntegrationTestFixture fixture) : I
         }
     }
 
+    [Fact]
+    public async Task Dedupe_keeps_the_most_referenced_copy_even_when_it_is_the_newer_one()
+    {
+        // Pins the PRIMARY survivor rule (ref_count DESC) independently of the CreatedAt tie-break:
+        // the survivor here is the LATER-created copy but has MORE vendor references, so it must win.
+        // (The other dedupe test ties on ref count and would pass even if ref_count DESC were broken.)
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            await ExecAsync(conn, tx, "DROP INDEX \"IX_ComplianceTemplates_Name_SystemUnique\"");
+
+            var orgId = Guid.NewGuid();
+            var olderFewRefs = Guid.NewGuid(); // created earlier, 1 vendor
+            var newerManyRefs = Guid.NewGuid(); // created later, 2 vendors → should survive
+            const string name = "ZZ-Dedupe-Refs";
+
+            await using (var db = new SystemDbContext(
+                new DbContextOptionsBuilder<SystemDbContext>().UseNpgsql(conn).Options))
+            {
+                await db.Database.UseTransactionAsync(tx);
+                db.Organizations.Add(new Organization { Id = orgId, Name = "RefsOrg", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+                db.ComplianceTemplates.Add(new ComplianceTemplate { Id = olderFewRefs, OrganizationId = ComplianceTemplateSeed.SystemOrgId, Name = name, IsSystemTemplate = true, CreatedAt = DateTime.UtcNow.AddMinutes(-10) });
+                db.ComplianceTemplates.Add(new ComplianceTemplate { Id = newerManyRefs, OrganizationId = ComplianceTemplateSeed.SystemOrgId, Name = name, IsSystemTemplate = true, CreatedAt = DateTime.UtcNow });
+                db.Vendors.Add(new Vendor { Id = Guid.NewGuid(), OrganizationId = orgId, Name = "V1", ComplianceTemplateId = olderFewRefs, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+                db.Vendors.Add(new Vendor { Id = Guid.NewGuid(), OrganizationId = orgId, Name = "V2", ComplianceTemplateId = newerManyRefs, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+                db.Vendors.Add(new Vendor { Id = Guid.NewGuid(), OrganizationId = orgId, Name = "V3", ComplianceTemplateId = newerManyRefs, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow });
+                await db.SaveChangesAsync();
+            }
+
+            await ExecAsync(conn, tx, SystemTemplateDedup.DedupeSql);
+
+            (await ScalarAsync(conn, tx, $"SELECT count(*) FROM \"ComplianceTemplates\" WHERE \"Id\" = '{newerManyRefs}'"))
+                .Should().Be(1, "the more-referenced copy must survive even though it was created later");
+            (await ScalarAsync(conn, tx, $"SELECT count(*) FROM \"ComplianceTemplates\" WHERE \"Id\" = '{olderFewRefs}'"))
+                .Should().Be(0, "the less-referenced (older) copy is dropped");
+            (await ScalarAsync(conn, tx, $"SELECT count(*) FROM \"Vendors\" WHERE \"ComplianceTemplateId\" = '{newerManyRefs}'"))
+                .Should().Be(3, "all three vendors land on the most-referenced survivor");
+        }
+        finally
+        {
+            await tx.RollbackAsync();
+        }
+    }
+
     private static async Task ExecAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string sql)
     {
         await using var cmd = conn.CreateCommand();
