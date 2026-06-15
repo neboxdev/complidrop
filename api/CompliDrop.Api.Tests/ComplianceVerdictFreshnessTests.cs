@@ -102,6 +102,22 @@ public sealed class ComplianceVerdictFreshnessTests(IntegrationTestFixture fixtu
         stats.GetProperty("expired").GetInt32().Should().Be(1);
     }
 
+    [Fact]
+    public async Task Dashboard_counts_a_noncompliant_expiring_soon_doc_only_as_nonCompliant()
+    {
+        // A failing doc expiring within 30 days stays NonCompliant (the date doesn't soften the
+        // verdict). It must be counted ONCE — under nonCompliant — not double-counted as expiringSoon,
+        // matching the deriver and the documents-list ExpiringSoon filter.
+        var auth = await RegisterAndLoginAsync();
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.NonCompliant, DateTime.UtcNow.Date.AddDays(10));
+
+        var stats = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/dashboard/stats")).GetProperty("data");
+
+        stats.GetProperty("nonCompliant").GetInt32().Should().Be(1);
+        stats.GetProperty("expiringSoon").GetInt32().Should().Be(0,
+            "a NonCompliant doc expiring soon must not also be counted as ExpiringSoon");
+    }
+
     // ---- expiring-within filter lower bound ----
 
     [Fact]
@@ -201,5 +217,39 @@ public sealed class ComplianceVerdictFreshnessTests(IntegrationTestFixture fixtu
         await using var verify = CreateSystemDb();
         (await verify.Documents.SingleAsync(d => d.Id == docId)).ComplianceStatus
             .Should().Be(ComplianceStatus.NonCompliant, "adding a rule must fan out a re-evaluation across the template's docs");
+    }
+
+    [Fact]
+    public async Task Fan_out_regrades_every_document_on_the_template_independently()
+    {
+        // Two docs on one template: one fails the rule (1M < 2M), one passes (3M >= 2M). The fan-out
+        // loop must re-grade BOTH to their own correct verdict — proving it doesn't stop after the
+        // first and that one doc's evaluation doesn't bleed into the next (the ChangeTracker.Clear /
+        // per-doc isolation in ReevaluateEachAsync).
+        var auth = await RegisterAndLoginAsync();
+        var now = DateTime.UtcNow;
+        var vendorId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        await using (var db = CreateSystemDb())
+        {
+            db.ComplianceTemplates.Add(new ComplianceTemplate { Id = templateId, OrganizationId = auth.OrgId, Name = "T", CreatedAt = now });
+            db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = auth.OrgId, Name = "V", ComplianceTemplateId = templateId, CreatedAt = now, UpdatedAt = now });
+            await db.SaveChangesAsync();
+        }
+        var failingId = await SeedDocAsync(auth.OrgId, ComplianceStatus.Pending, now.AddYears(1), vendorId: vendorId, glLimit: 1_000_000m);
+        var passingId = await SeedDocAsync(auth.OrgId, ComplianceStatus.Pending, now.AddYears(1), vendorId: vendorId, glLimit: 3_000_000m);
+
+        var resp = await auth.Client.PostAsJsonAsync($"/api/compliance/templates/{templateId}/rules", new
+        {
+            id = (Guid?)null, documentType = "coi", fieldName = "general_liability_limit",
+            @operator = "min_value", expectedValue = "2000000", errorMessage = (string?)null, sortOrder = 0
+        });
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.SingleAsync(d => d.Id == failingId)).ComplianceStatus
+            .Should().Be(ComplianceStatus.NonCompliant);
+        (await verify.Documents.SingleAsync(d => d.Id == passingId)).ComplianceStatus
+            .Should().Be(ComplianceStatus.Compliant, "the fan-out must re-grade every doc independently, not stop after the first");
     }
 }

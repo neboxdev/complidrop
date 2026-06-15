@@ -33,10 +33,18 @@ public static class DashboardEndpoints
         var nonCompliant = await docs.CountAsync(d =>
             d.ComplianceStatus == Entities.ComplianceStatus.NonCompliant
             && (d.ExpirationDate == null || d.ExpirationDate >= today), ct);
+        // ExpiringSoon must use the SAME stored-status eligibility as ComplianceStatusDeriver and the
+        // documents-list ExpiringSoon filter: a NonCompliant doc expiring soon stays NonCompliant
+        // (its hard fail isn't softened by the date), so it must NOT also be counted here — otherwise
+        // it double-counts under both nonCompliant and expiringSoon. Expired stays status-agnostic
+        // (Expired is top precedence; the compliant/nonCompliant arms already exclude past-date docs).
         var expiringSoon = await docs.CountAsync(d =>
             d.ExpirationDate != null
             && d.ExpirationDate >= today
-            && d.ExpirationDate <= in30, ct);
+            && d.ExpirationDate <= in30
+            && (d.ComplianceStatus == Entities.ComplianceStatus.Compliant
+                || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon
+                || d.ComplianceStatus == Entities.ComplianceStatus.Pending), ct);
         var expired = await docs.CountAsync(d => d.ExpirationDate != null && d.ExpirationDate < today, ct);
         var pendingExtraction = await docs.CountAsync(d =>
             d.ExtractionStatus == Entities.ExtractionStatus.Pending
