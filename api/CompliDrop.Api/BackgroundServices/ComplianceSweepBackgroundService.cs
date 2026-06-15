@@ -51,10 +51,14 @@ public class ComplianceSweepBackgroundService(
 
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var today = now.Date;
-        var expiringSoonCutoff = today.AddDays(ComplianceStatusDeriver.ExpiringSoonWindowDays);
+        // Exclusive upper bound so the instant comparison matches ComplianceStatusDeriver's date-only
+        // window (a noon-UTC expiry on day 30 is still expiring-soon, not Compliant) — see #294.
+        var expiringSoonCutoffExclusive =
+            ComplianceStatusDeriver.WindowUpperBoundExclusive(today, ComplianceStatusDeriver.ExpiringSoonWindowDays);
 
         // Expired wins over every rule verdict (mirrors ComplianceCheckService's top-precedence
-        // expiry branch): any non-Expired doc whose date has passed flips to Expired.
+        // expiry branch): any non-Expired doc whose date has passed flips to Expired. `< today`
+        // (UTC midnight) is already exactly "calendar date before today" — no shift needed.
         var expired = await db.Documents
             .Where(d => d.DeletedAt == null
                 && d.ExpirationDate != null
@@ -71,7 +75,7 @@ public class ComplianceSweepBackgroundService(
             .Where(d => d.DeletedAt == null
                 && d.ExpirationDate != null
                 && d.ExpirationDate >= today
-                && d.ExpirationDate <= expiringSoonCutoff
+                && d.ExpirationDate < expiringSoonCutoffExclusive
                 && (d.ComplianceStatus == ComplianceStatus.Compliant
                     || d.ComplianceStatus == ComplianceStatus.Pending))
             .ExecuteUpdateAsync(s => s

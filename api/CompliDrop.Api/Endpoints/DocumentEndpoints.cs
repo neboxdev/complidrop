@@ -61,7 +61,12 @@ public static class DocumentEndpoints
         if (currentUser.OrganizationId is null) return Unauthorized();
 
         var today = DateTime.UtcNow.Date;
-        var in30 = today.AddDays(ComplianceStatusDeriver.ExpiringSoonWindowDays);
+        // Exclusive instant upper bound for the 30-day window so these raw-timestamptz comparisons
+        // agree with ComplianceStatusDeriver's date-only window for a time-bearing expiry on the
+        // boundary day (#294): "within 30 days" is exp < today+31 (UTC midnight); "beyond the window"
+        // is exp >= today+31. The lower edges (< today / >= today) are already date-equivalent.
+        var expiringSoonUpperExclusive =
+            ComplianceStatusDeriver.WindowUpperBoundExclusive(today, ComplianceStatusDeriver.ExpiringSoonWindowDays);
 
         var query = db.Documents.AsQueryable();
         if (!string.IsNullOrWhiteSpace(status))
@@ -76,19 +81,19 @@ public static class DocumentEndpoints
                     ComplianceStatus.Expired => query.Where(d =>
                         d.ExpirationDate != null && d.ExpirationDate < today),
                     ComplianceStatus.ExpiringSoon => query.Where(d =>
-                        d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate <= in30
+                        d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate < expiringSoonUpperExclusive
                         && (d.ComplianceStatus == ComplianceStatus.Compliant
                             || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
                             || d.ComplianceStatus == ComplianceStatus.Pending)),
                     ComplianceStatus.Compliant => query.Where(d =>
                         d.ComplianceStatus == ComplianceStatus.Compliant
-                        && (d.ExpirationDate == null || d.ExpirationDate > in30)),
+                        && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive)),
                     ComplianceStatus.NonCompliant => query.Where(d =>
                         d.ComplianceStatus == ComplianceStatus.NonCompliant
                         && (d.ExpirationDate == null || d.ExpirationDate >= today)),
                     _ => query.Where(d => // Pending — but not if a date overlay would make it Expiring/Expired
                         d.ComplianceStatus == ComplianceStatus.Pending
-                        && (d.ExpirationDate == null || d.ExpirationDate > in30)),
+                        && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive)),
                 };
         }
         if (!string.IsNullOrWhiteSpace(type))
@@ -97,11 +102,16 @@ public static class DocumentEndpoints
             query = query.Where(d => d.VendorId == vendorId);
         if (expiresWithin is int days && days > 0)
         {
+            // Clamp to a sane maximum (~10 years) so a hostile/absurd value can't push the C#
+            // date arithmetic below out of DateTime's range and turn a malformed query param into a
+            // 500 (#294 review). Anything past a decade is "everything not yet expired" anyway.
+            days = Math.Min(days, 3650);
             // Upper AND lower bound: "expiring within N days" is a future window, so exclude
             // already-expired docs — without the lower bound the "Expiring in 30 days" filter also
             // returned long-expired documents (#257). Already-expired docs live under status=Expired.
-            var cutoff = today.AddDays(days);
-            query = query.Where(d => d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate <= cutoff);
+            // Exclusive upper bound (< today+N+1) so a time-bearing expiry on day N still matches (#294).
+            var cutoffExclusive = ComplianceStatusDeriver.WindowUpperBoundExclusive(today, days);
+            query = query.Where(d => d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate < cutoffExclusive);
         }
         if (!string.IsNullOrWhiteSpace(search))
         {

@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -150,6 +151,68 @@ public sealed class ComplianceVerdictFreshnessTests(IntegrationTestFixture fixtu
         csv.Should().Contain("Expired", "the audit export must derive the date status at generation");
         csv.Should().NotContain("Compliant",
             "the export must not certify the stale stored Compliant on an expired document");
+    }
+
+    // ---- #294: date-window boundary agreement (deriver vs SQL sites) ----
+
+    [Fact]
+    public async Task A_time_bearing_expiry_on_the_30_day_boundary_reads_ExpiringSoon_everywhere()
+    {
+        // A non-midnight expiry exactly on the today+30 boundary. The badge (deriver, date-only)
+        // reads ExpiringSoon; the list filter and the dashboard counts must AGREE. Before the
+        // exclusive-bound fix (#294) the raw `exp <= today+30 (midnight)` dropped this noon expiry
+        // out of ExpiringSoon and the `exp > today+30` arm counted it Compliant — two answers.
+        var auth = await RegisterAndLoginAsync();
+        var onBoundaryNoon = DateTime.UtcNow.Date
+            .AddDays(ComplianceStatusDeriver.ExpiringSoonWindowDays)
+            .AddHours(12);
+        var docId = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, onBoundaryNoon);
+
+        // Badge (detail) derives ExpiringSoon.
+        var detail = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        detail.GetProperty("data").GetProperty("complianceStatus").GetString().Should().Be("ExpiringSoon");
+
+        // List filter agrees: under ExpiringSoon, not under Compliant.
+        var soon = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?status=ExpiringSoon");
+        soon.GetProperty("data").GetProperty("items").EnumerateArray()
+            .Select(i => i.GetProperty("id").GetString())
+            .Should().Contain(docId.ToString(), "the badge says ExpiringSoon, so the ExpiringSoon filter must return it");
+        var compliantList = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?status=Compliant");
+        StatusesOf(compliantList).Should().BeEmpty("a doc expiring on the boundary day is no longer Compliant");
+
+        // The expiresWithin filter (same WindowUpperBoundExclusive) also includes the boundary-day doc.
+        var within = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?expiresWithin=30");
+        within.GetProperty("data").GetProperty("items").EnumerateArray()
+            .Select(i => i.GetProperty("id").GetString())
+            .Should().Contain(docId.ToString(), "expiresWithin=30 must include a noon expiry on day 30");
+
+        // Dashboard counts agree: expiringSoon, not compliant.
+        var stats = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/dashboard/stats")).GetProperty("data");
+        stats.GetProperty("expiringSoon").GetInt32().Should().Be(1);
+        stats.GetProperty("compliant").GetInt32().Should().Be(0,
+            "the boundary-day doc must not also be counted Compliant — the #294 two-answers split");
+    }
+
+    [Fact]
+    public async Task Expiry_pipeline_buckets_a_time_bearing_boundary_expiry_into_its_own_window()
+    {
+        // #294: the expiry-pipeline buckets compare a raw timestamptz against today+N exclusive
+        // bounds. A noon-UTC expiry exactly on day 30 / 60 / 90 must land in the 30 / 60 / 90 bucket —
+        // not slip up a bucket as the pre-fix `<= today+N` would have pushed a boundary-day noon expiry.
+        var auth = await RegisterAndLoginAsync();
+        var baseDate = DateTime.UtcNow.Date;
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, baseDate.AddDays(30).AddHours(12));
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, baseDate.AddDays(60).AddHours(12));
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, baseDate.AddDays(90).AddHours(12));
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, baseDate.AddDays(120).AddHours(12));
+
+        var data = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/dashboard/expiry-pipeline")).GetProperty("data");
+
+        data.GetProperty("bucket30").GetInt32().Should().Be(1, "a noon expiry on day 30 belongs to the 30-day bucket");
+        data.GetProperty("bucket60").GetInt32().Should().Be(1, "a noon expiry on day 60 belongs to the 60-day bucket");
+        data.GetProperty("bucket90").GetInt32().Should().Be(1, "a noon expiry on day 90 belongs to the 90-day bucket");
+        data.GetProperty("beyond").GetInt32().Should().Be(1);
+        data.GetProperty("expired").GetInt32().Should().Be(0, "the buckets must stay disjoint — no doc double-counted or dropped");
     }
 
     // ---- re-evaluation fan-out ----

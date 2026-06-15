@@ -24,6 +24,28 @@ public static class ComplianceStatusDeriver
     public const int ExpiringSoonWindowDays = 30;
 
     /// <summary>
+    /// The EXCLUSIVE upper instant a SQL read site (documents-list filter, dashboard counts, the
+    /// nightly sweep) must compare a raw <c>timestamptz</c> <see cref="Document.ExpirationDate"/>
+    /// against to reproduce the SAME "expires within <paramref name="withinDays"/> calendar days"
+    /// window this deriver applies on read.
+    ///
+    /// The deriver buckets by calendar DATE (<c>exp.Date &lt;= today + N</c>). The instant-equivalent
+    /// is <c>exp &lt; (today.Date + (N + 1) days)</c> — so a time-bearing expiry that lands on day N
+    /// (e.g. noon UTC) is still inside the window, exactly as the derived badge shows it. Comparing a
+    /// raw timestamptz against <c>today + N</c> at midnight instead drops such a doc out of the window
+    /// in SQL while the badge keeps it in: the two-answers bug #294 fixes. The lower bounds
+    /// (<c>exp &lt; today</c> for Expired, <c>exp &gt;= today</c> for "not yet expired") are already
+    /// date-equivalent at UTC midnight and need no shift — only the inclusive upper edge does.
+    ///
+    /// The returned bound is a UTC-midnight instant (<paramref name="today"/> is a UTC date), so the
+    /// comparison stays a plain instant-vs-instant test: no <c>::date</c> / <c>date_trunc</c>
+    /// truncation, no <c>AT TIME ZONE</c>, no session-TimeZone dependence (ADR 0009). See
+    /// <see href="../../../docs/adr/0027-compliance-date-window-boundaries.md">ADR 0027</see>.
+    /// </summary>
+    public static DateTime WindowUpperBoundExclusive(DateTime today, int withinDays) =>
+        today.Date.AddDays(withinDays + 1);
+
+    /// <summary>
     /// Derives the effective status shown to the user as of <paramref name="today"/> (a date; the
     /// time component is ignored). <paramref name="today"/> is passed in — not read from the clock —
     /// so callers stay deterministically testable and consistent with the rest of the codebase's
