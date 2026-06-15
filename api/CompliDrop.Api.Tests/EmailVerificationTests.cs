@@ -185,6 +185,37 @@ public sealed class EmailVerificationTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
+    public async Task Resend_with_email_unconfigured_returns_an_honest_error_not_a_false_success()
+    {
+        // #249: with the email subsystem off, resend must NOT claim success the user never receives.
+        var auth = await RegisterAndLoginAsync();
+        var sendsAfterRegister = Email.Sends.Count;
+        Email.IsEnabled = false;
+
+        var resend = await auth.Client.PostAsync("/api/auth/resend-verification", null);
+
+        resend.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        var body = await resend.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be("email.not_configured");
+        body.GetProperty("error").GetProperty("message").GetString().Should().NotBeNullOrWhiteSpace();
+        Email.Sends.Count.Should().Be(sendsAfterRegister, "nothing should be sent (or claimed) when email is unconfigured");
+    }
+
+    [Fact]
+    public async Task Resend_when_the_provider_rejects_the_send_returns_an_error_not_a_false_success()
+    {
+        // #249: a non-accepted send (Resend returns no message id) must surface, not toast "sent".
+        var auth = await RegisterAndLoginAsync();
+        Email.NextSendReturnsNull = true;
+
+        var resend = await auth.Client.PostAsync("/api/auth/resend-verification", null);
+
+        resend.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        (await resend.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("error").GetProperty("code").GetString().Should().Be("email.send_failed");
+    }
+
+    [Fact]
     public async Task Register_succeeds_and_persists_a_token_even_when_email_delivery_is_disabled()
     {
         // Signup must NEVER block on email delivery: with Resend disabled the send

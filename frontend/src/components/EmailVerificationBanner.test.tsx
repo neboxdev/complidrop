@@ -47,17 +47,20 @@ describe("EmailVerificationBanner (#184)", () => {
     );
   });
 
-  it("shows a jargon-free toast and never leaks HTTP jargon on failure", async () => {
+  it("surfaces the SERVER's failure message (not the client fallback) and never leaks HTTP jargon", async () => {
+    // The mocked message is deliberately DISTINCT from GENERIC_FALLBACK_MESSAGE so this fails if the
+    // banner ever dropped err.message and always toasted the fallback (matches #249's real 502 copy).
+    const serverMsg = "We couldn't send your confirmation email just now. Please try again in a few minutes.";
     server.use(
       http.post(url("/api/auth/resend-verification"), () =>
-        jsonError("server.error", "Something went wrong. Try again.", { status: 502 }),
+        jsonError("email.send_failed", serverMsg, { status: 502 }),
       ),
     );
     renderWithProviders(<EmailVerificationBanner email="owner@acme.test" />);
 
     fireEvent.click(screen.getByRole("button", { name: /resend/i }));
 
-    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith(serverMsg));
     const msg = String(toastError.mock.calls.at(-1)?.[0] ?? "");
     expect(msg).not.toMatch(/bad gateway/i);
     expect(msg).not.toMatch(/502/);

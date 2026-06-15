@@ -449,6 +449,13 @@ public static class AuthEndpoints
         if (user.EmailVerifiedAt is not null)
             return Results.Ok(new { data = new { message = "Your email is already confirmed." }, error = (object?)null });
 
+        // Don't mint a token and claim success when the email subsystem can't deliver (#249). This is
+        // an explicit user action (the verify-banner Resend button), so failure must be honest —
+        // mirroring the portal-invite endpoint — not a self-defeating "sent" the user never receives.
+        if (!email.IsEnabled)
+            return Error(503, "email.not_configured",
+                "Email isn't set up yet, so we couldn't send your confirmation link. Please try again later, or contact support.");
+
         var now = DateTime.UtcNow;
         // Consume previously-emailed SIGNUP-verification links (NewEmail == null)
         // so a stale one can't be redeemed after a resend. Deliberately leave any
@@ -467,7 +474,10 @@ public static class AuthEndpoints
         db.EmailVerificationTokens.Add(token);
         await db.SaveChangesAsync();
 
-        await SendVerificationEmailAsync(email, frontendOpts.Value, user.Email, rawToken, logger, http.RequestAborted);
+        var sent = await SendVerificationEmailAsync(email, frontendOpts.Value, user.Email, rawToken, logger, http.RequestAborted);
+        if (!sent)
+            return Error(502, "email.send_failed",
+                "We couldn't send your confirmation email just now. Please try again in a few minutes.");
 
         return Results.Ok(new { data = new { message = "Verification email sent." }, error = (object?)null });
     }
@@ -1012,7 +1022,13 @@ public static class AuthEndpoints
         return (token, raw);
     }
 
-    private static async Task SendVerificationEmailAsync(
+    /// <summary>
+    /// Sends the email-verification link. Returns <c>true</c> only when the provider ACCEPTED the
+    /// send (a non-null Resend message id), <c>false</c> on a swallowed delivery failure — so the
+    /// explicit resend endpoint can report honestly (#249) while registration stays best-effort
+    /// (it discards the result; the durable token always lets the user resend later).
+    /// </summary>
+    private static async Task<bool> SendVerificationEmailAsync(
         IEmailService email,
         FrontendSettings frontend,
         string toEmail,
@@ -1031,22 +1047,24 @@ public static class AuthEndpoints
               <p style="color: #64748b; font-size: 12px;">This link expires in {VerificationTokenTtlDays} days. If you didn't create a CompliDrop account, you can ignore this email.</p>
             </div>
             """;
-        // The send MUST NOT be able to fail the calling request. SendAsync
-        // swallows non-2xx Resend responses, but a transient transport failure
-        // (DNS/socket/TLS → HttpRequestException) or a client abort
-        // (http.RequestAborted → OperationCanceledException) would otherwise
-        // throw AFTER the caller has already committed the user + token row —
-        // surfacing a 500 to a user whose account actually exists. The durable
-        // token guarantees they can always resend later, so we log and continue.
+        // The send MUST NOT throw out of the calling request. SendAsync returns null on a non-2xx
+        // Resend response; a transient transport failure (DNS/socket/TLS → HttpRequestException) or
+        // the HttpClient's own timeout (→ TaskCanceledException, tied to its internal token, not our
+        // `ct`) would otherwise throw AFTER the caller committed the user + token row. We gate the
+        // catch on `!ct.IsCancellationRequested` (mirroring the portal-invite path) so those are
+        // swallowed to a false return, while a genuine client abort propagates — there's no one left
+        // to receive a response. The durable token guarantees the user can always resend later.
         try
         {
-            await email.SendAsync(toEmail, subject, body, ct);
+            var messageId = await email.SendAsync(toEmail, subject, body, ct);
+            return messageId is not null;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             logger.LogWarning(ex,
                 "Verification email send failed for {Email}; the durable token lets the user resend later.",
                 toEmail);
+            return false;
         }
     }
 
