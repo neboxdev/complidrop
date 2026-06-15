@@ -85,4 +85,30 @@ public sealed class ComplianceStatusDeriverTests
         ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today, todayAfternoon)
             .Should().Be(ComplianceStatus.ExpiringSoon);
     }
+
+    [Fact]
+    public void WindowUpperBoundExclusive_is_the_instant_equivalent_of_the_date_window()
+    {
+        // #294: the SQL read sites compare a raw timestamptz against this bound to reproduce the
+        // deriver's inclusive date window (exp.Date <= today + N). It must be UTC midnight of day
+        // N+1, independent of today's time component.
+        var todayNoon = new DateTime(2026, 6, 15, 12, 0, 0, DateTimeKind.Utc);
+        ComplianceStatusDeriver.WindowUpperBoundExclusive(todayNoon, 30)
+            .Should().Be(new DateTime(2026, 7, 16, 0, 0, 0, DateTimeKind.Utc));
+
+        var bound = ComplianceStatusDeriver.WindowUpperBoundExclusive(todayNoon, ComplianceStatusDeriver.ExpiringSoonWindowDays);
+
+        // A time-bearing expiry ON the boundary day (day 30 at noon) is INSIDE the window (`< bound`),
+        // matching the deriver's ExpiringSoon — where a naive `<= today+30` midnight bound excluded it.
+        var onBoundaryNoon = new DateTime(2026, 7, 15, 12, 0, 0, DateTimeKind.Utc);
+        (onBoundaryNoon < bound).Should().BeTrue();
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, onBoundaryNoon, todayNoon)
+            .Should().Be(ComplianceStatus.ExpiringSoon);
+
+        // The day after the window (day 31 at noon) is OUTSIDE (`>= bound`), matching stored Compliant.
+        var pastBoundaryNoon = new DateTime(2026, 7, 16, 12, 0, 0, DateTimeKind.Utc);
+        (pastBoundaryNoon < bound).Should().BeFalse();
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, pastBoundaryNoon, todayNoon)
+            .Should().Be(ComplianceStatus.Compliant);
+    }
 }

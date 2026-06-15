@@ -121,6 +121,34 @@ public sealed class ComplianceSweepBackgroundServiceTests(IntegrationTestFixture
     }
 
     [Fact]
+    public async Task Sweep_flips_a_time_bearing_expiry_on_the_30_day_boundary_to_ExpiringSoon()
+    {
+        // #294: Anchor is noon, so AddDays(30) is a NON-midnight expiry exactly on the 30-day
+        // boundary. The deriver (date-only) reads ExpiringSoon; before the exclusive-bound fix the
+        // sweep's `exp <= today+30 (midnight)` left it Compliant (noon > midnight) — the two-answers
+        // split this fix removes.
+        var id = await SeedAsync(ComplianceStatus.Compliant, Anchor.AddDays(30));
+
+        await BuildSweep().SweepAsync(CancellationToken.None);
+
+        (await StatusAsync(id)).Should().Be(ComplianceStatus.ExpiringSoon,
+            "a time-bearing expiry on the boundary day is within the window, matching the deriver");
+    }
+
+    [Fact]
+    public async Task Sweep_leaves_a_time_bearing_expiry_just_past_the_window_Compliant()
+    {
+        // The exclusive bound must not over-reach: a noon expiry on day 31 is beyond the 30-day
+        // window (the deriver keeps it Compliant), so the sweep must not flip it.
+        var id = await SeedAsync(ComplianceStatus.Compliant, Anchor.AddDays(31));
+
+        await BuildSweep().SweepAsync(CancellationToken.None);
+
+        (await StatusAsync(id)).Should().Be(ComplianceStatus.Compliant,
+            "day 31 is outside the 30-day window — the exclusive bound is today+31, not today+32");
+    }
+
+    [Fact]
     public async Task Sweep_skips_soft_deleted_documents()
     {
         // A soft-deleted doc must never be resurrected by the sweep — its status stays frozen.

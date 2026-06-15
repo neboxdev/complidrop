@@ -1,5 +1,6 @@
 using CompliDrop.Api.Auth;
 using CompliDrop.Api.Data;
+using CompliDrop.Api.Services;
 using Microsoft.EntityFrameworkCore;
 
 namespace CompliDrop.Api.Endpoints;
@@ -18,8 +19,12 @@ public static class DashboardEndpoints
     private static async Task<IResult> Stats(AppDbContext db, CancellationToken ct)
     {
         var today = DateTime.UtcNow.Date;
-        var in30 = today.AddDays(30);
-        var in60 = today.AddDays(60);
+        // Exclusive instant upper bound for the 30-day window so these raw-timestamptz comparisons
+        // match ComplianceStatusDeriver's date-only window on the boundary day (#294): "within 30
+        // days" is exp < today+31 (UTC midnight); "beyond the window" is exp >= today+31. The lower
+        // edges (< today / >= today) are already date-equivalent at midnight.
+        var expiringSoonUpperExclusive =
+            ComplianceStatusDeriver.WindowUpperBoundExclusive(today, ComplianceStatusDeriver.ExpiringSoonWindowDays);
 
         var docs = db.Documents;
         var totalDocs = await docs.CountAsync(ct);
@@ -29,7 +34,7 @@ public static class DashboardEndpoints
         // nonCompliant exclude any doc the date buckets already claim.
         var compliant = await docs.CountAsync(d =>
             d.ComplianceStatus == Entities.ComplianceStatus.Compliant
-            && (d.ExpirationDate == null || d.ExpirationDate > in30), ct);
+            && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive), ct);
         var nonCompliant = await docs.CountAsync(d =>
             d.ComplianceStatus == Entities.ComplianceStatus.NonCompliant
             && (d.ExpirationDate == null || d.ExpirationDate >= today), ct);
@@ -41,7 +46,7 @@ public static class DashboardEndpoints
         var expiringSoon = await docs.CountAsync(d =>
             d.ExpirationDate != null
             && d.ExpirationDate >= today
-            && d.ExpirationDate <= in30
+            && d.ExpirationDate < expiringSoonUpperExclusive
             && (d.ComplianceStatus == Entities.ComplianceStatus.Compliant
                 || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon
                 || d.ComplianceStatus == Entities.ComplianceStatus.Pending), ct);
@@ -76,18 +81,21 @@ public static class DashboardEndpoints
     private static async Task<IResult> ExpiryPipeline(AppDbContext db, CancellationToken ct)
     {
         var today = DateTime.UtcNow.Date;
-        var in30 = today.AddDays(30);
-        var in60 = today.AddDays(60);
-        var in90 = today.AddDays(90);
+        // Exclusive upper bounds (exp < today+N+1) so each "within N days" bucket matches a date-only
+        // window: a time-bearing expiry on day N lands in the N-day bucket, not the next one (#294).
+        // Buckets stay disjoint and gap-free: [< today] expired, [today, 30] , (30, 60], (60, 90], (> 90].
+        var in31 = ComplianceStatusDeriver.WindowUpperBoundExclusive(today, 30);
+        var in61 = ComplianceStatusDeriver.WindowUpperBoundExclusive(today, 60);
+        var in91 = ComplianceStatusDeriver.WindowUpperBoundExclusive(today, 90);
 
         var bucket30 = await db.Documents.CountAsync(d =>
-            d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate <= in30, ct);
+            d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate < in31, ct);
         var bucket60 = await db.Documents.CountAsync(d =>
-            d.ExpirationDate != null && d.ExpirationDate > in30 && d.ExpirationDate <= in60, ct);
+            d.ExpirationDate != null && d.ExpirationDate >= in31 && d.ExpirationDate < in61, ct);
         var bucket90 = await db.Documents.CountAsync(d =>
-            d.ExpirationDate != null && d.ExpirationDate > in60 && d.ExpirationDate <= in90, ct);
+            d.ExpirationDate != null && d.ExpirationDate >= in61 && d.ExpirationDate < in91, ct);
         var beyond = await db.Documents.CountAsync(d =>
-            d.ExpirationDate != null && d.ExpirationDate > in90, ct);
+            d.ExpirationDate != null && d.ExpirationDate >= in91, ct);
         var expired = await db.Documents.CountAsync(d =>
             d.ExpirationDate != null && d.ExpirationDate < today, ct);
 

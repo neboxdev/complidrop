@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -150,6 +151,40 @@ public sealed class ComplianceVerdictFreshnessTests(IntegrationTestFixture fixtu
         csv.Should().Contain("Expired", "the audit export must derive the date status at generation");
         csv.Should().NotContain("Compliant",
             "the export must not certify the stale stored Compliant on an expired document");
+    }
+
+    // ---- #294: date-window boundary agreement (deriver vs SQL sites) ----
+
+    [Fact]
+    public async Task A_time_bearing_expiry_on_the_30_day_boundary_reads_ExpiringSoon_everywhere()
+    {
+        // A non-midnight expiry exactly on the today+30 boundary. The badge (deriver, date-only)
+        // reads ExpiringSoon; the list filter and the dashboard counts must AGREE. Before the
+        // exclusive-bound fix (#294) the raw `exp <= today+30 (midnight)` dropped this noon expiry
+        // out of ExpiringSoon and the `exp > today+30` arm counted it Compliant — two answers.
+        var auth = await RegisterAndLoginAsync();
+        var onBoundaryNoon = DateTime.UtcNow.Date
+            .AddDays(ComplianceStatusDeriver.ExpiringSoonWindowDays)
+            .AddHours(12);
+        var docId = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, onBoundaryNoon);
+
+        // Badge (detail) derives ExpiringSoon.
+        var detail = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        detail.GetProperty("data").GetProperty("complianceStatus").GetString().Should().Be("ExpiringSoon");
+
+        // List filter agrees: under ExpiringSoon, not under Compliant.
+        var soon = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?status=ExpiringSoon");
+        soon.GetProperty("data").GetProperty("items").EnumerateArray()
+            .Select(i => i.GetProperty("id").GetString())
+            .Should().Contain(docId.ToString(), "the badge says ExpiringSoon, so the ExpiringSoon filter must return it");
+        var compliantList = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?status=Compliant");
+        StatusesOf(compliantList).Should().BeEmpty("a doc expiring on the boundary day is no longer Compliant");
+
+        // Dashboard counts agree: expiringSoon, not compliant.
+        var stats = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/dashboard/stats")).GetProperty("data");
+        stats.GetProperty("expiringSoon").GetInt32().Should().Be(1);
+        stats.GetProperty("compliant").GetInt32().Should().Be(0,
+            "the boundary-day doc must not also be counted Compliant — the #294 two-answers split");
     }
 
     // ---- re-evaluation fan-out ----
