@@ -904,6 +904,65 @@ describe("DocumentDetailPage — reextract mutation toasts (#122 / #74 followup)
   });
 });
 
+describe("DocumentDetailPage — recheck (Check again) mutation (#257)", () => {
+  it("recheck success: POSTs the compliance-check endpoint and toasts the re-check copy", async () => {
+    // The header renders a "Check again" button that re-runs ONLY compliance
+    // evaluation (POST /api/compliance/check/:id) — no re-extraction. The #257
+    // manual escape hatch. On 200 the mutation toasts the documented copy.
+    let posted = false;
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(makeDocumentDetail({ extractionStatus: "Completed" })),
+      ),
+      http.post(url("/api/compliance/check/:id"), () => {
+        posted = true;
+        return jsonOk<void>(undefined);
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_recheck_ok_01" },
+    });
+
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: /check again/i }),
+    );
+    fireEvent.click(button);
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Re-checking compliance…"));
+    expect(posted).toBe(true);
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("recheck 5xx: toast.error surfaces the server message, no jargon leak (#77)", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(makeDocumentDetail({ extractionStatus: "Completed" })),
+      ),
+      http.post(url("/api/compliance/check/:id"), () =>
+        jsonError("compliance.failed", "We couldn't re-check this document. Try again.", 500),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_recheck_err_01" },
+    });
+
+    const button = await waitFor(() =>
+      screen.getByRole("button", { name: /check again/i }),
+    );
+    fireEvent.click(button);
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    expect(toastError).toHaveBeenCalledWith("We couldn't re-check this document. Try again.");
+    const args = toastError.mock.calls[0]?.[0];
+    expect(args).not.toMatch(/typeerror/i);
+    expect(args).not.toMatch(/bad gateway/i);
+  });
+});
+
 describe("DocumentDetailPage — saveFields mutation toasts (#122 / #74 followup)", () => {
   it("saveFields success: toast.success fires with the save-confirmation copy", async () => {
     // To reach the saveFields path the test must (a) load a doc with at

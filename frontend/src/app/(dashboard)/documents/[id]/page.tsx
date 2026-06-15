@@ -284,6 +284,25 @@ export default function DocumentDetailPage() {
       toast.success("Reading the file again…");
     },
     onError: (err) => {
+      const message =
+        err instanceof Error && err.message?.trim()
+          ? err.message
+          : GENERIC_FALLBACK_MESSAGE;
+      toast.error(message);
+    },
+  });
+
+  // "Check again" re-runs ONLY the compliance evaluation against the current rules
+  // (POST /api/compliance/check/{id}) — no re-extraction, no LLM cost. The manual escape hatch
+  // for #257: assignment/rule changes already fan out automatically, but this lets a user force a
+  // fresh verdict on demand (e.g. right after editing a checklist) without re-reading the file.
+  const recheck = useMutation({
+    mutationFn: () => api.post<void>(`/api/compliance/check/${params.id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["documents", params.id] });
+      toast.success("Re-checking compliance…");
+    },
+    onError: (err) => {
       // Mirror the established mutation-error pattern across this
       // app (documents/page.tsx remove, vendors/* updates, settings/*
       // billing actions): pull the server message off the ApiError
@@ -506,6 +525,15 @@ export default function DocumentDetailPage() {
             disabled={reextract.isPending || isProcessing}
           >
             <RefreshCw className={cn("w-4 h-4 mr-1", reextract.isPending && "animate-spin")} /> Read again
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            title="Re-checks this document against the current requirements — use after changing a checklist or rule. Doesn't re-read the file."
+            onClick={() => recheck.mutate()}
+            disabled={recheck.isPending || isProcessing}
+          >
+            <ShieldCheck className={cn("w-4 h-4 mr-1", recheck.isPending && "animate-pulse")} /> Check again
           </Button>
           <Button
             variant="outline"
