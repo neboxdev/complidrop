@@ -41,13 +41,11 @@ public sealed class AzureStorageSettingsValidatorTests
         result.FailureMessage.Should().Contain("ConnectionString");
     }
 
-    // A well-formed connection string with a valid base64 AccountKey (the SDK validates the key
-    // format when it parses) — used for the "container name empty" and "accepted" cases so they
-    // reach/pass the parse check rather than tripping it.
-    private const string WellFormed =
-        "DefaultEndpointsProtocol=https;AccountName=acct;" +
-        "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;" +
-        "EndpointSuffix=core.windows.net";
+    // Well-formed connection string with a valid base64 AccountKey (the SDK validates the key when it
+    // parses) — used for the "container name empty" and "accepted" cases so they reach/pass the parse
+    // check rather than tripping it. Centralized in TestConfig so the #250 boot-isolation test reuses
+    // the same value instead of re-pasting the key.
+    private const string WellFormed = TestConfig.WellFormedAzureConnectionString;
 
     [Fact]
     public void Non_development_rejects_an_empty_container_name()
@@ -118,8 +116,11 @@ public sealed class BlobStorageFailureTests(IntegrationTestFixture fixture) : In
         resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
         body.GetProperty("error").GetProperty("code").GetString().Should().Be("storage.unavailable");
-        body.GetProperty("error").GetProperty("message").GetString()
-            .Should().NotContainEquivalentOf("unexpected error", "the friendly copy must replace the generic 500");
+        var message = body.GetProperty("error").GetProperty("message").GetString();
+        message.Should().NotContainEquivalentOf("unexpected error", "the friendly copy must replace the generic 500");
+        // Positively pin the dashboard-specific wording (distinct from the portal's "save your file"),
+        // matching the portal test's assertion strength so a regression that swapped the copy is caught.
+        message.Should().Contain("store your file");
     }
 
     [Fact]

@@ -216,6 +216,77 @@ public sealed class EmailVerificationTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
+    public async Task Resend_when_the_send_throws_a_transport_error_returns_502_not_500()
+    {
+        // #249: the OTHER path to 502 — SendVerificationEmailAsync's catch-when(!ct.IsCancellationRequested)
+        // swallowing an HttpClient transport throw (DNS/socket/TLS). The null-return branch is pinned
+        // above; this pins the catch gate, the subtler half — a wrong filter would leak a 500 or, worse,
+        // let a thrown send fall through and falsely report success.
+        var auth = await RegisterAndLoginAsync();
+        var sendsAfterRegister = Email.Sends.Count;
+        Email.NextSendThrows = new HttpRequestException("simulated transport failure");
+
+        var resend = await auth.Client.PostAsync("/api/auth/resend-verification", null);
+
+        resend.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        (await resend.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("error").GetProperty("code").GetString().Should().Be("email.send_failed");
+        Email.Sends.Count.Should().Be(sendsAfterRegister, "a thrown send records nothing");
+    }
+
+    [Fact]
+    public async Task Resend_when_the_send_times_out_returns_502_not_500()
+    {
+        // #249: an HttpClient timeout surfaces as TaskCanceledException tied to the client's OWN token,
+        // NOT our request ct. The catch gate (!ct.IsCancellationRequested) must still treat it as a send
+        // failure (502), not mistake it for a caller abort and let it escape as an unhandled 500.
+        var auth = await RegisterAndLoginAsync();
+        Email.NextSendThrows = new TaskCanceledException("simulated 30s Resend timeout");
+
+        var resend = await auth.Client.PostAsync("/api/auth/resend-verification", null);
+
+        resend.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        (await resend.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("error").GetProperty("code").GetString().Should().Be("email.send_failed");
+    }
+
+    [Fact]
+    public async Task ChangeEmail_with_email_unconfigured_returns_503_and_mints_no_token()
+    {
+        // #302: change-email must not claim "we sent the link to {newEmail}" when email is off — the
+        // link goes to an address with no Resend affordance, so a false success strands the user. Fail
+        // honestly BEFORE minting the change token (nothing claimed), mirroring resend-verification.
+        var auth = await RegisterAndLoginAsync();
+        Email.IsEnabled = false;
+
+        var resp = await auth.Client.PostAsJsonAsync("/api/auth/change-email",
+            new { newEmail = $"new-{Guid.NewGuid():N}@example.com", password = "Password1234" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        (await resp.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("error").GetProperty("code").GetString().Should().Be("email.not_configured");
+
+        await using var db = CreateSystemDb();
+        (await db.EmailVerificationTokens.AnyAsync(t => t.UserId == auth.UserId && t.NewEmail != null))
+            .Should().BeFalse("no email-change token should be minted when we can't send the link");
+    }
+
+    [Fact]
+    public async Task ChangeEmail_when_the_provider_rejects_the_send_returns_502()
+    {
+        // #302: a non-accepted send (Resend returns no message id) must surface, not toast "sent".
+        var auth = await RegisterAndLoginAsync();
+        Email.NextSendReturnsNull = true;
+
+        var resp = await auth.Client.PostAsJsonAsync("/api/auth/change-email",
+            new { newEmail = $"new-{Guid.NewGuid():N}@example.com", password = "Password1234" });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        (await resp.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("error").GetProperty("code").GetString().Should().Be("email.send_failed");
+    }
+
+    [Fact]
     public async Task Register_succeeds_and_persists_a_token_even_when_email_delivery_is_disabled()
     {
         // Signup must NEVER block on email delivery: with Resend disabled the send
