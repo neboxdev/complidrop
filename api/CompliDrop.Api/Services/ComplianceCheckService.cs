@@ -62,7 +62,8 @@ public class ComplianceCheckService(
         ReevaluateWhereAsync(d => d.Vendor != null && d.Vendor.ComplianceTemplateId == templateId, ct);
 
     public Task ReevaluateForVendorAsync(Guid vendorId, CancellationToken ct) =>
-        ReevaluateWhereAsync(d => d.VendorId == vendorId, ct);
+        // Delegates to the plural so there is a single vendor-membership predicate to maintain.
+        ReevaluateForVendorsAsync([vendorId], ct);
 
     public Task ReevaluateForVendorsAsync(IReadOnlyList<Guid> vendorIds, CancellationToken ct)
     {
@@ -78,6 +79,12 @@ public class ComplianceCheckService(
     // persist is logged and skipped — those documents keep their prior verdict until the nightly
     // sweep or a manual "Check again", never a 500 that, on the rule-create path, would duplicate the
     // rule on retry. Cancellation still propagates (a shutdown isn't a per-page failure).
+    //
+    // Granularity note: a page commits as a unit (one SaveChanges), so one document that fails to
+    // persist forfeits the re-grade of its WHOLE page (≤ PageSize), not just itself — coarser than
+    // the old per-document loop. Accepted trade-off of batching the writes, and bounded: the one
+    // known write-path failure (oversize check text → 22001) is clamped at the source (#272), so a
+    // realistic page rarely fails, and the sweep heals any page that does.
     private async Task ReevaluateWhereAsync(Expression<Func<Document, bool>> predicate, CancellationToken ct)
     {
         // Snapshot the affected ids first — a cheap key-only projection (no ExtractionFields, no

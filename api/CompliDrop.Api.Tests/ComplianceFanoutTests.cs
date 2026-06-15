@@ -1,4 +1,5 @@
 using System.Globalization;
+using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
@@ -231,5 +232,78 @@ public sealed class ComplianceFanoutTests(IntegrationTestFixture fixture) : Inte
         await using var db = CreateSystemDb();
         (await db.Documents.SingleAsync(d => d.Id == doc)).ComplianceStatus
             .Should().Be(ComplianceStatus.Compliant, "an empty vendor list must touch nothing");
+    }
+
+    [Fact]
+    public async Task ReevaluateForTemplate_keeps_check_rows_on_a_document_that_has_since_expired()
+    {
+        // The Expired branch returns ClearExistingChecks:false — a doc that crosses its expiration
+        // keeps the check rows from its last rule evaluation (only the date changed). Every OTHER
+        // terminal branch clears checks, so this is the branch a batch-path slip would most likely
+        // get wrong; pin it through the fan-out's ApplyEvaluationsAsync.
+        var orgId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        await SeedOrgWithTemplateAsync(orgId, templateId);
+        var vendor = await SeedVendorAsync(orgId, templateId);
+        var doc = await SeedDocAsync(orgId, vendor, glLimit: 3_000_000m, stored: ComplianceStatus.Pending);
+
+        // First pass: passes the 2M rule on a far-future date ⇒ Compliant + one check row.
+        await RunTemplateFanoutAsync(orgId, templateId);
+        await using (var db = CreateSystemDb())
+        {
+            (await db.Documents.SingleAsync(d => d.Id == doc)).ComplianceStatus.Should().Be(ComplianceStatus.Compliant);
+            (await db.ComplianceChecks.CountAsync(c => c.DocumentId == doc)).Should().Be(1);
+        }
+
+        // The certificate lapses (expiration moves before the fixed clock's date).
+        await using (var db = CreateSystemDb())
+            await db.Documents.Where(d => d.Id == doc)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.ExpirationDate, new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc)));
+
+        await RunTemplateFanoutAsync(orgId, templateId);
+
+        await using (var verify = CreateSystemDb())
+        {
+            (await verify.Documents.SingleAsync(d => d.Id == doc)).ComplianceStatus
+                .Should().Be(ComplianceStatus.Expired);
+            (await verify.ComplianceChecks.CountAsync(c => c.DocumentId == doc)).Should().Be(1,
+                "the Expired branch must NOT clear existing check rows");
+        }
+    }
+
+    [Fact]
+    public async Task ReevaluateForTemplate_skips_a_failed_page_and_still_commits_the_others()
+    {
+        // Proves the per-page best-effort guarantee: when one page's SaveChanges throws, the fan-out
+        // logs + skips it (those docs keep their prior verdict) and KEEPS GOING — later pages commit.
+        var orgId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        await SeedOrgWithTemplateAsync(orgId, templateId);
+        var vendor = await SeedVendorAsync(orgId, templateId);
+        // Four docs failing the 2M rule, seeded stale-Compliant; page size 2 ⇒ two pages. The
+        // interceptor throws on the FIRST page's SaveChanges only.
+        for (var i = 0; i < 4; i++)
+            await SeedDocAsync(orgId, vendor, glLimit: 1_000_000m, stored: ComplianceStatus.Compliant);
+
+        var user = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = orgId };
+        await using (var appDb = new AppDbContext(
+            new DbContextOptionsBuilder<AppDbContext>()
+                .UseNpgsql(Fixture.ConnectionString)
+                .AddInterceptors(new AuditSaveChangesInterceptor(() => user), new ThrowOnceSaveChangesInterceptor())
+                .Options, user))
+        await using (var sysDb = CreateSystemDb())
+        {
+            var svc = new ComplianceCheckService(
+                appDb, sysDb, new FixedTimeProvider(FixedNow), NullLogger<ComplianceCheckService>.Instance, reevaluationPageSize: 2);
+
+            // Must NOT throw despite a page failing mid-run.
+            await svc.ReevaluateForTemplateAsync(templateId, default);
+        }
+
+        await using var verify = CreateSystemDb();
+        var statuses = await verify.Documents.Where(d => d.OrganizationId == orgId)
+            .Select(d => d.ComplianceStatus).ToListAsync();
+        statuses.Count(s => s == ComplianceStatus.NonCompliant).Should().Be(2, "the surviving page must still be re-graded");
+        statuses.Count(s => s == ComplianceStatus.Compliant).Should().Be(2, "the failed page's documents keep their prior verdict");
     }
 }
