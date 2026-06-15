@@ -34,7 +34,13 @@ builder.Services.AddOptions<DocumentAiSettings>().Bind(builder.Configuration.Get
 builder.Services.AddOptions<StripeSettings>().Bind(builder.Configuration.GetSection("Stripe"));
 builder.Services.AddOptions<ResendSettings>().Bind(builder.Configuration.GetSection("Resend"));
 builder.Services.AddOptions<CostCeilings>().Bind(builder.Configuration.GetSection("CostCeilings"));
-builder.Services.AddOptions<FrontendSettings>().Bind(builder.Configuration.GetSection("Frontend"));
+// Frontend:BaseUrl is the public origin minted into every email-borne / copy-paste link (portal,
+// verify, reset, checkout). Required-and-non-localhost outside Development, validated at boot so a
+// misconfigured prod fails fast instead of mailing dead localhost links (#250).
+builder.Services.AddOptions<FrontendSettings>()
+    .Bind(builder.Configuration.GetSection("Frontend"))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<FrontendSettings>, FrontendSettingsValidator>();
 
 // ============================================================
 // Logging — Serilog JSON sink
