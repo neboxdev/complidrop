@@ -3,6 +3,7 @@ using System.Text.Json;
 using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
@@ -104,6 +105,21 @@ public sealed class FrontendSettingsValidatorTests
 public sealed class FrontendBaseUrlLinkTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
     private const string Origin = "https://links.example.test";
+
+    [Fact]
+    public void Production_boot_fails_fast_on_the_localhost_BaseUrl_default()
+    {
+        // Pins the WIRING (registration + ValidateOnStart), not just the validator logic: booting in
+        // Production with the unset/localhost default must abort startup with a clear message. A
+        // regression that dropped .ValidateOnStart() or the IValidateOptions registration would make
+        // this throw nothing (#250 AC1).
+        using var factory = new CustomWebApplicationFactory(Fixture.ConnectionString)
+            .WithWebHostBuilder(b => b.UseEnvironment("Production"));
+
+        var act = () => factory.CreateClient(); // builds + starts the host → runs ValidateOnStart
+
+        act.Should().Throw<OptionsValidationException>().WithMessage("*localhost*");
+    }
 
     [Fact]
     public async Task Portal_and_verify_links_use_the_configured_origin_not_localhost()
