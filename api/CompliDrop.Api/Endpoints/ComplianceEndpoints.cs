@@ -148,9 +148,10 @@ public static class ComplianceEndpoints
         // Re-evaluation fan-out (#257): the affected vendors now have no checklist, so their
         // documents must drop from any rule verdict to "no requirements apply" (Pending) and shed
         // the now-orphaned check rows. Runs after commit — the template is gone and the assignments
-        // are cleared, so each evaluation takes the no-governing-rules path.
-        foreach (var vendorId in vendorIds)
-            await checker.ReevaluateForVendorAsync(vendorId, ct);
+        // are cleared, so each evaluation takes the no-governing-rules path. One batched pass over
+        // the whole vendor set rather than a per-vendor loop, so deleting a checklist shared by a
+        // large vendor base doesn't pin the request thread with hundreds of serial round-trips (#293).
+        await checker.ReevaluateForVendorsAsync(vendorIds, ct);
 
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }

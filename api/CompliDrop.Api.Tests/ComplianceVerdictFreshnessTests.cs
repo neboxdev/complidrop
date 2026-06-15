@@ -222,10 +222,10 @@ public sealed class ComplianceVerdictFreshnessTests(IntegrationTestFixture fixtu
     [Fact]
     public async Task Fan_out_regrades_every_document_on_the_template_independently()
     {
-        // Two docs on one template: one fails the rule (1M < 2M), one passes (3M >= 2M). The fan-out
-        // loop must re-grade BOTH to their own correct verdict — proving it doesn't stop after the
-        // first and that one doc's evaluation doesn't bleed into the next (the ChangeTracker.Clear /
-        // per-doc isolation in ReevaluateEachAsync).
+        // Two docs on one template: one fails the rule (1M < 2M), one passes (3M >= 2M). The batched
+        // fan-out must re-grade BOTH to their own correct verdict — proving it covers every doc on
+        // the template and that one doc's evaluation doesn't bleed into the next (each doc's outcome
+        // is computed independently before the page's single SaveChanges — see #293).
         var auth = await RegisterAndLoginAsync();
         var now = DateTime.UtcNow;
         var vendorId = Guid.NewGuid();

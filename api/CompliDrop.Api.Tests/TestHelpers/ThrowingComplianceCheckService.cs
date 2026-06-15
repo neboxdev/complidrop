@@ -23,4 +23,7 @@ public sealed class ThrowingComplianceCheckService : IComplianceCheckService
 
     public Task ReevaluateForVendorAsync(Guid vendorId, CancellationToken ct) =>
         throw new InvalidOperationException("Simulated compliance-engine failure.");
+
+    public Task ReevaluateForVendorsAsync(IReadOnlyList<Guid> vendorIds, CancellationToken ct) =>
+        throw new InvalidOperationException("Simulated compliance-engine failure.");
 }
