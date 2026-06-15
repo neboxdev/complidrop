@@ -5,19 +5,33 @@ namespace CompliDrop.Api.Tests.TestHelpers;
 
 /// <summary>
 /// In-memory <see cref="IBlobStorageService"/> for tests — stores blobs in a dictionary so the
-/// upload path works without Azure (the real service connects to Azure in its constructor).
+/// upload path works without Azure (the real service builds a BlobServiceClient in its constructor,
+/// but no longer makes a network call there — container creation is lazy since #248).
 /// </summary>
 public sealed class FakeBlobStorageService : IBlobStorageService
 {
     private readonly ConcurrentDictionary<string, byte[]> _blobs = new();
 
+    /// <summary>When true, <see cref="UploadAsync"/> throws <see cref="BlobStorageUnavailableException"/>
+    /// — simulates a storage outage so the upload endpoints' friendly-503 mapping can be tested (#248).</summary>
+    public bool ThrowUnavailableOnUpload { get; set; }
+
     public async Task<BlobUploadResult> UploadAsync(string blobName, Stream content, string contentType, CancellationToken ct)
     {
+        if (ThrowUnavailableOnUpload)
+            throw new BlobStorageUnavailableException("Simulated storage outage.", new InvalidOperationException("simulated"));
         using var ms = new MemoryStream();
         await content.CopyToAsync(ms, ct);
         var bytes = ms.ToArray();
         _blobs[blobName] = bytes;
         return new BlobUploadResult(blobName, $"memory://{blobName}", bytes.Length, contentType);
+    }
+
+    /// <summary>Clears stored blobs and the outage knob between tests (host singleton).</summary>
+    public void Reset()
+    {
+        _blobs.Clear();
+        ThrowUnavailableOnUpload = false;
     }
 
     // Honest not-found: null for an unknown name, mirroring the interface contract the real

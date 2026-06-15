@@ -437,7 +437,17 @@ public static class DocumentEndpoints
             return Error(400, "document.unreadable_image", ImageTranscoderExtensions.UnreadableImageMessage);
 
         var blobName = $"{orgId}/{DateTime.UtcNow:yyyy-MM}/{Guid.NewGuid()}-{SanitizeFileName(file.FileName)}";
-        var upload = await blobs.UploadAsync(blobName, storedStream, storedContentType, ct);
+        BlobUploadResult upload;
+        try
+        {
+            upload = await blobs.UploadAsync(blobName, storedStream, storedContentType, ct);
+        }
+        catch (BlobStorageUnavailableException)
+        {
+            // Storage outage → friendly 503, not the generic 500 (#248).
+            return Error(503, "storage.unavailable",
+                "We couldn't store your file just now. Please try again in a few minutes.");
+        }
 
         var doc = new Document
         {

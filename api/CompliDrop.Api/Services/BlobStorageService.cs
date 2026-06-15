@@ -20,16 +20,52 @@ public interface IBlobStorageService
 
 public record BlobUploadResult(string BlobName, string Url, long Size, string ContentType);
 
+/// <summary>
+/// Thrown by <see cref="IBlobStorageService.UploadAsync"/> when the storage backend can't accept the
+/// file (misconfiguration, unreachable account, throttling, transient Azure error). Lets the upload
+/// endpoints map a storage outage to a friendly 503 instead of the generic unhandled-exception 500
+/// (#248) — without referencing the Azure SDK's exception types, mirroring how
+/// <see cref="IBlobStorageService.DownloadAsync"/> maps its 404 to <c>null</c> (#254).
+/// </summary>
+public sealed class BlobStorageUnavailableException(string message, Exception inner) : Exception(message, inner);
+
 public class BlobStorageService : IBlobStorageService
 {
     private readonly BlobContainerClient _container;
+    private readonly SemaphoreSlim _ensureLock = new(1, 1);
+    private bool _containerEnsured;
 
     public BlobStorageService(IOptions<AzureStorageSettings> settings)
     {
+        // Construction is pure: BlobServiceClient + GetBlobContainerClient parse config but make NO
+        // network call. The old ctor's CreateIfNotExists() was a blocking network call inside a lazy
+        // singleton, so a transient Azure error at first upload poisoned construction and re-threw an
+        // opaque 500 on every subsequent request (#248). Container creation now happens lazily on
+        // first upload (EnsureContainerAsync) with a clear, mappable failure.
         var cfg = settings.Value;
         var client = new BlobServiceClient(cfg.ConnectionString, BuildClientOptions());
         _container = client.GetBlobContainerClient(cfg.ContainerName);
-        _container.CreateIfNotExists(PublicAccessType.None);
+    }
+
+    /// <summary>
+    /// Creates the container once per process on first use (replaces the ctor's network call, #248).
+    /// Guarded by a semaphore so concurrent first uploads don't race; on failure <c>_containerEnsured</c>
+    /// stays false so the next upload retries rather than caching a permanently-failed state.
+    /// </summary>
+    private async Task EnsureContainerAsync(CancellationToken ct)
+    {
+        if (_containerEnsured) return;
+        await _ensureLock.WaitAsync(ct);
+        try
+        {
+            if (_containerEnsured) return;
+            await _container.CreateIfNotExistsAsync(PublicAccessType.None, cancellationToken: ct);
+            _containerEnsured = true;
+        }
+        finally
+        {
+            _ensureLock.Release();
+        }
     }
 
     /// <summary>
@@ -56,14 +92,27 @@ public class BlobStorageService : IBlobStorageService
 
     public async Task<BlobUploadResult> UploadAsync(string blobName, Stream content, string contentType, CancellationToken ct)
     {
-        var blob = _container.GetBlobClient(blobName);
-        var headers = new BlobHttpHeaders { ContentType = contentType };
-        var options = new BlobUploadOptions { HttpHeaders = headers };
+        try
+        {
+            await EnsureContainerAsync(ct);
 
-        var initialPosition = content.CanSeek ? content.Position : 0;
-        await blob.UploadAsync(content, options, ct);
-        var length = content.CanSeek ? content.Position - initialPosition : content.Length;
-        return new BlobUploadResult(blobName, blob.Uri.ToString(), length, contentType);
+            var blob = _container.GetBlobClient(blobName);
+            var headers = new BlobHttpHeaders { ContentType = contentType };
+            var options = new BlobUploadOptions { HttpHeaders = headers };
+
+            var initialPosition = content.CanSeek ? content.Position : 0;
+            await blob.UploadAsync(content, options, ct);
+            var length = content.CanSeek ? content.Position - initialPosition : content.Length;
+            return new BlobUploadResult(blobName, blob.Uri.ToString(), length, contentType);
+        }
+        catch (Exception ex) when (ex is not BlobStorageUnavailableException && !ct.IsCancellationRequested)
+        {
+            // Any storage failure that ISN'T the caller aborting (Azure RequestFailedException after
+            // the fail-fast retries, a transport error, the per-try NetworkTimeout) becomes a
+            // mappable domain exception so the upload endpoints answer a friendly 503 rather than the
+            // generic 500 (#248). A genuine caller cancellation propagates — there's no one to answer.
+            throw new BlobStorageUnavailableException("Blob storage is unavailable.", ex);
+        }
     }
 
     public async Task<Stream?> DownloadAsync(string blobName, CancellationToken ct)

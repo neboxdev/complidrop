@@ -1,6 +1,8 @@
 using Azure.Core;
+using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Services;
 using FluentAssertions;
+using Microsoft.Extensions.Options;
 
 namespace CompliDrop.Api.Tests;
 
@@ -28,5 +30,39 @@ public sealed class BlobStorageServiceTests
         // The per-try transfer bound stays generous on purpose — it must fit a legitimately slow
         // 10 MB upload (the cap), so it is NOT the fail-fast lever and must not be tightened to it.
         options.Retry.NetworkTimeout.Should().Be(TimeSpan.FromSeconds(30));
+    }
+
+    // A well-formed connection string whose blob endpoint points at a closed local port, so any
+    // network call fails fast with "connection refused" — no external network, deterministic (#248).
+    private const string UnreachableConnectionString =
+        "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;" +
+        "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;" +
+        "BlobEndpoint=http://127.0.0.1:1/devstoreaccount1;";
+
+    private static BlobStorageService Build(string connectionString) =>
+        new(Options.Create(new AzureStorageSettings { ConnectionString = connectionString, ContainerName = "documents" }));
+
+    [Fact]
+    public void Constructor_makes_no_network_call_and_does_not_throw_on_an_unreachable_account()
+    {
+        // #248: the ctor must be pure (BlobServiceClient + GetBlobContainerClient parse only) — it
+        // must NOT connect or throw here, even pointed at an unreachable account. (The old ctor's
+        // CreateIfNotExists network call poisoned construction and 500ed every upload.)
+        var act = () => Build(UnreachableConnectionString);
+
+        act.Should().NotThrow();
+    }
+
+    [Fact]
+    public async Task UploadAsync_maps_a_storage_failure_to_BlobStorageUnavailableException()
+    {
+        // The container-ensure + upload hit the closed port; the wrapper must surface the domain
+        // exception (so the endpoints can answer a friendly 503), not leak the Azure SDK type (#248).
+        var sut = Build(UnreachableConnectionString);
+        using var content = new MemoryStream([1, 2, 3, 4]);
+
+        var act = async () => await sut.UploadAsync("org/2026-06/doc.pdf", content, "application/pdf", default);
+
+        await act.Should().ThrowAsync<BlobStorageUnavailableException>();
     }
 }

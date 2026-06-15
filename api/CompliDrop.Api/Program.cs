@@ -26,7 +26,13 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddOptions<JwtSettings>().Bind(builder.Configuration.GetSection("Jwt"))
     .ValidateDataAnnotations().ValidateOnStart();
 builder.Services.AddOptions<CookieSettings>().Bind(builder.Configuration.GetSection("Cookies"));
-builder.Services.AddOptions<AzureStorageSettings>().Bind(builder.Configuration.GetSection("AzureStorage"));
+// AzureStorage backs file upload (the product's core path). Required-and-non-empty outside
+// Development, validated at boot so a misconfigured deploy fails fast instead of 500ing every
+// upload on first use (#248).
+builder.Services.AddOptions<AzureStorageSettings>()
+    .Bind(builder.Configuration.GetSection("AzureStorage"))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<AzureStorageSettings>, AzureStorageSettingsValidator>();
 builder.Services.AddOptions<ExtractionSettings>().Bind(builder.Configuration.GetSection("Extraction"));
 builder.Services.AddOptions<GeminiSettings>().Bind(builder.Configuration.GetSection("Gemini"));
 builder.Services.AddOptions<AnthropicSettings>().Bind(builder.Configuration.GetSection("Anthropic"));
