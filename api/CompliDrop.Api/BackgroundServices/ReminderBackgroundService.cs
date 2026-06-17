@@ -306,6 +306,9 @@ public class ReminderBackgroundService(
                                         db.ReminderLogs.Add(new ReminderLog
                                         {
                                             Id = Guid.NewGuid(),
+                                            // Denormalized org id (#309). The heal path doesn't touch it:
+                                            // a failed row already carries the right org from its insert.
+                                            OrganizationId = org.Id,
                                             ReminderId = reminder.Id,
                                             DocumentId = doc.Id,
                                             RecipientEmail = recipient,

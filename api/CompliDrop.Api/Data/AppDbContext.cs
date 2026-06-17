@@ -48,6 +48,14 @@ public class AppDbContext(
         builder.Entity<ComplianceTemplate>().HasQueryFilter(ct =>
             ct.DeletedAt == null && (ct.IsSystemTemplate || ct.OrganizationId == CurrentOrgId));
         builder.Entity<Reminder>().HasQueryFilter(r => r.OrganizationId == CurrentOrgId);
+        // ReminderLog carries a denormalized OrganizationId since #309. Filtering it directly (rather
+        // than reaching it via its parent Reminder's filter, as the pre-#309 history endpoint did with
+        // an EXISTS join) lets the request-path read be served by the (OrganizationId, SentAt DESC)
+        // index and gives the entity its own tenant guard — both ends of the required ReminderLog→
+        // Reminder relationship are now filtered on the same predicate. Background workers + the Resend
+        // webhook use SystemDbContext, which applies no tenant filter, so their cross-org access is
+        // unaffected.
+        builder.Entity<ReminderLog>().HasQueryFilter(l => l.OrganizationId == CurrentOrgId);
         builder.Entity<Subscription>().HasQueryFilter(s => s.OrganizationId == CurrentOrgId);
         builder.Entity<AuditLog>().HasQueryFilter(a => a.OrganizationId == CurrentOrgId);
         builder.Entity<IdempotencyRecord>().HasQueryFilter(i => i.OrganizationId == CurrentOrgId);

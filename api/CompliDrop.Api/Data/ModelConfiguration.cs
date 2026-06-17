@@ -178,6 +178,12 @@ internal static class ModelConfiguration
             e.HasIndex(l => new { l.ReminderId, l.DocumentId, l.SendDate, l.RecipientEmail }).IsUnique();
             // Inbound Resend (Svix) webhook looks up the log by its Resend message id.
             e.HasIndex(l => l.ResendMessageId);
+            // Org-scoped most-recent history (GET /api/reminders/history): WHERE OrganizationId = @org
+            // ORDER BY SentAt DESC LIMIT 200. The composite with SentAt DESC turns this into a forward
+            // index range scan — no sort, no whole-table scan, no parent join (#309).
+            e.HasIndex(l => new { l.OrganizationId, l.SentAt })
+                .IsDescending(false, true)
+                .HasDatabaseName("IX_ReminderLogs_OrganizationId_SentAt");
             e.HasOne(l => l.Reminder).WithMany(r => r.Logs)
                 .HasForeignKey(l => l.ReminderId).OnDelete(DeleteBehavior.Cascade);
         });

@@ -21,6 +21,14 @@ public class Reminder
 public class ReminderLog
 {
     public Guid Id { get; set; }
+    // Denormalized from the parent Reminder (#309). ReminderLog is reached via its parent
+    // Reminder, but carrying OrganizationId directly lets the org-scoped history query
+    // (GET /api/reminders/history) be served by the (OrganizationId, SentAt DESC) index as a
+    // range scan instead of a whole-table scan + top-N sort + EXISTS join. Also makes the row
+    // eligible for the AppDbContext tenant query filter (defense-in-depth), matching the
+    // denormalized-OrgId pattern of AuditLog / IdempotencyRecord (bare column, no FK/nav).
+    // Set on insert by ReminderBackgroundService; backfilled for pre-#309 rows by migration.
+    public Guid OrganizationId { get; set; }
     public Guid ReminderId { get; set; }
     public Guid DocumentId { get; set; }
     public string RecipientEmail { get; set; } = string.Empty;
