@@ -13,13 +13,16 @@ namespace CompliDrop.Api.Migrations
     ///
     /// <para>
     /// The column is added <em>nullable</em>, backfilled from each row's parent
-    /// <c>Reminder</c>, then tightened to <c>NOT NULL</c> — so existing rows get a real org id
-    /// and the final schema carries no lingering DB default (a future insert that forgets the org
-    /// fails loudly rather than silently writing the empty guid). The FK
+    /// <c>Reminder</c>, then tightened to <c>NOT NULL</c> with no lingering DB default. NOT NULL
+    /// only rejects an actual NULL — it would NOT catch a fabricated empty guid (<c>00000000-…</c>
+    /// is a valid non-null uuid); such a row would simply match no org under the tenant filter and
+    /// be invisible to every tenant, not error. The guarantee that every row carries a REAL org
+    /// therefore comes from (a) this backfill for existing rows and (b) the single worker insert
+    /// path stamping <c>OrganizationId = org.Id</c>, not from the NOT NULL constraint. The FK
     /// <c>ReminderLog.ReminderId → Reminders.Id</c> (ON DELETE CASCADE) guarantees every log has a
     /// live parent, so the join matches every row and the <c>SET NOT NULL</c> can't fail on a
     /// straggler; were an orphan ever to exist, the failure is the right outcome (it surfaces the
-    /// corruption instead of masking it with the empty guid).
+    /// corruption instead of masking it).
     /// </para>
     /// <para>
     /// No <c>timestamptz</c> arithmetic here, so ADR 0009 doesn't apply — the backfill is a pure
