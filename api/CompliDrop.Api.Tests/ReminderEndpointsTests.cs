@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using CompliDrop.Api.Entities;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -98,4 +99,51 @@ public sealed class ReminderEndpointsTests(IntegrationTestFixture fixture) : Int
         await using (var db2 = CreateSystemDb())
             (await db2.Reminders.SingleAsync(r => r.Id == orgAReminderId)).IsActive.Should().BeTrue();
     }
+
+    [Fact]
+    public async Task History_returns_only_callers_logs_ordered_most_recent_first()
+    {
+        // #309: history scopes by ReminderLog's denormalized OrganizationId (via the AppDbContext
+        // tenant filter) and orders SentAt DESC. The other org's row carries the LATEST SentAt, so
+        // a broken filter would surface it FIRST — making this sensitive to both the scoping and
+        // the ordering. Replaces the pre-#309 EXISTS-join scoping; the cross-tenant guarantee is
+        // also pinned by TenantIsolationTests.Reminder_history_returns_only_the_callers_org_logs.
+        var a = await RegisterAndLoginAsync();
+        var other = await RegisterAndLoginAsync();
+
+        var baseTime = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+        await using (var db = CreateSystemDb())
+        {
+            var aReminder = await db.Reminders.FirstAsync(r => r.OrganizationId == a.OrgId);
+            var otherReminder = await db.Reminders.FirstAsync(r => r.OrganizationId == other.OrgId);
+            db.ReminderLogs.AddRange(
+                HistoryLog(a.OrgId, aReminder.Id, "oldest@a.example", baseTime),
+                HistoryLog(a.OrgId, aReminder.Id, "middle@a.example", baseTime.AddHours(1)),
+                HistoryLog(a.OrgId, aReminder.Id, "newest@a.example", baseTime.AddHours(2)),
+                // Other org's row is the most recent of all — it must NOT leak in despite sorting first.
+                HistoryLog(other.OrgId, otherReminder.Id, "secret@other.example", baseTime.AddHours(3)));
+            await db.SaveChangesAsync();
+        }
+
+        var resp = await a.Client.GetAsync("/api/reminders/history");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var recipients = (await Data(resp)).EnumerateArray()
+            .Select(r => r.GetProperty("recipient").GetString())
+            .ToArray();
+        recipients.Should().Equal("newest@a.example", "middle@a.example", "oldest@a.example");
+        recipients.Should().NotContain("secret@other.example", "org A must never see another org's reminder logs");
+    }
+
+    private static ReminderLog HistoryLog(Guid orgId, Guid reminderId, string recipient, DateTime sentAt) => new()
+    {
+        Id = Guid.NewGuid(),
+        OrganizationId = orgId,
+        ReminderId = reminderId,
+        DocumentId = Guid.NewGuid(),
+        RecipientEmail = recipient,
+        SentAt = sentAt,
+        SendDate = DateOnly.FromDateTime(sentAt),
+        Status = ReminderLogStatus.Sent,
+    };
 }

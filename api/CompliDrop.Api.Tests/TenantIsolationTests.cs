@@ -56,7 +56,7 @@ public sealed class TenantIsolationTests(IntegrationTestFixture fixture) : Integ
         var reminder = await db.Reminders.FirstAsync(r => r.OrganizationId == owner.OrgId);
         db.ReminderLogs.Add(new ReminderLog
         {
-            Id = Guid.NewGuid(), ReminderId = reminder.Id, DocumentId = docId,
+            Id = Guid.NewGuid(), OrganizationId = owner.OrgId, ReminderId = reminder.Id, DocumentId = docId,
             RecipientEmail = logRecipient, SentAt = now, SendDate = DateOnly.FromDateTime(now), Status = ReminderLogStatus.Sent
         });
         await db.SaveChangesAsync();
@@ -81,7 +81,7 @@ public sealed class TenantIsolationTests(IntegrationTestFixture fixture) : Integ
             var aDoc = new Document { Id = Guid.NewGuid(), OrganizationId = a.OrgId, VendorId = aVendor.Id, OriginalFileName = "a.pdf", BlobStorageUrl = "blob://a", FileSizeBytes = 1, ContentType = "application/pdf", DocumentType = "coi", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
             db.AddRange(aVendor, aDoc);
             var aReminder = await db.Reminders.FirstAsync(r => r.OrganizationId == a.OrgId);
-            db.ReminderLogs.Add(new ReminderLog { Id = Guid.NewGuid(), ReminderId = aReminder.Id, DocumentId = aDoc.Id, RecipientEmail = "vendor@orga.example", SentAt = DateTime.UtcNow, SendDate = DateOnly.FromDateTime(DateTime.UtcNow), Status = ReminderLogStatus.Sent });
+            db.ReminderLogs.Add(new ReminderLog { Id = Guid.NewGuid(), OrganizationId = a.OrgId, ReminderId = aReminder.Id, DocumentId = aDoc.Id, RecipientEmail = "vendor@orga.example", SentAt = DateTime.UtcNow, SendDate = DateOnly.FromDateTime(DateTime.UtcNow), Status = ReminderLogStatus.Sent });
             await db.SaveChangesAsync();
         }
 

@@ -448,6 +448,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             db.ReminderLogs.Add(new ReminderLog
             {
                 Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
                 ReminderId = seed.ReminderId,
                 DocumentId = seed.DocumentId,
                 RecipientEmail = "owner@example.com",
@@ -702,6 +703,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             db.ReminderLogs.Add(new ReminderLog
             {
                 Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
                 ReminderId = seed.ReminderId,
                 DocumentId = seed.DocumentId,
                 RecipientEmail = "owner@example.com",
@@ -809,6 +811,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             db.ReminderLogs.Add(new ReminderLog
             {
                 Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
                 ReminderId = seed.ReminderId,
                 DocumentId = seed.DocumentId,
                 RecipientEmail = "tokyo@example.com",
@@ -820,6 +823,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             db.ReminderLogs.Add(new ReminderLog
             {
                 Id = Guid.NewGuid(),
+                OrganizationId = nyOnSameTokyoDay.OrgId,
                 ReminderId = nyOnSameTokyoDay.ReminderId,
                 DocumentId = nyOnSameTokyoDay.DocumentId,
                 RecipientEmail = "ny@example.com",
@@ -881,6 +885,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             db.ReminderLogs.Add(new ReminderLog
             {
                 Id = logId,
+                OrganizationId = orgId,
                 ReminderId = reminderId,
                 DocumentId = docId,
                 RecipientEmail = "mars@example.com",
@@ -919,6 +924,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             db.ReminderLogs.Add(new ReminderLog
             {
                 Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
                 ReminderId = seed.ReminderId,
                 DocumentId = seed.DocumentId,
                 RecipientEmail = "tokyo@example.com",
@@ -1011,6 +1017,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             db.ReminderLogs.Add(new ReminderLog
             {
                 Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
                 ReminderId = seed.ReminderId,
                 DocumentId = seed.DocumentId,
                 RecipientEmail = "owner@example.com",
@@ -1053,6 +1060,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             db.ReminderLogs.Add(new ReminderLog
             {
                 Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
                 ReminderId = seed.ReminderId,
                 DocumentId = seed.DocumentId,
                 RecipientEmail = "owner@example.com",
@@ -1100,6 +1108,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             db.ReminderLogs.Add(new ReminderLog
             {
                 Id = Guid.NewGuid(),
+                OrganizationId = orgId,
                 ReminderId = reminderId,
                 DocumentId = docAId,
                 RecipientEmail = "owner@example.com",
@@ -1423,6 +1432,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             db.ReminderLogs.Add(new ReminderLog
             {
                 Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
                 ReminderId = seed.ReminderId,
                 DocumentId = seed.DocumentId,
                 RecipientEmail = "owner@example.com",
@@ -1454,6 +1464,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             db.ReminderLogs.Add(new ReminderLog
             {
                 Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
                 ReminderId = seed.ReminderId,
                 DocumentId = seed.DocumentId,
                 RecipientEmail = "owner@example.com",
@@ -1774,5 +1785,107 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             .Should().NotBe(ReminderBackgroundService.BuildOrgDayLockKey(orgId, date));
         ReminderBackgroundService.BuildOrgDayLockKey(orgId, date.AddDays(1))
             .Should().NotBe(ReminderBackgroundService.BuildOrgDayLockKey(orgId, date));
+    }
+
+    // ----- #309: denormalized OrganizationId on ReminderLog ----------------------------------
+
+    [Fact]
+    public async Task Worker_stamps_the_org_id_on_new_log_rows()
+    {
+        // The denormalized OrganizationId (#309) is what the (OrganizationId, SentAt DESC) index
+        // and the AppDbContext tenant filter scope on, so the worker must populate it on insert.
+        var seed = await SeedReminderAsync(NyEightAm);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        await using var db = CreateSystemDb();
+        var log = await db.ReminderLogs.SingleAsync(l =>
+            l.ReminderId == seed.ReminderId && l.DocumentId == seed.DocumentId);
+        log.OrganizationId.Should().Be(seed.OrgId, "the worker stamps the parent org on each new log row");
+    }
+
+    [Fact]
+    public async Task Worker_keeps_the_org_id_when_healing_a_failed_row_in_place()
+    {
+        // The heal path re-stamps SentAt/Status/ResendMessageId but must leave OrganizationId intact
+        // (#309): a failed row already carries the right org from its original insert. Seed a failed
+        // row today, let the retry tick heal it, and assert the org id survived the in-place update.
+        var seed = await SeedReminderAsync(NyEightAm, internalEmail: "owner@example.com");
+        await using (var db = CreateSystemDb())
+        {
+            db.ReminderLogs.Add(new ReminderLog
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
+                ReminderId = seed.ReminderId,
+                DocumentId = seed.DocumentId,
+                RecipientEmail = "owner@example.com",
+                SentAt = NyEightAm.UtcDateTime.AddHours(-1),
+                SendDate = new DateOnly(2026, 1, 15), // same NY-local day → heal in place, not insert
+                ResendMessageId = null,
+                Status = "failed",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        await using var assert = CreateSystemDb();
+        var log = await assert.ReminderLogs.SingleAsync(l =>
+            l.ReminderId == seed.ReminderId && l.DocumentId == seed.DocumentId);
+        log.Status.Should().Be("sent", "the retry tick healed the failed row");
+        log.OrganizationId.Should().Be(seed.OrgId, "the heal must not clear the denormalized org id");
+    }
+
+    [Fact]
+    public async Task Backfill_sql_copies_organization_id_from_parent_reminder()
+    {
+        // The runtime tests cover the new write path; this covers the one-shot backfill SQL shipped
+        // in migration DenormalizeReminderLogOrganizationId (#309). Pre-#309 rows have no real org —
+        // seed two orgs' rows with the empty-guid placeholder, run the EXACT SQL the migration ships
+        // (sourced from the const, no copy-paste drift), and assert each row inherits its PARENT
+        // reminder's org and only that org's.
+        var a = await SeedReminderAsync(NyEightAm, internalEmail: "a@example.com");
+        var b = await SeedReminderAsync(NyEightAm, internalEmail: "b@example.com");
+        var aLogId = Guid.NewGuid();
+        var bLogId = Guid.NewGuid();
+
+        await using (var db = CreateSystemDb())
+        {
+            db.ReminderLogs.Add(new ReminderLog
+            {
+                Id = aLogId,
+                OrganizationId = Guid.Empty, // pre-backfill placeholder for a legacy row
+                ReminderId = a.ReminderId,
+                DocumentId = a.DocumentId,
+                RecipientEmail = "a@example.com",
+                SentAt = NyEightAm.UtcDateTime,
+                SendDate = new DateOnly(2026, 1, 15),
+                Status = "sent",
+            });
+            db.ReminderLogs.Add(new ReminderLog
+            {
+                Id = bLogId,
+                OrganizationId = Guid.Empty,
+                ReminderId = b.ReminderId,
+                DocumentId = b.DocumentId,
+                RecipientEmail = "b@example.com",
+                SentAt = NyEightAm.UtcDateTime,
+                SendDate = new DateOnly(2026, 1, 15),
+                Status = "sent",
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await using (var db = CreateSystemDb())
+            await db.Database.ExecuteSqlRawAsync(DenormalizeReminderLogOrganizationId.BackfillSql);
+
+        await using (var assert = CreateSystemDb())
+        {
+            (await assert.ReminderLogs.SingleAsync(l => l.Id == aLogId)).OrganizationId
+                .Should().Be(a.OrgId, "row A inherits org A from its parent reminder");
+            (await assert.ReminderLogs.SingleAsync(l => l.Id == bLogId)).OrganizationId
+                .Should().Be(b.OrgId, "row B inherits org B from its parent reminder");
+        }
     }
 }
