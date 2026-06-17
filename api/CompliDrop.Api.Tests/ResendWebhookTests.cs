@@ -36,6 +36,7 @@ public sealed class ResendWebhookTests(IntegrationTestFixture fixture) : Integra
         db.ReminderLogs.Add(new ReminderLog
         {
             Id = Guid.NewGuid(),
+            OrganizationId = orgId,
             ReminderId = reminderId,
             DocumentId = Guid.NewGuid(), // no FK constraint on DocumentId
             RecipientEmail = "vendor@example.com",

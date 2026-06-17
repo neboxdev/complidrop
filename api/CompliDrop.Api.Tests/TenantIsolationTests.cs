@@ -12,9 +12,12 @@ namespace CompliDrop.Api.Tests;
 /// Two-org cross-tenant authorization regression suite (#242). For every id-taking endpoint that
 /// relies on the <c>AppDbContext</c> global query filter, an org-A caller passing org-B ids must get
 /// 404 / no effect — proving the filter is ACTIVE on that exact path, and (for the filter-LESS child
-/// entities ComplianceCheck / ComplianceRule / VendorPortalLink / ReminderLog) that the parent's org
-/// is verified first. Two of these pin cross-tenant defects this audit found and fixed: the reminder
-/// history leak and the portal-link revoke IDOR.
+/// entities ComplianceCheck / ComplianceRule / VendorPortalLink) that the parent's org is verified
+/// first. ReminderLog was in that filter-LESS group at audit time but gained its own denormalized
+/// OrganizationId + AppDbContext query filter in #309, so its history read is now scoped directly by
+/// the filter (the EXISTS-against-Reminders join was removed) rather than via the parent. Two of
+/// these pin cross-tenant defects this audit found and fixed: the reminder history leak and the
+/// portal-link revoke IDOR.
 /// </summary>
 public sealed class TenantIsolationTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
@@ -56,7 +59,7 @@ public sealed class TenantIsolationTests(IntegrationTestFixture fixture) : Integ
         var reminder = await db.Reminders.FirstAsync(r => r.OrganizationId == owner.OrgId);
         db.ReminderLogs.Add(new ReminderLog
         {
-            Id = Guid.NewGuid(), ReminderId = reminder.Id, DocumentId = docId,
+            Id = Guid.NewGuid(), OrganizationId = owner.OrgId, ReminderId = reminder.Id, DocumentId = docId,
             RecipientEmail = logRecipient, SentAt = now, SendDate = DateOnly.FromDateTime(now), Status = ReminderLogStatus.Sent
         });
         await db.SaveChangesAsync();
@@ -70,7 +73,9 @@ public sealed class TenantIsolationTests(IntegrationTestFixture fixture) : Integ
     public async Task Reminder_history_returns_only_the_callers_org_logs()
     {
         // BUG #242: GET /api/reminders/history read the GLOBAL most-recent-200 ReminderLog rows
-        // (ReminderLog has no query filter), leaking every org's recipient emails + ids.
+        // (ReminderLog had no query filter then; #309 added one), leaking every org's recipient
+        // emails + ids. Post-#309 this test exercises that new filter directly — the endpoint's
+        // EXISTS-against-Reminders scoping was removed in favour of l.OrganizationId == CurrentOrgId.
         var b = await SeedOrgAsync("secret-vendor@orgb.example");
         var a = await RegisterAndLoginAsync();
 
@@ -81,7 +86,7 @@ public sealed class TenantIsolationTests(IntegrationTestFixture fixture) : Integ
             var aDoc = new Document { Id = Guid.NewGuid(), OrganizationId = a.OrgId, VendorId = aVendor.Id, OriginalFileName = "a.pdf", BlobStorageUrl = "blob://a", FileSizeBytes = 1, ContentType = "application/pdf", DocumentType = "coi", CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
             db.AddRange(aVendor, aDoc);
             var aReminder = await db.Reminders.FirstAsync(r => r.OrganizationId == a.OrgId);
-            db.ReminderLogs.Add(new ReminderLog { Id = Guid.NewGuid(), ReminderId = aReminder.Id, DocumentId = aDoc.Id, RecipientEmail = "vendor@orga.example", SentAt = DateTime.UtcNow, SendDate = DateOnly.FromDateTime(DateTime.UtcNow), Status = ReminderLogStatus.Sent });
+            db.ReminderLogs.Add(new ReminderLog { Id = Guid.NewGuid(), OrganizationId = a.OrgId, ReminderId = aReminder.Id, DocumentId = aDoc.Id, RecipientEmail = "vendor@orga.example", SentAt = DateTime.UtcNow, SendDate = DateOnly.FromDateTime(DateTime.UtcNow), Status = ReminderLogStatus.Sent });
             await db.SaveChangesAsync();
         }
 
