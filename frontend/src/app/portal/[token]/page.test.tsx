@@ -476,6 +476,9 @@ describe("PortalPage — happy upload + partial-batch failure (#37)", () => {
     );
     expect(screen.getByText("coi.pdf")).toBeInTheDocument();
     expect(screen.getByText(/processing…/i)).toBeInTheDocument();
+    // "What happens next" closes the loop for a cold vendor (#240) — no silent "did it work?".
+    expect(screen.getByText(/they.ll review your document/i)).toBeInTheDocument();
+    expect(screen.getByText(/you can close this page/i)).toBeInTheDocument();
   });
 
   it("partial-batch failure: 3 files, 2nd fails → 1st in Received, 3rd never attempted, failed file ABSENT from Received", async () => {
