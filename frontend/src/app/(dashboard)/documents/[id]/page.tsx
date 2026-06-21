@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AlertTriangle, ArrowLeft, ExternalLink, Mail, RefreshCw, RotateCw, ShieldCheck } from "lucide-react";
@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { StaleDataBanner } from "@/components/StaleDataBanner";
 import { DocumentTypeSelect } from "@/components/DocumentTypeSelect";
 import { useUpdateDocument } from "@/hooks/useDocuments";
+import { ClearSampleButton } from "@/components/onboarding/SampleData";
 import {
   complianceFailureReason,
   fieldLabel,
@@ -65,6 +66,7 @@ type DocDetail = {
   daysUntilExpiry: number | null;
   isManuallyVerified: boolean;
   uploadedBy: string | null;
+  isSample: boolean;
   generalLiabilityLimit: number | null;
   fields: DocField[];
   complianceChecks: ComplianceCheck[];
@@ -253,6 +255,7 @@ function ProcessingErrorCard({ doc }: { doc: DocDetail }) {
 
 export default function DocumentDetailPage() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
   const qc = useQueryClient();
   const [edits, setEdits] = useState<Record<string, string>>({});
   const updateDoc = useUpdateDocument();
@@ -489,6 +492,19 @@ export default function DocumentDetailPage() {
       <Link href="/documents" className="inline-flex items-center gap-1 text-sm text-sky-700 hover:text-sky-800">
         <ArrowLeft className="w-4 h-4" /> All documents
       </Link>
+
+      {doc.isSample && (
+        <div className="flex flex-col gap-3 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-sm text-sky-900">
+            <span className="font-semibold">This is a sample certificate.</span>{" "}
+            A demo document showing how CompliDrop reads a COI and checks it — not real insurance.
+          </p>
+          <ClearSampleButton
+            className="self-start sm:self-auto"
+            onCleared={() => router.push("/documents")}
+          />
+        </div>
+      )}
 
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-1.5">

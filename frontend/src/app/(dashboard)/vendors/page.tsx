@@ -196,7 +196,14 @@ export default function VendorsPage() {
               ) : pageItems.map((v) => (
                 <tr key={v.id} className="border-t border-slate-100">
                   <td className="px-4 py-3">
-                    <Link href={`/vendors/${v.id}`} className="text-sky-700 font-medium hover:underline">{v.name}</Link>
+                    <span className="inline-flex items-center gap-2">
+                      <Link href={`/vendors/${v.id}`} className="text-sky-700 font-medium hover:underline">{v.name}</Link>
+                      {v.isSample && (
+                        <Badge className="bg-sky-100 text-sky-700 border-transparent text-[10px] uppercase tracking-wide">
+                          Sample
+                        </Badge>
+                      )}
+                    </span>
                     {v.contactEmail && <p className="text-xs text-slate-500">{v.contactEmail}</p>}
                   </td>
                   <td data-label="Requirements" className="px-4 py-3 text-slate-600">

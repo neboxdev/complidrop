@@ -13,6 +13,8 @@ export type VendorSummary = {
   complianceTemplateName: string | null;
   documentCount: number;
   activePortalLinks: number;
+  /** True for the demo's sample vendor (#238) so the vendors list can badge it "Sample". */
+  isSample: boolean;
 };
 
 export type PortalLink = {

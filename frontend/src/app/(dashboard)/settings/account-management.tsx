@@ -15,7 +15,7 @@ import {
   useChangeEmail,
   useDeleteAccount,
 } from "@/hooks/useAuth";
-import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { GENERIC_FALLBACK_MESSAGE, friendly } from "@/lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5292";
 
@@ -25,10 +25,6 @@ const strongPassword = z
   .min(12, "At least 12 characters")
   .regex(/[A-Za-z]/, "Include a letter")
   .regex(/[0-9]/, "Include a digit");
-
-function friendly(err: unknown): string {
-  return err instanceof Error && err.message ? err.message : GENERIC_FALLBACK_MESSAGE;
-}
 
 // ───────────────────────── Security ─────────────────────────
 

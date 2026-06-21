@@ -142,6 +142,17 @@ type RequestInitEx = RequestInit & { skipRefresh?: boolean; idempotencyKey?: str
 // truth for the jargon-free string.
 export const GENERIC_FALLBACK_MESSAGE = "Something went wrong. Try again.";
 
+/**
+ * Pulls the user-facing message off an unknown thrown value for toast / error-card copy:
+ * the server's `error.message` (carried on `ApiError`) when present, else the jargon-free
+ * `GENERIC_FALLBACK_MESSAGE`. Single source for the per-mutation `toast.error(friendly(err))`
+ * pattern — the `api.*` client already guarantees `ApiError.message` is friendly (#77), so this
+ * never leaks `statusText` / a raw `TypeError`.
+ */
+export function friendly(err: unknown): string {
+  return err instanceof Error && err.message ? err.message : GENERIC_FALLBACK_MESSAGE;
+}
+
 async function fetchOrFriendlyThrow(
   url: string,
   init: RequestInit,

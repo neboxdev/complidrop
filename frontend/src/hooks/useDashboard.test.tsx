@@ -41,6 +41,8 @@ const STATS: DashboardStats = {
   pendingExtraction: 3,
   totalVendors: 4,
   anyVendorWithRequirements: true,
+  hasSampleData: false,
+  sampleDocumentId: null,
   complianceRate: 67,
 };
 
