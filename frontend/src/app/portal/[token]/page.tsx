@@ -453,6 +453,14 @@ export default function PortalPage() {
                 </li>
               ))}
             </ul>
+            {/* "What happens next" — a cold vendor who's never heard of CompliDrop must not be left
+                wondering if the upload worked or whether more is needed (#240 zero-touch sweep).
+                Without it, a successful upload silently generates "did it go through?" support emails. */}
+            <p className="mt-3 border-t border-emerald-100 pt-3 text-sm text-slate-600">
+              That&apos;s everything {info.orgName} needs. They&apos;ll review your{" "}
+              {uploaded.length === 1 ? "document" : "documents"} and reach out only if something&apos;s
+              missing — you can close this page.
+            </p>
           </div>
         )}
 
