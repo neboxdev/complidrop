@@ -221,3 +221,27 @@ Severity: P0 blocks the job / locks out / data loss / trust destroyer · P1 majo
 ## What's genuinely good (calibration — don't break these)
 
 The onboarding modal + state-aware checklist teach the loop and tick from real data; status badges pair icon + text + AA hues; `prefers-reduced-motion` is globally neutralized; stacked-card tables on documents/vendors are a strong phone pattern; the sentence-catalog requirement builder (money presets, numeric keyboard, honest "not expired" helper) keeps Pat away from operators entirely; "Email link to {vendor}" with the saved-email gate is exactly right; portal camera-first copy + HEIC + branded skeleton; the timezone next-send preview; dialogs/sheets/switches ride Base UI with correct focus behavior; skip link + `aria-current` + extraction live regions; upload→verdict in ~9 s with plain-English field labels throughout.
+
+## Re-score addenda (#241 batch split)
+
+The P0/P1 fix work was split into batches A–G (#315–#321; see #241). Each batch
+appends its outcome here; the full per-page re-score to the >=8 exit bar lands
+with the final batch once every gate on a page is cleared.
+
+### Batch A — contrast & visibility sweep (#315, merged 2026-06-22)
+
+Resolved the cross-cutting visual findings: **FP-005** (every primary/accent CTA
++ `text-primary` link now clears AA — `--primary` sky-700 5.9:1, `--accent`
+orange-700 5.2:1), **FP-001** (input/select boundaries `--input` slate-500 4.77:1,
+was 1.33:1), **FP-002** (focus rings full-opacity `--ring` sky-600, explicit
+dropzone rings, all routed through the token), **FP-010** (meaningful slate-400
+text + action icons → slate-500), **FP-014** (dark pre-footer footnote → sky-200).
+A self-bug found in review — the token darkening pushed the two dark-section
+`SectionLabel` eyebrows to 2.34:1 — was fixed in the same PR (sky-300 on dark).
+
+**Effect on the score table:** contrast is no longer a gating factor on any page;
+`contrast-tokens.test.ts` pins the WCAG ratios so it can't silently regress. No
+page is *re-scored to 8 yet* — the pages whose contrast was a named gate still
+carry non-contrast gates from later batches (e.g. Landing still needs FP-012
+header overflow + FP-011/020 promise drift, both Batch B). Per-page numbers move
+when those land.
