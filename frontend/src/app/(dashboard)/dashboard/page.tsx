@@ -9,6 +9,7 @@ import { actionLabel } from "@/lib/display-labels";
 import { peekTourRestart, clearTourRestart } from "@/lib/onboarding";
 import { WelcomeModal } from "@/components/onboarding/WelcomeModal";
 import { GetStartedChecklist, useOnboardingChecklist } from "@/components/onboarding/GetStartedChecklist";
+import { SampleDataBanner, TrySampleButton } from "@/components/onboarding/SampleData";
 import Link from "next/link";
 import { FileText, Clock, AlertTriangle, ShieldCheck, Users, Zap } from "lucide-react";
 
@@ -71,6 +72,9 @@ export default function DashboardPage() {
 
       {/* Auto-hides once every step is done. */}
       <GetStartedChecklist checklist={onboarding} />
+
+      {/* Shown only while sample-demo data exists; renders nothing otherwise. */}
+      <SampleDataBanner />
 
       {/* Hidden until there's real data, so a brand-new account never lands on an
           all-zeros stat grid (#3) — the checklist above guides them instead. */}
@@ -144,6 +148,14 @@ export default function DashboardPage() {
             <Link href="/documents" className="inline-flex items-center text-sm font-medium text-sky-700 hover:text-sky-800">
               Go to Documents →
             </Link>
+            {/* No COI on hand? Seed a sample and land on a real verdict in ~a minute (#238).
+                Hidden once a sample exists — the banner above owns it then. */}
+            {!stats.data?.hasSampleData && (
+              <div className="border-t border-slate-100 pt-3">
+                <p className="text-xs text-slate-500">No certificate handy?</p>
+                <TrySampleButton className="mt-1.5" />
+              </div>
+            )}
           </CardContent>
         </Card>
         <Card>

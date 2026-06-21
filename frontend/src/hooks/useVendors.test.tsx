@@ -47,6 +47,7 @@ const VENDORS: VendorSummary[] = [
     complianceTemplateName: "Default COI",
     documentCount: 3,
     activePortalLinks: 1,
+    isSample: false,
   },
   {
     id: "v_beach_01",
@@ -58,6 +59,7 @@ const VENDORS: VendorSummary[] = [
     complianceTemplateName: null,
     documentCount: 0,
     activePortalLinks: 0,
+    isSample: false,
   },
 ];
 

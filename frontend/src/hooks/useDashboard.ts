@@ -15,6 +15,11 @@ export type DashboardStats = {
    * "Get started" checklist step 2) — derived server-side so the dashboard
    * doesn't have to pull the full vendor list. */
   anyVendorWithRequirements: boolean;
+  /** True when the org has live sample-demo data (#238) — drives the dashboard's
+   * "Try a sample certificate" CTA vs. the "Clear sample data" banner. */
+  hasSampleData: boolean;
+  /** The sample document to deep-link to ("View sample"), or null when none exists. */
+  sampleDocumentId: string | null;
   complianceRate: number;
 };
 

@@ -9,7 +9,9 @@ public record VendorSummary(
     Guid? ComplianceTemplateId,
     string? ComplianceTemplateName,
     int DocumentCount,
-    int ActivePortalLinks);
+    int ActivePortalLinks,
+    // True for the demo's sample vendor (#238) so the vendors list can badge it "Sample".
+    bool IsSample);
 
 public record VendorDetail(
     Guid Id,

@@ -4,7 +4,7 @@ import { useId, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
-import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { api, friendly } from "@/lib/api";
 import {
   REQUIREMENT_GROUPS,
   REQUIREMENT_TYPES,
@@ -59,10 +59,6 @@ type RulePayload = {
   expectedValue: string | null;
   errorMessage: string;
 };
-
-function friendly(err: unknown): string {
-  return err instanceof Error && err.message ? err.message : GENERIC_FALLBACK_MESSAGE;
-}
 
 export default function RulesPage() {
   const qc = useQueryClient();

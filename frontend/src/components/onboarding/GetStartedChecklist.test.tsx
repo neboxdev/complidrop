@@ -97,6 +97,27 @@ describe("GetStartedChecklist (#191)", () => {
   });
 });
 
+describe("GetStartedChecklist — sample-certificate affordance (#238)", () => {
+  it("offers 'Try a sample certificate' on the document step while it is incomplete", () => {
+    // vendor + requirements done, document NOT done, reminders done.
+    renderWithProviders(
+      <GetStartedChecklist checklist={makeChecklist([true, true, false, true])} />,
+      { auth: null },
+    );
+    expect(screen.getByText(/no document handy/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /try a sample certificate/i })).toBeInTheDocument();
+  });
+
+  it("hides the affordance once the document step is done", () => {
+    // document done; reminders left incomplete so the card still renders (3 of 4).
+    renderWithProviders(
+      <GetStartedChecklist checklist={makeChecklist([true, true, true, false])} />,
+      { auth: null },
+    );
+    expect(screen.queryByRole("button", { name: /try a sample certificate/i })).toBeNull();
+  });
+});
+
 describe("GetStartedChecklist — plan-aware document hint (#261)", () => {
   // Vendor upload links are a Pro entitlement (the server 403s link generation
   // on Free), so the "Collect a document" hint must not recommend them to a

@@ -5,6 +5,7 @@ import { Check, ChevronRight } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { useDashboardStats } from "@/hooks/useDashboard";
 import { useSubscription } from "@/hooks/useSubscription";
+import { TrySampleButton } from "@/components/onboarding/SampleData";
 
 export type ChecklistStep = {
   key: string;
@@ -151,6 +152,21 @@ export function GetStartedChecklist({ checklist }: { checklist: OnboardingCheckl
                     aria-hidden="true"
                   />
                 </Link>
+                {/* The cold-start gap (#238): the COI is the one asset Pat may not have. Offer the
+                    sample so "Collect a document" can complete with no file on hand. Only on the
+                    document step, and only while it's incomplete (this unchecked branch). */}
+                {step.key === "document" && (
+                  <p className="mt-1.5 pl-9 text-xs text-slate-500">
+                    No document handy?{" "}
+                    <TrySampleButton
+                      variant="link"
+                      size="sm"
+                      showIcon={false}
+                      label="Try a sample certificate"
+                      className="h-auto p-0 align-baseline text-xs font-medium"
+                    />
+                  </p>
+                )}
               </li>
             ),
           )}

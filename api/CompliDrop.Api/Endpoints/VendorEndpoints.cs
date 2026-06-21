@@ -36,7 +36,8 @@ public static class VendorEndpoints
                 v.ComplianceTemplateId,
                 v.ComplianceTemplate != null ? v.ComplianceTemplate.Name : null,
                 v.Documents.Count,
-                v.PortalLinks.Count(l => l.IsActive)))
+                v.PortalLinks.Count(l => l.IsActive),
+                v.IsSample))
             .ToListAsync(ct);
         return Results.Ok(new { data = vendors, error = (object?)null });
     }

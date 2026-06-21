@@ -93,6 +93,7 @@ export const documentsAllStatuses: ReadonlyArray<Readonly<DocumentListItem>> = [
     effectiveDate: null,
     expirationDate: null,
     daysUntilExpiry: null,
+    isSample: false,
     createdAt: "2026-05-26T12:00:00Z",
   },
   {
@@ -107,6 +108,7 @@ export const documentsAllStatuses: ReadonlyArray<Readonly<DocumentListItem>> = [
     effectiveDate: null,
     expirationDate: null,
     daysUntilExpiry: null,
+    isSample: false,
     createdAt: "2026-05-26T11:50:00Z",
   },
   {
@@ -121,6 +123,7 @@ export const documentsAllStatuses: ReadonlyArray<Readonly<DocumentListItem>> = [
     effectiveDate: "2026-01-01T00:00:00Z",
     expirationDate: "2026-12-31T00:00:00Z",
     daysUntilExpiry: 219,
+    isSample: false,
     createdAt: "2026-05-25T09:30:00Z",
   },
   {
@@ -135,6 +138,7 @@ export const documentsAllStatuses: ReadonlyArray<Readonly<DocumentListItem>> = [
     effectiveDate: null,
     expirationDate: null,
     daysUntilExpiry: null,
+    isSample: false,
     createdAt: "2026-05-24T16:00:00Z",
   },
 ];
@@ -213,6 +217,7 @@ export type DocumentDetailFixture = {
   daysUntilExpiry: number | null;
   isManuallyVerified: boolean;
   uploadedBy: string | null;
+  isSample: boolean;
   generalLiabilityLimit: number | null;
   fields: DocumentDetailField[];
   complianceChecks: ComplianceCheckFixture[];
@@ -239,6 +244,7 @@ const DOCUMENT_DETAIL_BASE: Readonly<DocumentDetailFixture> = {
   daysUntilExpiry: null,
   isManuallyVerified: false,
   uploadedBy: null,
+  isSample: false,
   generalLiabilityLimit: null,
   fields: [],
   complianceChecks: [],

@@ -9,6 +9,14 @@ public class Vendor
     public string? ContactPhone { get; set; }
     public string? Category { get; set; }
     public Guid? ComplianceTemplateId { get; set; }
+
+    /// <summary>
+    /// True only for the sample vendor created by the one-click demo (#238). The demo seeds this
+    /// vendor, assigns it the "Caterer" system checklist, and attaches the generated sample COI so a
+    /// fresh org reaches a real verdict with no file on hand. "Clear sample data" removes it.
+    /// </summary>
+    public bool IsSample { get; set; } = false;
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public DateTime? DeletedAt { get; set; }

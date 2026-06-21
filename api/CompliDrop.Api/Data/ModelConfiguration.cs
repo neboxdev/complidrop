@@ -102,6 +102,16 @@ internal static class ModelConfiguration
             e.HasIndex(d => new { d.OrganizationId, d.VendorId });
             e.HasIndex(d => new { d.OrganizationId, d.ComplianceStatus });
             e.HasIndex(d => new { d.OrganizationId, d.ExtractionStatus, d.CreatedAt });
+            // At most one LIVE sample-demo document per org (#238). The seed endpoint already dedups on
+            // an existence check, but this partial unique index closes the concurrent-double-click
+            // TOCTOU race at the database: a racing second insert fails loudly (23505) and the endpoint
+            // returns the existing sample instead of double-seeding. Scoped to live sample rows so a
+            // normal upload (IsSample=false) is never constrained and a cleared/soft-deleted sample
+            // doesn't block re-seeding. Mirrors the IX_ComplianceTemplates_Name_SystemUnique guard.
+            e.HasIndex(d => d.OrganizationId)
+                .IsUnique()
+                .HasFilter("\"IsSample\" AND \"DeletedAt\" IS NULL")
+                .HasDatabaseName("IX_Documents_OrganizationId_SampleUnique");
 
             e.HasOne(d => d.Organization).WithMany(o => o.Documents)
                 .HasForeignKey(d => d.OrganizationId).OnDelete(DeleteBehavior.Cascade);

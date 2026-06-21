@@ -74,6 +74,14 @@ public class Document
 
     public string? UploadedBy { get; set; }
     public bool IsManuallyVerified { get; set; } = false;
+
+    /// <summary>
+    /// True only for the one-click sample-certificate demo document (#238). Drives the "Sample"
+    /// labels across the documents list/detail UI and lets "Clear sample data" find what to remove.
+    /// A normal owner/portal upload is always false; only the sample-seed endpoint sets it.
+    /// </summary>
+    public bool IsSample { get; set; } = false;
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public DateTime? DeletedAt { get; set; }

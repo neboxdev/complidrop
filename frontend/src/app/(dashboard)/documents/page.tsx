@@ -527,6 +527,11 @@ export default function DocumentsPage() {
                       <Link href={`/documents/${d.id}`} className="text-sky-700 hover:underline font-medium">
                         {d.originalFileName}
                       </Link>
+                      {d.isSample && (
+                        <span className="ml-2 inline-flex items-center rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-700">
+                          Sample
+                        </span>
+                      )}
                     </td>
                     <td data-label="Type" className="px-4 py-3 text-slate-600 text-xs">{documentTypeLabel(d.documentType)}</td>
                     <td data-label="Vendor" className="px-4 py-3 text-slate-600">

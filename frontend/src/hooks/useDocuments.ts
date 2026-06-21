@@ -49,6 +49,8 @@ export type DocumentListItem = {
   effectiveDate: string | null;
   expirationDate: string | null;
   daysUntilExpiry: number | null;
+  /** True for the one-click sample-demo document (#238) so the list can badge it "Sample". */
+  isSample: boolean;
   createdAt: string;
 };
 

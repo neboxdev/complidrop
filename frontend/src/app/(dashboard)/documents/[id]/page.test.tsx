@@ -38,6 +38,54 @@ import { api } from "@/lib/api";
 // (#122) — `resetSonner()` runs in the harness `afterEach` so call
 // counts never leak between tests.
 
+describe("DocumentDetailPage — sample banner (#238)", () => {
+  it("shows the sample banner and clears + redirects to /documents on a sample doc", async () => {
+    const push = vi.fn();
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_sample",
+            originalFileName: "Sample Certificate of Insurance.pdf",
+            isSample: true,
+            extractionStatus: "Completed",
+            complianceStatus: "Compliant",
+          }),
+        ),
+      ),
+      http.delete(url("/api/sample"), () =>
+        jsonOk({ message: "Sample data cleared.", clearedDocuments: 1, clearedVendors: 1 }),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_sample" },
+      router: { push },
+    });
+
+    expect(await screen.findByText(/this is a sample certificate/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /clear sample data/i }));
+
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/documents"));
+    expect(toastSuccess).toHaveBeenCalledWith("Sample data cleared.");
+  });
+
+  it("does not show the sample banner on a normal document", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(makeDocumentDetail({ id: "d_real", isSample: false, extractionStatus: "Completed" })),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_real" } });
+
+    await waitFor(() => expect(screen.queryByText(/loading document/i)).not.toBeInTheDocument());
+    expect(screen.queryByText(/this is a sample certificate/i)).not.toBeInTheDocument();
+  });
+});
+
 describe("DocumentDetailPage — basic states (#36)", () => {
   it("isLoading: renders the loading copy", () => {
     // Hold the response so the test observes the loading branch.
