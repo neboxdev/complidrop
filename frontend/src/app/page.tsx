@@ -44,9 +44,22 @@ const heroOutlineCta = cn(
 );
 
 /* ── Section eyebrow label ─────────────────────────────────────────────────── */
-function SectionLabel({ children }: { children: React.ReactNode }) {
+function SectionLabel({
+  children,
+  tone = "light",
+}: {
+  children: React.ReactNode;
+  tone?: "light" | "dark";
+}) {
+  // text-primary is sky-700 (AA on the light sections). On the dark #082F49
+  // sections it would be 2.34:1, so those eyebrows use sky-300 (8.3:1). (#315 FP-005)
   return (
-    <p className="text-center text-xs font-bold uppercase tracking-[0.2em] text-primary">
+    <p
+      className={cn(
+        "text-center text-xs font-bold uppercase tracking-[0.2em]",
+        tone === "dark" ? "text-sky-300" : "text-primary",
+      )}
+    >
       {children}
     </p>
   );
@@ -467,7 +480,7 @@ export default function Home() {
         {/* ── Who It's For ──────────────────────────────────────── */}
         <section className="bg-[#082F49] py-24 sm:py-32">
           <div className="mx-auto max-w-6xl px-4 sm:px-6">
-            <SectionLabel>Who it&rsquo;s for</SectionLabel>
+            <SectionLabel tone="dark">Who it&rsquo;s for</SectionLabel>
             <h2 className="mt-3 text-center text-3xl font-bold tracking-tight text-white sm:text-4xl">
               If you&rsquo;ve ever lost sleep over an expired certificate, this is
               for you.
@@ -508,7 +521,7 @@ export default function Home() {
           <div className="pointer-events-none absolute left-1/2 top-0 h-[600px] w-[600px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary opacity-10 blur-3xl" />
 
           <div className="relative mx-auto max-w-2xl px-4 text-center sm:px-6">
-            <SectionLabel>Get started</SectionLabel>
+            <SectionLabel tone="dark">Get started</SectionLabel>
             <h2 className="mt-3 text-3xl font-bold tracking-tight text-white sm:text-4xl">
               Drop your first document in under a minute.
             </h2>

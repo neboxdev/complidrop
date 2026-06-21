@@ -14,16 +14,16 @@ import { describe, expect, it } from "vitest";
  * (#BAE6FD), the computed ratio drops below the floor and this test fails.
  */
 
-const globalsCss = readFileSync(
-  path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../app/globals.css"),
-  "utf8",
-);
+const SRC = path.dirname(fileURLToPath(import.meta.url));
+const read = (rel: string) => readFileSync(path.resolve(SRC, rel), "utf8");
+
+const globalsCss = read("../app/globals.css");
 
 // Isolate the light-theme `:root { ... }` block (the `.dark` block uses oklch()).
-const rootBlock = globalsCss.slice(
-  globalsCss.indexOf(":root {"),
-  globalsCss.indexOf("}", globalsCss.indexOf(":root {")),
-);
+// Anchored on the block's own closing `\n}` so a stray brace can't truncate it.
+const rootMatch = globalsCss.match(/:root\s*\{([\s\S]*?)\n\}/);
+if (!rootMatch) throw new Error(":root block not found in globals.css");
+const rootBlock = rootMatch[1];
 
 function token(name: string): string {
   const m = rootBlock.match(new RegExp(`\\n\\s*--${name}:\\s*(#[0-9a-fA-F]{6})`));
@@ -59,8 +59,16 @@ describe("globals.css brand tokens clear WCAG contrast (FP-005/001/002)", () => 
     expect(contrast(token("primary"), WHITE)).toBeGreaterThanOrEqual(4.5);
   });
 
+  it("--primary-foreground stays white so the AA pairing above is the real one", () => {
+    expect(token("primary-foreground").toLowerCase()).toBe("#ffffff");
+  });
+
   it("--accent holds white CTA text at AA (>= 4.5:1)", () => {
     expect(contrast(token("accent"), WHITE)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("--accent-foreground stays white so the accent AA claim is anchored to the real fg", () => {
+    expect(token("accent-foreground").toLowerCase()).toBe("#ffffff");
   });
 
   it("--input boundary is visible on white at >= 3:1 (WCAG 1.4.11)", () => {
@@ -70,8 +78,21 @@ describe("globals.css brand tokens clear WCAG contrast (FP-005/001/002)", () => 
   it("--ring focus indicator is visible on white at >= 3:1 (WCAG 1.4.11)", () => {
     expect(contrast(token("ring"), WHITE)).toBeGreaterThanOrEqual(3);
   });
+});
 
-  it("--primary-foreground stays white so the AA pairing above is the real one", () => {
-    expect(token("primary-foreground").toLowerCase()).toBe("#ffffff");
-  });
+/**
+ * The contrast guard above only knows the token VALUE. The other half of FP-002
+ * is that the primitives render the ring at FULL opacity — a re-added `/50`
+ * modifier would halve the effective contrast (below the 3:1 floor) yet leave
+ * the token test green. Pin the application here, on the central primitives.
+ */
+describe("focus rings apply the --ring token at full opacity (FP-002)", () => {
+  for (const file of ["../components/ui/button.tsx", "../components/ui/input.tsx", "../components/ui/badge.tsx"]) {
+    it(`${path.basename(file)} drives the focus ring off ring-ring with no fractional opacity`, () => {
+      const src = read(file);
+      expect(src).toMatch(/focus-visible:ring-ring(?![/\w-])/);
+      // No fractional-opacity ring (e.g. ring-ring/50) anywhere in the primitive.
+      expect(src).not.toMatch(/ring-ring\/\d/);
+    });
+  }
 });

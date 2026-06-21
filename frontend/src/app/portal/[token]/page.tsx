@@ -336,7 +336,7 @@ export default function PortalPage() {
         <div
           {...getRootProps()}
           aria-disabled={atQuota || undefined}
-          className={`bg-white border-2 border-dashed rounded-xl p-10 text-center shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-600 focus-visible:ring-offset-2 ${
+          className={`bg-white border-2 border-dashed rounded-xl p-10 text-center shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
             atQuota
               ? "border-slate-200 opacity-60 cursor-not-allowed"
               : isDragActive

@@ -165,7 +165,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                 id={templateSelectId}
                 value={form.complianceTemplateId}
                 onChange={(e) => setForm({ ...form, complianceTemplateId: e.target.value })}
-                className="mt-1 w-full border border-input rounded-md h-9 px-2 text-sm focus-visible:border-sky-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-600"
+                className="mt-1 w-full border border-input rounded-md h-9 px-2 text-sm focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <option value="">— No requirements set —</option>
                 {(templates.data ?? []).map((t) => (

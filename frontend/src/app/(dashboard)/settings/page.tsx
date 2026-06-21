@@ -303,7 +303,7 @@ function OrgSettingsForm({ me }: { me: Me }) {
               id={tzId}
               value={timeZone}
               onChange={(e) => setTimeZone(e.target.value)}
-              className="mt-1 block w-full rounded-md border border-input bg-white px-3 py-2 text-sm text-slate-900 focus-visible:border-sky-600 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-sky-600"
+              className="mt-1 block w-full rounded-md border border-input bg-white px-3 py-2 text-sm text-slate-900 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring"
             >
               {zones.map((z) => (
                 <option key={z} value={z}>
