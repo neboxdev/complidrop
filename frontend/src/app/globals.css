@@ -55,18 +55,26 @@
   --card-foreground: #0C4A6E;
   --popover: #ffffff;
   --popover-foreground: #0C4A6E;
-  --primary: #0EA5E9;
+  /* sky-700: 5.9:1 on white so every bg-primary CTA and text-primary link
+     clears WCAG AA (sky-500 was 2.77:1). White fg stays the pairing. (#315 FP-005) */
+  --primary: #0369A1;
   --primary-foreground: #ffffff;
   --secondary: #F0F9FF;
   --secondary-foreground: #0C4A6E;
   --muted: #F0F9FF;
   --muted-foreground: #64748B;
-  --accent: #F97316;
+  /* orange-700: white text on the accent CTAs is 5.2:1 (orange-500 was 2.80:1).
+     Only marketing CTAs + decorative blobs use --accent; no shadcn primitive does. (#315 FP-005) */
+  --accent: #C2410C;
   --accent-foreground: #ffffff;
   --destructive: oklch(0.577 0.245 27.325);
   --border: #E0F2FE;
-  --input: #BAE6FD;
-  --ring: #0EA5E9;
+  /* slate-500: input/select boundaries hit 4.77:1 vs white so the field edge is
+     visible on white cards (sky-200 #BAE6FD was 1.33:1, effectively invisible —
+     WCAG 1.4.11 wants >=3:1). Neutral resting border; blue is reserved for focus. (#315 FP-001) */
+  --input: #64748B;
+  /* sky-600 for full-opacity focus rings (paired with dropping the /50 in the primitives). (#315 FP-002) */
+  --ring: #0284C7;
   --chart-1: #0EA5E9;
   --chart-2: #38BDF8;
   --chart-3: #F97316;

@@ -44,8 +44,8 @@ export function DocumentTypeSelect({
       aria-label={ariaLabel}
       onChange={(e) => onChange(e.target.value)}
       className={cn(
-        "h-9 rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700",
-        "focus:outline-none focus:ring-2 focus:ring-sky-500/40 disabled:opacity-60",
+        "h-9 rounded-md border border-input bg-white px-2 text-sm text-slate-700",
+        "focus:outline-none focus:ring-2 focus:ring-sky-600 disabled:opacity-60",
         className,
       )}
     >

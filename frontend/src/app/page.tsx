@@ -491,7 +491,7 @@ export default function Home() {
                     {card.href ? (
                       <Link
                         href={card.href}
-                        className="mt-4 inline-flex items-center text-sm font-semibold text-primary hover:text-sky-300"
+                        className="mt-4 inline-flex items-center text-sm font-semibold text-sky-300 hover:text-sky-200"
                       >
                         See it for venues&nbsp;&rarr;
                       </Link>
@@ -535,7 +535,7 @@ export default function Home() {
               </Link>
             </div>
 
-            <p className="mt-5 text-sm text-sky-300/60">No credit card. Cancel anytime.</p>
+            <p className="mt-5 text-sm text-sky-200">No credit card. Cancel anytime.</p>
           </div>
         </section>
       </main>

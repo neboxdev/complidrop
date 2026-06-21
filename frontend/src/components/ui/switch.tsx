@@ -28,7 +28,7 @@ export function ToggleSwitch({
       className={cn(
         "group relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors",
         "bg-slate-400 data-[checked]:bg-sky-600",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50 focus-visible:ring-offset-2",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-600 focus-visible:ring-offset-2",
         "disabled:cursor-not-allowed disabled:opacity-60",
         // Expand the pointer hit area to ≥44px without enlarging the visual track.
         "before:absolute before:left-1/2 before:top-1/2 before:h-11 before:w-11 before:-translate-x-1/2 before:-translate-y-1/2 before:content-['']",

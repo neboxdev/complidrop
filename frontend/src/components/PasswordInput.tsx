@@ -32,7 +32,7 @@ export function PasswordInput({
         onClick={() => setVisible((v) => !v)}
         className={cn(
           "absolute right-1.5 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded text-slate-500",
-          "hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40",
+          "hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-600",
         )}
       >
         {visible ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
