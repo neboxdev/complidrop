@@ -168,19 +168,19 @@ describe("LoginPage — server-side error copy (#35)", () => {
       fillByLabel(/^password$/i, "anything");
       submitFormIn(container);
 
-      await waitFor(() =>
-        expect(toastError).toHaveBeenCalledWith(message),
-      );
-      // Jargon-free guard class: the toHaveBeenCalledWith(message) above
-      // already pins the EXACT copy for THIS row. These regex bands catch
-      // the broader class of regression — a future code (not in this
-      // table) leaking through as `auth.x` (dot-namespaced),
+      // FP-033: server errors now persist in an inline role="alert" block (the
+      // lockout copy carries the only way back in — a 4s toast was the bug).
+      // Find the rendered message element and run the jargon-free guards on ITS
+      // text. The bands catch a future code leaking as `auth.x` (dot-namespaced),
       // `E_AUTH_LOCKED` (SCREAMING_SNAKE), or "423" (bare status).
-      const toastText = (toastError.mock.calls[0][0] ?? "") as string;
-      expect(toastText).not.toContain(code);
-      expect(toastText).not.toMatch(/(?:[a-z]+\.)+[a-z_]+/i);
-      expect(toastText).not.toMatch(/^[A-Z][A-Z_]{2,}$/);
-      expect(toastText).not.toMatch(/^\d{3}$/);
+      const msgEl = await screen.findByText(message);
+      const renderedText = msgEl.textContent ?? "";
+      expect(renderedText).not.toContain(code);
+      expect(renderedText).not.toMatch(/(?:[a-z]+\.)+[a-z_]+/i);
+      expect(renderedText).not.toMatch(/^[A-Z][A-Z_]{2,}$/);
+      expect(renderedText).not.toMatch(/^\d{3}$/);
+      // The message lives in a role="alert" so a screen reader announces it.
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
       // The success branch must NOT have fired on any error.
       expect(toastSuccess).not.toHaveBeenCalled();
       expect(pushSpy).not.toHaveBeenCalled();

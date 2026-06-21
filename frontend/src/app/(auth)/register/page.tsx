@@ -1,5 +1,8 @@
+import type { Metadata } from "next";
 import { Suspense } from "react";
 import RegisterForm, { RegisterFormSkeleton } from "./register-form";
+
+export const metadata: Metadata = { title: "Create your account" };
 
 // The form reads `?plan=` via useSearchParams() (#31), which Next.js requires
 // to live inside a <Suspense> boundary so the rest of the auth route can

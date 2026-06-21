@@ -221,11 +221,13 @@ describe("RegisterForm — signup-friction reducers (#195)", () => {
     ).toBeInTheDocument();
 
     // A paid plan must NOT promise "free, no card" — that would contradict the
-    // "$49/month" banner above it. (#195 review — user-empathy)
+    // "$49/month" banner above it. Instead it sets the honest expectation that
+    // payment comes next (the form routes paid signups to Settings billing).
+    // (#195 review — user-empathy; #316 FP-030)
     setPlanParam("pro");
     rerender(<RegisterForm />);
     expect(screen.queryByText(/no credit card/i)).toBeNull();
-    expect(screen.getByText(/cancel anytime\. no long-term contract/i)).toBeInTheDocument();
+    expect(screen.getByText(/set up payment on the next screen/i)).toBeInTheDocument();
   });
 
   it("shows a live password checklist that flips each rule's met-state as it's satisfied", () => {

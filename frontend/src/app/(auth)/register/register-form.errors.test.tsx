@@ -254,23 +254,38 @@ describe("RegisterForm — server-side error copy (#35)", () => {
       fillFullForm();
       submitFormIn(container);
 
-      await waitFor(() =>
-        expect(toastError).toHaveBeenCalledWith(message),
-      );
-      const toastText = (toastError.mock.calls[0][0] ?? "") as string;
-      // Jargon-free guard class: no dot-namespaced (auth.x, validation.y),
-      // no SCREAMING_SNAKE error codes, no bare 3-digit status string.
-      // The toHaveBeenCalledWith(message) above already pins the EXACT
-      // copy; these regex bands catch the broader class of regression
-      // where a future code (not in this table) leaked through.
-      expect(toastText).not.toContain(code);
-      expect(toastText).not.toMatch(/(?:[a-z]+\.)+[a-z_]+/i);
-      expect(toastText).not.toMatch(/^[A-Z][A-Z_]{2,}$/);
-      expect(toastText).not.toMatch(/^\d{3}$/);
+      // FP-033: server errors now persist inline (role="alert"), not as a toast.
+      // Run the jargon guards on the rendered MESSAGE element specifically — the
+      // email-taken alert also holds recovery links whose text would otherwise
+      // trip the dotted-identifier guard via "exists.Sign".
+      const msgEl = await screen.findByText(message);
+      const renderedText = msgEl.textContent ?? "";
+      expect(renderedText).not.toContain(code);
+      expect(renderedText).not.toMatch(/(?:[a-z]+\.)+[a-z_]+/i);
+      expect(renderedText).not.toMatch(/^[A-Z][A-Z_]{2,}$/);
+      expect(renderedText).not.toMatch(/^\d{3}$/);
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
       expect(toastSuccess).not.toHaveBeenCalled();
       expect(pushSpy).not.toHaveBeenCalled();
     },
   );
+
+  it("409 duplicate email offers 'Sign in instead' + 'Reset your password' exits (FP-033)", async () => {
+    server.use(
+      http.post(url("/api/auth/register"), () =>
+        jsonError("auth.email_taken", "An account with that email already exists.", { status: 409 }),
+      ),
+    );
+    const { container } = renderWithProviders(<RegisterForm />, {
+      auth: null,
+      router: { push: vi.fn() },
+    });
+    fillFullForm();
+    submitFormIn(container);
+
+    expect(await screen.findByRole("link", { name: /sign in instead/i })).toHaveAttribute("href", "/login");
+    expect(screen.getByRole("link", { name: /reset your password/i })).toHaveAttribute("href", "/forgot-password");
+  });
 });
 
 describe("RegisterForm — loading state (#35)", () => {

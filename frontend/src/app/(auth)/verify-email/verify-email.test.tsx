@@ -24,7 +24,9 @@ describe("VerifyEmailClient (#184)", () => {
 
     await waitFor(() => expect(screen.getByText("Email confirmed")).toBeInTheDocument());
     expect(screen.getByText(/thanks/i)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /continue to dashboard/i })).toBeInTheDocument();
+    // No session-hint cookie in this render → treated as logged-out, so the CTA
+    // sends them to sign in rather than bouncing them off /dashboard. (FP-037)
+    expect(screen.getByRole("link", { name: /sign in to continue/i })).toHaveAttribute("href", "/login");
   });
 
   it("invalidates the Me cache on success so the dashboard banner clears (#184 ↔ #182 seam)", async () => {
