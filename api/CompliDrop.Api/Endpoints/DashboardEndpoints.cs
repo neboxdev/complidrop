@@ -60,6 +60,18 @@ public static class DashboardEndpoints
         // fetched) instead of pulling the full vendor list on every load.
         var anyVendorWithRequirements = await db.Vendors.AnyAsync(v => v.ComplianceTemplateId != null, ct);
 
+        // One source of truth for the sample-certificate demo (#238): the dashboard CTA ("Try a
+        // sample certificate" vs "Clear sample data" banner), the onboarding checklist's document
+        // step, and the clear affordance all read these instead of each pulling the documents list.
+        // sampleDocumentId is the doc to deep-link to after seeding; hasSampleData also covers a
+        // lingering sample vendor whose doc was manually deleted, so "Clear sample data" still shows.
+        var sampleDocumentId = await docs
+            .Where(d => d.IsSample)
+            .OrderByDescending(d => d.CreatedAt)
+            .Select(d => (Guid?)d.Id)
+            .FirstOrDefaultAsync(ct);
+        var hasSampleData = sampleDocumentId != null || await db.Vendors.AnyAsync(v => v.IsSample, ct);
+
         return Results.Ok(new
         {
             data = new
@@ -72,6 +84,8 @@ public static class DashboardEndpoints
                 pendingExtraction,
                 totalVendors = vendors,
                 anyVendorWithRequirements,
+                hasSampleData,
+                sampleDocumentId,
                 complianceRate = totalDocs == 0 ? 0 : Math.Round((double)compliant / totalDocs * 100, 1)
             },
             error = (object?)null

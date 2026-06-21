@@ -83,6 +83,7 @@ builder.Services.AddScoped<ICurrentUser, CurrentUserService>();
 builder.Services.AddSingleton<IPasswordHasher, BCryptPasswordHasher>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
 builder.Services.AddSingleton<IBlobStorageService, BlobStorageService>();
+builder.Services.AddSingleton<ISampleCertificateGenerator, SampleCertificateGenerator>();
 builder.Services.AddSingleton<IFileValidationService, FileValidationService>();
 builder.Services.AddSingleton<IImageTranscoder, MagickImageTranscoder>();
 builder.Services.AddScoped<IIdempotencyService, IdempotencyService>();
@@ -410,6 +411,7 @@ app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = Dat
 app.MapWaitlistEndpoints();
 app.MapAuthEndpoints();
 app.MapDocumentEndpoints();
+app.MapSampleEndpoints();
 app.MapComplianceEndpoints();
 app.MapDashboardEndpoints();
 app.MapVendorEndpoints();

@@ -14,6 +14,15 @@ public static class ComplianceTemplateSeed
     internal static readonly Guid SystemOrgId = Guid.Parse("00000000-0000-0000-0000-000000000001");
 
     /// <summary>
+    /// Name of the system venue-type checklist the sample-certificate demo (#238) assigns to its
+    /// sample vendor. The generated sample COI is built to PASS exactly this checklist's rules
+    /// (GL ≥ $1M each-occurrence, expiration date present, workers-comp coverage present), so the
+    /// demo lands a fresh org on a real "Compliant" verdict. Kept here as the single source so the
+    /// seed below and the sample-seed endpoint can never drift on the name.
+    /// </summary>
+    internal const string SampleVendorTemplateName = "Caterer";
+
+    /// <summary>
     /// Number of system templates this seed installs. Exposed to the test project
     /// (<see cref="InternalsVisibleToAttribute"/>) so harness assertions can pin the exact count
     /// without re-declaring a brittle hand-mirror constant — adding a template here forces the
@@ -95,7 +104,7 @@ public static class ComplianceTemplateSeed
     // in lockstep with that migration's renames.
     private static readonly TemplateSeed[] Templates =
     [
-        new("Caterer",
+        new(SampleVendorTemplateName,
             "Typical insurance for a food & beverage caterer.",
             [
                 new("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000.", 1),

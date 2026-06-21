@@ -14,6 +14,8 @@ public record DocumentListItem(
     DateTime? EffectiveDate,
     DateTime? ExpirationDate,
     int? DaysUntilExpiry,
+    // True for the sample-certificate demo document (#238) so the list can badge it "Sample".
+    bool IsSample,
     DateTime CreatedAt);
 
 public record DocumentDetail(
@@ -35,6 +37,9 @@ public record DocumentDetail(
     int? DaysUntilExpiry,
     bool IsManuallyVerified,
     string? UploadedBy,
+    // True for the sample-certificate demo document (#238) so the detail page can show the
+    // "Sample" banner + one-click "Clear sample data".
+    bool IsSample,
     // No BlobStorageUrl: the raw Azure URI is private (PublicAccessType.None) and clicking it
     // always 409'd — clients view the file through GET /api/documents/{id}/file instead (#254).
     decimal? GeneralLiabilityLimit,

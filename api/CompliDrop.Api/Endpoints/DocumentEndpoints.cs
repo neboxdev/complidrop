@@ -164,6 +164,7 @@ public static class DocumentEndpoints
                 d.ComplianceStatus,
                 d.EffectiveDate,
                 d.ExpirationDate,
+                d.IsSample,
                 d.CreatedAt
             })
             .ToListAsync(ct);
@@ -181,6 +182,7 @@ public static class DocumentEndpoints
             d.ExpirationDate != null
                 ? (int?)(d.ExpirationDate.Value.Date - today).TotalDays
                 : null,
+            d.IsSample,
             d.CreatedAt)).ToList();
 
         return Results.Ok(new
@@ -235,6 +237,7 @@ public static class DocumentEndpoints
                 : null,
             doc.IsManuallyVerified,
             doc.UploadedBy,
+            doc.IsSample,
             doc.GeneralLiabilityLimit,
             doc.Fields.Select(f => new DocumentFieldDto(
                 f.Id, f.FieldName, f.FieldValue, f.FieldType, f.Confidence, f.IsManuallyEdited, f.OriginalValue)).ToArray(),
@@ -402,8 +405,10 @@ public static class DocumentEndpoints
         var sub = await sysDb.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == orgId, ct);
         if (sub is { DocumentLimit: { } limit })
         {
+            // The one-click sample-demo document (#238) is a throwaway artifact, not a customer
+            // document — it must never consume a paid plan slot, so it's excluded from the count.
             var activeCount = await sysDb.Documents
-                .CountAsync(d => d.OrganizationId == orgId && d.DeletedAt == null, ct);
+                .CountAsync(d => d.OrganizationId == orgId && d.DeletedAt == null && !d.IsSample, ct);
             if (activeCount >= limit)
                 return Error(403, "plan.limit_reached", $"Document limit of {limit} reached. Upgrade to add more.");
         }
