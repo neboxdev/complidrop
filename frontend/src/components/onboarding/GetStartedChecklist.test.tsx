@@ -114,8 +114,26 @@ describe("GetStartedChecklist — in-place tick + link-waiting (#239)", () => {
     expect(live).toHaveTextContent(""); // first render seeds the baseline, no announcement
 
     // The vendor step flips to done without any navigation — the live region announces it.
+    // Exact (not substring) so an over-announce (also announcing a second, already-done step) fails.
     rerender(<GetStartedChecklist checklist={makeChecklist([true, false, false, true])} />);
-    expect(live).toHaveTextContent("Step complete: Add your first vendor.");
+    expect(live?.textContent).toBe("Step complete: Add your first vendor.");
+  });
+
+  it("does not announce already-done steps when stats resolve from a cold cache", () => {
+    // Render 1: the loading placeholder (isLoading true → card hidden, every step reads incomplete).
+    const loading: OnboardingChecklist = {
+      steps: makeChecklist([false, false, false, false]).steps,
+      completedCount: 0,
+      isComplete: false,
+      isLoading: true,
+      linkSentWaiting: false,
+    };
+    const { rerender } = renderWithProviders(<GetStartedChecklist checklist={loading} />, { auth: null });
+
+    // Render 2: real data lands with vendor + requirements ALREADY done — these must NOT be
+    // announced as fresh ticks (the loading render must not have seeded a false baseline).
+    rerender(<GetStartedChecklist checklist={makeChecklist([true, true, false, true])} />);
+    expect(document.querySelector('[aria-live="polite"]')?.textContent).toBe("");
   });
 
   it("shows 'link sent — waiting' on the document step when a link is out but no document yet", async () => {

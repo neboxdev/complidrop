@@ -86,6 +86,34 @@ describe("DocumentDetailPage — what we checked (#239)", () => {
     expect(await screen.findByText(/why isn.t this compliant/i)).toBeInTheDocument();
     expect(screen.queryByText(/what we checked/i)).toBeNull();
   });
+
+  it("does not show the checked card when a document has no recorded checks", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(makeDocumentDetail({ id: "d_none", documentType: "coi", extractionStatus: "Completed", complianceStatus: "Compliant", complianceChecks: [] })),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_none" } });
+
+    // Wait for load to settle, then confirm neither verdict card renders (no rules → nothing to show).
+    await waitFor(() => expect(screen.queryByText(/loading document/i)).not.toBeInTheDocument());
+    expect(screen.queryByText(/what we checked/i)).toBeNull();
+    expect(screen.queryByText(/why isn.t this compliant/i)).toBeNull();
+  });
+
+  it("explains the Verified tile when a document hasn't been hand-verified", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(makeDocumentDetail({ id: "d_nv", extractionStatus: "Completed", isManuallyVerified: false })),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_nv" } });
+
+    expect(await screen.findByText(/optional: confirm the read fields look right/i)).toBeInTheDocument();
+    expect(screen.getByText(/^not yet$/i)).toBeInTheDocument();
+  });
 });
 
 describe("DocumentDetailPage — sample banner (#238)", () => {

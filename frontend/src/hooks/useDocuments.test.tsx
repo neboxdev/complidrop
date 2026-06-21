@@ -36,6 +36,7 @@ import {
   sequencedJsonOk,
 } from "@/test";
 import { api, ApiError } from "@/lib/api";
+import { useDashboardStats } from "./useDashboard";
 
 // Analytics module is imported by useUploadDocument's onSuccess.
 const { track } = vi.hoisted(() => ({ track: vi.fn() }));
@@ -406,6 +407,32 @@ describe("useUploadDocument / useDeleteDocument — cache invalidation (#36)", (
       "document.uploaded",
       expect.objectContaining({ documentId: "d_new_01" }),
     );
+  });
+
+  it("upload also invalidates ['dashboard'] so the onboarding checklist ticks in place (#239)", async () => {
+    // The wiring that ticks the checklist after an upload WITHOUT a manual dismissal — a regression
+    // dropping the dashboard invalidation must fail here.
+    let statsCalls = 0;
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => {
+        statsCalls++;
+        return jsonOk({ totalDocuments: 0 });
+      }),
+      http.post(url("/api/documents/upload"), () =>
+        jsonOk({ id: "d_new_01", originalFileName: "new.pdf", extractionStatus: "Pending" }),
+      ),
+    );
+
+    const { Wrapper } = createTestWrapper();
+    const stats = renderHook(() => useDashboardStats(), { wrapper: Wrapper });
+    await waitFor(() => expect(stats.result.current.isSuccess).toBe(true));
+    expect(statsCalls).toBe(1);
+
+    const upload = renderHook(() => useUploadDocument(), { wrapper: Wrapper });
+    await upload.result.current.mutateAsync({
+      file: new File(["x"], "new.pdf", { type: "application/pdf" }),
+    });
+    await waitFor(() => expect(statsCalls).toBe(2));
   });
 
   it("delete onSuccess invalidates ['documents'] so the next list read refetches", async () => {

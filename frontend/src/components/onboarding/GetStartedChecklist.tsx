@@ -120,6 +120,11 @@ export function GetStartedChecklist({ checklist }: { checklist: OnboardingCheckl
   const liveRef = useRef<HTMLDivElement>(null);
   const prevDone = useRef<Record<string, boolean> | null>(null);
   useEffect(() => {
+    // Don't seed or compare against the LOADING render's placeholder state (every step
+    // reads done:false while stats are in flight). Otherwise, on a cold cache, the first
+    // real data render would announce every already-completed step as a fresh tick. The
+    // first LOADED render becomes the true baseline; only genuine transitions announce.
+    if (isLoading) return;
     const prev = prevDone.current;
     if (prev) {
       const newly = steps.filter((step) => step.done && prev[step.key] === false).map((step) => step.label);
@@ -128,9 +133,9 @@ export function GetStartedChecklist({ checklist }: { checklist: OnboardingCheckl
       }
     }
     prevDone.current = Object.fromEntries(steps.map((step) => [step.key, step.done]));
-    // doneKey is the real trigger; reading `steps` for labels is intentional.
+    // doneKey + isLoading are the triggers; reading `steps` for labels is intentional.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doneKey]);
+  }, [doneKey, isLoading]);
 
   if (isLoading || isComplete) return null;
 

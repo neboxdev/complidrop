@@ -9,7 +9,7 @@ import { describe, it, expect } from "vitest";
 import { http } from "msw";
 import { screen, fireEvent, waitFor } from "@testing-library/react";
 import ExportPage from "./page";
-import { renderWithProviders, server, url, jsonOk, authedMe } from "@/test";
+import { renderWithProviders, server, url, jsonOk, jsonError, authedMe } from "@/test";
 
 // sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
 
@@ -82,5 +82,13 @@ describe("ExportPage — empty state (#239)", () => {
     await waitFor(() =>
       expect(screen.queryByText(/your audit report will appear here/i)).not.toBeInTheDocument(),
     );
+  });
+
+  it("keeps the download cards when the stats read fails (a transient outage must not hide export)", async () => {
+    server.use(http.get(url("/api/dashboard/stats"), () => jsonError("server.error", "down", { status: 500 })));
+    renderWithProviders(<ExportPage />, { auth: authedMe });
+
+    expect(await screen.findByRole("button", { name: /download pdf/i })).toBeInTheDocument();
+    expect(screen.queryByText(/your audit report will appear here/i)).toBeNull();
   });
 });

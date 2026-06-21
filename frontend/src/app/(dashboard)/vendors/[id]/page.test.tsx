@@ -85,6 +85,23 @@ describe("VendorDetailPage — requirement contents at decision time (#239)", ()
     expect(screen.getByText(/at least \$1,000,000 in general liability/i)).toBeInTheDocument();
     expect(screen.getByText(/workers' compensation coverage/i)).toBeInTheDocument();
   });
+
+  it("tells the user to add requirements when the assigned checklist has none", async () => {
+    const vendorWithEmpty = { ...VENDOR_DETAIL, complianceTemplateId: "t_empty", complianceTemplateName: "Empty" };
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(vendorWithEmpty)),
+      http.get(url("/api/compliance/templates"), () =>
+        jsonOk([{ id: "t_empty", name: "Empty", isSystemTemplate: false }]),
+      ),
+      http.get(url("/api/compliance/templates/t_empty"), () =>
+        jsonOk({ id: "t_empty", name: "Empty", isSystemTemplate: false, rules: [] }),
+      ),
+    );
+
+    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
+
+    expect(await screen.findByText(/this checklist has no requirements yet/i)).toBeInTheDocument();
+  });
 });
 
 describe("VendorDetailPage — smoke (#36)", () => {

@@ -27,6 +27,7 @@ import {
   type VendorDetail,
   type VendorSummary,
 } from "./useVendors";
+import { useDashboardStats } from "./useDashboard";
 import { createTestWrapper, server, url, jsonOk, jsonError } from "@/test";
 import { ApiError } from "@/lib/api";
 
@@ -251,6 +252,29 @@ describe("useCreateVendor / useUpdateVendor / useDeleteVendor — cache invalida
     const del = renderHook(() => useDeleteVendor(), { wrapper: Wrapper });
     await del.result.current.mutateAsync("v_acme_01");
     await waitFor(() => expect(listCalls).toBe(2));
+  });
+
+  it("create also invalidates ['dashboard'] so the onboarding checklist ticks in place (#239)", async () => {
+    // This is the wiring that makes the checklist tick WITHOUT a manual dismissal — a regression
+    // dropping the dashboard invalidation must fail loudly here.
+    let statsCalls = 0;
+    server.use(
+      http.get(url("/api/vendors"), () => jsonOk(VENDORS)),
+      http.get(url("/api/dashboard/stats"), () => {
+        statsCalls++;
+        return jsonOk({ totalVendors: 0 });
+      }),
+      http.post(url("/api/vendors"), () => jsonOk({ id: "v_new_01" })),
+    );
+
+    const { Wrapper } = createTestWrapper();
+    const stats = renderHook(() => useDashboardStats(), { wrapper: Wrapper });
+    await waitFor(() => expect(stats.result.current.isSuccess).toBe(true));
+    expect(statsCalls).toBe(1);
+
+    const create = renderHook(() => useCreateVendor(), { wrapper: Wrapper });
+    await create.result.current.mutateAsync({ name: "New Sub" });
+    await waitFor(() => expect(statsCalls).toBe(2));
   });
 });
 
