@@ -84,7 +84,7 @@ export function WelcomeModal({ open, onClose }: { open: boolean; onClose: () => 
                 <button
                   type="button"
                   aria-label="Skip the tour"
-                  className="-mr-1 -mt-1 shrink-0 rounded-md p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                  className="-mr-1 -mt-1 shrink-0 rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-700 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                 />
               }
             >

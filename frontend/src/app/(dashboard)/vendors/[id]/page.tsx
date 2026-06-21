@@ -165,7 +165,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                 id={templateSelectId}
                 value={form.complianceTemplateId}
                 onChange={(e) => setForm({ ...form, complianceTemplateId: e.target.value })}
-                className="mt-1 w-full border border-slate-200 rounded-md h-9 px-2 text-sm"
+                className="mt-1 w-full border border-input rounded-md h-9 px-2 text-sm focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <option value="">— No requirements set —</option>
                 {(templates.data ?? []).map((t) => (
@@ -331,7 +331,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                   <span className="text-xs text-slate-500">{l.uploadCount}/{l.maxUploads} uploads</span>
                   {l.isActive && (
                     <Button size="sm" variant="ghost" aria-label="Revoke link" onClick={() => revoke.mutate(l.id)}>
-                      <XCircle className="w-4 h-4 text-slate-400 hover:text-rose-600" />
+                      <XCircle className="w-4 h-4 text-slate-500 hover:text-rose-600" />
                     </Button>
                   )}
                 </li>

@@ -704,7 +704,7 @@ function SummaryCell({ label, value, hint }: { label: string; value: React.React
       <CardContent className="p-4 space-y-1">
         <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
         <div className="text-sm font-medium text-slate-900">{value}</div>
-        {hint && <p className="text-[11px] leading-tight text-slate-400">{hint}</p>}
+        {hint && <p className="text-[11px] leading-tight text-slate-500">{hint}</p>}
       </CardContent>
     </Card>
   );

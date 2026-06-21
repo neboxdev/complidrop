@@ -237,13 +237,13 @@ export default function RegisterForm() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label htmlFor={industryId} className="text-sm font-medium text-slate-700">
-                Industry <span className="font-normal text-slate-400">(optional)</span>
+                Industry <span className="font-normal text-slate-500">(optional)</span>
               </label>
               <Input {...r("industry")} id={industryId} placeholder="Construction, healthcare…" className="mt-1" />
             </div>
             <div>
               <label htmlFor={companySizeId} className="text-sm font-medium text-slate-700">
-                Size <span className="font-normal text-slate-400">(optional)</span>
+                Size <span className="font-normal text-slate-500">(optional)</span>
               </label>
               <Input {...r("companySize")} id={companySizeId} placeholder="10-30" className="mt-1" />
             </div>

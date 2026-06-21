@@ -66,7 +66,7 @@ const EXPIRY_FILTERS: ReadonlyArray<{ value: string; label: string }> = [
 ];
 
 const FILTER_SELECT_CLASS =
-  "h-9 rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-500/40";
+  "h-9 rounded-md border border-input bg-white px-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-ring";
 
 export default function DocumentsPage() {
   // --- list controls (#187) ---
@@ -247,6 +247,7 @@ export default function DocumentsPage() {
             {...getRootProps()}
             className={cn(
               "border-2 border-dashed rounded-lg p-10 text-center transition cursor-pointer",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
               isDragActive ? "border-sky-500 bg-sky-50" : "border-slate-200 hover:border-sky-300 hover:bg-sky-50/50",
             )}
           >
@@ -293,7 +294,7 @@ export default function DocumentsPage() {
                     disabled={isUploading}
                     onClick={() => setStaged((prev) => prev.filter((_, idx) => idx !== i))}
                   >
-                    <X className="h-4 w-4 text-slate-400 hover:text-rose-600" />
+                    <X className="h-4 w-4 text-slate-500 hover:text-rose-600" />
                   </Button>
                 </li>
               ))}
@@ -622,7 +623,7 @@ export default function DocumentsPage() {
                             aria-label={`Remove ${d.originalFileName}`}
                             disabled={del.isPending}
                           >
-                            <Trash2 className="w-4 h-4 text-slate-400 hover:text-rose-600" />
+                            <Trash2 className="w-4 h-4 text-slate-500 hover:text-rose-600" />
                           </Button>
                         }
                       />

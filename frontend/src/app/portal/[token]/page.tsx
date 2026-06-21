@@ -91,7 +91,7 @@ function PortalLoadingSkeleton() {
           <div className="mx-auto mt-4 h-4 w-56 rounded bg-slate-200/60 motion-safe:animate-pulse" />
           <div className="mx-auto mt-2 h-3 w-40 rounded bg-slate-200/50 motion-safe:animate-pulse" />
         </div>
-        <p className="text-center text-xs text-slate-400">
+        <p className="text-center text-xs text-slate-500">
           Powered by <span className="font-semibold text-sky-700">CompliDrop</span>
         </p>
       </div>
@@ -336,7 +336,7 @@ export default function PortalPage() {
         <div
           {...getRootProps()}
           aria-disabled={atQuota || undefined}
-          className={`bg-white border-2 border-dashed rounded-xl p-10 text-center shadow-sm transition ${
+          className={`bg-white border-2 border-dashed rounded-xl p-10 text-center shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
             atQuota
               ? "border-slate-200 opacity-60 cursor-not-allowed"
               : isDragActive

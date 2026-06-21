@@ -533,7 +533,7 @@ function RequirementRow({
               aria-label={`Edit requirement: ${requirementSentence(rule)}`}
               onClick={() => setEditing(true)}
             >
-              <Pencil className="h-4 w-4 text-slate-400 hover:text-sky-600" />
+              <Pencil className="h-4 w-4 text-slate-500 hover:text-sky-600" />
             </Button>
           )}
           <Button
@@ -542,7 +542,7 @@ function RequirementRow({
             aria-label={`Remove requirement: ${requirementSentence(rule)}`}
             onClick={onRemove}
           >
-            <Trash2 className="h-4 w-4 text-slate-400 hover:text-rose-600" />
+            <Trash2 className="h-4 w-4 text-slate-500 hover:text-rose-600" />
           </Button>
         </div>
       )}
@@ -611,7 +611,7 @@ function AddRequirement({ onAdd }: { onAdd: (rule: RulePayload) => void }) {
       </div>
       {REQUIREMENT_GROUPS.map((group) => (
         <div key={group}>
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">{group}</p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{group}</p>
           <div className="mt-1 space-y-1">
             {REQUIREMENT_TYPES.filter((t) => t.group === group).map((t) => (
               <button
@@ -726,7 +726,7 @@ function RequirementValueForm({
         <Button size="sm" variant="ghost" onClick={onCancel}>
           Cancel
         </Button>
-        {!ready && disabledReason && <span className="text-xs text-slate-400">{disabledReason}</span>}
+        {!ready && disabledReason && <span className="text-xs text-slate-500">{disabledReason}</span>}
       </div>
     </div>
   );
