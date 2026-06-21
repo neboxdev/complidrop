@@ -38,6 +38,84 @@ import { api } from "@/lib/api";
 // (#122) — `resetSonner()` runs in the harness `afterEach` so call
 // counts never leak between tests.
 
+describe("DocumentDetailPage — what we checked (#239)", () => {
+  it("lists the met requirements in plain English for a compliant document", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_ok",
+            documentType: "coi",
+            extractionStatus: "Completed",
+            complianceStatus: "Compliant",
+            complianceChecks: [
+              makeComplianceCheck({ id: "c1", ruleFieldName: "general_liability_limit", ruleOperator: "min_value", ruleExpectedValue: "1000000", isPassed: true }),
+              makeComplianceCheck({ id: "c2", ruleFieldName: "workers_comp_limit", ruleOperator: "required", ruleExpectedValue: null, isPassed: true }),
+            ],
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_ok" } });
+
+    expect(await screen.findByText(/what we checked/i)).toBeInTheDocument();
+    expect(screen.getByText(/at least \$1,000,000 in general liability/i)).toBeInTheDocument();
+    expect(screen.getByText(/workers' compensation coverage/i)).toBeInTheDocument();
+  });
+
+  it("shows the non-compliance explainer (not the checked card) when a requirement failed", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_bad",
+            documentType: "coi",
+            extractionStatus: "Completed",
+            complianceStatus: "NonCompliant",
+            complianceChecks: [
+              makeComplianceCheck({ id: "c1", ruleFieldName: "general_liability_limit", ruleOperator: "min_value", ruleExpectedValue: "1000000", isPassed: false }),
+            ],
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_bad" } });
+
+    expect(await screen.findByText(/why isn.t this compliant/i)).toBeInTheDocument();
+    expect(screen.queryByText(/what we checked/i)).toBeNull();
+  });
+
+  it("does not show the checked card when a document has no recorded checks", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(makeDocumentDetail({ id: "d_none", documentType: "coi", extractionStatus: "Completed", complianceStatus: "Compliant", complianceChecks: [] })),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_none" } });
+
+    // Wait for load to settle, then confirm neither verdict card renders (no rules → nothing to show).
+    await waitFor(() => expect(screen.queryByText(/loading document/i)).not.toBeInTheDocument());
+    expect(screen.queryByText(/what we checked/i)).toBeNull();
+    expect(screen.queryByText(/why isn.t this compliant/i)).toBeNull();
+  });
+
+  it("explains the Verified tile when a document hasn't been hand-verified", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(makeDocumentDetail({ id: "d_nv", extractionStatus: "Completed", isManuallyVerified: false })),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_nv" } });
+
+    expect(await screen.findByText(/optional: confirm the read fields look right/i)).toBeInTheDocument();
+    expect(screen.getByText(/^not yet$/i)).toBeInTheDocument();
+  });
+});
+
 describe("DocumentDetailPage — sample banner (#238)", () => {
   it("shows the sample banner and clears + redirects to /documents on a sample doc", async () => {
     const push = vi.fn();

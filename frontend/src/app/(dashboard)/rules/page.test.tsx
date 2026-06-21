@@ -62,6 +62,37 @@ const SUGGESTED = {
   vendorCount: 0,
 };
 
+describe("RulesPage — assigned-template seam (#239)", () => {
+  it("acknowledges an in-use suggested checklist instead of 'None yet'", async () => {
+    const inUse = {
+      id: "t_sys_caterer",
+      name: "Caterer",
+      description: "Suggested",
+      isSystemTemplate: true,
+      ruleCount: 3,
+      vendorCount: 1,
+    };
+    server.use(http.get(url("/api/compliance/templates"), () => jsonOk([inUse])));
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+
+    // The #237 seam: "Your checklists — None yet" while a system checklist is assigned. Healed.
+    expect(await screen.findByText(/you.re using a suggested checklist/i)).toBeInTheDocument();
+    expect(screen.queryByText(/none yet/i)).toBeNull();
+
+    // The assigned suggested checklist is now visibly "In use" with its vendor usage.
+    expect(screen.getByText(/^in use$/i)).toBeInTheDocument();
+    expect(screen.getByText(/used by 1 vendor/i)).toBeInTheDocument();
+  });
+
+  it("keeps 'None yet' when no suggested checklist is in use", async () => {
+    server.use(http.get(url("/api/compliance/templates"), () => jsonOk([SUGGESTED])));
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+
+    expect(await screen.findByText(/none yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^in use$/i)).toBeNull();
+  });
+});
+
 describe("RulesPage — smoke + reframe (#192)", () => {
   it("renders the 'Vendor requirements' header and lists suggested checklists", async () => {
     server.use(http.get(url("/api/compliance/templates"), () => jsonOk([SUGGESTED])));

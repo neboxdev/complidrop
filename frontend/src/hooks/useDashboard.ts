@@ -15,6 +15,10 @@ export type DashboardStats = {
    * "Get started" checklist step 2) — derived server-side so the dashboard
    * doesn't have to pull the full vendor list. */
   anyVendorWithRequirements: boolean;
+  /** True when the org has at least one ACTIVE vendor portal upload link (#239 delta 3) —
+   * drives the checklist's "Link sent — waiting for their upload" state so the funnel
+   * doesn't go quiet while waiting on a vendor. */
+  anyActivePortalLink: boolean;
   /** True when the org has live sample-demo data (#238) — drives the dashboard's
    * "Try a sample certificate" CTA vs. the "Clear sample data" banner. */
   hasSampleData: boolean;

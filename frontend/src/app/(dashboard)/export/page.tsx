@@ -1,17 +1,26 @@
 "use client";
 
 import { useId, useState } from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 import { FileText, FileSpreadsheet, Calendar } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { useDashboardStats } from "@/hooks/useDashboard";
+import { cn } from "@/lib/utils";
 
 export default function ExportPage() {
   const [from, setFrom] = useState(isoDaysAgo(30));
   const [to, setTo] = useState(isoDaysAgo(0));
   const [busy, setBusy] = useState(false);
+  const stats = useDashboardStats();
+  // Teach when there's nothing to export yet (#239 delta 5) instead of dead-ending on
+  // download buttons that produce an empty report. Gate on a SUCCESSFUL zero read — while
+  // stats are loading or errored (data undefined) keep the export cards so a transient
+  // outage never hides the feature from an org that DOES have documents.
+  const hasDocuments = stats.data ? stats.data.totalDocuments > 0 : true;
   // yyyy-MM-dd strings compare correctly as strings; empty inputs don't block.
   const rangeInverted = Boolean(from && to && from > to);
   // a11y: wire the From/To date inputs to their labels via htmlFor +
@@ -57,6 +66,24 @@ export default function ExportPage() {
         <p className="text-slate-500">Download audit-ready reports and raw data.</p>
       </header>
 
+      {!hasDocuments ? (
+        <Card>
+          <CardContent className="p-8 text-center space-y-3">
+            <FileText className="mx-auto h-8 w-8 text-slate-300" />
+            <div>
+              <h2 className="text-base font-semibold text-slate-800">Your audit report will appear here</h2>
+              <p className="mx-auto mt-1 max-w-md text-sm text-slate-500">
+                Once your first document is in, you can download an audit-ready PDF or a CSV of every
+                document and its compliance status.
+              </p>
+            </div>
+            <Link href="/documents" className={cn(buttonVariants({ size: "sm" }))}>
+              Collect your first document
+            </Link>
+          </CardContent>
+        </Card>
+      ) : (
+        <>
       <Card>
         <CardContent className="p-6 space-y-4">
           <div className="flex items-center gap-2">
@@ -128,6 +155,8 @@ export default function ExportPage() {
           </Button>
         </CardContent>
       </Card>
+        </>
+      )}
     </div>
   );
 }

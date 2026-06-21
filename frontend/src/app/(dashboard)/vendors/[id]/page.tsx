@@ -3,11 +3,12 @@
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
-import { ArrowLeft, AlertTriangle, Copy, Link as LinkIcon, Mail, XCircle } from "lucide-react";
+import { ArrowLeft, AlertTriangle, Check, Copy, Link as LinkIcon, Mail, XCircle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { requirementSentence } from "@/lib/requirements";
 import {
   useVendor,
   useGeneratePortalLink,
@@ -22,6 +23,18 @@ import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { useId, useState } from "react";
 
 type TemplateSummary = { id: string; name: string; isSystemTemplate: boolean };
+
+type TemplateRule = {
+  id: string;
+  documentType: string;
+  fieldName: string | null;
+  operator: string;
+  expectedValue: string | null;
+  errorMessage: string | null;
+  sortOrder: number;
+};
+
+type TemplateDetail = { id: string; name: string; isSystemTemplate: boolean; rules: TemplateRule[] };
 
 export default function VendorDetailPage() {
   const params = useParams<{ id: string }>();
@@ -120,6 +133,18 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
   // needs its id at this level so the label can reference it.
   const templateSelectId = useId();
 
+  // Show what the chosen checklist checks AT DECISION TIME (#239 delta 1) — the
+  // highest-leverage gap the #237 audit found: Pat used to assign a checklist on
+  // faith, with nothing on the path ever revealing what it requires. Keyed on the
+  // (possibly unsaved) selected id so it updates the moment she picks, and shares
+  // the ["templates", id] cache with the /rules detail view.
+  const selectedTemplate = useQuery<TemplateDetail>({
+    queryKey: ["templates", form.complianceTemplateId],
+    queryFn: ({ signal }) =>
+      api.get<TemplateDetail>(`/api/compliance/templates/${form.complianceTemplateId}`, { signal }),
+    enabled: form.complianceTemplateId !== "",
+  });
+
   return (
     <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
       <Link href="/vendors" className="inline-flex items-center gap-1 text-sm text-sky-700">
@@ -150,7 +175,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
               <p className="mt-1 text-xs text-slate-500">
                 Pick the checklist for their type — we check every document against it.
               </p>
-              {form.complianceTemplateId === "" && (
+              {form.complianceTemplateId === "" ? (
                 <p
                   role="status"
                   className="mt-2 flex items-start gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-800"
@@ -161,6 +186,37 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                     or not until you choose one.
                   </span>
                 </p>
+              ) : (
+                <div
+                  role="status"
+                  className="mt-2 rounded-md border border-emerald-100 bg-emerald-50/60 px-3 py-2.5 text-xs text-emerald-900"
+                >
+                  {selectedTemplate.isLoading || !selectedTemplate.data ? (
+                    <span className="text-emerald-800/70">Loading what this checklist requires…</span>
+                  ) : selectedTemplate.data.rules.length === 0 ? (
+                    <span>
+                      This checklist has no requirements yet — add some on the{" "}
+                      <Link href="/rules" className="font-medium underline">
+                        requirements page
+                      </Link>
+                      .
+                    </span>
+                  ) : (
+                    <>
+                      <p className="font-medium">We&apos;ll check every document for:</p>
+                      <ul className="mt-1 space-y-1">
+                        {[...selectedTemplate.data.rules]
+                          .sort((a, b) => a.sortOrder - b.sortOrder)
+                          .map((r) => (
+                            <li key={r.id} className="flex gap-1.5">
+                              <Check className="mt-0.5 h-3 w-3 shrink-0 text-emerald-600" aria-hidden="true" />
+                              <span>{requirementSentence(r)}</span>
+                            </li>
+                          ))}
+                      </ul>
+                    </>
+                  )}
+                </div>
               )}
               {templates.data && templates.data.length === 0 && (
                 <p className="mt-2 text-xs">

@@ -52,6 +52,58 @@ const VENDOR_DETAIL = {
   updatedAt: "2026-05-26T00:00:00Z",
 };
 
+describe("VendorDetailPage — requirement contents at decision time (#239)", () => {
+  it("shows what the chosen checklist checks, in plain English", async () => {
+    const vendorWithTemplate = {
+      ...VENDOR_DETAIL,
+      complianceTemplateId: "t_caterer",
+      complianceTemplateName: "Caterer",
+    };
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(vendorWithTemplate)),
+      http.get(url("/api/compliance/templates"), () =>
+        jsonOk([{ id: "t_caterer", name: "Caterer", isSystemTemplate: true }]),
+      ),
+      http.get(url("/api/compliance/templates/t_caterer"), () =>
+        jsonOk({
+          id: "t_caterer",
+          name: "Caterer",
+          isSystemTemplate: true,
+          rules: [
+            { id: "r1", documentType: "coi", fieldName: "general_liability_limit", operator: "min_value", expectedValue: "1000000", errorMessage: null, sortOrder: 1 },
+            { id: "r2", documentType: "coi", fieldName: "workers_comp_limit", operator: "required", expectedValue: null, errorMessage: null, sortOrder: 2 },
+          ],
+        }),
+      ),
+    );
+
+    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
+
+    // The "We'll check every document for:" panel renders the chosen checklist's rules as
+    // plain, money-formatted sentences — the #237 highest-leverage gap (assign on faith).
+    expect(await screen.findByText(/we'll check every document for/i)).toBeInTheDocument();
+    expect(screen.getByText(/at least \$1,000,000 in general liability/i)).toBeInTheDocument();
+    expect(screen.getByText(/workers' compensation coverage/i)).toBeInTheDocument();
+  });
+
+  it("tells the user to add requirements when the assigned checklist has none", async () => {
+    const vendorWithEmpty = { ...VENDOR_DETAIL, complianceTemplateId: "t_empty", complianceTemplateName: "Empty" };
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(vendorWithEmpty)),
+      http.get(url("/api/compliance/templates"), () =>
+        jsonOk([{ id: "t_empty", name: "Empty", isSystemTemplate: false }]),
+      ),
+      http.get(url("/api/compliance/templates/t_empty"), () =>
+        jsonOk({ id: "t_empty", name: "Empty", isSystemTemplate: false, rules: [] }),
+      ),
+    );
+
+    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: "v_acme_01" } });
+
+    expect(await screen.findByText(/this checklist has no requirements yet/i)).toBeInTheDocument();
+  });
+});
+
 describe("VendorDetailPage — smoke (#36)", () => {
   it("loading: renders the loading copy while fetch is in flight", () => {
     const settled = new Promise<void>(() => {});
@@ -138,6 +190,11 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
     server.use(
       http.get(url("/api/vendors/:id"), () => jsonOk(vendor)),
       http.get(url("/api/compliance/templates"), () => jsonOk(templates)),
+      // The page now fetches the SELECTED template's detail to show what it checks (#239);
+      // answer it generically so a test that assigns a template doesn't hit an unhandled request.
+      http.get(url("/api/compliance/templates/:tid"), ({ params }) =>
+        jsonOk({ id: params.tid, name: "Checklist", isSystemTemplate: true, rules: [] }),
+      ),
     );
     return renderWithProviders(<VendorDetailPage />, {
       auth: authedMe,

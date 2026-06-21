@@ -118,6 +118,7 @@ export function useUploadDocument() {
     onSuccess: (res) => {
       track("document.uploaded", { documentId: res.id, extractionStatus: res.extractionStatus });
       qc.invalidateQueries({ queryKey: ["documents"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] }); // tick the onboarding checklist in place (#239)
     },
   });
 }
@@ -146,7 +147,10 @@ export function useUpdateDocument() {
     // detail observer (['documents', id]) so the assigned vendor / changed type
     // AND the recomputed compliance verdict refresh together. Call sites own
     // their own success/error toasts (no meta.errorToast) for precise copy.
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["documents"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["documents"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] }); // tick the onboarding checklist in place (#239)
+    },
   });
 }
 
@@ -154,6 +158,9 @@ export function useDeleteDocument() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.delete<void>(`/api/documents/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["documents"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["documents"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] }); // tick the onboarding checklist in place (#239)
+    },
   });
 }
