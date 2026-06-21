@@ -477,8 +477,32 @@ describe("PortalPage — happy upload + partial-batch failure (#37)", () => {
     expect(screen.getByText("coi.pdf")).toBeInTheDocument();
     expect(screen.getByText(/processing…/i)).toBeInTheDocument();
     // "What happens next" closes the loop for a cold vendor (#240) — no silent "did it work?".
-    expect(screen.getByText(/they.ll review your document/i)).toBeInTheDocument();
+    // "document and" (not "documents and") pins the SINGULAR branch — it can't pass on plural output.
+    expect(screen.getByText(/review your document and reach out/i)).toBeInTheDocument();
     expect(screen.getByText(/you can close this page/i)).toBeInTheDocument();
+  });
+
+  it("two successful uploads: the 'what happens next' copy uses the plural 'documents'", async () => {
+    let n = 0;
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () =>
+        jsonOk({ uploadId: `u_${n++}`, extractionStatus: "Pending", message: "Received" }),
+      ),
+    );
+
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+
+    dropFiles([makeFile("coi.pdf"), makeFile("license.pdf")]);
+
+    await waitFor(() =>
+      expect(screen.getByText(/review your documents and reach out/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByText("coi.pdf")).toBeInTheDocument();
+    expect(screen.getByText("license.pdf")).toBeInTheDocument();
   });
 
   it("partial-batch failure: 3 files, 2nd fails → 1st in Received, 3rd never attempted, failed file ABSENT from Received", async () => {

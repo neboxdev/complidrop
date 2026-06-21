@@ -38,7 +38,7 @@
 |---|---|---|
 | Collect a document (owner) | self-serve OK | Upload / send a link / **try a sample** (#238); the checklist shows "link sent — waiting" (#239) so the funnel never goes quiet |
 | Upload rejected (type / size / unreadable) | self-serve OK | `rejectionCopy` says what to do ("upload a PDF or a photo…", "take it again from further back…") — owner AND portal share it |
-| Storage outage | self-serve OK | Friendly 503 "we couldn't store your file just now. Please try again in a few minutes." (owner + portal, #248) |
+| Storage outage | self-serve OK | Friendly 503 on both personas, "Please try again in a few minutes." (#248) — owner: "We couldn't **store** your file just now…"; portal: "We couldn't **save** your file just now…" |
 | Extraction failed | self-serve OK | Per-cause copy ("try a clearer copy" / "press Read again next month" / "try again") + optional Contact-support link |
 | Plan document limit | self-serve OK | "Document limit of N reached. Upgrade to add more." → billing |
 | Vendor portal — cold open | self-serve OK | "Hi {vendor} / {org} asked for your latest compliance documents"; owner's instructions rendered; "no account or password needed" |
