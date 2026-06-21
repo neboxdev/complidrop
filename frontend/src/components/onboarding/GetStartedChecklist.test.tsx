@@ -27,7 +27,13 @@ function makeChecklist(done: boolean[]): OnboardingChecklist {
   ];
   const steps = labels.map((l, i) => ({ ...l, hint: "", done: done[i] }));
   const completedCount = steps.filter((s) => s.done).length;
-  return { steps, completedCount, isComplete: completedCount === steps.length, isLoading: false };
+  return {
+    steps,
+    completedCount,
+    isComplete: completedCount === steps.length,
+    isLoading: false,
+    linkSentWaiting: false,
+  };
 }
 
 describe("GetStartedChecklist (#191)", () => {
@@ -94,6 +100,49 @@ describe("GetStartedChecklist (#191)", () => {
 
     renderWithProviders(<ChecklistHarness />, { auth: authedMe });
     expect(screen.queryByText("Get started")).toBeNull();
+  });
+});
+
+describe("GetStartedChecklist — in-place tick + link-waiting (#239)", () => {
+  it("announces a step ticking in place via aria-live", () => {
+    const { rerender } = renderWithProviders(
+      <GetStartedChecklist checklist={makeChecklist([false, false, false, true])} />,
+      { auth: null },
+    );
+    const live = document.querySelector('[aria-live="polite"]');
+    expect(live).not.toBeNull();
+    expect(live).toHaveTextContent(""); // first render seeds the baseline, no announcement
+
+    // The vendor step flips to done without any navigation — the live region announces it.
+    rerender(<GetStartedChecklist checklist={makeChecklist([true, false, false, true])} />);
+    expect(live).toHaveTextContent("Step complete: Add your first vendor.");
+  });
+
+  it("shows 'link sent — waiting' on the document step when a link is out but no document yet", async () => {
+    server.use(
+      http.get(url("/api/dashboard/stats"), () =>
+        jsonOk({
+          totalDocuments: 0,
+          compliant: 0,
+          nonCompliant: 0,
+          expiringSoon: 0,
+          expired: 0,
+          pendingExtraction: 0,
+          totalVendors: 1,
+          anyVendorWithRequirements: true,
+          anyActivePortalLink: true,
+          hasSampleData: false,
+          sampleDocumentId: null,
+          complianceRate: 0,
+        }),
+      ),
+    );
+
+    renderWithProviders(<ChecklistHarness />, { auth: authedMe });
+
+    expect(
+      await screen.findByText(/upload link sent — waiting for your vendor to upload/i),
+    ).toBeInTheDocument();
   });
 });
 

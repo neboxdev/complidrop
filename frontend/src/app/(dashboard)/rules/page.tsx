@@ -22,6 +22,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 
 type TemplateSummary = {
   id: string;
@@ -156,6 +157,10 @@ export default function RulesPage() {
   const all = useMemo(() => templates.data ?? [], [templates.data]);
   const yours = all.filter((t) => !t.isSystemTemplate);
   const suggested = all.filter((t) => t.isSystemTemplate);
+  // Heal the #237 seam (#239 delta 2): a system template assigned to a vendor used to
+  // leave "Your checklists — None yet" reading as "you have nothing", with the assigned
+  // checklist invisible. Acknowledge any in-use suggested checklist so Pat can find it.
+  const suggestedInUse = suggested.some((t) => t.vendorCount > 0);
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
@@ -185,7 +190,9 @@ export default function RulesPage() {
             </h2>
             {yours.length === 0 ? (
               <p className="text-sm text-slate-500">
-                None yet — create one above, or start from a suggested checklist below.
+                {suggestedInUse
+                  ? "You’re using a suggested checklist (below). Create your own above, or open it and click “Use this” for an editable copy."
+                  : "None yet — create one above, or start from a suggested checklist below."}
               </p>
             ) : (
               yours.map((t) => (
@@ -316,9 +323,19 @@ function SuggestedChecklist({
       className={`rounded-md border ${selected ? "border-sky-500 bg-sky-50" : "border-slate-200"} px-3 py-2`}
     >
       <button onClick={onPreview} className="w-full text-left" aria-current={selected ? "true" : undefined}>
-        <span className="font-medium text-slate-800">{template.name}</span>
+        <span className="flex items-center gap-2">
+          <span className="font-medium text-slate-800">{template.name}</span>
+          {template.vendorCount > 0 && (
+            <Badge className="bg-emerald-100 text-emerald-700 border-transparent text-[10px] uppercase tracking-wide">
+              In use
+            </Badge>
+          )}
+        </span>
         <p className="text-xs text-slate-500">
           {template.ruleCount} requirement{template.ruleCount === 1 ? "" : "s"}
+          {template.vendorCount > 0 && (
+            <> · used by {template.vendorCount} vendor{template.vendorCount === 1 ? "" : "s"}</>
+          )}
         </p>
       </button>
       <Button size="sm" variant="outline" className="mt-2 w-full" onClick={onUse} disabled={using}>

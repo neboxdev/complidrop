@@ -59,6 +59,10 @@ public static class DashboardEndpoints
         // derive the "choose requirements" step from /api/dashboard/stats (already
         // fetched) instead of pulling the full vendor list on every load.
         var anyVendorWithRequirements = await db.Vendors.AnyAsync(v => v.ComplianceTemplateId != null, ct);
+        // Drives the onboarding checklist's "Link sent — waiting for their upload" state (#239 delta 3)
+        // so the funnel doesn't go quiet while waiting on a vendor. Scoped through the tenant-filtered
+        // Vendors set (VendorPortalLink has no global tenant filter of its own — it's reached via Vendor).
+        var anyActivePortalLink = await db.Vendors.AnyAsync(v => v.PortalLinks.Any(l => l.IsActive), ct);
 
         // One source of truth for the sample-certificate demo (#238): the dashboard CTA ("Try a
         // sample certificate" vs "Clear sample data" banner), the onboarding checklist's document
@@ -84,6 +88,7 @@ public static class DashboardEndpoints
                 pendingExtraction,
                 totalVendors = vendors,
                 anyVendorWithRequirements,
+                anyActivePortalLink,
                 hasSampleData,
                 sampleDocumentId,
                 complianceRate = totalDocs == 0 ? 0 : Math.Round((double)compliant / totalDocs * 100, 1)

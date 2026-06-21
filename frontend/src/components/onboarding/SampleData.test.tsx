@@ -33,6 +33,7 @@ const baseStats: DashboardStats = {
   pendingExtraction: 0,
   totalVendors: 0,
   anyVendorWithRequirements: false,
+  anyActivePortalLink: false,
   hasSampleData: false,
   sampleDocumentId: null,
   complianceRate: 0,

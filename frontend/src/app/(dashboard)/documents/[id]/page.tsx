@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, ArrowLeft, ExternalLink, Mail, RefreshCw, RotateCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, ExternalLink, Mail, RefreshCw, RotateCw, ShieldCheck } from "lucide-react";
 import { api, ApiError, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { ComplianceBadge, ExtractionBadge } from "@/components/StatusBadges";
@@ -19,6 +19,7 @@ import {
   fieldLabel,
   processingErrorMessage,
 } from "@/lib/display-labels";
+import { requirementSentence } from "@/lib/requirements";
 import { SUPPORT_EMAIL } from "@/lib/site";
 import { formatCalendarDate } from "@/lib/dates";
 import { cn } from "@/lib/utils";
@@ -205,6 +206,40 @@ function NonComplianceExplainer({ doc }: { doc: DocDetail }) {
             </p>
           )}
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Closes the loop on a PASSING document (#239 / §7): a compliant doc used to show the
+// verdict with no "what we checked" breakdown — Pat saw "Compliant" but never the rules
+// that produced it. Renders only when EVERY check passed (the failing case is owned by
+// NonComplianceExplainer), listing each met requirement as a plain sentence (#192 rendering).
+function WhatWeCheckedCard({ doc }: { doc: DocDetail }) {
+  const checks = doc.complianceChecks ?? [];
+  if (checks.length === 0 || checks.some((c) => !c.isPassed)) return null;
+  return (
+    <Card className="border-emerald-200 bg-emerald-50/50">
+      <CardContent className="p-4 sm:p-6 space-y-3">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" aria-hidden />
+          <h2 className="font-semibold text-emerald-900">What we checked</h2>
+        </div>
+        <ul className="space-y-1.5 text-sm text-slate-700">
+          {checks.map((c) => (
+            <li key={c.id} className="flex gap-2">
+              <Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" aria-hidden />
+              <span>
+                {requirementSentence({
+                  documentType: doc.documentType,
+                  fieldName: c.ruleFieldName,
+                  operator: c.ruleOperator ?? "required",
+                  expectedValue: c.ruleExpectedValue,
+                })}
+              </span>
+            </li>
+          ))}
+        </ul>
       </CardContent>
     </Card>
   );
@@ -590,10 +625,16 @@ export default function DocumentDetailPage() {
           value={<ComplianceBadge status={doc.complianceStatus} data-testid="compliance-status" />}
         />
         <SummaryCell label="Expires" value={formatCalendarDate(doc.expirationDate)} />
-        <SummaryCell label="Verified" value={doc.isManuallyVerified ? <span className="inline-flex items-center gap-1 text-emerald-700"><ShieldCheck className="w-3.5 h-3.5" /> Yes</span> : "—"} />
+        <SummaryCell
+          label="Verified"
+          value={doc.isManuallyVerified ? <span className="inline-flex items-center gap-1 text-emerald-700"><ShieldCheck className="w-3.5 h-3.5" /> Yes</span> : "Not yet"}
+          hint={doc.isManuallyVerified ? "A person confirmed these fields." : "Optional: confirm the read fields look right."}
+        />
       </section>
 
       <NonComplianceExplainer doc={doc} />
+
+      <WhatWeCheckedCard doc={doc} />
 
       {doc.extractionStatus === "ManualRequired" && <ManualReviewCard />}
 
@@ -657,12 +698,13 @@ export default function DocumentDetailPage() {
   );
 }
 
-function SummaryCell({ label, value }: { label: string; value: React.ReactNode }) {
+function SummaryCell({ label, value, hint }: { label: string; value: React.ReactNode; hint?: string }) {
   return (
     <Card>
       <CardContent className="p-4 space-y-1">
         <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
         <div className="text-sm font-medium text-slate-900">{value}</div>
+        {hint && <p className="text-[11px] leading-tight text-slate-400">{hint}</p>}
       </CardContent>
     </Card>
   );

@@ -68,7 +68,10 @@ export function useCreateVendor() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (payload: VendorUpsert) => api.post<{ id: string }>("/api/vendors", payload),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["vendors"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] }); // tick the onboarding checklist in place (#239)
+    },
   });
 }
 
@@ -83,7 +86,10 @@ export function useUpdateVendor(id: string) {
     // ['vendors']. Adding an explicit invalidateQueries(['vendors', id])
     // on top would cause the detail observer to refetch twice per save
     // (#81).
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["vendors"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] }); // tick the onboarding checklist in place (#239)
+    },
   });
 }
 
@@ -91,7 +97,10 @@ export function useDeleteVendor() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.delete<void>(`/api/vendors/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["vendors"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] }); // tick the onboarding checklist in place (#239)
+    },
     // Callers don't wrap this in a local error handler — opt into the global
     // mutation-error toast (lib/query-client.ts) so a failed delete surfaces
     // instead of silently leaving the vendor in the list.
@@ -112,7 +121,10 @@ export function useGeneratePortalLink(vendorId: string) {
     // hits the detail observer and leaves the list count stale until
     // a manual refresh — the freshness gap #113 was filed against.
     // See useUpdateVendor above for the TQ prefix-match mechanics.
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["vendors"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] }); // tick the onboarding checklist in place (#239)
+    },
   });
 }
 
@@ -135,7 +147,10 @@ export function useRevokePortalLink(vendorId: string) {
     // invalidate refreshes BOTH the list-summary activePortalLinks
     // count and the detail-page portal-link list (#113). See
     // useUpdateVendor above for the TQ prefix-match mechanics.
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["vendors"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] }); // tick the onboarding checklist in place (#239)
+    },
     // The revoke button (vendors/[id]) calls `revoke.mutate(...)` with no
     // local error handler — opt into the global mutation-error toast so a
     // failed revoke isn't silently lost. See lib/query-client.ts.
