@@ -643,6 +643,10 @@ public static class DocumentEndpoints
     {
         var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
         if (doc is null) return NotFound();
+        // Soft delete only; the blob is intentionally RETAINED so a soft-deleted customer document
+        // remains recoverable and its audit trail keeps a viewable original (ADR 0013). This is the
+        // deliberate contrast with SampleEndpoints.ClearSample, which DOES delete the blob — a sample
+        // is a throwaway demo artifact that should leave zero storage trace (ADR 0028).
         db.Documents.Remove(doc); // interceptor translates to soft delete
         await db.SaveChangesAsync(ct);
         return Results.Ok(new { data = new { message = "Document removed." }, error = (object?)null });

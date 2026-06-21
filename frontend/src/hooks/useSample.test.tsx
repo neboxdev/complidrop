@@ -19,8 +19,8 @@ vi.mock("@/lib/analytics", () => ({
   track: vi.fn(),
 }));
 
-function invalidatedPrefixes(spy: ReturnType<typeof vi.spyOn>): unknown[] {
-  return spy.mock.calls.map((c) => (c[0] as { queryKey: unknown[] }).queryKey[0]);
+function invalidatedPrefixes(calls: unknown[][]): unknown[] {
+  return calls.map((c) => (c[0] as { queryKey: unknown[] }).queryKey[0]);
 }
 
 describe("useSeedSample (#238)", () => {
@@ -34,7 +34,7 @@ describe("useSeedSample (#238)", () => {
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual({ documentId: "d_sample_01", vendorId: "v_sample_01" });
-    expect(invalidatedPrefixes(invalidate)).toEqual(
+    expect(invalidatedPrefixes(invalidate.mock.calls)).toEqual(
       expect.arrayContaining(["documents", "dashboard", "vendors"]),
     );
   });
@@ -68,7 +68,7 @@ describe("useClearSample (#238)", () => {
     result.current.mutate();
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(invalidatedPrefixes(invalidate)).toEqual(
+    expect(invalidatedPrefixes(invalidate.mock.calls)).toEqual(
       expect.arrayContaining(["documents", "dashboard", "vendors"]),
     );
   });

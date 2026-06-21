@@ -217,6 +217,7 @@ export type DocumentDetailFixture = {
   daysUntilExpiry: number | null;
   isManuallyVerified: boolean;
   uploadedBy: string | null;
+  isSample: boolean;
   generalLiabilityLimit: number | null;
   fields: DocumentDetailField[];
   complianceChecks: ComplianceCheckFixture[];
@@ -243,6 +244,7 @@ const DOCUMENT_DETAIL_BASE: Readonly<DocumentDetailFixture> = {
   daysUntilExpiry: null,
   isManuallyVerified: false,
   uploadedBy: null,
+  isSample: false,
   generalLiabilityLimit: null,
   fields: [],
   complianceChecks: [],

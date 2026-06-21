@@ -138,6 +138,11 @@ public static class SampleEndpoints
             var winner = await CurrentSampleAsync(db, ct);
             if (winner is not null)
                 return Results.Ok(SampleEnvelope(winner.Value.DocumentId, winner.Value.VendorId));
+            // 23505 with no sample to return means the violation was on some OTHER unique constraint
+            // (IsSampleUniqueViolation only knows the SqlState, not which index) — surface it rather
+            // than swallow it. Log first so an operator can tell a genuine sample race apart from this.
+            loggerFactory.CreateLogger("SampleEndpoints")
+                .LogWarning(ex, "Sample seed hit a unique violation but found no existing sample to return; re-throwing.");
             throw;
         }
         catch

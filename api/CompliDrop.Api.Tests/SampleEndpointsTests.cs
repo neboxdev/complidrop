@@ -53,6 +53,10 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
         // The generated COI is really in (fake) blob storage.
         var blobs = Fixture.Factory.Services.GetRequiredService<IBlobStorageService>();
         (await blobs.DownloadAsync(doc.BlobStoragePath!, default)).Should().NotBeNull();
+
+        // The seed is audited as its own semantic event.
+        (await db.AuditLogs.CountAsync(a => a.OrganizationId == auth.OrgId && a.Action == "sample.seeded"))
+            .Should().Be(1);
     }
 
     [Fact]
@@ -332,6 +336,85 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
         // Editable: the org can rename/update its clone (a system template would 4xx here).
         (await auth.Client.PutAsJsonAsync($"/api/compliance/templates/{cloneId}",
             new { name = "My Caterers", description = "Tweaked." })).EnsureSuccessStatusCode();
+    }
+
+    [Fact]
+    public async Task Clear_returns_a_friendly_503_and_leaves_rows_intact_when_the_blob_delete_fails()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var docId = DocumentId(await (await SeedSampleAsync(auth.Client)).Content.ReadFromJsonAsync<JsonElement>());
+
+        var blobs = (FakeBlobStorageService)Fixture.Factory.Services.GetRequiredService<IBlobStorageService>();
+        blobs.ThrowOnDelete = true;
+        try
+        {
+            var clear = await auth.Client.DeleteAsync("/api/sample");
+
+            clear.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+            (await clear.Content.ReadFromJsonAsync<JsonElement>())
+                .GetProperty("error").GetProperty("code").GetString().Should().Be("storage.unavailable");
+
+            // Blob-delete-first contract: a delete outage fails loudly BEFORE any row is touched, so
+            // nothing is half-cleared and the sample stays fully live for a clean retry.
+            await using var db = CreateSystemDb();
+            (await db.Documents.IgnoreQueryFilters().FirstAsync(d => d.Id == docId)).DeletedAt.Should().BeNull();
+            (await db.Vendors.IgnoreQueryFilters()
+                .CountAsync(v => v.OrganizationId == auth.OrgId && v.IsSample && v.DeletedAt == null)).Should().Be(1);
+        }
+        finally
+        {
+            blobs.Reset();
+        }
+    }
+
+    [Fact]
+    public async Task Re_seeding_after_the_sample_document_is_deleted_reuses_the_same_sample_vendor()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var firstDoc = DocumentId(await (await SeedSampleAsync(auth.Client)).Content.ReadFromJsonAsync<JsonElement>());
+
+        Guid vendorId;
+        await using (var setup = CreateSystemDb())
+        {
+            // Soft-delete ONLY the sample document, leaving the sample vendor behind.
+            var doc = await setup.Documents.FirstAsync(d => d.Id == firstDoc);
+            vendorId = doc.VendorId!.Value;
+            setup.Documents.Remove(doc);
+            await setup.SaveChangesAsync();
+        }
+
+        var resp = await SeedSampleAsync(auth.Client);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        (await resp.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("vendorId").GetGuid()
+            .Should().Be(vendorId, "the lingering sample vendor is reused, not duplicated");
+
+        await using var db = CreateSystemDb();
+        (await db.Vendors.IgnoreQueryFilters()
+            .CountAsync(v => v.OrganizationId == auth.OrgId && v.IsSample && v.DeletedAt == null)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Concurrent_seed_requests_create_exactly_one_sample()
+    {
+        var auth = await RegisterAndLoginAsync();
+
+        // The existence check can't dedupe a TRUE race, so the IX_Documents_OrganizationId_SampleUnique
+        // index must: the losers catch the 23505 violation and return the winner's sample.
+        var responses = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => SeedSampleAsync(auth.Client)));
+
+        foreach (var r in responses)
+            r.StatusCode.Should().BeOneOf(HttpStatusCode.Created, HttpStatusCode.OK);
+
+        var docIds = new HashSet<Guid>();
+        foreach (var r in responses)
+            docIds.Add(DocumentId(await r.Content.ReadFromJsonAsync<JsonElement>()));
+        docIds.Should().HaveCount(1, "every racing request resolves to the same single sample");
+
+        await using var db = CreateSystemDb();
+        (await db.Documents.IgnoreQueryFilters()
+            .CountAsync(d => d.OrganizationId == auth.OrgId && d.IsSample && d.DeletedAt == null)).Should().Be(1);
     }
 
     // ---- helpers ----

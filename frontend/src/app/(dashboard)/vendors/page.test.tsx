@@ -3,7 +3,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { http } from "msw";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import VendorsPage from "./page";
 import {
   renderWithProviders,
@@ -32,6 +32,49 @@ const VENDORS = [
     activePortalLinks: 1,
   },
 ];
+
+describe("VendorsPage — sample badge (#238)", () => {
+  it("badges the sample vendor and leaves a normal one unbadged", async () => {
+    server.use(
+      http.get(url("/api/vendors"), () =>
+        jsonOk([
+          {
+            id: "v_sample",
+            name: "Brightside Catering Co.",
+            contactEmail: null,
+            contactPhone: null,
+            category: "Caterer",
+            complianceTemplateId: "t_caterer",
+            complianceTemplateName: "Caterer",
+            documentCount: 1,
+            activePortalLinks: 0,
+            isSample: true,
+          },
+          {
+            id: "v_real",
+            name: "Acme Subcontractor",
+            contactEmail: null,
+            contactPhone: null,
+            category: "electrical",
+            complianceTemplateId: null,
+            complianceTemplateName: null,
+            documentCount: 0,
+            activePortalLinks: 0,
+            isSample: false,
+          },
+        ]),
+      ),
+    );
+
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+
+    const sampleRow = await screen.findByRole("row", { name: /Brightside Catering Co\./i });
+    expect(within(sampleRow).getByText("Sample")).toBeInTheDocument();
+
+    const realRow = screen.getByRole("row", { name: /Acme Subcontractor/i });
+    expect(within(realRow).queryByText("Sample")).toBeNull();
+  });
+});
 
 describe("VendorsPage — state matrix (#36)", () => {
   it("loading: renders the loading row before the fetch resolves", () => {

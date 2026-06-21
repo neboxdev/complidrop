@@ -44,6 +44,32 @@ afterEach(() => {
 // afterEach resets all toast spies between tests — no per-file
 // beforeEach mockClear needed (#74).
 
+describe("DocumentsPage — sample badge (#238)", () => {
+  it("badges a sample document and leaves a normal one unbadged", async () => {
+    server.use(
+      http.get(url("/api/documents"), () =>
+        jsonOk(
+          makeDocumentsResponse({
+            items: [
+              makeDocument({ id: "d_sample", originalFileName: "Sample Certificate of Insurance.pdf", isSample: true }),
+              makeDocument({ id: "d_real", originalFileName: "real-coi.pdf", isSample: false }),
+            ],
+            total: 2,
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+
+    const sampleRow = await screen.findByRole("row", { name: /Sample Certificate of Insurance\.pdf/i });
+    expect(within(sampleRow).getByText("Sample")).toBeInTheDocument();
+
+    const realRow = screen.getByRole("row", { name: /real-coi\.pdf/i });
+    expect(within(realRow).queryByText("Sample")).toBeNull();
+  });
+});
+
 describe("DocumentsPage — state matrix (#36)", () => {
   it("loading: renders the loading row before the fetch resolves", () => {
     let release: () => void = () => {};

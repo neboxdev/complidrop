@@ -16,6 +16,10 @@ public sealed class FakeBlobStorageService : IBlobStorageService
     /// — simulates a storage outage so the upload endpoints' friendly-503 mapping can be tested (#248).</summary>
     public bool ThrowUnavailableOnUpload { get; set; }
 
+    /// <summary>When true, <see cref="DeleteAsync"/> throws — simulates a storage outage on the delete
+    /// path so the sample-clear endpoint's fail-loudly-before-touching-rows behavior can be tested (#238).</summary>
+    public bool ThrowOnDelete { get; set; }
+
     public async Task<BlobUploadResult> UploadAsync(string blobName, Stream content, string contentType, CancellationToken ct)
     {
         if (ThrowUnavailableOnUpload)
@@ -32,6 +36,7 @@ public sealed class FakeBlobStorageService : IBlobStorageService
     {
         _blobs.Clear();
         ThrowUnavailableOnUpload = false;
+        ThrowOnDelete = false;
     }
 
     // Honest not-found: null for an unknown name, mirroring the interface contract the real
@@ -42,6 +47,8 @@ public sealed class FakeBlobStorageService : IBlobStorageService
 
     public Task DeleteAsync(string blobName, CancellationToken ct)
     {
+        if (ThrowOnDelete)
+            throw new BlobStorageUnavailableException("Simulated storage outage on delete.", new InvalidOperationException("simulated"));
         _blobs.TryRemove(blobName, out _);
         return Task.CompletedTask;
     }
