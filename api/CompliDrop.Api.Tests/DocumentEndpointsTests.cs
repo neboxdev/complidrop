@@ -293,6 +293,35 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId)).Should().Be(1);
     }
 
+    // Parked repro for the #243 concurrency-audit finding (filed as #336). The current
+    // IIdempotencyService is check-then-store: two CONCURRENT same-key uploads both miss
+    // TryGetAsync and each create a Document. This asserts the post-fix contract (insert-first
+    // reservation → exactly one doc, the loser replays the winner), so it stays Skip until #336
+    // lands — at which point it becomes the proving regression test. Sequential replay is already
+    // guarded above by Same_idempotency_key_replays_without_creating_a_duplicate.
+    [Fact(Skip = "Blocked on #336 (idempotency insert-first reservation); see docs/audits/concurrency-2026-06-22.md")]
+    public async Task Concurrent_same_idempotency_key_creates_only_one_document()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var key = Guid.NewGuid().ToString("N");
+
+        var responses = await Task.WhenAll(
+            PostWithIdempotency(auth.Client, key),
+            PostWithIdempotency(auth.Client, key));
+
+        // The BINDING assertion is the side-effect count below (exactly one Document). The status
+        // shape is left deliberately loose: #336 must still decide what the losing concurrent request
+        // returns (replay the winner's 201/200, or a 409 "in progress"), so pinning a specific code
+        // here would pre-judge that open contract and could fail this test for the wrong reason.
+        responses.Should().OnlyContain(r =>
+            r.StatusCode == HttpStatusCode.Created
+            || r.StatusCode == HttpStatusCode.OK
+            || r.StatusCode == HttpStatusCode.Conflict);
+
+        await using var db = CreateSystemDb();
+        (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId)).Should().Be(1);
+    }
+
     private async Task<HttpResponseMessage> PostWithIdempotency(HttpClient client, string key)
     {
         var req = new HttpRequestMessage(HttpMethod.Post, "/api/documents/upload")

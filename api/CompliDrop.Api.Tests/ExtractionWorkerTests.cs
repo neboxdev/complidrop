@@ -166,6 +166,29 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
 
     // ----- AC1: bounded retry then Failed (no infinite loop) ---------------------------------
 
+    /// <summary>
+    /// Pins verdict #1 of the #243 concurrency audit: the per-attempt timeout ceiling must stay
+    /// STRICTLY below the zombie-reclaim window baked into <see cref="ExtractionWorker.ClaimSql"/>,
+    /// with a positive margin, so a slow-but-alive attempt is always cancelled (releasing its row
+    /// lock) before a second worker could reclaim the same row and double-process it. Parses the
+    /// threshold out of ClaimSql so a future edit to EITHER side — widening the ceiling or shrinking
+    /// the interval — trips this test instead of silently reintroducing the double-process race.
+    /// Pure (no DB); it just rides the class's fixture.
+    /// </summary>
+    [Fact]
+    public void Attempt_timeout_ceiling_stays_below_the_zombie_reclaim_window()
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            ExtractionWorker.ClaimSql, @"interval '(\d+) minutes'");
+        match.Success.Should().BeTrue("ClaimSql must define the zombie-reclaim window as an interval literal");
+        var zombieSeconds = int.Parse(match.Groups[1].Value) * 60;
+
+        ExtractionWorker.AttemptTimeoutCeilingSeconds.Should().BeLessThan(zombieSeconds,
+            "a wedged attempt must be cancelled (releasing its row lock) before the zombie reclaim could double-grab the row");
+        (zombieSeconds - ExtractionWorker.AttemptTimeoutCeilingSeconds).Should().BeGreaterThanOrEqualTo(60,
+            "keep a >=60s margin so a timed-out attempt can cancel AND requeue before a second worker reclaims");
+    }
+
     [Fact]
     public async Task Always_failing_extraction_retries_up_to_MaxAttempts_then_marks_failed()
     {
