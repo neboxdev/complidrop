@@ -45,6 +45,7 @@ Each writer now commits the **whole `(inputs, verdict)` tuple atomically**, so a
 
 ### Neutral
 - `ApplyEvaluationAsync` loads `Vendor → ComplianceTemplate → Rules` via the tracked navigation query against the document's *current* (possibly just-edited) `VendorId`, honoring the Vendor soft-delete filter exactly as the prior `Include` did. The pure re-grade path does one extra cheap query (doc, then vendor chain) versus the old single Include — negligible, and not on a hot path.
+- `EvaluateForSystemAsync` is now **caller-less in production** — the worker (its only former caller) folds grading into `PersistSuccess` via `ApplyEvaluationAsync`. It is retained as the symmetric system-context entry point to `EvaluateAsync` (and is still exercised by the sample-grading test as a convenient driver); a future system-context re-grade would use it. If no such caller materializes it can be dropped along with the service's now-`EvaluateForSystemAsync`-only `SystemDbContext` dependency.
 
 ## Alternatives considered
 

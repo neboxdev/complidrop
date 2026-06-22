@@ -76,13 +76,15 @@ public sealed class ComplianceVerdictConsistencyTests(IntegrationTestFixture fix
     [Fact]
     public async Task Manual_edit_racing_a_reextraction_leaves_a_consistent_not_torn_verdict()
     {
-        // Reproduces the audit's interleave deterministically at the persistence layer: a "worker"
-        // (re-extraction) computes the verdict from freshly-extracted inputs W while a "user" commits an
-        // edit U + its verdict in between, and the worker commits LAST. Before #337 the verdict was written
-        // in a transaction SEPARATE from its inputs, so the terminal row could read inputs=U with
-        // verdict(W) — a torn pair. With the combined unit of work each writer commits the whole
-        // (inputs, verdict) tuple atomically, so whichever lands last wins it WHOLE: the terminal verdict
-        // always matches the terminal inputs.
+        // Asserts the post-fix combined-unit invariant under the audit's exact commit-order interleave: a
+        // "worker" (re-extraction) stages a verdict from freshly-extracted inputs W, a "user" commits an
+        // edit U + its verdict in between, and the worker commits LAST. (It exercises the shared
+        // ApplyEvaluationAsync primitive in that order — not the original separate-transaction code, which
+        // no longer exists.) Before #337 the verdict was written in a transaction SEPARATE from its inputs,
+        // so this order could leave inputs=U with verdict(W) — a torn pair. With the combined unit of work
+        // each writer commits the whole (inputs, verdict) tuple atomically, so whichever lands last wins it
+        // WHOLE: the terminal verdict always matches the terminal inputs. Reverting ApplyEvaluationAsync to
+        // not set the verdict would fail this test.
         var auth = await RegisterAndLoginAsync();
         var vendorId = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "2000000");
         var docId = await SeedCoiAsync(auth.OrgId, vendorId, glLimit: 1_000_000m, stored: ComplianceStatus.NonCompliant);
@@ -157,5 +159,42 @@ public sealed class ComplianceVerdictConsistencyTests(IntegrationTestFixture fix
         after.GetProperty("ComplianceStatus").GetInt32().Should().Be((int)ComplianceStatus.Compliant,
             "and its After holds the flipped verdict — the transition is captured atomically with the input change");
         after.GetProperty("GeneralLiabilityLimit").GetDecimal().Should().Be(3_000_000m);
+    }
+
+    [Fact]
+    public async Task Assigning_a_vendor_commits_the_verdict_against_the_new_checklist_atomically()
+    {
+        // #337: UpdateDocument folds the verdict into the assignment's transaction, computed against the
+        // JUST-ASSIGNED VendorId (ApplyEvaluationAsync loads the new vendor's template). Assigning a vendor
+        // whose checklist the doc's inputs FAIL must persist NonCompliant atomically with the vendor — not
+        // leave it at Pending for a separate transaction (the torn window #337 closes on this endpoint too).
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "2000000");
+        // A vendor-LESS doc with GL 1M (will fail the 2M rule once the vendor is assigned).
+        var now = DateTime.UtcNow;
+        var docId = Guid.NewGuid();
+        await using (var db = CreateSystemDb())
+        {
+            db.Documents.Add(new Document
+            {
+                Id = docId, OrganizationId = auth.OrgId, VendorId = null,
+                OriginalFileName = "coi.pdf", BlobStorageUrl = "blob://d", FileSizeBytes = 1,
+                ContentType = "application/pdf", DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed, ComplianceStatus = ComplianceStatus.Pending,
+                GeneralLiabilityLimit = 1_000_000m,
+                ExtractionFields = JsonDocument.Parse("{\"general_liability_limit\":\"1000000\"}"),
+                ExpirationDate = now.AddYears(1), CreatedAt = now, UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var resp = await auth.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { vendorId });
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var verify = CreateSystemDb();
+        var saved = await verify.Documents.FirstAsync(d => d.Id == docId);
+        saved.VendorId.Should().Be(vendorId);
+        saved.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant,
+            "the verdict computed against the newly-assigned vendor's checklist commits in the assignment's transaction");
     }
 }

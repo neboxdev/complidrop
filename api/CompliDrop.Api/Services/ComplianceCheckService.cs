@@ -180,14 +180,25 @@ public class ComplianceCheckService(
     public async Task ApplyEvaluationAsync(DbContext context, Document doc, CancellationToken ct)
     {
         // Load Vendor → ComplianceTemplate → Rules for the verdict computation, against the doc's CURRENT
-        // (possibly just-edited, uncommitted) VendorId, fixing up doc.Vendor on this same context. The
-        // navigation query honors the Vendor soft-delete filter, so a deleted vendor reads as no-template
-        // (Pending) exactly as the prior Include did.
+        // (possibly just-edited, uncommitted) VendorId, fixing up doc.Vendor on this same context. A
+        // SINGLE query (no AsSplitQuery): the root is ONE Vendor (not a set of Documents) and the only
+        // collection in the chain is template.Rules, so there is no cartesian payload multiplication — the
+        // batched fan-out splits because its root IS a set of documents whose ExtractionFields JSON would
+        // be re-shipped per rule, which does not apply here. The nav query honors the Vendor soft-delete
+        // filter, so a deleted vendor reads as no-template (Pending) exactly as the prior Include did.
+        var vendorRef = context.Entry(doc).Reference(d => d.Vendor);
         if (doc.VendorId is not null)
-            await context.Entry(doc).Reference(d => d.Vendor).Query()
+            await vendorRef.Query()
                 .Include(v => v!.ComplianceTemplate)
                     .ThenInclude(t => t!.Rules)
                 .LoadAsync(ct);
+        else
+        {
+            // No vendor assigned: force the in-memory navigation to match the FK so ComputeOutcome reads
+            // no-template (Pending) even if a caller ever hands us a tracked doc with a stale Vendor loaded.
+            doc.Vendor = null;
+            vendorRef.IsLoaded = true;
+        }
 
         var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
         var outcome = ComputeOutcome(doc, nowUtc);
