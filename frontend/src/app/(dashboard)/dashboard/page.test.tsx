@@ -51,6 +51,19 @@ const ACTIVITY = [
   },
 ];
 
+describe("DashboardPage — clickable stat cards (#317 FP-041)", () => {
+  it("the Non-compliant card deep-links to the filtered documents view", async () => {
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+    const link = await screen.findByRole("link", { name: /non-compliant: 1\. view these documents/i });
+    expect(link).toHaveAttribute("href", "/documents?status=NonCompliant");
+  });
+});
+
 describe("DashboardPage — state matrix (#36)", () => {
   it("loading (no responses yet): page chrome renders, recent-activity shows the loading copy", () => {
     // Hold all three responses so the test observes the loading branch.

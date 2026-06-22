@@ -44,6 +44,44 @@ afterEach(() => {
 // afterEach resets all toast spies between tests — no per-file
 // beforeEach mockClear needed (#74).
 
+describe("DocumentsPage — URL-addressable filters (#317 FP-041)", () => {
+  it("seeds the status filter from ?status= and sends it to the server", async () => {
+    let requestedUrl = "";
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        requestedUrl = request.url;
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, searchParams: { status: "NonCompliant" } });
+    await waitFor(() => expect(requestedUrl).toContain("status=NonCompliant"));
+  });
+
+  it("honors a ?vendor= deep link by filtering the list to that vendor (FP-071 pairing)", async () => {
+    let requestedUrl = "";
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        requestedUrl = request.url;
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, searchParams: { vendor: "v_123" } });
+    await waitFor(() => expect(requestedUrl).toContain("vendorId=v_123"));
+  });
+
+  it("mirrors the active filters back into the URL so the view is shareable", async () => {
+    const replaceSpy = vi.fn();
+    server.use(http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))));
+    renderWithProviders(<DocumentsPage />, {
+      auth: authedMe,
+      searchParams: { status: "Expired" },
+      router: { replace: replaceSpy },
+    });
+    await waitFor(() => expect(replaceSpy).toHaveBeenCalled());
+    expect(replaceSpy.mock.calls.some(([href]) => String(href).includes("status=Expired"))).toBe(true);
+  });
+});
+
 describe("DocumentsPage — sample badge (#238)", () => {
   it("badges a sample document and leaves a normal one unbadged", async () => {
     server.use(

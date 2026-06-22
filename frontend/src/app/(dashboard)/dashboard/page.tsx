@@ -81,10 +81,10 @@ export default function DashboardPage() {
       {hasData && (
         <>
       <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <StatCard icon={FileText} label="Total documents" value={stats.data?.totalDocuments ?? 0} hue="sky" />
-        <StatCard icon={ShieldCheck} label="Compliant" value={stats.data?.compliant ?? 0} hue="emerald" />
-        <StatCard icon={Clock} label="Expiring ≤ 30d" value={stats.data?.expiringSoon ?? 0} hue="amber" />
-        <StatCard icon={AlertTriangle} label="Non-compliant" value={stats.data?.nonCompliant ?? 0} hue="rose" />
+        <StatCard icon={FileText} label="Total documents" value={stats.data?.totalDocuments ?? 0} hue="sky" href="/documents" />
+        <StatCard icon={ShieldCheck} label="Compliant" value={stats.data?.compliant ?? 0} hue="emerald" href="/documents?status=Compliant" />
+        <StatCard icon={Clock} label="Expiring ≤ 30d" value={stats.data?.expiringSoon ?? 0} hue="amber" href="/documents?status=ExpiringSoon" />
+        <StatCard icon={AlertTriangle} label="Non-compliant" value={stats.data?.nonCompliant ?? 0} hue="rose" href="/documents?status=NonCompliant" />
       </section>
 
       <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -128,8 +128,8 @@ export default function DashboardPage() {
           <CardContent className="p-6">
             <h2 className="text-base font-semibold text-slate-800 mb-4">When documents expire</h2>
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 text-center">
-              <PipelineBucket label="Expired" value={pipeline.data?.expired ?? 0} hue="rose" max={pipelineMax} />
-              <PipelineBucket label="Next 30 days" value={pipeline.data?.bucket30 ?? 0} hue="amber" max={pipelineMax} />
+              <PipelineBucket label="Expired" value={pipeline.data?.expired ?? 0} hue="rose" max={pipelineMax} href="/documents?status=Expired" />
+              <PipelineBucket label="Next 30 days" value={pipeline.data?.bucket30 ?? 0} hue="amber" max={pipelineMax} href="/documents?expiresWithin=30" />
               <PipelineBucket label="30–60 days" value={pipeline.data?.bucket60 ?? 0} hue="sky" max={pipelineMax} />
               <PipelineBucket label="60–90 days" value={pipeline.data?.bucket90 ?? 0} hue="sky" max={pipelineMax} />
               <PipelineBucket label="90+ days" value={pipeline.data?.beyond ?? 0} hue="emerald" max={pipelineMax} />
@@ -196,11 +196,14 @@ function StatCard({
   label,
   value,
   hue,
+  href,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
   value: number;
   hue: "sky" | "emerald" | "amber" | "rose";
+  /** When set, the whole card links to a pre-filtered documents view (FP-041). */
+  href?: string;
 }) {
   const hueClasses = {
     sky: "bg-sky-50 text-sky-700",
@@ -208,8 +211,8 @@ function StatCard({
     amber: "bg-amber-50 text-amber-700",
     rose: "bg-rose-50 text-rose-700",
   }[hue];
-  return (
-    <Card>
+  const card = (
+    <Card className={href ? "h-full transition-shadow hover:shadow-md" : undefined}>
       <CardContent className="p-5 flex items-center gap-4">
         <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${hueClasses}`}>
           <Icon className="w-5 h-5" />
@@ -221,9 +224,20 @@ function StatCard({
       </CardContent>
     </Card>
   );
+  return href ? (
+    <Link
+      href={href}
+      aria-label={`${label}: ${value}. View these documents.`}
+      className="block rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {card}
+    </Link>
+  ) : (
+    card
+  );
 }
 
-function PipelineBucket({ label, value, hue, max }: { label: string; value: number; hue: "rose" | "amber" | "sky" | "emerald"; max: number }) {
+function PipelineBucket({ label, value, hue, max, href }: { label: string; value: number; hue: "rose" | "amber" | "sky" | "emerald"; max: number; href?: string }) {
   const hueBar = {
     rose: "bg-rose-500",
     amber: "bg-amber-500",
@@ -231,13 +245,24 @@ function PipelineBucket({ label, value, hue, max }: { label: string; value: numb
     emerald: "bg-emerald-500",
   }[hue];
   const ratio = Math.min(1, value / Math.max(1, max));
-  return (
-    <div>
+  const body = (
+    <>
       <div className="h-24 bg-slate-100 rounded-md flex items-end overflow-hidden">
         <div className={`w-full ${hueBar}`} style={{ height: `${Math.max(6, ratio * 100)}%` }} />
       </div>
       <p className="mt-2 text-xs font-medium text-slate-600">{label}</p>
       <p className="text-lg font-semibold text-slate-900">{value}</p>
-    </div>
+    </>
+  );
+  return href ? (
+    <Link
+      href={href}
+      aria-label={`${label}: ${value} documents. View them.`}
+      className="block rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring hover:opacity-90"
+    >
+      {body}
+    </Link>
+  ) : (
+    <div>{body}</div>
   );
 }

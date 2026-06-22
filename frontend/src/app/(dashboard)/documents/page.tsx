@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useDropzone, type FileRejection } from "react-dropzone";
 import { toast } from "sonner";
 import {
@@ -14,6 +15,7 @@ import {
   Search,
   ChevronLeft,
   ChevronRight,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -70,12 +72,21 @@ const FILTER_SELECT_CLASS =
 
 export default function DocumentsPage() {
   // --- list controls (#187) ---
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // Filters are URL-addressable (FP-041): seed from the query string so a deep
+  // link lands pre-filtered (the dashboard's "Non-compliant" card -> ?status=
+  // NonCompliant, a vendor's "Docs N" -> ?vendor=<id>), and the active filters
+  // are mirrored back so the view is shareable + survives back/forward.
   const [page, setPage] = useState(1);
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState(""); // debounced value sent to the server
-  const [status, setStatus] = useState("");
-  const [typeFilter, setTypeFilter] = useState("");
-  const [expiresWithin, setExpiresWithin] = useState("");
+  const [searchInput, setSearchInput] = useState(() => searchParams.get("search") ?? "");
+  const [search, setSearch] = useState(() => searchParams.get("search") ?? ""); // debounced value sent to the server
+  const [status, setStatus] = useState(() => searchParams.get("status") ?? "");
+  const [typeFilter, setTypeFilter] = useState(() => searchParams.get("type") ?? "");
+  const [expiresWithin, setExpiresWithin] = useState(() => searchParams.get("expiresWithin") ?? "");
+  // ?vendor=<id> is honored for deep-linking (FP-071's "Documents from {vendor}");
+  // there's no vendor dropdown, so it's read-only from the URL.
+  const vendorId = searchParams.get("vendor") || undefined;
 
   // Debounce the search box so we don't fire a request per keystroke. The
   // page-1 reset lives in the input's onChange (an event handler) — NOT here —
@@ -87,12 +98,25 @@ export default function DocumentsPage() {
     return () => clearTimeout(t);
   }, [searchInput]);
 
+  // Mirror the active filters into the URL (replace — no history spam per change). (FP-041)
+  useEffect(() => {
+    const sp = new URLSearchParams();
+    if (search) sp.set("search", search);
+    if (status) sp.set("status", status);
+    if (typeFilter) sp.set("type", typeFilter);
+    if (expiresWithin) sp.set("expiresWithin", expiresWithin);
+    if (vendorId) sp.set("vendor", vendorId);
+    const qs = sp.toString();
+    router.replace(qs ? `/documents?${qs}` : "/documents", { scroll: false });
+  }, [search, status, typeFilter, expiresWithin, vendorId, router]);
+
   const params: DocumentListParams = {
     page,
     pageSize: PAGE_SIZE,
     search: search || undefined,
     status: status || undefined,
     type: typeFilter || undefined,
+    vendorId,
     expiresWithin: expiresWithin ? Number(expiresWithin) : undefined,
   };
 
@@ -121,7 +145,7 @@ export default function DocumentsPage() {
     setter(value);
     setPage(1);
   };
-  const hasActiveFilters = Boolean(search || status || typeFilter || expiresWithin);
+  const hasActiveFilters = Boolean(search || status || typeFilter || expiresWithin || vendorId);
 
   // Drop stages the files; the vendor + document-type step below must be
   // completed before they're actually uploaded — so every document lands
@@ -180,6 +204,12 @@ export default function DocumentsPage() {
       // Whole batch succeeded — reset the vendor/type selection for the next one.
       setStagedVendor(null);
       setStagedType("coi");
+      // A just-uploaded doc can be invisible behind an active status/expiry/vendor
+      // filter — the success toast then reads as a lie ("uploaded" but the list is
+      // empty). Tell the user where it went. (FP-054)
+      if (hasActiveFilters) {
+        toast.info("Heads up — an active filter may be hiding your new upload. Clear filters to see everything.");
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Upload failed.");
     } finally {
@@ -273,7 +303,9 @@ export default function DocumentsPage() {
                 Add details before uploading
               </h2>
               <p className="text-xs text-slate-500">
-                Pick the vendor this is for so we can check it against their requirements.
+                {staged.length === 1
+                  ? "Pick the vendor this is for so we can check it against their requirements."
+                  : `Pick the vendor these ${staged.length} files are for — all of them will be assigned to it and checked against its requirements.`}
               </p>
             </div>
 
@@ -286,16 +318,24 @@ export default function DocumentsPage() {
                   <span className="flex items-center gap-2 text-slate-700">
                     <FileText className="h-4 w-4 text-slate-400" /> {file.name}
                   </span>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    aria-label={`Remove ${file.name} from this upload`}
-                    disabled={isUploading}
-                    onClick={() => setStaged((prev) => prev.filter((_, idx) => idx !== i))}
-                  >
-                    <X className="h-4 w-4 text-slate-500 hover:text-rose-600" />
-                  </Button>
+                  {/* Per-file feedback while the batch uploads — each file drops
+                      from the list as it lands, so a spinner on the rest reads as
+                      "in progress" instead of a frozen Remove button. (FP-055) */}
+                  {isUploading ? (
+                    <span className="flex items-center gap-1 text-xs text-sky-600">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> Uploading…
+                    </span>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`Remove ${file.name} from this upload`}
+                      onClick={() => setStaged((prev) => prev.filter((_, idx) => idx !== i))}
+                    >
+                      <X className="h-4 w-4 text-slate-500 hover:text-rose-600" />
+                    </Button>
+                  )}
                 </li>
               ))}
             </ul>
@@ -445,7 +485,7 @@ export default function DocumentsPage() {
                 <th className="px-4 py-3 text-left">File</th>
                 <th className="px-4 py-3 text-left">Type</th>
                 <th className="px-4 py-3 text-left">Vendor</th>
-                <th className="px-4 py-3 text-left">Extraction</th>
+                <th className="px-4 py-3 text-left">Reading</th>
                 <th className="px-4 py-3 text-left">Compliance</th>
                 <th className="px-4 py-3 text-left">Expires</th>
                 <th className="px-4 py-3" />
@@ -584,7 +624,7 @@ export default function DocumentsPage() {
                         </Button>
                       )}
                     </td>
-                    <td data-label="Extraction" className="px-4 py-3">
+                    <td data-label="Reading" className="px-4 py-3">
                       <ExtractionBadge status={d.extractionStatus} />
                     </td>
                     <td data-label="Compliance" className="px-4 py-3">
@@ -594,7 +634,9 @@ export default function DocumentsPage() {
                       {formatCalendarDate(d.expirationDate)}
                       {d.daysUntilExpiry != null && (
                         <span className={cn("ml-2 text-xs", d.daysUntilExpiry < 30 ? "text-rose-600" : "text-slate-500")}>
-                          {d.daysUntilExpiry < 0 ? `${-d.daysUntilExpiry}d ago` : `in ${d.daysUntilExpiry}d`}
+                          {d.daysUntilExpiry < 0
+                            ? `expired ${-d.daysUntilExpiry} day${-d.daysUntilExpiry === 1 ? "" : "s"} ago`
+                            : `in ${d.daysUntilExpiry} day${d.daysUntilExpiry === 1 ? "" : "s"}`}
                         </span>
                       )}
                     </td>

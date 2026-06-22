@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, ArrowLeft, Check, ExternalLink, Mail, RefreshCw, RotateCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, ExternalLink, Mail, RefreshCw, RotateCw, ShieldCheck, Trash2 } from "lucide-react";
 import { api, ApiError, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { ComplianceBadge, ExtractionBadge } from "@/components/StatusBadges";
@@ -12,8 +12,9 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StaleDataBanner } from "@/components/StaleDataBanner";
 import { DocumentTypeSelect } from "@/components/DocumentTypeSelect";
-import { useUpdateDocument } from "@/hooks/useDocuments";
+import { useUpdateDocument, useDeleteDocument } from "@/hooks/useDocuments";
 import { VendorPicker, type VendorOption } from "@/components/VendorPicker";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ClearSampleButton } from "@/components/onboarding/SampleData";
 import {
   complianceFailureReason,
@@ -385,6 +386,7 @@ export default function DocumentDetailPage() {
   const qc = useQueryClient();
   const [edits, setEdits] = useState<Record<string, string>>({});
   const updateDoc = useUpdateDocument();
+  const del = useDeleteDocument();
   const typeSelectId = useId();
 
   const detail = useQuery<DocDetail, ApiError>({
@@ -607,6 +609,13 @@ export default function DocumentDetailPage() {
 
   const doc = detail.data;
   const hasEdits = Object.keys(edits).length > 0;
+  // "Read again" re-extracts from scratch, overwriting hand-corrected fields AND
+  // any unsaved edits. Count the unique fields that would be lost so we can warn
+  // before discarding them (FP-062). Manually-edited-saved + pending-edited.
+  const discardCount = new Set([
+    ...doc.fields.filter((f) => f.isManuallyEdited).map((f) => f.fieldName),
+    ...Object.keys(edits),
+  ]).size;
   const isProcessing =
     doc.extractionStatus === "Pending" || doc.extractionStatus === "Processing";
 
@@ -657,17 +666,44 @@ export default function DocumentDetailPage() {
               }
             />
           </div>
+          {/* Vendor name + link — the doc detail used to hide who it's for; an
+              orphan doc gets the assign picker instead (NotCheckedExplainer). (FP-065) */}
+          {doc.vendorId && doc.vendorName && (
+            <div className="flex items-center gap-2 text-xs">
+              <span className="font-medium text-slate-500">Vendor</span>
+              <Link href={`/vendors/${doc.vendorId}`} className="font-medium text-sky-700 hover:underline">
+                {doc.vendorName}
+              </Link>
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <Button
-            variant="outline"
-            size="sm"
-            title="Reads the file again from scratch — this replaces any edits you've made."
-            onClick={() => reextract.mutate()}
-            disabled={reextract.isPending || isProcessing}
-          >
-            <RefreshCw className={cn("w-4 h-4 mr-1", reextract.isPending && "animate-spin")} /> Read again
-          </Button>
+          {/* Reading again overwrites hand-corrected + unsaved fields, so confirm
+              first when there's anything to lose — the hover-title alone was the
+              sole warning (FP-062). */}
+          {discardCount > 0 ? (
+            <ConfirmDialog
+              trigger={
+                <Button variant="outline" size="sm" disabled={reextract.isPending || isProcessing}>
+                  <RefreshCw className={cn("w-4 h-4 mr-1", reextract.isPending && "animate-spin")} /> Read again
+                </Button>
+              }
+              title="Read this file again?"
+              description={`This re-reads the document from scratch and replaces the ${discardCount} value${discardCount === 1 ? "" : "s"} you corrected by hand.`}
+              confirmLabel="Read again"
+              onConfirm={() => reextract.mutate()}
+            />
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              title="Reads the file again from scratch."
+              onClick={() => reextract.mutate()}
+              disabled={reextract.isPending || isProcessing}
+            >
+              <RefreshCw className={cn("w-4 h-4 mr-1", reextract.isPending && "animate-spin")} /> Read again
+            </Button>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -686,6 +722,29 @@ export default function DocumentDetailPage() {
           >
             <ExternalLink className={cn("w-4 h-4 mr-1", viewFile.isPending && "animate-pulse")} /> View file
           </Button>
+          {/* Delete from the detail page too (the list had the only one). Same
+              ConfirmDialog as the list rows. (FP-060) */}
+          <ConfirmDialog
+            trigger={
+              <Button variant="ghost" size="sm" aria-label={`Delete ${doc.originalFileName}`} disabled={del.isPending}>
+                <Trash2 className="w-4 h-4 text-slate-500 hover:text-rose-600" />
+              </Button>
+            }
+            title={`Delete ${doc.originalFileName}?`}
+            description="This removes the document from your list. This can't be undone."
+            confirmLabel="Delete"
+            destructive
+            onConfirm={() =>
+              del.mutate(doc.id, {
+                onSuccess: () => {
+                  toast.success("Document deleted");
+                  router.push("/documents");
+                },
+                onError: (err) =>
+                  toast.error(err instanceof Error && err.message ? err.message : GENERIC_FALLBACK_MESSAGE),
+              })
+            }
+          />
         </div>
       </header>
 
@@ -731,7 +790,10 @@ export default function DocumentDetailPage() {
 
       {doc.extractionStatus === "ManualRequired" && <ManualReviewCard />}
 
-      {doc.processingError && <ProcessingErrorCard doc={doc} />}
+      {/* Only show the "we couldn't read this / contact support" card once
+          extraction has terminally Failed — not while a transient error sits
+          between automatic retries (Pending/Processing). (FP-067) */}
+      {doc.processingError && doc.extractionStatus === "Failed" && <ProcessingErrorCard doc={doc} />}
 
       <Card>
         <CardContent className="p-6 space-y-4">

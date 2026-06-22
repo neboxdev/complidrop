@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { http } from "msw";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import DocumentDetailPage from "./page";
 import {
   renderWithProviders,
@@ -158,6 +158,163 @@ describe("DocumentDetailPage — manual entry on a failed read (#316 FP-064)", (
     expect(wire).toContain("1000000");
     // Guard the exact bug this test exists for: never the PascalCase column name.
     expect(wire).not.toContain("GeneralLiabilityLimit");
+  });
+});
+
+describe("DocumentDetailPage — Batch C (#317)", () => {
+  it("FP-062: 'Read again' confirms before discarding hand-corrected fields", async () => {
+    let reextractCalled = 0;
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_edited",
+            extractionStatus: "Completed",
+            complianceStatus: "Compliant",
+            fields: [
+              {
+                id: "f1",
+                fieldName: "expiration_date",
+                fieldValue: "2026-11-01",
+                fieldType: "date",
+                confidence: 1,
+                isManuallyEdited: true,
+                originalValue: "2025-01-01",
+              },
+            ],
+          }),
+        ),
+      ),
+      http.post(url("/api/documents/:id/reextract"), () => {
+        reextractCalled += 1;
+        return jsonOk<void>(undefined);
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_edited" } });
+
+    fireEvent.click(await screen.findByRole("button", { name: /read again/i }));
+    // Opens a confirm dialog instead of firing immediately.
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveAccessibleName(/read this file again/i);
+    expect(within(dialog).getByText(/replaces the 1 value you corrected/i)).toBeInTheDocument();
+    expect(reextractCalled).toBe(0);
+    // Confirm → fires reextract.
+    fireEvent.click(within(dialog).getByRole("button", { name: /read again/i }));
+    await waitFor(() => expect(reextractCalled).toBe(1));
+  });
+
+  it("FP-062: 'Read again' fires immediately when there's nothing corrected to lose", async () => {
+    let reextractCalled = 0;
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_clean",
+            extractionStatus: "Completed",
+            complianceStatus: "Compliant",
+            fields: [
+              {
+                id: "f1",
+                fieldName: "expiration_date",
+                fieldValue: "2026-11-01",
+                fieldType: "date",
+                confidence: 0.95,
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+            ],
+          }),
+        ),
+      ),
+      http.post(url("/api/documents/:id/reextract"), () => {
+        reextractCalled += 1;
+        return jsonOk<void>(undefined);
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_clean" } });
+
+    fireEvent.click(await screen.findByRole("button", { name: /read again/i }));
+    await waitFor(() => expect(reextractCalled).toBe(1));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("FP-067: the processing-error card shows only on terminal Failed, not between retries", async () => {
+    // Pending with a transient processingError → NO 'contact support' card.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_retry",
+            extractionStatus: "Pending",
+            processingError: "Gemini 503",
+          }),
+        ),
+      ),
+    );
+    const { unmount } = renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_retry" } });
+    await waitFor(() => expect(screen.getByText(/reading the document/i)).toBeInTheDocument());
+    expect(screen.queryByText(/couldn't read this document/i)).toBeNull();
+    unmount();
+
+    // Failed (terminal) → the card shows.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_failed2",
+            extractionStatus: "Failed",
+            processingError: "Gemini 503",
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_failed2" } });
+    expect(await screen.findByText(/couldn't read this document/i)).toBeInTheDocument();
+  });
+
+  it("FP-065: shows the vendor name as a link to the vendor page", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_vendor",
+            extractionStatus: "Completed",
+            complianceStatus: "Compliant",
+            vendorId: "v7",
+            vendorName: "Acme Catering",
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_vendor" } });
+    expect(await screen.findByRole("link", { name: "Acme Catering" })).toHaveAttribute("href", "/vendors/v7");
+  });
+
+  it("FP-060: delete from the detail page confirms, then deletes + returns to the list", async () => {
+    let deleted = false;
+    const pushSpy = vi.fn();
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(makeDocumentDetail({ id: "d_del", originalFileName: "coi.pdf", extractionStatus: "Completed" })),
+      ),
+      http.delete(url("/api/documents/:id"), () => {
+        deleted = true;
+        return jsonOk<void>(undefined);
+      }),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_del" },
+      router: { push: pushSpy },
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: /delete coi\.pdf/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+    await waitFor(() => expect(deleted).toBe(true));
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledWith("/documents"));
   });
 });
 
