@@ -48,6 +48,15 @@ export function useDashboardStats() {
     queryKey: ["dashboard", "stats"],
     queryFn: ({ signal }) => api.get<DashboardStats>("/api/dashboard/stats", { signal }),
     staleTime: 30_000,
+    // Poll ONLY while a document is still being read, so the "Still being read: N"
+    // tile (and the headline counts behind it) unfreeze when extraction completes —
+    // but an idle dashboard stays silent (#318 FP-049). One tick is a heavy ~14-count
+    // query, so we gate on the last-seen pendingExtraction and never poll in error
+    // (mirrors the conditional pattern in useDocuments).
+    refetchInterval: (q) => {
+      if (q.state.status === "error") return false;
+      return (q.state.data?.pendingExtraction ?? 0) > 0 ? 15_000 : false;
+    },
   });
 }
 

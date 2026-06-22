@@ -78,8 +78,8 @@ export function useOnboardingChecklist(): OnboardingChecklist {
       key: "document",
       label: "Collect a document",
       hint: hasPortal
-        ? "Upload a COI, or send the vendor an upload link."
-        : "Upload a COI you have on file.",
+        ? "Upload an insurance certificate (COI), or send the vendor an upload link."
+        : "Upload an insurance certificate (COI) you have on file.",
       href: "/documents",
       done: documentDone,
     },

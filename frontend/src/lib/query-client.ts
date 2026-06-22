@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ApiError, GENERIC_FALLBACK_MESSAGE } from "./api";
+import { markSessionExpired } from "./session-expiry";
 import { ME_KEY, ME_PROBE_KEY } from "@/hooks/useAuth";
 
 // Opt-in flag for the global mutation-error toast. Mutations that do NOT
@@ -69,6 +70,11 @@ export function createQueryClient(defaultOptions: DefaultOptions): QueryClient {
   let client: QueryClient;
 
   const handleAuthError = () => {
+    // This is the SINGLE involuntary-eviction chokepoint — a 401 that survived
+    // the silent refresh. Flag it so the layout shows the "you were signed out"
+    // notice + a returnTo, distinct from a deliberate log-out (which nulls the
+    // cache directly, never here) which just lands on a plain /login (#318 FP-045).
+    markSessionExpired();
     // Null both keys (authoritative + landing-probe) so the layout's
     // `useMe()` effect sees `me.data === null` and redirects. Reuses the
     // tested redirect path rather than navigating from here (no router

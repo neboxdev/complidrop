@@ -59,7 +59,6 @@ public static class ComplianceEndpoints
         CreateTemplateRequest req,
         AppDbContext db,
         ICurrentUser currentUser,
-        IAuditLogger audit,
         CancellationToken ct)
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
@@ -76,7 +75,8 @@ public static class ComplianceEndpoints
         };
         db.ComplianceTemplates.Add(template);
         await db.SaveChangesAsync(ct);
-        await audit.LogAsync("complianceTemplate.created", nameof(ComplianceTemplate), template.Id, after: new { template.Name });
+        // Interceptor records "compliancetemplate.created" with a full snapshot — the explicit
+        // duplicate was dropped (#318 FP-043); manual IAuditLogger is for non-entity events only.
         return Results.Ok(new { data = new { id = template.Id }, error = (object?)null });
     }
 
@@ -84,7 +84,6 @@ public static class ComplianceEndpoints
         Guid id,
         UpdateTemplateRequest req,
         AppDbContext db,
-        IAuditLogger audit,
         CancellationToken ct)
     {
         var template = await db.ComplianceTemplates.FirstOrDefaultAsync(t => t.Id == id && !t.IsSystemTemplate, ct);
@@ -92,7 +91,7 @@ public static class ComplianceEndpoints
         template.Name = req.Name.Trim();
         template.Description = req.Description;
         await db.SaveChangesAsync(ct);
-        await audit.LogAsync("complianceTemplate.updated", nameof(ComplianceTemplate), template.Id);
+        // Interceptor records "compliancetemplate.updated" — no explicit duplicate (#318 FP-043).
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }
 
@@ -139,11 +138,13 @@ public static class ComplianceEndpoints
             await tx.CommitAsync(ct);
         }
 
+        // Only the assignment-clearing row is explicit: ExecuteUpdate bypasses the interceptor.
+        // The template soft-delete is recorded by the interceptor as "compliancetemplate.deleted" —
+        // the explicit duplicate was dropped (#318 FP-043).
         if (vendorIds.Count > 0)
             await audit.LogAsync(
                 "vendor.template_cleared_on_template_delete", nameof(ComplianceTemplate), id,
                 after: new { count = vendorIds.Count, vendorIds });
-        await audit.LogAsync("complianceTemplate.deleted", nameof(ComplianceTemplate), id);
 
         // Re-evaluation fan-out (#257): the affected vendors now have no checklist, so their
         // documents must drop from any rule verdict to "no requirements apply" (Pending) and shed

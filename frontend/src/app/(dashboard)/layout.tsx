@@ -2,10 +2,12 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
-import { LayoutDashboard, FileText, Users, Settings, LogOut, Bell, ClipboardList, Download, Menu, X, AlertTriangle, RotateCw } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { LayoutDashboard, FileText, Users, Settings, LogOut, Bell, ClipboardList, Download, Menu, X, AlertTriangle, RotateCw, LifeBuoy } from "lucide-react";
 import { useLogout, useMe, type Me } from "@/hooks/useAuth";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { consumeSessionExpired, safeReturnTo } from "@/lib/session-expiry";
+import { SUPPORT_EMAIL } from "@/lib/site";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -112,6 +114,15 @@ function ShellUnreachable({
 function SidebarFooter({ me, onLogout }: { me: Me; onLogout: () => void }) {
   return (
     <div className="px-4 py-4 border-t border-sky-900 text-sm">
+      {/* Help affordance (#318 FP-048): error copy across the app says "contact
+          support", but the shell offered no way to do it. A mailto reaches the
+          same address the marketing/legal pages use. */}
+      <a
+        href={`mailto:${SUPPORT_EMAIL}`}
+        className="mb-3 flex items-center gap-2 text-xs text-sky-300 hover:text-white pointer-coarse:min-h-11"
+      >
+        <LifeBuoy className="w-3.5 h-3.5 shrink-0" /> Help &amp; support
+      </a>
       <p className="font-medium text-sky-100 truncate">{me.organizationName}</p>
       <p className="text-xs text-sky-300 truncate">{me.email}</p>
       <div className="mt-2 flex items-center justify-between">
@@ -133,15 +144,32 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const router = useRouter();
   const pathname = usePathname();
   const [navOpen, setNavOpen] = useState(false);
+  // One-shot guard so the redirect navigates exactly once even under React's
+  // dev-mode double-invoke of effects — otherwise the second pass, finding the
+  // expiry flag already consumed, would clobber `?expired=1` with a plain /login.
+  const redirected = useRef(false);
 
   // Redirect to /login ONLY on the explicit logged-out signal. useMe maps a
   // genuine 401 (after the api-client refresh attempt) to `null`; a transient
   // /me 500 or network failure instead leaves `me.data === undefined` with
   // `me.isError` set. Guarding on `=== null` (not `!me.data`) means a backend
   // blip no longer evicts a valid session mid-task (#182).
+  //
+  // When the null came from an INVOLUNTARY eviction (query-client flagged it via
+  // markSessionExpired), carry `?expired=1` + a validated `returnTo` so /login
+  // can explain what happened and bounce Pat back to where she was (#318 FP-045).
+  // A deliberate log-out never sets the flag, so it lands on a plain /login.
   useEffect(() => {
-    if (me.data === null) router.replace("/login");
-  }, [me.data, router]);
+    if (me.data !== null || redirected.current) return;
+    redirected.current = true;
+    if (consumeSessionExpired()) {
+      const returnTo = safeReturnTo(pathname);
+      const qs = returnTo ? `?expired=1&returnTo=${encodeURIComponent(returnTo)}` : "?expired=1";
+      router.replace(`/login${qs}`);
+    } else {
+      router.replace("/login");
+    }
+  }, [me.data, pathname, router]);
 
   // Explicit logout/expiry → the redirect above is in flight; show the neutral
   // placeholder (not the error card) so there's no flash before /login.
@@ -178,8 +206,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         Skip to content
       </a>
       {/* Desktop sidebar — hidden below md, where the mobile top bar + drawer
-          take over. */}
-      <aside className="hidden md:flex bg-sky-950 text-sky-50 flex-col">
+          take over. Sticky + full-height so the nav stays put while a long page
+          scrolls (#318 FP-049); the nav itself scrolls internally if it overflows. */}
+      <aside className="hidden md:flex md:sticky md:top-0 md:h-screen bg-sky-950 text-sky-50 flex-col">
         <div className="px-6 py-5 flex items-center border-b border-sky-900">
           <Logo variant="reverse" height={32} />
         </div>

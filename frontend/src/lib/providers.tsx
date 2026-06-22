@@ -22,10 +22,25 @@ export function Providers({ children }: { children: React.ReactNode }) {
     initAnalytics();
   }, []);
 
+  // Toasts sit top-right on desktop, but on a phone that spot covers the sticky
+  // top bar (hamburger + logo) — live-confirmed interception (#318 FP-047). Move
+  // them to bottom-center on coarse (touch) pointers, where nothing is occluded
+  // and they're within thumb reach. Defaults to top-right for SSR / the first
+  // paint, then settles on the client; matchMedia is guarded for non-browser envs.
+  const [toastPosition, setToastPosition] = useState<"top-right" | "bottom-center">("top-right");
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mq = window.matchMedia("(pointer: coarse)");
+    const apply = () => setToastPosition(mq.matches ? "bottom-center" : "top-right");
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+
   return (
     <QueryClientProvider client={client}>
       {children}
-      <Toaster richColors position="top-right" />
+      <Toaster richColors position={toastPosition} />
     </QueryClientProvider>
   );
 }

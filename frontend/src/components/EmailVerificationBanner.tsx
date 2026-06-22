@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { MailWarning } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -40,7 +41,12 @@ export function EmailVerificationBanner({ email }: { email: string }) {
         <MailWarning className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
         <span>
           Confirm your email <strong className="font-medium break-all">{email}</strong> so your
-          compliance reminders actually reach you.
+          compliance reminders actually reach you.{" "}
+          {/* Escape hatch (#318 FP-049): a typo'd address can't be fixed by resending to
+              it — Settings is where the change-email flow lives. */}
+          <Link href="/settings" className="font-medium underline hover:text-amber-950">
+            Not your email?
+          </Link>
         </span>
       </p>
       <Button

@@ -40,6 +40,49 @@ public sealed class DashboardStatsTests(IntegrationTestFixture fixture) : Integr
         (await FlagAsync(auth.Client)).Should().BeFalse();
     }
 
+    [Fact]
+    public async Task complianceRate_excludes_only_not_yet_evaluated_documents()
+    {
+        // #318 FP-042: a freshly-uploaded doc sits ComplianceStatus.Pending until the worker grades it.
+        // Counting those in the denominator flashed a demoralizing "0%" right after the first upload.
+        // Rate = compliant / GRADED docs: 2 Compliant + 1 NonCompliant + 1 Pending → 2/3 = 66.7%. This
+        // pins BOTH that Pending is excluded AND that NonCompliant stays IN the denominator (a regression
+        // defining "graded" as compliant-only would read 100% and slip through a Compliant+Pending test).
+        var auth = await RegisterAndLoginAsync();
+        await SeedDocsAsync(auth.OrgId,
+            ComplianceStatus.Compliant,
+            ComplianceStatus.Compliant,
+            ComplianceStatus.NonCompliant,
+            ComplianceStatus.Pending);
+
+        var data = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/dashboard/stats")).GetProperty("data");
+        data.GetProperty("complianceRate").GetDouble().Should().Be(66.7,
+            "2 of 3 graded docs are compliant; the Pending doc is excluded, the NonCompliant doc is not");
+    }
+
+    private async Task SeedDocsAsync(Guid orgId, params ComplianceStatus[] statuses)
+    {
+        await using var db = CreateSystemDb();
+        var now = DateTime.UtcNow;
+        var i = 0;
+        foreach (var status in statuses)
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = orgId,
+                OriginalFileName = $"doc{i++}.pdf",
+                BlobStorageUrl = "memory://x",
+                BlobStoragePath = $"path/{Guid.NewGuid():N}",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                ComplianceStatus = status,
+                ExtractionStatus = ExtractionStatus.Completed,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        await db.SaveChangesAsync();
+    }
+
     private async Task AddActiveLinkAsync(Guid orgId, bool isActive = true)
     {
         await using var db = CreateSystemDb();

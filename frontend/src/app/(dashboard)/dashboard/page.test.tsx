@@ -77,7 +77,7 @@ describe("DashboardPage — clickable stat cards (#317 FP-041)", () => {
     expect(await screen.findByRole("link", { name: /compliant: 8\. view these documents/i })).toHaveAttribute("href", "/documents?status=Compliant");
     expect(screen.getByRole("link", { name: /total documents: 12\. view these documents/i })).toHaveAttribute("href", "/documents");
     expect(screen.getByRole("link", { name: /non-compliant: 1\. view these documents/i })).toHaveAttribute("href", "/documents?status=NonCompliant");
-    expect(screen.getByRole("link", { name: /expiring ≤ 30d: 2\. view these documents/i })).toHaveAttribute("href", "/documents?status=ExpiringSoon");
+    expect(screen.getByRole("link", { name: /expiring within 30 days: 2\. view these documents/i })).toHaveAttribute("href", "/documents?status=ExpiringSoon");
     // Pipeline buckets (distinct aria-label format + the expiresWithin param path).
     expect(screen.getByRole("link", { name: /expired: 1 documents\. view them/i })).toHaveAttribute("href", "/documents?status=Expired");
     expect(screen.getByRole("link", { name: /next 30 days: 2 documents\. view them/i })).toHaveAttribute("href", "/documents?expiresWithin=30");
@@ -185,11 +185,11 @@ describe("DashboardPage — state matrix (#36)", () => {
     expect(screen.queryByText("0-30d")).toBeNull();
   });
 
-  it("error on /stats: page still renders via fallback `?? 0` values; pipeline+activity unaffected", async () => {
-    // Partial-success path — UX requirement: a single hook failing
-    // doesn't crash the page. Stats hook's error means stats.data is
-    // undefined; the JSX uses `?? 0` to fall back to zero. The other
-    // panels MUST still render with their successful data.
+  it("error on /stats: an error card + Retry replaces the stat region — NEVER a zeroed grid or the checklist (#318 FP-040)", async () => {
+    // A stats outage must NOT render a paying account as brand-new-empty. The whole
+    // numbers region (grid + pipeline) is gated on a SUCCESSFUL read; on failure we
+    // show one honest error card + Retry. Page chrome + the independent activity
+    // panel still render.
     server.use(
       http.get(url("/api/dashboard/stats"), () =>
         jsonError("server.error", "stats down", { status: 500 }),
@@ -200,25 +200,36 @@ describe("DashboardPage — state matrix (#36)", () => {
 
     renderWithProviders(<DashboardPage />, { auth: authedMe });
 
-    // Page chrome + welcome text always render.
-    await waitFor(() =>
-      expect(
-        screen.getByRole("heading", { name: /welcome, acme/i }),
-      ).toBeInTheDocument(),
+    expect(await screen.findByText(/couldn't load your dashboard/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+    // Chrome + the activity panel (its own section) still render.
+    expect(screen.getByRole("heading", { name: /welcome, acme/i })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/document uploaded/i)).toBeInTheDocument());
+    // The lies FP-040 prevents: a zeroed grid, the brand-new-account checklist, the
+    // numbers region rendering at all, or the old six `?? 0` fallback cards.
+    expect(screen.queryByText(/total documents/i)).toBeNull();
+    expect(screen.queryByText(/^get started$/i)).toBeNull();
+    expect(screen.queryByText(/when documents expire/i)).toBeNull();
+    expect(screen.queryAllByText(/^0$/).length).toBe(0);
+  });
+
+  it("error on /stats: Retry refetches and reveals the real grid once stats recover (#318 FP-040)", async () => {
+    let calls = 0;
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => {
+        calls += 1;
+        return calls === 1 ? jsonError("server.error", "boom", { status: 500 }) : jsonOk(STATS);
+      }),
+      http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
     );
-    // Activity panel populated normally.
-    await waitFor(() =>
-      expect(screen.getByText(/document uploaded/i)).toBeInTheDocument(),
-    );
-    // Pipeline panel populated normally.
-    expect(screen.getByText(/when documents expire/i)).toBeInTheDocument();
-    // Stats panel falls back to zeroes (no crash). The page renders
-    // exactly SIX cards bound to `stats.data?.xxx ?? 0`: Total documents,
-    // Compliant, Expiring ≤ 30d, Non-compliant, Vendors tracked, Awaiting
-    // extraction (compliance rate has its own `%` suffix so it doesn't
-    // match `^0$`). Requiring ≥6 means a regression that drops the
-    // fallback on most stats — but leaves one intact — still fails.
-    expect(screen.getAllByText(/^0$/).length).toBeGreaterThanOrEqual(6);
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    fireEvent.click(await screen.findByRole("button", { name: /retry/i }));
+
+    await waitFor(() => expect(screen.getByText("12")).toBeInTheDocument()); // totalDocuments
+    expect(screen.queryByText(/couldn't load your dashboard/i)).toBeNull();
   });
 });
 

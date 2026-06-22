@@ -618,6 +618,13 @@ export default function DocumentDetailPage() {
   ]).size;
   const isProcessing =
     doc.extractionStatus === "Pending" || doc.extractionStatus === "Processing";
+  // A crashed claim can sit in the 5-minute zombie-reclaim window showing only
+  // "Reading…". After ~2 minutes in flight, reassure that it's taking longer than
+  // usual and will retry automatically (the backend timeout/reclaim from #259) —
+  // so the silence doesn't read as a hang. updatedAt is bumped at claim and on each
+  // requeue, and the page re-polls every 3s while processing, so this recomputes. (#318 FP-004)
+  const takingLong =
+    isProcessing && Date.now() - new Date(doc.updatedAt).getTime() > 2 * 60 * 1000;
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
@@ -819,7 +826,15 @@ export default function DocumentDetailPage() {
           </div>
           {doc.fields.length === 0 ? (
             isProcessing ? (
-              <p className="text-sm text-slate-500">Reading the document…</p>
+              <div className="space-y-1">
+                <p className="text-sm text-slate-500">Reading the document…</p>
+                {takingLong && (
+                  <p className="text-xs text-amber-700">
+                    This is taking longer than usual — we&apos;re still working on it and will keep
+                    retrying automatically. You can safely leave this page and check back later.
+                  </p>
+                )}
+              </div>
             ) : (
               // FP-064: a Failed / zero-field read used to dead-end at "No details
               // read yet." Offer the key fields for manual entry instead — Save

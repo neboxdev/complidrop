@@ -88,6 +88,15 @@ afterEach(() => {
   server.resetHandlers();
   resetNavigation();
   resetSonner();
+  // Clear web storage so per-tab state never leaks across tests in a file —
+  // e.g. the #318 FP-045 session-expiry flag (sessionStorage) or the welcome-tour
+  // restart flag (localStorage). jsdom shares one window across a file's tests.
+  try {
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+  } catch {
+    /* storage may be unavailable in some envs — best-effort */
+  }
 });
 
 afterAll(() => server.close());

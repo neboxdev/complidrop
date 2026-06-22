@@ -384,7 +384,6 @@ public static class DocumentEndpoints
         IImageTranscoder transcoder,
         IIdempotencyService idem,
         ICurrentUser currentUser,
-        IAuditLogger audit,
         CancellationToken ct)
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
@@ -499,8 +498,11 @@ public static class DocumentEndpoints
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
             await idem.StoreAsync(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status201Created, response, ct);
 
-        await audit.LogAsync("document.uploaded", nameof(Document), doc.Id, after: new { doc.Id, doc.OriginalFileName, doc.UploadedBy });
-
+        // No explicit "document.uploaded": the interceptor already records this owner upload as the
+        // entity mutation "document.created" (#318 FP-043) — the two firing in the same request was
+        // the "Document uploaded + Document added in the same second" duplicate. A VENDOR upload via
+        // the public portal has no current user, so the interceptor can't see it; that path keeps its
+        // explicit "vendorportallink.upload_processed" row (→ "Vendor sent a document" in the feed).
         return Results.Json(response, statusCode: StatusCodes.Status201Created);
     }
 

@@ -14,6 +14,7 @@ import {
   complianceFailureReason,
   formatCheckValue,
   processingErrorMessage,
+  relativeTime,
 } from "./display-labels";
 
 describe("complianceStatusLabel (#188)", () => {
@@ -79,6 +80,11 @@ describe("actionLabel (#188)", () => {
     expect(actionLabel("complianceRule.upserted")).toBe("Requirement saved");
     expect(actionLabel("vendorPortalLink.revoked")).toBe("Portal link revoked");
   });
+  it("maps the #318 FP-043 feed actions (portal upload, link email, processed)", () => {
+    expect(actionLabel("vendorPortalLink.upload_processed")).toBe("Vendor sent a document");
+    expect(actionLabel("vendorPortalLink.emailed")).toBe("Upload link emailed");
+    expect(actionLabel("document.processed")).toBe("Document read");
+  });
   it("fixes the all-lowercase entity garble the old prettyAction produced", () => {
     // Old prettyAction → "Compliancetemplate · Created"; the map gives English.
     expect(actionLabel("compliancetemplate.created")).toBe("Requirement set created");
@@ -87,6 +93,29 @@ describe("actionLabel (#188)", () => {
   it("falls back to a de-dotted, de-camelCased, title-cased form for unknown actions", () => {
     expect(actionLabel("fooBar.created")).toBe("Foo Bar · Created");
     expect(actionLabel("weird.action")).toBe("Weird · Action");
+  });
+});
+
+describe("relativeTime (#318 FP-049)", () => {
+  const now = new Date("2026-06-22T12:00:00Z").getTime();
+  it("renders recent times relatively", () => {
+    expect(relativeTime(new Date(now - 5_000).toISOString(), now)).toBe("just now");
+    expect(relativeTime(new Date(now - 5 * 60_000).toISOString(), now)).toBe("5m ago");
+    expect(relativeTime(new Date(now - 3 * 3_600_000).toISOString(), now)).toBe("3h ago");
+    expect(relativeTime(new Date(now - 2 * 86_400_000).toISOString(), now)).toBe("2d ago");
+  });
+  it("falls back to a date for anything older than ~a week", () => {
+    const old = new Date(now - 30 * 86_400_000).toISOString();
+    const out = relativeTime(old, now);
+    expect(out).not.toMatch(/ago/);
+    expect(out).toBe(new Date(now - 30 * 86_400_000).toLocaleDateString());
+  });
+  it("treats a future / clock-skewed timestamp as 'just now', never negative", () => {
+    expect(relativeTime(new Date(now + 60_000).toISOString(), now)).toBe("just now");
+  });
+  it("returns empty for nullish / unparseable input", () => {
+    expect(relativeTime(null, now)).toBe("");
+    expect(relativeTime("not-a-date", now)).toBe("");
   });
 });
 
@@ -124,10 +153,11 @@ describe("deliveryStatusLabel (#188)", () => {
 // emitted_action on the C# side so a one-sided map edit is caught.
 const REAL_AUDIT_ACTIONS = [
   "document.created", "document.uploaded", "document.updated", "document.deleted",
-  "document.verified", "document.fields_edited", "document.reextract_queued",
+  "document.verified", "document.fields_edited", "document.reextract_queued", "document.processed",
   "documentfield.created", "documentfield.updated",
   "vendor.created", "vendor.updated", "vendor.deleted",
-  "vendorPortalLink.created", "vendorPortalLink.revoked",
+  "vendorPortalLink.created", "vendorPortalLink.revoked", "vendorPortalLink.emailed",
+  "vendorPortalLink.upload_processed",
   "complianceTemplate.created", "complianceTemplate.updated", "complianceTemplate.deleted",
   "complianceRule.created", "complianceRule.updated", "complianceRule.upserted", "complianceRule.deleted",
   "user.registered", "user.logged_in", "user.login_failed", "user.password_changed",

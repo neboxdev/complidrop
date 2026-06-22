@@ -51,6 +51,11 @@ public static class DashboardEndpoints
                 || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon
                 || d.ComplianceStatus == Entities.ComplianceStatus.Pending), ct);
         var expired = await docs.CountAsync(d => d.ExpirationDate != null && d.ExpirationDate < today, ct);
+        // Denominator for the compliance rate EXCLUDES not-yet-graded documents (#318 FP-042): a fresh
+        // upload sits ComplianceStatus.Pending until the worker reads + evaluates it, and counting those
+        // as "not compliant" flashed a demoralizing "0%" the instant Pat uploaded her very first document.
+        // Rate = effective-compliant / documents-that-have-a-verdict.
+        var evaluated = await docs.CountAsync(d => d.ComplianceStatus != Entities.ComplianceStatus.Pending, ct);
         var pendingExtraction = await docs.CountAsync(d =>
             d.ExtractionStatus == Entities.ExtractionStatus.Pending
             || d.ExtractionStatus == Entities.ExtractionStatus.Processing, ct);
@@ -91,7 +96,7 @@ public static class DashboardEndpoints
                 anyActivePortalLink,
                 hasSampleData,
                 sampleDocumentId,
-                complianceRate = totalDocs == 0 ? 0 : Math.Round((double)compliant / totalDocs * 100, 1)
+                complianceRate = evaluated == 0 ? 0 : Math.Round((double)compliant / evaluated * 100, 1)
             },
             error = (object?)null
         });
@@ -129,18 +134,49 @@ public static class DashboardEndpoints
     private const int RecentActivityBuffer = 60;
 
     /// <summary>
-    /// Internal-flag mutations with no user-meaningful label — they would render as raw
-    /// "Entity - Operation" entity-speak in the feed (#252). The canonical case is the interceptor's
-    /// bare <c>user.updated</c> from the welcome-tour <c>HasCompletedOnboarding</c> flip; meaningful
-    /// user events (sign-in, password/email change, account delete) have their own explicit, labelled
-    /// actions. Filtered in the SQL query (below) so a hidden row never consumes a buffer slot. An
-    /// array (not HashSet) so EF translates <c>!Contains</c> to a server-side <c>NOT IN</c>.
+    /// Curated allow-list of the audit actions Pat should see in the activity feed (#318 FP-043).
+    /// A WHITELIST, not a blocklist, so any unmapped/internal action (e.g. the welcome-tour
+    /// <c>user.updated</c> flip, the per-evaluation <c>compliancecheck.created</c> ×N noise, raw
+    /// <c>documentfield.*</c> / <c>vendorportallink.updated</c> machine churn, or login noise per
+    /// FP-049) is fail-closed OUT of the feed rather than leaking as title-cased entity-speak. The
+    /// AuditLog TABLE still keeps every row — only the FEED is curated; the audit export is unchanged.
+    /// Stored lowercase and matched against <c>lower(Action)</c> so it covers BOTH the interceptor's
+    /// all-lowercase entity actions AND the explicit camelCase ones (<c>complianceRule.upserted</c>,
+    /// <c>vendorPortalLink.upload_processed</c>). An array (not HashSet) so EF translates
+    /// <c>Contains</c> to a server-side <c>= ANY</c>. Keep in sync with the labelled actions in
+    /// DisplayLabels.Action / display-labels.ts.
     /// </summary>
-    private static readonly string[] FeedHiddenActions = ["user.updated"];
+    private static readonly string[] FeedVisibleActions =
+    [
+        // "document.uploaded" is no longer EMITTED (the owner-upload explicit row was dropped in
+        // FP-043; uploads now record "document.created" via the interceptor) — but it stays whitelisted
+        // + labelled so HISTORICAL rows from before #318 still render in the feed.
+        "document.created", "document.uploaded", "document.updated", "document.deleted",
+        "document.verified", "document.fields_edited", "document.reextract_queued", "document.processed",
+        "vendor.created", "vendor.updated", "vendor.deleted",
+        "vendorportallink.created", "vendorportallink.revoked", "vendorportallink.deleted",
+        "vendorportallink.emailed", "vendorportallink.upload_processed",
+        "compliancetemplate.created", "compliancetemplate.updated", "compliancetemplate.deleted",
+        "compliancerule.created", "compliancerule.updated", "compliancerule.upserted", "compliancerule.deleted",
+        "reminder.sent",
+        "user.registered", "user.password_changed", "user.password_reset",
+        "user.email_verified", "user.email_changed", "user.account_deleted",
+    ];
 
-    /// <summary>The interceptor's generic update action for an entity type, e.g. <c>vendor.updated</c>.</summary>
-    private static bool IsGenericUpdate(string action, string entityType) =>
-        string.Equals(action, $"{entityType.ToLowerInvariant()}.updated", StringComparison.Ordinal);
+    /// <summary>
+    /// The interceptor's GENERIC entity action for a type — <c>{type}.created</c> or
+    /// <c>{type}.updated</c>. In a collapse group these LOSE to an explicit REFINED twin so the feed
+    /// shows the meaningful verb: <c>compliancerule.upserted</c> beats the interceptor's
+    /// <c>compliancerule.created</c> ("Requirement saved", not "Requirement added"), and
+    /// <c>document.verified</c> beats <c>document.updated</c>. A standalone generic action (no refined
+    /// twin in its group) is the group's only row and still shows. (#318 FP-043 + review S1)
+    /// </summary>
+    private static bool IsGenericEntityMutation(string action, string entityType)
+    {
+        var prefix = entityType.ToLowerInvariant();
+        return string.Equals(action, $"{prefix}.updated", StringComparison.Ordinal)
+            || string.Equals(action, $"{prefix}.created", StringComparison.Ordinal);
+    }
 
     private static async Task<IResult> RecentActivity(AppDbContext db, CancellationToken ct)
     {
@@ -151,9 +187,9 @@ public static class DashboardEndpoints
         // vs the interceptor's document.updated). Keep ONE row per (request, entity), preferring the
         // more specific action (the generic "...updated" loses). Rows with no correlation id or entity
         // id (background jobs, non-entity events) are never collapsed. The buffer (60 for 20) absorbs
-        // the ~2:1 twin ratio; hidden actions are excluded in SQL so they don't eat into it.
+        // the ~2:1 twin ratio; non-whitelisted actions are filtered in SQL so they don't eat into it.
         var buffer = await db.AuditLogs
-            .Where(a => !FeedHiddenActions.Contains(a.Action))
+            .Where(a => FeedVisibleActions.Contains(a.Action.ToLower()))
             .OrderByDescending(a => a.CreatedAt)
             .Take(RecentActivityBuffer)
             .Select(a => new { a.Id, a.Action, a.EntityType, a.EntityId, a.CorrelationId, a.CreatedAt })
@@ -167,7 +203,7 @@ public static class DashboardEndpoints
             .GroupBy(a => (a.CorrelationId, a.EntityType, a.EntityId,
                 Distinct: a.CorrelationId != null && a.EntityId != null ? (Guid?)null : a.Id))
             .Select(g => g
-                .OrderBy(a => IsGenericUpdate(a.Action, a.EntityType) ? 1 : 0) // specific action wins the twin
+                .OrderBy(a => IsGenericEntityMutation(a.Action, a.EntityType) ? 1 : 0) // specific action wins the twin
                 .ThenByDescending(a => a.CreatedAt)
                 .First())
             .OrderByDescending(a => a.CreatedAt)

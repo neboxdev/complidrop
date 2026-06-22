@@ -303,3 +303,56 @@ deep-linkable filters. Upload (was 5) keeps #265's rejection feedback + now
 per-file progress (FP-055). The closing per-page re-score table lands once
 Batches D–G complete (dashboard/shell, vendors/requirements, reminders/export/
 settings, portal/a11y).
+
+### Batch D — dashboard & shell (#318, merged 2026-06-22)
+
+Closed the dashboard-trust + app-shell cluster: **FP-040** (P0 — a stats outage
+now renders an error card + Retry, gated on `stats.isSuccess`; NEITHER a zeroed
+grid NOR the first-run checklist can render on failure — the "paying account
+looks brand-new-empty" lie is gone; the activity feed gets its own error
+branch), **FP-042** (compliance rate excludes not-yet-graded docs from the
+denominator, so a fresh upload no longer flashes "0%"; the "Expiring ≤ 30d" math
+notation → "Expiring within 30 days"), **FP-043** (the activity feed is now a
+fail-closed *whitelist* — `compliancecheck.created` ×N, `documentfield.*`,
+`vendorportallink.updated`, the internal `user.updated` flip, and login noise no
+longer leak as entity-speak; the portal upload reads "Vendor sent a document",
+link emails "Upload link emailed"; a new system `document.processed` event puts
+extraction completion in the feed; and the redundant explicit `IAuditLogger`
+calls that duplicated the interceptor's entity-mutation rows
+(`vendor.created/updated/deleted`, `complianceTemplate.*`,
+`vendorPortalLink.created`, `document.uploaded`) were dropped, de-polluting the
+audit export per the CLAUDE.md rule), **FP-044** ("insurance certificates
+(COIs)" spelled out at first in-app use — modal slide 1 + the checklist hint),
+**FP-045** (P1 — session expiry now lands on `/login?expired=1` with a "you were
+signed out to keep your account safe" notice and a `returnTo`; the `returnTo` is
+validated as a same-origin RELATIVE path — `safeReturnTo` rejects `//host`,
+`/\host`, absolute URLs, and control chars — closing the open-redirect vector; a
+deliberate log-out still lands on a plain `/login`), **FP-046** (skeletons
+instead of hard zeros while stats load; grid-vs-checklist branch only on success;
+the welcome modal treats backdrop/Escape as *minimize* — a stray click no longer
+ends the tour forever — while the X / Skip / final CTA complete it; `onError` on
+the completion mutation), **FP-047** (toasts move to bottom-center on coarse
+pointers so they stop covering the mobile top bar), **FP-048** (a "Help &
+support" mailto in the sidebar footer — the shell had no path for the "contact
+support" error copy), **FP-049** (sticky desktop sidebar; dashboard self-refresh
+gated on `pendingExtraction > 0` so "Still being read: N" unfreezes without
+polling idle dashboards; a "Not your email?" escape on the verify banner;
+zero-count pipeline buckets draw no bar; relative time in the feed; login noise
+filtered via the FP-043 whitelist), and **FP-004 (UI half)** (a document stuck in
+"Reading…" past ~2 minutes shows a "taking longer than usual — we'll keep
+retrying automatically" reassurance, pairing with #259's backend timeout/reclaim).
+
+**Effect on the score table:** Dashboard (first-run) (was 7) clears its
+hard-zeros-flash gate (FP-046) and should re-measure ~8. Dashboard (with data)
+(was 4) clears all three named gates — the stale Compliant-vs-Expired
+contradiction (#257, landed), the API-error-as-empty-account (FP-040), and the
+duplicated activity feed (FP-043) — and should re-measure ~8. App shell (was 6)
+clears the silent-session-eviction (FP-045) and no-help-affordance (FP-048)
+gates and should re-measure ~8. **Deferred** (real tickets under #150): the
+FP-042 *supersession* half — bucketing Expired by latest-doc-per-(vendor,type) —
+is a cross-surface data-semantics change that must stay consistent across the
+dashboard, documents list, reminders, and export, so it warrants its own ADR
+rather than a one-screen edit (**#327**, `bug`); and the FP-049
+*entity-names-in-the-feed* half needs polymorphic name resolution
+(Document/Vendor/Template → name) in the RecentActivity query (**#328**, `task`).
+The closing per-page re-score table lands once Batches E–G complete.

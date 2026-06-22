@@ -450,6 +450,23 @@ public class ExtractionWorker(
         doc.ComplianceStatus = ComplianceStatus.Pending;
         doc.UpdatedAt = now;
 
+        // System "document processed" event for the activity feed (#318 FP-043): extraction completes
+        // in this background worker, which has no ICurrentUser, so the AuditSaveChangesInterceptor
+        // skips it (its audit branch requires a current user) and the read step would otherwise never
+        // appear in Pat's feed. Written explicitly against the doc's org with a null user; saved in the
+        // same unit of work as the fields so a processed doc and its feed entry are atomic. AuditLog is
+        // in the interceptor's NonAuditedTypes, so this insert doesn't recurse.
+        db.AuditLogs.Add(new AuditLog
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = doc.OrganizationId,
+            UserId = null,
+            Action = "document.processed",
+            EntityType = nameof(Document),
+            EntityId = doc.Id,
+            CreatedAt = now,
+        });
+
         await db.SaveChangesAsync(ct);
     }
 }

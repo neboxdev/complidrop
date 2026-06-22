@@ -129,10 +129,12 @@ public sealed class RecentActivityFeedTests(IntegrationTestFixture fixture) : In
     }
 
     [Fact]
-    public async Task Creating_a_vendor_over_http_produces_one_feed_row_but_keeps_both_audit_rows()
+    public async Task Creating_a_vendor_over_http_produces_one_feed_row_and_one_audit_row()
     {
-        // End-to-end: the real interceptor + explicit logger both fire in one request. The feed shows
-        // one row; the AuditLog table keeps both, so the audit export is unchanged (#252 AC1 + AC3).
+        // End-to-end: creating a vendor writes exactly ONE "vendor.created" audit row — the
+        // interceptor's, with a full snapshot. The redundant explicit IAuditLogger duplicate was
+        // dropped (#318 FP-043) per the CLAUDE.md audit rule (manual logging is for non-entity
+        // events only), de-polluting the audit export. The feed still shows one row.
         var auth = await RegisterAndLoginAsync();
 
         var create = await auth.Client.PostAsJsonAsync("/api/vendors", new
@@ -149,7 +151,7 @@ public sealed class RecentActivityFeedTests(IntegrationTestFixture fixture) : In
 
         await using var db = CreateSystemDb();
         (await db.AuditLogs.CountAsync(a => a.Action == "vendor.created" && a.EntityId == vendorId))
-            .Should().Be(2, "the table keeps both the interceptor and explicit rows — export is unchanged");
+            .Should().Be(1, "the interceptor is now the sole writer — the explicit duplicate was dropped (#318 FP-043)");
     }
 
     [Fact]
@@ -189,13 +191,54 @@ public sealed class RecentActivityFeedTests(IntegrationTestFixture fixture) : In
     }
 
     [Fact]
+    public async Task Non_whitelisted_machine_actions_are_hidden_from_the_feed()
+    {
+        // The feed is a curated allow-list (#318 FP-043): per-evaluation check rows, raw field
+        // mutations, login noise, and the internal onboarding flip must NOT leak as entity-speak.
+        var auth = await RegisterAndLoginAsync();
+        var kept = Guid.NewGuid();
+        await SeedAsync(auth.OrgId,
+            ("compliancecheck.created", "ComplianceCheck", Guid.NewGuid(), null, 5),
+            ("documentfield.updated", "DocumentField", Guid.NewGuid(), null, 5),
+            ("user.logged_in", "User", Guid.NewGuid(), null, 5),
+            ("vendorportallink.updated", "VendorPortalLink", Guid.NewGuid(), null, 5),
+            ("vendor.created", "Vendor", kept, null, 5));
+
+        var feed = await FeedAsync(auth);
+        var actions = feed.Select(a => a.GetProperty("action").GetString()).ToArray();
+
+        actions.Should().NotContain("compliancecheck.created");
+        actions.Should().NotContain("documentfield.updated");
+        actions.Should().NotContain("user.logged_in");
+        actions.Should().NotContain("vendorportallink.updated");
+        CountFor(feed, kept).Should().Be(1, "whitelisted actions still appear");
+    }
+
+    [Fact]
+    public async Task Portal_upload_and_processed_events_appear_in_the_feed()
+    {
+        // The portal-upload row (#318 FP-043, labelled "Vendor sent a document") and the worker's
+        // system "document.processed" event must surface — the latter has no current user, so the
+        // interceptor can't write it. camelCase upload_processed is matched case-insensitively.
+        var auth = await RegisterAndLoginAsync();
+        await SeedAsync(auth.OrgId,
+            ("vendorPortalLink.upload_processed", "VendorPortalLink", Guid.NewGuid(), null, 5),
+            ("document.processed", "Document", Guid.NewGuid(), null, 5));
+
+        var actions = (await FeedAsync(auth)).Select(a => a.GetProperty("action").GetString()).ToArray();
+
+        actions.Should().Contain("vendorPortalLink.upload_processed");
+        actions.Should().Contain("document.processed");
+    }
+
+    [Fact]
     public async Task Feed_is_capped_at_20_and_ordered_newest_first()
     {
         // 25 distinct events: the feed must cap at 20 (the collapse runs over the 60-row buffer BEFORE
         // the Take(20), so distinct events aren't lost to the cap) and be newest-first.
         var auth = await RegisterAndLoginAsync();
         var rows = Enumerable.Range(0, 25)
-            .Select(i => ("vendor.created", "Vendor", (Guid?)Guid.NewGuid(), Guid.NewGuid().ToString("N"), i + 1))
+            .Select(i => ("vendor.created", "Vendor", (Guid?)Guid.NewGuid(), (string?)Guid.NewGuid().ToString("N"), i + 1))
             .ToArray();
         await SeedAsync(auth.OrgId, rows);
 

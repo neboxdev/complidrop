@@ -12,7 +12,7 @@
  * plus one combined test that exercises all three simultaneously the
  * way DashboardPage does.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { http } from "msw";
 import { renderHook, waitFor } from "@testing-library/react";
 import {
@@ -23,7 +23,7 @@ import {
   type ExpiryPipeline,
   type ActivityEntry,
 } from "./useDashboard";
-import { createTestWrapper, server, url, jsonOk, jsonError } from "@/test";
+import { createTestWrapper, server, url, jsonOk, jsonError, sequencedJsonOk } from "@/test";
 import { ApiError } from "@/lib/api";
 
 vi.mock("@/lib/analytics", () => ({
@@ -93,6 +93,62 @@ describe("useDashboardStats (#36)", () => {
     const { result } = renderHook(() => useDashboardStats(), { wrapper: Wrapper });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect((result.current.error as ApiError).message).toBe("Stats down.");
+  });
+});
+
+describe("useDashboardStats — 15s polling gated on pendingExtraction (#318 FP-049)", () => {
+  // shouldAdvanceTime: true so RTL's waitFor (real setTimeout) doesn't hang under
+  // fake timers; delta-based assertions absorb any auto-fire during waitFor.
+  beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }));
+  afterEach(() => vi.useRealTimers());
+
+  it("polls every 15s while pendingExtraction>0, STOPS once it reaches 0", async () => {
+    let calls = 0;
+    const seq = sequencedJsonOk(
+      { ...STATS, pendingExtraction: 3 },
+      { ...STATS, pendingExtraction: 0 },
+    );
+    server.use(http.get(url("/api/dashboard/stats"), () => { calls++; return seq(); }));
+
+    const { Wrapper } = createTestWrapper();
+    const { result } = renderHook(() => useDashboardStats(), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.data?.pendingExtraction).toBe(3));
+    const before = calls;
+    await vi.advanceTimersByTimeAsync(15_000);
+    await waitFor(() => expect(result.current.data?.pendingExtraction).toBe(0));
+    expect(calls).toBeGreaterThanOrEqual(before + 1);
+
+    // Now nothing is pending → the interval stops. Advance well past 3 windows.
+    const after = calls;
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(calls).toBe(after);
+  });
+
+  it("does NOT poll an idle dashboard (pendingExtraction=0 on first read) — catches a flipped predicate", async () => {
+    let calls = 0;
+    server.use(http.get(url("/api/dashboard/stats"), () => { calls++; return jsonOk({ ...STATS, pendingExtraction: 0 }); }));
+
+    const { Wrapper } = createTestWrapper();
+    const { result } = renderHook(() => useDashboardStats(), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toBe(1);
+  });
+
+  it("does NOT poll a dead endpoint (error state short-circuits)", async () => {
+    let calls = 0;
+    server.use(http.get(url("/api/dashboard/stats"), () => { calls++; return jsonError("server.error", "down", { status: 500 }); }));
+
+    const { Wrapper } = createTestWrapper();
+    const { result } = renderHook(() => useDashboardStats(), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    const after = calls;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toBe(after);
   });
 });
 
