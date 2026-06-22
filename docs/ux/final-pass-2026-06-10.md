@@ -275,3 +275,31 @@ confirm + FP-065's vendor-name link (Batch C) to reach 8. **Deferred:** #323
 (cancel_at_period_end), #324 (the "Awaiting review"→"Not checked yet" relabel —
 the explainer makes the current label coherent meanwhile). Final per-page table
 lands with the closing re-score once Batches C–G complete.
+
+### Batch C — documents & detail (#317, merged 2026-06-22)
+
+Closed the documents-list + document-detail cluster: **FP-062** (P0 — "Read
+again" now confirms before discarding hand-corrected/unsaved fields, naming the
+count), **FP-065** (the vendor name shows as a link to the vendor page; the
+orphan-assign picker already shipped in #316), **FP-067** (the "we couldn't
+read this — contact support" card shows only on terminal Failed, not between
+automatic retries), **FP-060** (delete from the detail page, same ConfirmDialog
+as the list), **FP-041** (P1 — the documents filters are URL-addressable:
+`?status=`/`?type=`/`?expiresWithin=`/`?vendor=` seed the view and mirror back,
+and the dashboard stat cards + the Expired/Next-30 pipeline buckets deep-link
+into the filtered list — "1 non-compliant" is now one click away), **FP-053**
+("Extraction" list header → "Reading"; "5d ago" → "expired 5 days ago"),
+**FP-054** (a heads-up when an active filter may hide a just-uploaded doc),
+**FP-055** (per-file upload spinner + count-aware staging copy). **Already
+resolved by earlier merges:** FP-051 (#265 dropzone), FP-056 (#256 made the
+cost-ceiling reset real — the copy already states the monthly reset), FP-061
+(#269 already clears stale ComplianceCheck rows in the no-template branch).
+
+**Effect on the score table:** Document detail (was 5) clears its named gates —
+"View file" (#254), "Read again" destroying edits (FP-062), vendor invisible
+(FP-065) — and should re-measure ~8. Documents list (was 7) clears the
+day-early dates (#263) + the dead-end "Awaiting review" (FP-063/#316) and gains
+deep-linkable filters. Upload (was 5) keeps #265's rejection feedback + now
+per-file progress (FP-055). The closing per-page re-score table lands once
+Batches D–G complete (dashboard/shell, vendors/requirements, reminders/export/
+settings, portal/a11y).
