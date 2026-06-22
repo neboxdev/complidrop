@@ -160,6 +160,7 @@ const REAL_AUDIT_ACTIONS = [
   "vendorPortalLink.upload_processed",
   "complianceTemplate.created", "complianceTemplate.updated", "complianceTemplate.deleted",
   "complianceRule.created", "complianceRule.updated", "complianceRule.upserted", "complianceRule.deleted",
+  "reminder.recipient_suppressed",
   "user.registered", "user.logged_in", "user.login_failed", "user.password_changed",
   "user.password_reset", "user.password_reset_requested", "user.email_verified",
   "user.email_changed", "user.email_change_requested", "user.account_deleted",

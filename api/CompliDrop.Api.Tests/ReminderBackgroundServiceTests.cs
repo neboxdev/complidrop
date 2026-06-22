@@ -215,6 +215,51 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         Email.Sends.Select(s => s.ToEmail).Should().BeEquivalentTo(new[] { "owner@example.com" });
     }
 
+    [Fact]
+    public async Task Suppression_blocks_a_never_before_sent_document_not_just_a_re_send()
+    {
+        // The distinct value of address-level suppression vs the per-(reminder, doc, sendDate) dedupe:
+        // it blocks a DIFFERENT document's reminder (a later expiry cycle) to the same dead address,
+        // with NO prior ReminderLog for either document.
+        var seed = await SeedReminderAsync(NyEightAm, notifyInternal: false, notifyVendor: true, vendorEmail: "dead@vendor.test");
+        await using (var db = CreateSystemDb())
+        {
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
+                VendorId = seed.VendorId,
+                OriginalFileName = "policy2.pdf",
+                BlobStorageUrl = "blob://policy2",
+                FileSizeBytes = 1024,
+                ContentType = "application/pdf",
+                ExpirationDate = ExpirationForOrgWindow(NyTz, NyEightAm, 30),
+                CreatedAt = NyEightAm.UtcDateTime,
+                UpdatedAt = NyEightAm.UtcDateTime,
+            });
+            await db.SaveChangesAsync();
+        }
+        await SuppressAsync(seed.OrgId, "dead@vendor.test", EmailSuppressionReason.Bounced, NyEightAm);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().BeEmpty("a suppressed address is skipped for EVERY document, not just a re-send of one");
+    }
+
+    [Fact]
+    public async Task A_suppressed_internal_user_is_also_skipped()
+    {
+        // Suppression is per-(org, email) and covers INTERNAL recipients too, not just vendors: a
+        // bounced/complained internal address is dropped while a deliverable vendor still gets the reminder.
+        var seed = await SeedReminderAsync(NyEightAm, notifyInternal: true, internalEmail: "dead-owner@example.com",
+            internalEmailVerified: true, notifyVendor: true, vendorEmail: "good@vendor.test");
+        await SuppressAsync(seed.OrgId, "dead-owner@example.com", EmailSuppressionReason.Bounced, NyEightAm);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Select(s => s.ToEmail).Should().BeEquivalentTo(new[] { "good@vendor.test" });
+    }
+
     [Theory]
     [InlineData(12)] // 07:00 NY — one hour before the window opens
     [InlineData(11)] // 06:00 NY

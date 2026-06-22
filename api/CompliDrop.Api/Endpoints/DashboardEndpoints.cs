@@ -158,7 +158,7 @@ public static class DashboardEndpoints
         "vendorportallink.emailed", "vendorportallink.upload_processed",
         "compliancetemplate.created", "compliancetemplate.updated", "compliancetemplate.deleted",
         "compliancerule.created", "compliancerule.updated", "compliancerule.upserted", "compliancerule.deleted",
-        "reminder.sent",
+        "reminder.sent", "reminder.recipient_suppressed",
         "user.registered", "user.password_changed", "user.password_reset",
         "user.email_verified", "user.email_changed", "user.account_deleted",
     ];
