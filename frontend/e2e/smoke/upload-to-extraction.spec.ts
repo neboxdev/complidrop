@@ -190,8 +190,9 @@ test.describe("Flow 3 — upload → extraction → detail (#39)", () => {
     await expect(
       page.getByText(/add details before uploading/i),
     ).toBeVisible();
-    // Pick the vendor from the type-ahead, then upload.
-    await page.getByRole("button", { name: "Smoke Vendor" }).click();
+    // Pick the vendor from the type-ahead, then upload. The VendorPicker is now an ARIA combobox
+    // (#321 FP-130), so each match is a role="option", not a button.
+    await page.getByRole("option", { name: "Smoke Vendor" }).click();
 
     // Arm the upload-response wait BEFORE clicking Upload so the test pins the
     // upload actually fired (sibling to flow 2's pattern).
