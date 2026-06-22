@@ -15,7 +15,7 @@
  *     verify without spinning up the backend).
  *   - The legacy "Monthly" tile label is gone.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { http } from "msw";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import SettingsPage from "./page";
@@ -114,6 +114,49 @@ describe("SettingsPage — billing load gating (#316 FP-111/FP-115)", () => {
     expect(screen.queryByRole("button", { name: /upgrade to/i })).toBeNull();
     // FP-115: the renewal date is surfaced for a paid plan.
     expect(screen.getByText(/renews on/i)).toBeInTheDocument();
+  });
+
+  it("FP-114: after ?upgraded=true, polls until the plan lands paid — tiles hidden, success toast once", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      server.use(
+        http.get(url("/api/billing/subscription"), () => {
+          calls += 1;
+          const paid = calls >= 2; // webhook lands by the second poll
+          return jsonOk({
+            plan: paid ? "pro" : "free",
+            status: "active",
+            documentLimit: paid ? null : 5,
+            documentsUsed: 1,
+            hasVendorPortal: paid,
+            currentPeriodEnd: paid ? "2026-11-01T00:00:00Z" : null,
+            extractionSpend: 0,
+          });
+        }),
+      );
+
+      renderWithProviders(<SettingsPage />, { auth: authedMe, searchParams: { upgraded: "true" } });
+
+      // While activating: a status message and NO upgrade tiles (can't re-checkout).
+      expect(await screen.findByText(/activating your plan/i)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /upgrade to/i })).toBeNull();
+
+      // The 3s poll fires → the second response is paid.
+      await vi.advanceTimersByTimeAsync(3000);
+
+      await waitFor(() =>
+        expect(toastSuccess).toHaveBeenCalledWith(expect.stringMatching(/welcome to your paid plan/i)),
+      );
+      expect(screen.getByRole("button", { name: /manage billing/i })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /upgrade to/i })).toBeNull();
+
+      // Ref guard: the celebrate toast fires exactly once even as polling could continue.
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(toastSuccess).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

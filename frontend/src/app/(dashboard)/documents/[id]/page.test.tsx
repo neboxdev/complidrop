@@ -117,6 +117,48 @@ describe("DocumentDetailPage — manual entry on a failed read (#316 FP-064)", (
     expect(screen.getByLabelText(/general liability limit/i)).toBeInTheDocument();
     expect(screen.queryByText(/no details read yet/i)).toBeNull();
   });
+
+  it("saves manual entries under the backend's canonical (snake_case) field keys", async () => {
+    // The whole point of FP-064 is that the typed values reach the compliance
+    // engine. That requires the backend's snake_case canonical keys — a
+    // PascalCase key matches case-insensitively but NOT the underscore, so it
+    // would silently no-op. Pin the wire contract so that regresses loudly.
+    let putBody: unknown = null;
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_manual",
+            extractionStatus: "Failed",
+            complianceStatus: "Pending",
+            vendorId: "v2",
+            vendorName: "Caterer Co",
+            complianceChecks: [],
+            fields: [],
+          }),
+        ),
+      ),
+      http.put(url("/api/documents/:id/fields"), async ({ request }) => {
+        putBody = await request.json();
+        return jsonOk<void>(undefined);
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_manual" } });
+
+    const limit = await screen.findByLabelText(/general liability limit/i);
+    fireEvent.change(limit, { target: { value: "1000000" } });
+    const save = screen.getByRole("button", { name: /save changes/i });
+    await waitFor(() => expect(save).not.toBeDisabled());
+    fireEvent.click(save);
+
+    await waitFor(() => expect(putBody).not.toBeNull());
+    const wire = JSON.stringify(putBody);
+    expect(wire).toContain("general_liability_limit");
+    expect(wire).toContain("1000000");
+    // Guard the exact bug this test exists for: never the PascalCase column name.
+    expect(wire).not.toContain("GeneralLiabilityLimit");
+  });
 });
 
 describe("DocumentDetailPage — what we checked (#239)", () => {

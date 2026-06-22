@@ -290,18 +290,21 @@ function ProcessingErrorCard({ doc }: { doc: DocDetail }) {
 }
 
 // Canonical fields offered for manual entry when extraction returns nothing
-// (#316 FP-064). The names match the backend field-mirror (EffectiveDate /
-// ExpirationDate / GeneralLiabilityLimit map to typed columns + re-eval), so a
-// manual save flows through the same PUT /fields path as editing a read field.
+// (#316 FP-064). The names MUST be the backend's snake_case canonical keys
+// (CanonicalDocumentFields.cs: effective_date / expiration_date /
+// general_liability_limit) — the field-mirror + compliance lookup are
+// case-insensitive but NOT underscore-insensitive, so a PascalCase key would
+// silently no-op. A manual save then flows through the same PUT /fields path as
+// editing a read field (parses into the typed columns + re-checks).
 const MANUAL_ENTRY_FIELDS: ReadonlyArray<{
   name: string;
   label: string;
   type: string;
   placeholder?: string;
 }> = [
-  { name: "EffectiveDate", label: "Effective date", type: "date" },
-  { name: "ExpirationDate", label: "Expiration date", type: "date" },
-  { name: "GeneralLiabilityLimit", label: "General liability limit", type: "text", placeholder: "e.g. 1000000" },
+  { name: "effective_date", label: "Effective date", type: "date" },
+  { name: "expiration_date", label: "Expiration date", type: "date" },
+  { name: "general_liability_limit", label: "General liability limit", type: "text", placeholder: "e.g. 1000000" },
 ];
 
 // Explains WHY a document is "not checked yet" instead of leaving the user at a

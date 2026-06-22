@@ -17,6 +17,7 @@ type ForgotForm = z.infer<typeof schema>;
 export default function ForgotPasswordForm() {
   const forgot = useForgotPassword();
   const emailId = useId();
+  const emailErrId = useId();
   const errId = useId();
   const [sent, setSent] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -70,8 +71,16 @@ export default function ForgotPasswordForm() {
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div>
             <label htmlFor={emailId} className="text-sm font-medium text-slate-700">Email</label>
-            <Input {...register("email")} id={emailId} type="email" autoComplete="email" className="mt-1" />
-            {errors.email && <p className="text-xs text-red-600 mt-1">{errors.email.message}</p>}
+            <Input
+              {...register("email")}
+              id={emailId}
+              type="email"
+              autoComplete="email"
+              className="mt-1"
+              aria-invalid={errors.email ? true : undefined}
+              aria-describedby={errors.email ? emailErrId : undefined}
+            />
+            {errors.email && <p id={emailErrId} className="text-xs text-red-600 mt-1">{errors.email.message}</p>}
           </div>
           {submitError && (
             <p id={errId} role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

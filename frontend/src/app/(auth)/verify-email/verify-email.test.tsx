@@ -5,14 +5,20 @@
  * real useVerifyEmail hook → api client → MSW so an envelope/mapping regression
  * fails here.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { http } from "msw";
 import { screen, waitFor } from "@testing-library/react";
 import { VerifyEmailClient } from "./verify-email-client";
-import { ME_KEY } from "@/hooks/useAuth";
+import { ME_KEY, SESSION_HINT_COOKIE } from "@/hooks/useAuth";
 import { renderWithProviders, server, url, jsonOk, jsonError, makeMe } from "@/test";
 
 describe("VerifyEmailClient (#184)", () => {
+  // The CTA now reads the session-hint cookie (FP-037). Clear it after each test
+  // so a logged-in case can't leak into the logged-out ones.
+  afterEach(() => {
+    document.cookie = `${SESSION_HINT_COOKIE}=; path=/; max-age=0`;
+  });
+
   it("redeems a valid token and shows the confirmed state", async () => {
     server.use(
       http.post(url("/api/auth/verify-email"), () =>
@@ -27,6 +33,18 @@ describe("VerifyEmailClient (#184)", () => {
     // No session-hint cookie in this render → treated as logged-out, so the CTA
     // sends them to sign in rather than bouncing them off /dashboard. (FP-037)
     expect(screen.getByRole("link", { name: /sign in to continue/i })).toHaveAttribute("href", "/login");
+  });
+
+  it("sends a logged-in visitor to the dashboard, not /login (FP-037 session-hint branch)", async () => {
+    document.cookie = `${SESSION_HINT_COOKIE}=1; path=/`;
+    server.use(
+      http.post(url("/api/auth/verify-email"), () => jsonOk({ message: "Email confirmed. Thanks!" })),
+    );
+
+    renderWithProviders(<VerifyEmailClient />, { searchParams: { token: "good-token" } });
+
+    await waitFor(() => expect(screen.getByText("Email confirmed")).toBeInTheDocument());
+    expect(screen.getByRole("link", { name: /continue to dashboard/i })).toHaveAttribute("href", "/dashboard");
   });
 
   it("invalidates the Me cache on success so the dashboard banner clears (#184 ↔ #182 seam)", async () => {
