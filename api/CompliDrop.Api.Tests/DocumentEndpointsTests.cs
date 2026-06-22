@@ -807,7 +807,11 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         await using var verify = CreateSystemDb();
-        (await verify.Documents.FirstAsync(d => d.Id == docId)).VendorId.Should().Be(vendorId);
+        var saved = await verify.Documents.FirstAsync(d => d.Id == docId);
+        saved.VendorId.Should().Be(vendorId);
+        // #337: the verdict folds into the assignment's transaction now. A thrown recompute degrades it to
+        // a safe Pending (never a confident verdict from stale inputs), and the assignment still commits.
+        saved.ComplianceStatus.Should().Be(ComplianceStatus.Pending);
     }
 
     [Fact]
@@ -1593,6 +1597,9 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         // The edit persisted (typed column written, ManualRequired resolved) despite the throwing re-eval.
         saved.GeneralLiabilityLimit.Should().Be(1_500_000m);
         saved.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        // #337: the verdict folds into the edit's transaction. A thrown recompute degrades it to a safe
+        // Pending (never a confident verdict from stale inputs); the edit still commits atomically.
+        saved.ComplianceStatus.Should().Be(ComplianceStatus.Pending);
         (await verify.DocumentFields.FirstAsync(f => f.DocumentId == docId && f.FieldName == "general_liability_limit"))
             .FieldValue.Should().Be("1500000");
     }

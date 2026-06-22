@@ -345,33 +345,22 @@ public static class DocumentEndpoints
             return Results.Ok(new { data = new { message = "No changes." }, error = (object?)null });
 
         doc.UpdatedAt = DateTime.UtcNow;
+
+        // Combined unit of work (#337 / ADR 0030): assigning a vendor (which may carry a requirement set)
+        // or changing the document type (which changes WHICH rules apply — see ComplianceCheckService's
+        // applicableRules filter) can turn a forever-"Pending" verdict into a real answer. Compute + apply
+        // that verdict on the SAME context BEFORE saving, so the new vendor/type and its verdict commit in
+        // ONE transaction and can't be left torn against a concurrent (re)extraction. The extraction worker
+        // is the only other place that ever triggers a compliance check, and it won't re-run for a doc that
+        // already finished extracting.
+        await EvaluateIntoUnitOfWorkAsync(compliance, db, doc, loggerFactory, ct);
         await db.SaveChangesAsync(ct);
 
-        // Assigning a vendor (which may carry a requirement set) or changing the
-        // document type (which changes WHICH rules apply — see ComplianceCheckService's
-        // applicableRules filter) can turn a forever-"Pending" verdict into a real
-        // answer. Re-evaluate inline; the extraction worker is the only other place
-        // that ever triggers a compliance check, and it won't re-run for a doc that
-        // already finished extracting. Best-effort: a failure here must NOT fail the
-        // assignment the user just made — the verdict can be recomputed on the next
-        // re-extract.
-        try
-        {
-            await compliance.EvaluateAsync(doc.Id, ct);
-        }
-        catch (Exception ex)
-        {
-            loggerFactory.CreateLogger("DocumentEndpoints")
-                .LogError(ex, "Compliance re-evaluation failed after updating document {DocumentId}", doc.Id);
-        }
-
-        // No explicit IAuditLogger call: the vendor/type change is an ENTITY
-        // mutation, so AuditSaveChangesInterceptor already emitted a
-        // "document.updated" row (full Before/After) on the SaveChanges above —
-        // and the compliance re-eval's own SaveChanges audits the verdict change.
-        // Per CLAUDE.md, manual IAuditLogger is reserved for NON-entity events;
-        // re-emitting "document.updated" here would double the row in the
-        // customer's audit export (#186 review — architecture reviewer).
+        // No explicit IAuditLogger call: the vendor/type change AND the verdict it implies are now one
+        // ENTITY mutation, so AuditSaveChangesInterceptor emits a single "document.updated" row (full
+        // Before/After spanning vendor/type + ComplianceStatus) on the SaveChanges above. Per CLAUDE.md,
+        // manual IAuditLogger is reserved for NON-entity events; re-emitting "document.updated" here would
+        // double the row in the customer's audit export (#186 review — architecture reviewer).
         return Results.Ok(new { data = new { message = "Document updated." }, error = (object?)null });
     }
 
@@ -593,26 +582,21 @@ public static class DocumentEndpoints
         doc.ExtractionFields = JsonDocument.Parse(fields.ToJsonString());
         ResolveManualReview(doc);
         doc.UpdatedAt = DateTime.UtcNow;
+
+        // Combined unit of work (#337 / ADR 0030): compute + apply the verdict the edited inputs imply on
+        // the SAME context BEFORE saving, so the corrected inputs (e.g. a misread GL limit fixed above the
+        // required minimum) and the verdict they flip to commit in ONE transaction. The old pattern saved
+        // inputs, then re-evaluated in a SECOND transaction — which a concurrent (re)extraction could
+        // interleave to leave the stored verdict contradicting the stored inputs (a torn pair that did not
+        // self-heal: the hourly sweep only does date transitions). Re-extraction still overwrites manual
+        // edits by design (ADR 0017); the two writers are now each atomic on the whole (inputs, verdict)
+        // tuple, so the terminal state is always one writer's consistent pair, never a mix.
+        await EvaluateIntoUnitOfWorkAsync(compliance, db, doc, loggerFactory, ct);
         await db.SaveChangesAsync(ct);
 
         await audit.LogAsync("document.fields_edited", nameof(Document), doc.Id,
             before: before,
             after: doc.Fields.Select(f => new { f.FieldName, f.FieldValue }));
-
-        // Now that the edits reached doc.ExtractionFields / the typed columns, re-run compliance so a
-        // correction (e.g. a misread GL limit fixed above the required minimum) flips the verdict and
-        // refreshes the detail-page explainer. Best-effort, mirroring UpdateDocument: a recompute
-        // failure must NOT fail the save the user just made — it recomputes on the next edit/re-extract.
-        // Re-extraction re-reads the source and overwrites manual edits by design; see ADR 0017.
-        try
-        {
-            await compliance.EvaluateAsync(doc.Id, ct);
-        }
-        catch (Exception ex)
-        {
-            loggerFactory.CreateLogger("DocumentEndpoints")
-                .LogError(ex, "Compliance re-evaluation failed after editing fields on document {DocumentId}", doc.Id);
-        }
 
         return Results.Ok(new { data = new { message = "Fields updated." }, error = (object?)null });
     }
@@ -670,6 +654,28 @@ public static class DocumentEndpoints
         db.Documents.Remove(doc); // interceptor translates to soft delete
         await db.SaveChangesAsync(ct);
         return Results.Ok(new { data = new { message = "Document removed." }, error = (object?)null });
+    }
+
+    // Folds the compliance verdict into the caller's unit of work (#337 / ADR 0030): applies the verdict
+    // the document's CURRENT (just-edited) inputs imply onto the same tracked entity, so the caller's next
+    // SaveChanges commits inputs + verdict atomically — never a torn pair. Best-effort preserved: if the
+    // recompute itself fails, degrade the verdict to Pending (a safe "not yet graded" state the sweep /
+    // "Check again" resolves) rather than fail the user's edit — but NEVER leave a confident verdict
+    // computed from now-stale inputs. ApplyEvaluationAsync does all its I/O before any change-tracker
+    // mutation, so a throw here leaves no partial check rows for the SaveChanges to commit.
+    private static async Task EvaluateIntoUnitOfWorkAsync(
+        IComplianceCheckService compliance, AppDbContext db, Document doc, ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        try
+        {
+            await compliance.ApplyEvaluationAsync(db, doc, ct);
+        }
+        catch (Exception ex)
+        {
+            doc.ComplianceStatus = ComplianceStatus.Pending;
+            loggerFactory.CreateLogger("DocumentEndpoints")
+                .LogError(ex, "Compliance re-evaluation failed for document {DocumentId}; verdict degraded to Pending to avoid a stale verdict", doc.Id);
+        }
     }
 
     // A human has reviewed the extracted values (via field-save or explicit

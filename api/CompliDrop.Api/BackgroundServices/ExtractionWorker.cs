@@ -260,19 +260,13 @@ public class ExtractionWorker(
                 doc.DocumentType == "other" ? null : doc.DocumentType,
                 ct);
 
-            await PersistSuccess(db, doc, ocr, extraction, ct);
+            // The compliance verdict is now computed and committed INSIDE PersistSuccess, in the same
+            // transaction as the extracted inputs (#337 / ADR 0030) — no separate evaluation pass, so the
+            // worker can never leave a verdict contradicting the inputs it just wrote.
+            var compliance = scope.ServiceProvider.GetRequiredService<IComplianceCheckService>();
+            await PersistSuccess(db, compliance, logger, doc, ocr, extraction, ct);
             var totalCost = ocr.EstimatedCostUsd + (extraction.Usage?.EstimatedCostUsd ?? 0m);
             if (totalCost > 0) await costTracker.RecordSpendAsync(doc.OrganizationId, totalCost, ct);
-
-            try
-            {
-                var compliance = scope.ServiceProvider.GetRequiredService<IComplianceCheckService>();
-                await compliance.EvaluateForSystemAsync(doc.Id, ct);
-            }
-            catch (Exception compEx)
-            {
-                logger.LogError(compEx, "Compliance evaluation failed for {DocumentId}", doc.Id);
-            }
 
             logger.LogInformation("Extraction complete for {DocumentId} — {FieldCount} fields, avg conf {Conf:0.00}",
                 doc.Id, extraction.Fields.Count, doc.ExtractionConfidence);
@@ -384,6 +378,8 @@ public class ExtractionWorker(
 
     private static async Task PersistSuccess(
         SystemDbContext db,
+        IComplianceCheckService compliance,
+        ILogger logger,
         Document doc,
         OcrResult ocr,
         ExtractionResult extraction,
@@ -447,7 +443,6 @@ public class ExtractionWorker(
             : ExtractionStatus.Completed;
         doc.ExtractionCompletedAt = now;
         doc.ProcessingError = null;
-        doc.ComplianceStatus = ComplianceStatus.Pending;
         doc.UpdatedAt = now;
 
         // System "document processed" event for the activity feed (#318 FP-043): extraction completes
@@ -466,6 +461,27 @@ public class ExtractionWorker(
             EntityId = doc.Id,
             CreatedAt = now,
         });
+
+        // Combined unit of work (#337 / ADR 0030): compute + apply the compliance verdict from the
+        // freshly-extracted inputs on this SAME context, so the extracted fields/typed-columns AND the
+        // verdict they imply commit in ONE transaction. The verdict was previously written in a SECOND
+        // transaction (EvaluateForSystemAsync, after this method returned) — which a concurrent manual edit
+        // could interleave to leave the stored verdict contradicting the stored inputs (a torn pair that
+        // didn't self-heal). Now the worker writes (inputs, verdict) atomically; the manual-edit path does
+        // the same, so the two writers are each last-writer-wins on the whole (inputs, verdict) tuple.
+        // Best-effort verdict (matching the prior EvaluateForSystemAsync try/catch): if the recompute
+        // itself fails, persist the inputs with ComplianceStatus = Pending (a safe "not yet graded" state
+        // the sweep / "Check again" resolves) rather than fail the whole extraction into a costly re-OCR/LLM
+        // retry — but never commit a confident verdict from stale inputs.
+        try
+        {
+            await compliance.ApplyEvaluationAsync(db, doc, ct);
+        }
+        catch (Exception ex)
+        {
+            doc.ComplianceStatus = ComplianceStatus.Pending;
+            logger.LogError(ex, "Compliance evaluation failed for {DocumentId} during extraction persist; verdict left Pending", doc.Id);
+        }
 
         await db.SaveChangesAsync(ct);
     }
