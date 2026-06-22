@@ -657,6 +657,63 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
     }
 
     [Fact]
+    public async Task Vendor_reminder_embeds_an_upload_link_and_never_says_log_in_FP092()
+    {
+        // FP-092 (P0): the vendor reminder must NOT tell vendors to "Log in" (they have no account) —
+        // it embeds an active upload link (minted here since none exists). The internal body keeps the
+        // log-in-and-review copy. Gated on the portal entitlement, so seed a Pro subscription.
+        var seed = await SeedReminderAsync(NyEightAm, daysBefore: 30, notifyVendor: true, vendorEmail: "vendor@example.com");
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            db.Subscriptions.Add(new Subscription
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
+                Plan = "pro",
+                Status = "active",
+                HasVendorPortal = true,
+                ExtractionSpendThisMonthUsd = 0m,
+                SpendMonthStart = DateOnly.FromDateTime(now),
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().HaveCount(2);
+        var vendorSend = Email.Sends.Single(s => s.ToEmail == "vendor@example.com");
+        var internalSend = Email.Sends.Single(s => s.ToEmail == "owner@example.com");
+
+        vendorSend.HtmlBody.Should().Contain("/portal/", "the vendor gets a working upload link");
+        vendorSend.HtmlBody.Should().NotContain("Log in", "vendors have no account to log in to");
+        internalSend.HtmlBody.Should().NotContain("/portal/");
+
+        // A link was minted for the vendor (none existed before).
+        await using var verify = CreateSystemDb();
+        (await verify.VendorPortalLinks.CountAsync(l => l.VendorId == seed.VendorId && l.IsActive))
+            .Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Vendor_reminder_without_the_portal_entitlement_has_no_link_and_no_log_in()
+    {
+        // A Free org (no portal) can't offer an upload link — the vendor body falls back to "send your
+        // renewal to {org}" and still never says "Log in" (and never mints a link it isn't entitled to).
+        var seed = await SeedReminderAsync(NyEightAm, daysBefore: 30, notifyVendor: true, vendorEmail: "vendor@example.com");
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        var vendorSend = Email.Sends.Single(s => s.ToEmail == "vendor@example.com");
+        vendorSend.HtmlBody.Should().NotContain("Log in");
+        vendorSend.HtmlBody.Should().NotContain("/portal/");
+        await using var verify = CreateSystemDb();
+        (await verify.VendorPortalLinks.CountAsync(l => l.VendorId == seed.VendorId)).Should().Be(0);
+    }
+
+    [Fact]
     public async Task Org_name_is_html_encoded_in_the_reminder_body_no_injection()
     {
         // #185 makes the org name user-editable; it is interpolated into the

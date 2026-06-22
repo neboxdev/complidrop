@@ -1,12 +1,16 @@
 "use client";
 
+import Link from "next/link";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle, RotateCw } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ToggleSwitch } from "@/components/ui/switch";
-import { api } from "@/lib/api";
-import { deliveryStatusLabel } from "@/lib/display-labels";
+import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { isAuthError } from "@/lib/query-client";
+import { deliveryStatusLabel, relativeTime } from "@/lib/display-labels";
 
 type Reminder = {
   id: string;
@@ -25,7 +29,13 @@ type ReminderHistoryEntry = {
   status: string;
   reminderId: string;
   documentId: string;
+  /** FP-090: which document/vendor/rung the reminder was about (null if the doc/reminder is gone). */
+  documentName: string | null;
+  vendorName: string | null;
+  daysBefore: number | null;
 };
+
+type ReminderGaps = { vendorsWithoutEmail: number; documentsWithoutExpiration: number };
 
 export default function RemindersPage() {
   const qc = useQueryClient();
@@ -36,6 +46,11 @@ export default function RemindersPage() {
   const history = useQuery<ReminderHistoryEntry[]>({
     queryKey: ["reminders", "history"],
     queryFn: ({ signal }) => api.get<ReminderHistoryEntry[]>("/api/reminders/history", { signal }),
+  });
+  // FP-091 (disclosure half): surface the silent no-send paths.
+  const gaps = useQuery<ReminderGaps>({
+    queryKey: ["reminders", "gaps"],
+    queryFn: ({ signal }) => api.get<ReminderGaps>("/api/reminders/gaps", { signal }),
   });
 
   const update = useMutation({
@@ -116,15 +131,65 @@ export default function RemindersPage() {
     <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
       <header>
         <h1 className="text-2xl font-semibold text-sky-900">Reminders</h1>
-        <p className="text-slate-500">Sent automatically at 8 AM in your org&apos;s local time zone.</p>
+        {/* FP-093: say WHO gets emailed and WHEN — the table headers alone were jargon. */}
+        <p className="text-slate-500">
+          We email your team — and, when you turn it on, the vendor — before a document expires.
+          Sent automatically at 8 AM in your org&apos;s local time zone.
+        </p>
       </header>
+
+      {/* FP-091 disclosure: these recipients/documents silently get no reminder today. */}
+      {(gaps.data?.vendorsWithoutEmail ?? 0) > 0 || (gaps.data?.documentsWithoutExpiration ?? 0) > 0 ? (
+        <div
+          role="status"
+          className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden="true" />
+          <div className="space-y-0.5">
+            {(gaps.data?.vendorsWithoutEmail ?? 0) > 0 && (
+              <p>
+                {gaps.data!.vendorsWithoutEmail} vendor{gaps.data!.vendorsWithoutEmail === 1 ? "" : "s"} ha
+                {gaps.data!.vendorsWithoutEmail === 1 ? "s" : "ve"} no contact email — they won&apos;t get
+                vendor reminders.{" "}
+                <Link href="/vendors" className="font-medium underline">Add their email</Link>.
+              </p>
+            )}
+            {(gaps.data?.documentsWithoutExpiration ?? 0) > 0 && (
+              <p>
+                {gaps.data!.documentsWithoutExpiration} document
+                {gaps.data!.documentsWithoutExpiration === 1 ? "" : "s"} ha
+                {gaps.data!.documentsWithoutExpiration === 1 ? "s" : "ve"} no expiration date, so no reminder
+                can be scheduled for {gaps.data!.documentsWithoutExpiration === 1 ? "it" : "them"}.{" "}
+                <Link href="/documents" className="font-medium underline">Review them</Link>.
+              </p>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       <Card>
         <CardContent className="p-6 overflow-x-auto">
+          {reminders.isLoading ? (
+            <div role="status" aria-label="Loading reminders" className="space-y-2">
+              {[0, 1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-9 w-full" />
+              ))}
+            </div>
+          ) : reminders.isError && !isAuthError(reminders.error) ? (
+            // FP-094: an outage must not render as an empty schedule (which reads as "reminders off").
+            <div className="py-6 text-center" role="alert">
+              <AlertTriangle className="mx-auto h-7 w-7 text-rose-500" />
+              <p className="mt-2 text-sm font-medium text-slate-800">Couldn&apos;t load your reminder schedule.</p>
+              <p className="text-xs text-slate-500">{reminders.error?.message?.trim() || GENERIC_FALLBACK_MESSAGE}</p>
+              <Button variant="outline" size="sm" className="mt-3" onClick={() => reminders.refetch()} disabled={reminders.isFetching}>
+                <RotateCw className={`w-3.5 h-3.5 mr-1 ${reminders.isFetching ? "animate-spin" : ""}`} /> Retry
+              </Button>
+            </div>
+          ) : (
           <table className="w-full text-sm">
             <thead className="text-xs uppercase text-slate-500">
               <tr>
-                <th className="text-left py-2">Lead time</th>
+                <th className="text-left py-2">When</th>
                 <th className="text-left py-2">Notify team</th>
                 <th className="text-left py-2">Notify vendor</th>
                 <th className="text-left py-2">Active</th>
@@ -133,7 +198,7 @@ export default function RemindersPage() {
             <tbody>
               {(reminders.data ?? []).map((r) => (
                 <tr key={r.id} className="border-t border-slate-100">
-                  <td className="py-3 font-medium">{r.daysBefore} days before</td>
+                  <td className="py-3 font-medium">{r.daysBefore} days before a document expires</td>
                   <td className="py-3">
                     <ToggleSwitch
                       checked={r.notifyInternalUser}
@@ -159,17 +224,30 @@ export default function RemindersPage() {
               ))}
             </tbody>
           </table>
+          )}
         </CardContent>
       </Card>
 
       <Card>
-        <CardContent className="p-6 space-y-4">
+        {/* FP-095: overflow-x-auto so the Status column doesn't clip on phones once rows exist. */}
+        <CardContent className="p-6 space-y-4 overflow-x-auto">
           <h2 className="font-semibold text-slate-800">Recent deliveries</h2>
           {history.isLoading ? (
             <div role="status" aria-label="Loading recent deliveries" className="space-y-2">
               {[0, 1, 2].map((i) => (
                 <Skeleton key={i} className="h-9 w-full" />
               ))}
+            </div>
+          ) : history.isError && !isAuthError(history.error) ? (
+            // FP-094: a failed fetch must NOT read as "No reminders sent yet" — that's a false claim
+            // in the trust-critical direction.
+            <div className="py-6 text-center" role="alert">
+              <AlertTriangle className="mx-auto h-7 w-7 text-rose-500" />
+              <p className="mt-2 text-sm font-medium text-slate-800">Couldn&apos;t load recent deliveries.</p>
+              <p className="text-xs text-slate-500">{history.error?.message?.trim() || GENERIC_FALLBACK_MESSAGE}</p>
+              <Button variant="outline" size="sm" className="mt-3" onClick={() => history.refetch()} disabled={history.isFetching}>
+                <RotateCw className={`w-3.5 h-3.5 mr-1 ${history.isFetching ? "animate-spin" : ""}`} /> Retry
+              </Button>
             </div>
           ) : (history.data ?? []).length === 0 ? (
             <p className="text-sm text-slate-500">No reminders sent yet.</p>
@@ -178,6 +256,9 @@ export default function RemindersPage() {
               <thead className="text-xs uppercase text-slate-500">
                 <tr>
                   <th className="text-left py-2">When</th>
+                  <th className="text-left py-2">Document</th>
+                  <th className="text-left py-2">Vendor</th>
+                  <th className="text-left py-2">Reminder</th>
                   <th className="text-left py-2">Recipient</th>
                   <th className="text-left py-2">Status</th>
                 </tr>
@@ -185,7 +266,21 @@ export default function RemindersPage() {
               <tbody>
                 {(history.data ?? []).map((h) => (
                   <tr key={h.id} className="border-t border-slate-100">
-                    <td className="py-2 text-slate-600">{new Date(h.sentAt).toLocaleString()}</td>
+                    <td className="py-2 text-slate-600 whitespace-nowrap">{relativeTime(h.sentAt)}</td>
+                    <td className="py-2 text-slate-600">
+                      {/* FP-090: name + link the document; fall back when it's been removed. */}
+                      {h.documentName ? (
+                        <Link href={`/documents/${h.documentId}`} className="text-sky-700 hover:underline">
+                          {h.documentName}
+                        </Link>
+                      ) : (
+                        <span className="text-slate-400">(removed document)</span>
+                      )}
+                    </td>
+                    <td className="py-2 text-slate-600">{h.vendorName ?? "—"}</td>
+                    <td className="py-2 text-slate-600 whitespace-nowrap">
+                      {h.daysBefore != null ? `${h.daysBefore} days before` : "—"}
+                    </td>
                     <td className="py-2 text-slate-600">{h.recipient}</td>
                     <td className="py-2">
                       <Badge className={statusHue(h.status)}>{deliveryStatusLabel(h.status)}</Badge>

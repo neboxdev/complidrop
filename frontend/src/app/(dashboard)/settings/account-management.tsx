@@ -15,9 +15,7 @@ import {
   useChangeEmail,
   useDeleteAccount,
 } from "@/hooks/useAuth";
-import { GENERIC_FALLBACK_MESSAGE, friendly } from "@/lib/api";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5292";
+import { api, friendly } from "@/lib/api";
 
 // Mirrors the backend IsStrongPassword check (≥12 chars, a letter, a digit).
 const strongPassword = z
@@ -60,6 +58,7 @@ function ChangePasswordForm() {
   const change = useChangePassword();
   const currentId = useId();
   const newId = useId();
+  const newPwHelpId = useId();
   const confirmId = useId();
   const {
     register,
@@ -92,7 +91,17 @@ function ChangePasswordForm() {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
           <label htmlFor={newId} className="text-xs text-slate-500">New password</label>
-          <PasswordInput {...register("newPassword")} id={newId} autoComplete="new-password" className="mt-1" />
+          <PasswordInput
+            {...register("newPassword")}
+            id={newId}
+            autoComplete="new-password"
+            className="mt-1"
+            aria-describedby={newPwHelpId}
+          />
+          {/* FP-113: state the rules UP FRONT, not only as a post-submit error. */}
+          <p id={newPwHelpId} className="text-xs text-slate-500 mt-1">
+            At least 12 characters, including a letter and a number.
+          </p>
           {errors.newPassword && <p className="text-xs text-red-600 mt-1">{errors.newPassword.message}</p>}
         </div>
         <div>
@@ -161,47 +170,19 @@ function ChangeEmailForm() {
   );
 }
 
-// ───────────────────────── Danger zone ─────────────────────────
+// ───────────────────────── Data export ─────────────────────────
+// FP-113: exporting your data is a SAFE, useful action — it doesn't belong under the red
+// "Danger zone" next to account deletion. Its own neutral card.
 
-export function DangerZone() {
-  return (
-    <Card className="border-rose-200">
-      <CardContent className="p-6 space-y-6">
-        <div>
-          <h2 className="text-base font-semibold text-rose-700">Danger zone</h2>
-          <p className="text-sm text-slate-500">Export your data, or permanently delete your account.</p>
-        </div>
-        <ExportDataButton />
-        <hr className="border-slate-100" />
-        <DeleteAccountForm />
-      </CardContent>
-    </Card>
-  );
-}
-
-function ExportDataButton() {
+export function DataExportSection() {
   const [busy, setBusy] = useState(false);
 
   const onExport = async () => {
     setBusy(true);
     try {
-      // Bare fetch (not the api.* client) — the response is a downloadable file,
-      // not a JSON envelope. We own the jargon-free error discipline here (#77):
-      // both branches collapse to GENERIC_FALLBACK_MESSAGE, never a raw status.
-      let res = await fetch(`${API_BASE}/api/auth/account/export`, { credentials: "include" }).catch(() => null);
-      // Mirror the api client's one-shot 401→refresh→retry so an expired
-      // cd_session (but still-valid cd_refresh) doesn't dead-end the download.
-      if (res?.status === 401) {
-        const refreshed = await fetch(`${API_BASE}/api/auth/refresh`, {
-          method: "POST",
-          credentials: "include",
-        }).catch(() => null);
-        if (refreshed?.ok) {
-          res = await fetch(`${API_BASE}/api/auth/account/export`, { credentials: "include" }).catch(() => null);
-        }
-      }
-      if (!res || !res.ok) throw new Error(GENERIC_FALLBACK_MESSAGE);
-      const blob = await res.blob();
+      // api.getBlob (#254 / FP-101): cookie transport + the coalesced silent 401-refresh + the
+      // friendly-error discipline, replacing the old hand-rolled bare-fetch refresh dance.
+      const blob = await api.getBlob("/api/auth/account/export");
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -217,15 +198,33 @@ function ExportDataButton() {
   };
 
   return (
-    <div className="space-y-2">
-      <h3 className="text-sm font-medium text-slate-700">Export your data</h3>
-      <p className="text-xs text-slate-500">
-        Download a JSON copy of your account, organization, vendors, documents, and reminders.
-      </p>
-      <Button type="button" size="sm" variant="outline" onClick={onExport} disabled={busy}>
-        {busy ? "Preparing…" : "Export my data"}
-      </Button>
-    </div>
+    <Card>
+      <CardContent className="p-6 space-y-2">
+        <h2 className="text-base font-semibold text-slate-800">Export your data</h2>
+        <p className="text-sm text-slate-500">
+          Download a JSON copy of your account, organization, vendors, documents, and reminders.
+        </p>
+        <Button type="button" size="sm" variant="outline" onClick={onExport} disabled={busy}>
+          {busy ? "Preparing…" : "Export my data"}
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ───────────────────────── Danger zone ─────────────────────────
+
+export function DangerZone() {
+  return (
+    <Card className="border-rose-200">
+      <CardContent className="p-6 space-y-6">
+        <div>
+          <h2 className="text-base font-semibold text-rose-700">Danger zone</h2>
+          <p className="text-sm text-slate-500">Permanently delete your account and organization data.</p>
+        </div>
+        <DeleteAccountForm />
+      </CardContent>
+    </Card>
   );
 }
 

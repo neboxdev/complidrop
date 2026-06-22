@@ -6,7 +6,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { http } from "msw";
 import { screen, fireEvent, waitFor } from "@testing-library/react";
-import { SecuritySection, DangerZone } from "./account-management";
+import { SecuritySection, DataExportSection, DangerZone } from "./account-management";
 import { ME_KEY } from "@/hooks/useAuth";
 import {
   renderWithProviders,
@@ -126,7 +126,7 @@ describe("SecuritySection — change email (#183)", () => {
   });
 });
 
-describe("DangerZone — export (#183)", () => {
+describe("DataExportSection — export (#183 / #320 FP-113)", () => {
   beforeEach(() => resetSonner());
 
   it("downloads the account export and toasts on success", async () => {
@@ -144,7 +144,7 @@ describe("DangerZone — export (#183)", () => {
 
     try {
       server.use(http.get(url("/api/auth/account/export"), () => jsonOk({ account: {} })));
-      renderWithProviders(<DangerZone />);
+      renderWithProviders(<DataExportSection />);
 
       fireEvent.click(screen.getByRole("button", { name: /export my data/i }));
 
@@ -158,15 +158,19 @@ describe("DangerZone — export (#183)", () => {
     }
   });
 
-  it("shows a jargon-free toast on export failure — never an HTTP status", async () => {
-    server.use(http.get(url("/api/auth/account/export"), () => jsonError("server.error", "boom", { status: 502 })));
-    renderWithProviders(<DangerZone />);
+  it("shows a jargon-free toast on export failure — the friendly server message, never an HTTP status", async () => {
+    // api.getBlob (#254) now surfaces the server's friendly envelope message (not always the generic
+    // fallback the old bare fetch used); the contract is "no HTTP jargon", which this still pins.
+    server.use(http.get(url("/api/auth/account/export"), () =>
+      jsonError("server.error", "We couldn't prepare your export just now.", { status: 502 })),
+    );
+    renderWithProviders(<DataExportSection />);
 
     fireEvent.click(screen.getByRole("button", { name: /export my data/i }));
 
     await waitFor(() => expect(toastError).toHaveBeenCalled());
     const msg = String(toastError.mock.calls.at(-1)?.[0] ?? "");
-    expect(msg).toBe("Something went wrong. Try again.");
+    expect(msg).toBe("We couldn't prepare your export just now.");
     expect(msg).not.toMatch(/502|bad gateway|failed to fetch/i);
   });
 });

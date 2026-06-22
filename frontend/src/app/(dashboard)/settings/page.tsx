@@ -10,8 +10,8 @@ import { useMe, useUpdateOrganization, type Me } from "@/hooks/useAuth";
 import { useSubscription } from "@/hooks/useSubscription";
 import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { listTimeZones, describeNextSend } from "@/lib/timezones";
-import { SecuritySection, DangerZone } from "./account-management";
+import { listTimeZones, describeNextSend, CURATED_TIMEZONES } from "@/lib/timezones";
+import { SecuritySection, DataExportSection, DangerZone } from "./account-management";
 import {
   KNOWN_CHECKOUT_PLAN_IDS,
   PLANS,
@@ -222,19 +222,31 @@ export default function SettingsPage() {
                     {subscription.data.documentsUsed}
                     {subscription.data.documentLimit != null && ` / ${subscription.data.documentLimit}`}
                   </p>
+                  {/* FP-113: a post-downgrade over-limit count ("12 / 5") was unexplained. */}
+                  {subscription.data.documentLimit != null &&
+                    subscription.data.documentsUsed > subscription.data.documentLimit && (
+                      <p className="mt-0.5 text-xs text-amber-700">
+                        Over your plan limit — your documents are kept; upgrade to add more.
+                      </p>
+                    )}
                 </div>
                 <div className="p-3 rounded-md bg-slate-50">
                   <p className="text-xs uppercase text-slate-500">Vendor portal</p>
                   <p className="text-lg font-semibold text-slate-900">
                     {subscription.data.hasVendorPortal ? "On" : "Off"}
                   </p>
+                  {/* FP-113: "Off" alone had no explanation or path. */}
+                  {!subscription.data.hasVendorPortal && (
+                    <p className="mt-0.5 text-xs text-slate-500">Upgrade to collect documents from vendors.</p>
+                  )}
                 </div>
                 <div className="p-3 rounded-md bg-slate-50">
                   <p className="text-xs uppercase text-slate-500">AI reading cost</p>
                   <p className="text-lg font-semibold text-slate-900">
                     ${subscription.data.extractionSpend.toFixed(2)}
                   </p>
-                  <p className="text-[10px] text-slate-500">this month · included in your plan</p>
+                  {/* FP-113: was 10px — too small to read. */}
+                  <p className="text-xs text-slate-500">this month · included in your plan</p>
                 </div>
               </div>
 
@@ -288,6 +300,7 @@ export default function SettingsPage() {
 
       {/* Account & access management (#183). */}
       <SecuritySection />
+      <DataExportSection />
       <DangerZone />
     </div>
   );
@@ -336,6 +349,12 @@ function OrgSettingsForm({ me }: { me: Me }) {
   // Memoize the (~400-entry) IANA list; recompute only if the saved zone
   // changes (so a saved-but-unusual zone is always present + selectable).
   const zones = useMemo(() => listTimeZones(me.timeZone), [me.timeZone]);
+  // The "All time zones" group excludes the curated ones (they're already up top), so a zone
+  // never appears twice. A saved-but-unusual zone is still here (listTimeZones prepends it). (FP-112)
+  const otherZones = useMemo(() => {
+    const curated = new Set(CURATED_TIMEZONES.map((z) => z.value));
+    return zones.filter((z) => !curated.has(z));
+  }, [zones]);
   const dirty = name.trim() !== me.organizationName || timeZone !== me.timeZone;
 
   const onSubmit = (e: React.FormEvent) => {
@@ -387,11 +406,22 @@ function OrgSettingsForm({ me }: { me: Me }) {
               onChange={(e) => setTimeZone(e.target.value)}
               className="mt-1 block w-full rounded-md border border-input bg-white px-3 py-2 text-sm text-slate-900 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring"
             >
-              {zones.map((z) => (
-                <option key={z} value={z}>
-                  {z}
-                </option>
-              ))}
+              {/* FP-112: friendly US-first zones up top; the full IANA list under "All time zones"
+                  for everyone else. Finding your own zone shouldn't mean scrolling from Africa/Abidjan. */}
+              <optgroup label="Common">
+                {CURATED_TIMEZONES.map((z) => (
+                  <option key={z.value} value={z.value}>
+                    {z.label}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="All time zones">
+                {otherZones.map((z) => (
+                  <option key={z} value={z}>
+                    {z}
+                  </option>
+                ))}
+              </optgroup>
             </select>
             <p className="mt-1.5 text-xs text-slate-500">{describeNextSend(timeZone)}</p>
           </div>

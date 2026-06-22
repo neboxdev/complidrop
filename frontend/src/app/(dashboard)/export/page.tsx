@@ -164,5 +164,10 @@ export default function ExportPage() {
 function isoDaysAgo(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() - days);
-  return d.toISOString().slice(0, 10);
+  // LOCAL y-m-d, not toISOString()'s UTC date (#320 FP-102): for an evening US user the UTC date is
+  // already tomorrow, so the default "To" used to show a future day.
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
