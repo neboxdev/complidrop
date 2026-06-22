@@ -267,6 +267,29 @@ public sealed class StripeServiceCheckoutLiveStateTests(IntegrationTestFixture f
     }
 
     [Fact]
+    public async Task Checkout_with_an_incomplete_live_status_keeps_the_optimistic_paid_grant()
+    {
+        // #245 audit: a checkout completing while the first invoice is still settling (live status
+        // 'incomplete' — SCA/3DS pending or the initial charge uncaptured) is NOT terminal, so it falls
+        // through the canceled/incomplete_expired guard into the same optimistic grant as past_due
+        // above — record the real status + keep the paid grant, relying on Stripe's subsequent
+        // subscription.* events to converge (an 'incomplete' that never settles auto-expires to
+        // incomplete_expired within ~23h, which the terminal branch then handles). Pins that
+        // 'incomplete' is treated as non-terminal, mirroring the BillingEndpoints 409 re-checkout guard.
+        var orgId = await SeedFreeOrgAsync();
+        var stub = new StubHttpMessageHandler(HttpStatusCode.OK, LiveSubscriptionJson("incomplete", priceId: "price_monthly_test"));
+
+        await using var db = CreateSystemDb();
+        await NewService(db, stub).HandleWebhookEventAsync(CheckoutEvent(orgId, DateTime.UtcNow), CancellationToken.None);
+
+        var sub = await ReloadAsync(orgId);
+        sub.Status.Should().Be("incomplete", "the live status is recorded as-is");
+        sub.Plan.Should().Be("pro");
+        sub.HasVendorPortal.Should().BeTrue("a non-terminal subscription keeps the optimistic paid grant");
+        sub.DocumentLimit.Should().BeNull();
+    }
+
+    [Fact]
     public async Task Checkout_live_fetch_failure_propagates_so_stripe_retries_the_event()
     {
         // ADR 0020's at-least-once contract: a transient outbound failure must throw (the

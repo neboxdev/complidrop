@@ -220,6 +220,49 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
     }
 
     [Fact]
+    public async Task Dunning_state_event_preserves_paid_entitlements()
+    {
+        // The grace half of the lapse policy (ADR 0024; #245 audit §3): a customer.subscription.updated
+        // carrying a DUNNING status (past_due / unpaid — Stripe is still retrying the card) records the
+        // status but must NOT strip the paid entitlement flags. Only customer.subscription.deleted drops
+        // to free. A regression that zeroed HasVendorPortal/DocumentLimit on a dunning event would
+        // silently revoke a paying customer mid-retry — and the price-resolution test above asserts only
+        // Status/Plan, so it would not catch it. (#245 review finding.)
+        var subId = await SeedSubscriptionAsync(plan: "pro", status: "active", hasPortal: true);
+        var payload = SubscriptionStateEvent($"evt_{Guid.NewGuid():N}", "customer.subscription.updated", subId, "past_due", "price_monthly_test");
+
+        var resp = await PostWebhook(payload, SignatureFor(payload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var sub = await ReloadAsync(subId);
+        sub.Status.Should().Be("past_due");
+        sub.HasVendorPortal.Should().BeTrue("dunning is grace — paid entitlements stay until subscription.deleted");
+        sub.DocumentLimit.Should().BeNull("dunning must not impose the free-tier cap");
+    }
+
+    [Fact]
+    public async Task Concurrent_same_event_id_is_recorded_once()
+    {
+        // Two identical signed deliveries of the SAME event id race: both pass the AnyAsync dedupe
+        // pre-check and run the (idempotent) handler, then both try to INSERT ProcessedStripeEvent. The
+        // unique-PK 23505 on the loser is caught and absorbed as 200 (or it serializes and the second
+        // hits the AnyAsync early-return) — either way the event is recorded exactly once and Stripe is
+        // never 5xx'd into a spurious extra retry. Mirrors the Resend concurrent-delivery test. (#245 audit §2.)
+        var subId = await SeedSubscriptionAsync(plan: "pro", status: "active");
+        var eventId = $"evt_{Guid.NewGuid():N}";
+        var payload = SubscriptionStateEvent(eventId, "customer.subscription.updated", subId, "past_due", "price_monthly_test");
+        var signature = SignatureFor(payload);
+
+        var responses = await Task.WhenAll(
+            PostWebhook(payload, signature),
+            PostWebhook(payload, signature));
+
+        responses.Should().OnlyContain(r => r.StatusCode == HttpStatusCode.OK,
+            "the 23505 loser is absorbed as 200, never a 5xx that would trigger a spurious Stripe retry");
+        (await ProcessedCountAsync(eventId)).Should().Be(1, "the event is recorded exactly once despite the race");
+    }
+
+    [Fact]
     public async Task Unknown_event_type_is_accepted_as_a_noop()
     {
         var subId = await SeedSubscriptionAsync(plan: "pro", status: "active");
