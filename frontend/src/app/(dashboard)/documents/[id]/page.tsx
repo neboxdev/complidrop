@@ -689,7 +689,7 @@ export default function DocumentDetailPage() {
                 </Button>
               }
               title="Read this file again?"
-              description={`This re-reads the document from scratch and replaces the ${discardCount} value${discardCount === 1 ? "" : "s"} you corrected by hand.`}
+              description={`This re-reads the document from scratch and replaces the ${discardCount} value${discardCount === 1 ? "" : "s"} you changed.`}
               confirmLabel="Read again"
               onConfirm={() => reextract.mutate()}
             />
@@ -726,18 +726,18 @@ export default function DocumentDetailPage() {
               ConfirmDialog as the list rows. (FP-060) */}
           <ConfirmDialog
             trigger={
-              <Button variant="ghost" size="sm" aria-label={`Delete ${doc.originalFileName}`} disabled={del.isPending}>
+              <Button variant="ghost" size="sm" aria-label={`Remove ${doc.originalFileName}`} disabled={del.isPending}>
                 <Trash2 className="w-4 h-4 text-slate-500 hover:text-rose-600" />
               </Button>
             }
-            title={`Delete ${doc.originalFileName}?`}
-            description="This removes the document from your list. This can't be undone."
-            confirmLabel="Delete"
+            title={`Remove ${doc.originalFileName}?`}
+            description="This removes the document from your records and can't be undone."
+            confirmLabel="Remove"
             destructive
             onConfirm={() =>
               del.mutate(doc.id, {
                 onSuccess: () => {
-                  toast.success("Document deleted");
+                  toast.success("Document removed");
                   router.push("/documents");
                 },
                 onError: (err) =>

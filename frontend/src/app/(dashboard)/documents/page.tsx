@@ -77,7 +77,9 @@ export default function DocumentsPage() {
   // Filters are URL-addressable (FP-041): seed from the query string so a deep
   // link lands pre-filtered (the dashboard's "Non-compliant" card -> ?status=
   // NonCompliant, a vendor's "Docs N" -> ?vendor=<id>), and the active filters
-  // are mirrored back so the view is shareable + survives back/forward.
+  // are mirrored back (replace, not push) so the view is shareable and a Back
+  // from a detail page re-seeds it. (In-page changes use replace, so they don't
+  // stack history entries.)
   const [page, setPage] = useState(1);
   const [searchInput, setSearchInput] = useState(() => searchParams.get("search") ?? "");
   const [search, setSearch] = useState(() => searchParams.get("search") ?? ""); // debounced value sent to the server
@@ -470,6 +472,12 @@ export default function DocumentsPage() {
               setTypeFilter("");
               setExpiresWithin("");
               setPage(1);
+              // vendorId is read-only from the URL (no state setter), so resetting
+              // state alone leaves a ?vendor= deep link in place and the mirror
+              // effect just rewrites it — Clear would be a dead control. Drop the
+              // whole query string so the vendor filter is actually clearable; the
+              // mirror effect then reconciles against the now-empty state. (#317 review)
+              router.replace("/documents", { scroll: false });
             }}
           >
             Clear

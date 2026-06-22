@@ -30,6 +30,7 @@ import {
   dropFilesIn,
   makeFile,
   toastError,
+  toastInfo,
 } from "@/test";
 
 afterEach(() => {
@@ -79,6 +80,41 @@ describe("DocumentsPage — URL-addressable filters (#317 FP-041)", () => {
     });
     await waitFor(() => expect(replaceSpy).toHaveBeenCalled());
     expect(replaceSpy.mock.calls.some(([href]) => String(href).includes("status=Expired"))).toBe(true);
+  });
+});
+
+describe("DocumentsPage — upload UX (#317 FP-054/FP-055)", () => {
+  it("FP-055: the staging copy is count-aware for a multi-file batch", async () => {
+    server.use(http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))));
+    const { container } = renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    dropFilesIn(container, [makeFile("a.pdf"), makeFile("b.pdf")]);
+    expect(await screen.findByText(/these 2 files are for/i)).toBeInTheDocument();
+  });
+
+  it("FP-054: warns that an active filter may be hiding a just-uploaded doc", async () => {
+    server.use(
+      http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))),
+      http.get(url("/api/vendors"), () => jsonOk([{ id: "v1", name: "Acme Catering" }])),
+      http.post(url("/api/documents/upload"), () =>
+        jsonOk({ id: "d1", originalFileName: "a.pdf", extractionStatus: "Pending" }),
+      ),
+    );
+    const { container } = renderWithProviders(<DocumentsPage />, {
+      auth: authedMe,
+      searchParams: { status: "Expired" },
+    });
+    await waitFor(() => expect(screen.getByText(/no documents match your filters/i)).toBeInTheDocument());
+
+    dropFilesIn(container, [makeFile("a.pdf")]);
+    fireEvent.click(await screen.findByRole("button", { name: "Acme Catering" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /upload 1 file/i })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole("button", { name: /upload 1 file/i }));
+
+    await waitFor(() =>
+      expect(toastInfo).toHaveBeenCalledWith(expect.stringMatching(/active filter may be hiding/i)),
+    );
   });
 });
 

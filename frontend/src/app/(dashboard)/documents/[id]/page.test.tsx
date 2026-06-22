@@ -197,7 +197,7 @@ describe("DocumentDetailPage — Batch C (#317)", () => {
     // Opens a confirm dialog instead of firing immediately.
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveAccessibleName(/read this file again/i);
-    expect(within(dialog).getByText(/replaces the 1 value you corrected/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/replaces the 1 value you changed/i)).toBeInTheDocument();
     expect(reextractCalled).toBe(0);
     // Confirm → fires reextract.
     fireEvent.click(within(dialog).getByRole("button", { name: /read again/i }));
@@ -238,6 +238,47 @@ describe("DocumentDetailPage — Batch C (#317)", () => {
     fireEvent.click(await screen.findByRole("button", { name: /read again/i }));
     await waitFor(() => expect(reextractCalled).toBe(1));
     expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("FP-062: confirms on UNSAVED pending edits too (the common type-then-reread case)", async () => {
+    let reextractCalled = 0;
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_pending_edit",
+            extractionStatus: "Completed",
+            complianceStatus: "Compliant",
+            fields: [
+              {
+                id: "f1",
+                fieldName: "policy_number",
+                fieldValue: "POL-1",
+                fieldType: "string",
+                confidence: 0.9,
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+            ],
+          }),
+        ),
+      ),
+      http.post(url("/api/documents/:id/reextract"), () => {
+        reextractCalled += 1;
+        return jsonOk<void>(undefined);
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_pending_edit" } });
+
+    // Type an unsaved correction — discardCount should now count it even though
+    // isManuallyEdited is still false on the server payload.
+    const input = await screen.findByDisplayValue("POL-1");
+    fireEvent.change(input, { target: { value: "POL-2" } });
+    fireEvent.click(screen.getByRole("button", { name: /read again/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/replaces the 1 value you changed/i)).toBeInTheDocument();
+    expect(reextractCalled).toBe(0);
   });
 
   it("FP-067: the processing-error card shows only on terminal Failed, not between retries", async () => {
@@ -310,9 +351,9 @@ describe("DocumentDetailPage — Batch C (#317)", () => {
       router: { push: pushSpy },
     });
 
-    fireEvent.click(await screen.findByRole("button", { name: /delete coi\.pdf/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /remove coi\.pdf/i }));
     const dialog = await screen.findByRole("alertdialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+    fireEvent.click(within(dialog).getByRole("button", { name: /^remove$/i }));
     await waitFor(() => expect(deleted).toBe(true));
     await waitFor(() => expect(pushSpy).toHaveBeenCalledWith("/documents"));
   });
