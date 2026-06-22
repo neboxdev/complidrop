@@ -207,25 +207,36 @@ public sealed class ComplianceVerdictFreshnessTests(IntegrationTestFixture fixtu
         var expiringToday = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, today);
         var expiredYesterday = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, today.AddDays(-1));
 
-        // Detail badge agrees on both sides of the edge.
+        // Issue every read FIRST, then guard against a UTC-midnight rollover, THEN assert. The
+        // "expiring today" doc sits exactly on the strict `< today` Expired boundary, and the request
+        // handlers read the wall clock (DateTime.UtcNow.Date) — so if the UTC day advanced during the
+        // request window the handlers' `today` would move and flip the doc to Expired, spuriously
+        // failing. The straddle check below skips that ppm window. No coverage is lost: the exact
+        // boundary is ALSO pinned deterministically (fixed clock) by
+        // ComplianceSweepBackgroundServiceTests.Sweep_leaves_a_doc_expiring_exactly_today... (worker
+        // SQL) and ComplianceStatusDeriverTests.Expiring_today_is_not_yet_expired (the deriver).
         var todayDetail = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{expiringToday}");
+        var yesterdayDetail = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{expiredYesterday}");
+        var expiredList = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?status=Expired");
+        var soonList = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?status=ExpiringSoon");
+        var stats = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/dashboard/stats")).GetProperty("data");
+
+        if (DateTime.UtcNow.Date != today) return; // crossed UTC midnight mid-test — see comment above
+
+        // Detail badge agrees on both sides of the edge.
         todayDetail.GetProperty("data").GetProperty("complianceStatus").GetString()
             .Should().Be("ExpiringSoon", "a doc expiring at today's midnight is not yet Expired");
-        var yesterdayDetail = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{expiredYesterday}");
         yesterdayDetail.GetProperty("data").GetProperty("complianceStatus").GetString().Should().Be("Expired");
 
         // List filter agrees: yesterday under Expired (not today), today under ExpiringSoon (not yesterday).
-        var expiredList = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?status=Expired");
         expiredList.GetProperty("data").GetProperty("items").EnumerateArray()
             .Select(i => i.GetProperty("id").GetString())
             .Should().Contain(expiredYesterday.ToString()).And.NotContain(expiringToday.ToString());
-        var soonList = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/?status=ExpiringSoon");
         soonList.GetProperty("data").GetProperty("items").EnumerateArray()
             .Select(i => i.GetProperty("id").GetString())
             .Should().Contain(expiringToday.ToString()).And.NotContain(expiredYesterday.ToString());
 
         // Dashboard counts agree: exactly one Expired (yesterday), one ExpiringSoon (today).
-        var stats = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/dashboard/stats")).GetProperty("data");
         stats.GetProperty("expired").GetInt32().Should().Be(1, "only the yesterday doc is Expired");
         stats.GetProperty("expiringSoon").GetInt32().Should().Be(1, "the today doc is ExpiringSoon, not Expired");
     }
