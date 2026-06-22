@@ -46,6 +46,24 @@ public class CanonicalDocumentFieldsTests
     }
 
     [Fact]
+    public void Slash_format_dates_parse_month_first_under_invariant_culture()
+    {
+        // The extraction prompt mandates ISO yyyy-MM-dd, but a model that disobeys — or a US manual
+        // edit typed as a slash date — can still arrive here. ParseUtcDate pins
+        // CultureInfo.InvariantCulture, which is month-first (MM/dd/yyyy), correct for the US
+        // beachhead market. This test exists so a refactor to CurrentCulture (which is DD/MM on a
+        // non-US host) can't silently flip every slash date's month and day and shift compliance
+        // verdicts with no failing test — the only date tests above use culture-stable ISO, so they
+        // would NOT catch that regression. (#244 time/TZ audit, extracted-date culture class.)
+        var doc = new Document();
+
+        CanonicalDocumentFields.ApplyToTypedColumn(doc, "expiration_date", "06/10/2026");
+
+        doc.ExpirationDate.Should().Be(new DateTime(2026, 6, 10, 0, 0, 0, DateTimeKind.Utc),
+            "InvariantCulture reads MM/dd/yyyy, so 06/10 is June 10 — not October 6");
+    }
+
+    [Fact]
     public void Parses_an_offset_bearing_date_to_utc()
     {
         // AssumeUniversal|AdjustToUniversal shifts an offset-bearing value to the equivalent UTC
