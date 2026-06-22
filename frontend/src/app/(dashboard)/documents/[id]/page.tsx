@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { StaleDataBanner } from "@/components/StaleDataBanner";
 import { DocumentTypeSelect } from "@/components/DocumentTypeSelect";
 import { useUpdateDocument } from "@/hooks/useDocuments";
+import { VendorPicker, type VendorOption } from "@/components/VendorPicker";
 import { ClearSampleButton } from "@/components/onboarding/SampleData";
 import {
   complianceFailureReason,
@@ -283,6 +284,93 @@ function ProcessingErrorCard({ doc }: { doc: DocDetail }) {
           <summary className="cursor-pointer select-none">Details for support</summary>
           <p className="mt-1 font-mono break-words text-slate-500">{doc.processingError}</p>
         </details>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Canonical fields offered for manual entry when extraction returns nothing
+// (#316 FP-064). The names match the backend field-mirror (EffectiveDate /
+// ExpirationDate / GeneralLiabilityLimit map to typed columns + re-eval), so a
+// manual save flows through the same PUT /fields path as editing a read field.
+const MANUAL_ENTRY_FIELDS: ReadonlyArray<{
+  name: string;
+  label: string;
+  type: string;
+  placeholder?: string;
+}> = [
+  { name: "EffectiveDate", label: "Effective date", type: "date" },
+  { name: "ExpirationDate", label: "Expiration date", type: "date" },
+  { name: "GeneralLiabilityLimit", label: "General liability limit", type: "text", placeholder: "e.g. 1000000" },
+];
+
+// Explains WHY a document is "not checked yet" instead of leaving the user at a
+// dead end, and fixes it inline: an orphan doc gets a vendor picker (the only
+// place to assign a vendor to an already-uploaded doc — also FP-065's orphan
+// picker), and a vendor with no checklist links to set one up. Assigning re-runs
+// the check automatically (#257). (#316 FP-063)
+function NotCheckedExplainer({ doc }: { doc: DocDetail }) {
+  const updateDoc = useUpdateDocument();
+  const [picked, setPicked] = useState<VendorOption | null>(null);
+
+  const isProcessing =
+    doc.extractionStatus === "Pending" || doc.extractionStatus === "Processing";
+  if (doc.complianceStatus !== "Pending" || isProcessing) return null;
+
+  const noVendor = doc.vendorId == null;
+  const noChecklist = !noVendor && (doc.complianceChecks?.length ?? 0) === 0;
+  // Pending for some reason we can't name (shouldn't happen) — don't guess.
+  if (!noVendor && !noChecklist) return null;
+
+  return (
+    <Card className="border-sky-200 bg-sky-50/60">
+      <CardContent className="p-4 sm:p-6 space-y-3">
+        <div className="flex items-center gap-2">
+          <AlertTriangle className="h-4 w-4 shrink-0 text-sky-700" aria-hidden />
+          <h2 className="font-semibold text-sky-900">Not checked yet</h2>
+        </div>
+        {noVendor ? (
+          <>
+            <p className="text-sm text-sky-900">
+              This document isn&apos;t linked to a vendor yet, so there&apos;s nothing to
+              check it against. Assign it to a vendor and we&apos;ll check it automatically.
+            </p>
+            <VendorPicker
+              value={picked}
+              disabled={updateDoc.isPending}
+              placeholder="Assign a vendor…"
+              onCreateError={(m) => toast.error(m)}
+              onChange={(v) => {
+                setPicked(v);
+                if (!v) return;
+                updateDoc.mutate(
+                  { id: doc.id, vendorId: v.id },
+                  {
+                    onSuccess: () => toast.success(`Assigned to ${v.name} — checking now…`),
+                    onError: (err) => {
+                      setPicked(null);
+                      toast.error(err instanceof Error ? err.message : "Couldn't assign the vendor.");
+                    },
+                  },
+                );
+              }}
+            />
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-sky-900">
+              {doc.vendorName ?? "This vendor"} doesn&apos;t have a requirements checklist
+              yet, so there&apos;s nothing to check against. Set up what they need to prove
+              and we&apos;ll check it automatically.
+            </p>
+            <Link
+              href={`/vendors/${doc.vendorId}`}
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }), "w-fit")}
+            >
+              Set up {doc.vendorName ?? "vendor"} requirements
+            </Link>
+          </>
+        )}
       </CardContent>
     </Card>
   );
@@ -632,6 +720,8 @@ export default function DocumentDetailPage() {
         />
       </section>
 
+      <NotCheckedExplainer doc={doc} />
+
       <NonComplianceExplainer doc={doc} />
 
       <WhatWeCheckedCard doc={doc} />
@@ -663,11 +753,35 @@ export default function DocumentDetailPage() {
             </Button>
           </div>
           {doc.fields.length === 0 ? (
-            <p className="text-sm text-slate-500">
-              {doc.extractionStatus === "Pending" || doc.extractionStatus === "Processing"
-                ? "Reading the document…"
-                : "No details read yet."}
-            </p>
+            isProcessing ? (
+              <p className="text-sm text-slate-500">Reading the document…</p>
+            ) : (
+              // FP-064: a Failed / zero-field read used to dead-end at "No details
+              // read yet." Offer the key fields for manual entry instead — Save
+              // flows through the same PUT /fields path (creates them + re-checks).
+              <div className="space-y-3">
+                <p className="text-sm text-slate-600">
+                  We couldn&apos;t pull the details from this file automatically. Enter the
+                  key details below and we&apos;ll check them against the requirements when
+                  you save.
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {MANUAL_ENTRY_FIELDS.map((mf) => (
+                    <div key={mf.name} className="space-y-1">
+                      <label htmlFor={`manual-${mf.name}`} className="text-xs font-medium tracking-wide text-slate-500">
+                        {mf.label}
+                      </label>
+                      <Input
+                        id={`manual-${mf.name}`}
+                        type={mf.type}
+                        placeholder={mf.placeholder}
+                        onChange={(e) => setEdits((prev) => ({ ...prev, [mf.name]: e.target.value }))}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {doc.fields.map((f) => (

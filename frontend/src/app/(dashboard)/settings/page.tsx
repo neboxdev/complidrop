@@ -18,7 +18,7 @@ import {
   type CheckoutPlanId,
 } from "@/lib/plans";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { requestTourRestart, resetOnboardingTips } from "@/lib/onboarding";
 
 // Map the raw Stripe subscription status to friendly copy — never interpolate
@@ -55,6 +55,30 @@ function billingStatusNotice(
   }
 }
 
+// Skeleton for the billing card while the subscription loads — so a slow query
+// never flashes "free" + upgrade tiles at a paying customer (#316 FP-111).
+// Hoisted per the react-hooks/static-components rule.
+function BillingSkeleton() {
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4" aria-hidden="true">
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="p-3 rounded-md bg-slate-50">
+          <div className="h-3 w-20 rounded bg-slate-200 motion-safe:animate-pulse" />
+          <div className="mt-2 h-5 w-12 rounded bg-slate-200 motion-safe:animate-pulse" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// currentPeriodEnd is a real instant, so the viewer's local zone is correct here
+// (contrast formatCalendarDate, which pins UTC for date-only facts). (#316 FP-115)
+function formatRenewalDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+}
+
 export default function SettingsPage() {
   const me = useMe();
   const params = useSearchParams();
@@ -84,12 +108,45 @@ export default function SettingsPage() {
     onError: (err) => toast.error(err instanceof Error ? err.message : "Portal unavailable"),
   });
 
+  // Only "paid" once the subscription has actually LOADED as a paid plan — never
+  // while loading or on error, or a transient API hiccup would render a paying
+  // customer as free with live Upgrade tiles. (#316 FP-111)
+  const isPaid = subscription.isSuccess && subscription.data.plan !== "free";
+  const { refetch: refetchSub } = subscription;
+
+  // ?canceled=true is terminal + truthful (the user backed out) — toast it.
   useEffect(() => {
-    if (params.get("upgraded") === "true") toast.success("Welcome — you're now on a paid plan!");
     if (params.get("canceled") === "true") toast.info("Checkout canceled — no changes made.");
   }, [params]);
 
-  const isPaid = subscription.data?.plan && subscription.data.plan !== "free";
+  // ?upgraded=true is NOT terminal: the Stripe webhook that flips the plan to
+  // paid can lag a few seconds. Poll the subscription until it lands rather than
+  // toasting a success off the URL param (which would lie if the webhook hasn't
+  // arrived), and hide the upgrade tiles while we wait so they can't re-checkout.
+  // (#316 FP-114). `activating` is DERIVED (not synced state) — show it while we
+  // returned from checkout, the plan hasn't flipped, and we haven't timed out.
+  const upgraded = params.get("upgraded") === "true";
+  const [gaveUpActivating, setGaveUpActivating] = useState(false);
+  const activating = upgraded && !isPaid && !gaveUpActivating;
+  useEffect(() => {
+    if (!activating) return;
+    const poll = setInterval(() => refetchSub(), 3000);
+    const giveUp = setTimeout(() => setGaveUpActivating(true), 30000);
+    return () => {
+      clearInterval(poll);
+      clearTimeout(giveUp);
+    };
+  }, [activating, refetchSub]);
+
+  // Celebrate exactly once when the plan actually lands paid after an upgrade —
+  // a ref guard (not state) so the toast can't re-fire on later refetches.
+  const celebratedUpgrade = useRef(false);
+  useEffect(() => {
+    if (upgraded && isPaid && !celebratedUpgrade.current) {
+      celebratedUpgrade.current = true;
+      toast.success("You're all set — welcome to your paid plan!");
+    }
+  }, [upgraded, isPaid]);
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
@@ -111,93 +168,118 @@ export default function SettingsPage() {
           <div className="flex items-start justify-between">
             <div>
               <h2 className="text-base font-semibold text-slate-800">Plan & billing</h2>
-              <p className="text-sm text-slate-500">
-                You&apos;re on the{" "}
-                <strong className="capitalize">{subscription.data?.plan ?? "free"}</strong> plan.
-              </p>
+              {subscription.isSuccess && (
+                <p className="text-sm text-slate-500">
+                  You&apos;re on the{" "}
+                  <strong className="capitalize">{subscription.data.plan}</strong> plan.
+                </p>
+              )}
             </div>
             {isPaid && (
               <Badge className="bg-emerald-100 text-emerald-700 border-transparent">paid</Badge>
             )}
           </div>
 
-          {(() => {
-            const notice = billingStatusNotice(subscription.data?.status);
-            return notice ? (
-              <p
-                className={cn(
-                  "rounded-md px-3 py-2 text-sm",
-                  notice.warn
-                    ? "bg-rose-50 text-rose-700"
-                    : "bg-sky-50 text-sky-700",
-                )}
-              >
-                {notice.text}
-              </p>
-            ) : null;
-          })()}
+          {subscription.isLoading && <BillingSkeleton />}
 
-          {subscription.data && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
-              <div className="p-3 rounded-md bg-slate-50">
-                <p className="text-xs uppercase text-slate-500">Documents</p>
-                <p className="text-lg font-semibold text-slate-900">
-                  {subscription.data.documentsUsed}
-                  {subscription.data.documentLimit != null && ` / ${subscription.data.documentLimit}`}
-                </p>
-              </div>
-              <div className="p-3 rounded-md bg-slate-50">
-                <p className="text-xs uppercase text-slate-500">Vendor portal</p>
-                <p className="text-lg font-semibold text-slate-900">
-                  {subscription.data.hasVendorPortal ? "On" : "Off"}
-                </p>
-              </div>
-              <div className="p-3 rounded-md bg-slate-50">
-                <p className="text-xs uppercase text-slate-500">AI reading cost</p>
-                <p className="text-lg font-semibold text-slate-900">
-                  ${subscription.data.extractionSpend.toFixed(2)}
-                </p>
-                <p className="text-[10px] text-slate-500">this month · included in your plan</p>
-              </div>
+          {subscription.isError && (
+            <div className="rounded-md bg-rose-50 px-3 py-3 text-sm text-rose-700">
+              <p>We couldn&apos;t load your billing details.</p>
+              <Button variant="outline" size="sm" className="mt-2" onClick={() => refetchSub()}>
+                Try again
+              </Button>
             </div>
           )}
 
-          {!isPaid ? (
-            // Tiles are driven off `KNOWN_CHECKOUT_PLAN_IDS` + `PLANS`
-            // (#147, ADR 0011). Each tile's price + tagline reads from
-            // the registry; a price change requires editing exactly one
-            // file (`@/lib/plans.ts`) and the tile, the landing card,
-            // and the opengraph headline all update together.
-            //
-            // `annual` is highlighted as the conversion default — see
-            // the landing-page pricing section which uses the same
-            // `featured` styling on Annual. A future redesign that
-            // moves the highlight to Founding would change only this
-            // condition.
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
-              {KNOWN_CHECKOUT_PLAN_IDS.map((id) => (
-                <PlanCard
-                  key={id}
-                  name={PLANS[id].label}
-                  price={PLANS[id].monthlyPriceLabel}
-                  tagline={PLANS[id].tagline ?? ""}
-                  billedNote={
-                    PLANS[id].annualBilledLabel
-                      ? `${PLANS[id].annualBilledLabel}${PLANS[id].annualSavingsLabel ? ` · ${PLANS[id].annualSavingsLabel}` : ""}`
-                      : null
-                  }
-                  featured={id === "annual"}
-                  onClick={() => checkout.mutate(id)}
-                  pending={checkout.isPending}
-                />
-              ))}
-            </div>
-          ) : (
-            <div>
-              <Button onClick={() => portal.mutate()} disabled={portal.isPending}>
-                Manage billing
-              </Button>
-            </div>
+          {activating && (
+            <p className="rounded-md bg-sky-50 px-3 py-2 text-sm text-sky-700" role="status">
+              Activating your plan… this can take a few seconds.
+            </p>
+          )}
+
+          {subscription.isSuccess && (
+            <>
+              {(() => {
+                const notice = billingStatusNotice(subscription.data.status);
+                return notice ? (
+                  <p
+                    className={cn(
+                      "rounded-md px-3 py-2 text-sm",
+                      notice.warn
+                        ? "bg-rose-50 text-rose-700"
+                        : "bg-sky-50 text-sky-700",
+                    )}
+                  >
+                    {notice.text}
+                  </p>
+                ) : null;
+              })()}
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+                <div className="p-3 rounded-md bg-slate-50">
+                  <p className="text-xs uppercase text-slate-500">Documents</p>
+                  <p className="text-lg font-semibold text-slate-900">
+                    {subscription.data.documentsUsed}
+                    {subscription.data.documentLimit != null && ` / ${subscription.data.documentLimit}`}
+                  </p>
+                </div>
+                <div className="p-3 rounded-md bg-slate-50">
+                  <p className="text-xs uppercase text-slate-500">Vendor portal</p>
+                  <p className="text-lg font-semibold text-slate-900">
+                    {subscription.data.hasVendorPortal ? "On" : "Off"}
+                  </p>
+                </div>
+                <div className="p-3 rounded-md bg-slate-50">
+                  <p className="text-xs uppercase text-slate-500">AI reading cost</p>
+                  <p className="text-lg font-semibold text-slate-900">
+                    ${subscription.data.extractionSpend.toFixed(2)}
+                  </p>
+                  <p className="text-[10px] text-slate-500">this month · included in your plan</p>
+                </div>
+              </div>
+
+              {/* currentPeriodEnd is a real instant (Stripe billing-cycle end) →
+                  render in the viewer's local zone, not pinned UTC. Whether it
+                  "Renews" vs "Ends" needs cancel_at_period_end, which isn't stored
+                  yet — tracked in the FP-115 follow-up. (#316 FP-115) */}
+              {isPaid && subscription.data.currentPeriodEnd && (
+                <p className="text-xs text-slate-500">
+                  Renews on {formatRenewalDate(subscription.data.currentPeriodEnd)}.
+                </p>
+              )}
+
+              {/* Tiles are driven off `KNOWN_CHECKOUT_PLAN_IDS` + `PLANS`
+                  (#147, ADR 0011); a price change edits one file. `annual` is the
+                  highlighted conversion default (matches the landing pricing).
+                  Hidden while `activating` so a mid-webhook user can't re-checkout. */}
+              {!activating &&
+                (subscription.data.plan === "free" ? (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
+                    {KNOWN_CHECKOUT_PLAN_IDS.map((id) => (
+                      <PlanCard
+                        key={id}
+                        name={PLANS[id].label}
+                        price={PLANS[id].monthlyPriceLabel}
+                        tagline={PLANS[id].tagline ?? ""}
+                        billedNote={
+                          PLANS[id].annualBilledLabel
+                            ? `${PLANS[id].annualBilledLabel}${PLANS[id].annualSavingsLabel ? ` · ${PLANS[id].annualSavingsLabel}` : ""}`
+                            : null
+                        }
+                        featured={id === "annual"}
+                        onClick={() => checkout.mutate(id)}
+                        pending={checkout.isPending}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div>
+                    <Button onClick={() => portal.mutate()} disabled={portal.isPending}>
+                      Manage billing
+                    </Button>
+                  </div>
+                ))}
+            </>
           )}
         </CardContent>
       </Card>

@@ -38,6 +38,87 @@ import { api } from "@/lib/api";
 // (#122) — `resetSonner()` runs in the harness `afterEach` so call
 // counts never leak between tests.
 
+describe("DocumentDetailPage — not-checked explainer (#316 FP-063)", () => {
+  it("explains an orphan (no-vendor) Pending doc and offers an inline vendor assign", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_orphan",
+            extractionStatus: "Completed",
+            complianceStatus: "Pending",
+            vendorId: null,
+            vendorName: null,
+            complianceChecks: [],
+          }),
+        ),
+      ),
+      http.get(url("/api/vendors"), () => jsonOk([{ id: "v1", name: "Acme Catering" }])),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_orphan" } });
+
+    expect(await screen.findByText(/not checked yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/isn't linked to a vendor yet/i)).toBeInTheDocument();
+    // The inline assign picker (also FP-065's orphan picker) — the ONLY place to
+    // assign a vendor to an already-uploaded doc.
+    expect(screen.getByPlaceholderText(/assign a vendor/i)).toBeInTheDocument();
+  });
+
+  it("explains a vendor-without-checklist Pending doc and links to set requirements up", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_nochk",
+            extractionStatus: "Completed",
+            complianceStatus: "Pending",
+            vendorId: "v9",
+            vendorName: "Bob's Flowers",
+            complianceChecks: [],
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_nochk" } });
+
+    expect(await screen.findByText(/doesn't have a requirements checklist yet/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /set up bob's flowers requirements/i })).toHaveAttribute(
+      "href",
+      "/vendors/v9",
+    );
+  });
+});
+
+describe("DocumentDetailPage — manual entry on a failed read (#316 FP-064)", () => {
+  it("offers manual-entry fields instead of a dead-end when extraction returned nothing", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_failed",
+            extractionStatus: "Failed",
+            complianceStatus: "Pending",
+            vendorId: "v2",
+            vendorName: "Caterer Co",
+            complianceChecks: [],
+            fields: [],
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_failed" } });
+
+    expect(await screen.findByText(/couldn't pull the details from this file/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/effective date/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/expiration date/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/general liability limit/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no details read yet/i)).toBeNull();
+  });
+});
+
 describe("DocumentDetailPage — what we checked (#239)", () => {
   it("lists the met requirements in plain English for a compliant document", async () => {
     server.use(

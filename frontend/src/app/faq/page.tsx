@@ -45,7 +45,7 @@ const FAQ_ITEMS: readonly FaqItem[] = [
   {
     question: "What if the automatic reading gets something wrong?",
     answer:
-      "You always review and confirm what CompliDrop extracted before it counts — it's a head start you approve, not a black box you have to trust blindly. When a document is unclear, CompliDrop flags it for your review rather than guessing silently.",
+      "CompliDrop flags anything it's unsure about for your review instead of guessing silently. Confident reads are applied automatically, and you can open any document to see exactly what was read and correct any field — which re-checks it against your requirements right away.",
   },
   {
     question: "Can I get an audit-ready record of who's compliant?",

@@ -26,6 +26,7 @@ import {
   server,
   url,
   jsonOk,
+  jsonError,
   authedMe,
   makeMe,
   toastSuccess,
@@ -72,6 +73,47 @@ describe("SettingsPage — smoke (#36)", () => {
     const usageGrid = document.querySelector(".sm\\:grid-cols-3");
     expect(usageGrid).not.toBeNull();
     expect(usageGrid?.className).toContain("grid-cols-1");
+  });
+});
+
+describe("SettingsPage — billing load gating (#316 FP-111/FP-115)", () => {
+  it("a subscription-load ERROR shows a retry, never 'free' + upgrade tiles", async () => {
+    server.use(
+      http.get(url("/api/billing/subscription"), () =>
+        jsonError("server.error", "boom", { status: 500 }),
+      ),
+    );
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    expect(await screen.findByText(/couldn't load your billing details/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+    // The bug (FP-111): an undefined plan fell through to the !isPaid branch and
+    // rendered live Upgrade tiles at a paying customer during an outage.
+    expect(screen.queryByRole("button", { name: /upgrade to/i })).toBeNull();
+  });
+
+  it("a paid plan shows Manage billing + a renews-on date, never upgrade tiles", async () => {
+    server.use(
+      http.get(url("/api/billing/subscription"), () =>
+        jsonOk({
+          plan: "pro",
+          status: "active",
+          documentLimit: null,
+          documentsUsed: 3,
+          hasVendorPortal: true,
+          currentPeriodEnd: "2026-11-01T12:00:00Z",
+          extractionSpend: 1.2,
+        }),
+      ),
+    );
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /manage billing/i })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: /upgrade to/i })).toBeNull();
+    // FP-115: the renewal date is surfaced for a paid plan.
+    expect(screen.getByText(/renews on/i)).toBeInTheDocument();
   });
 });
 

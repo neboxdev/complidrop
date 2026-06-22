@@ -69,8 +69,17 @@ export function MarketingHeader() {
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-white/80 backdrop-blur-lg">
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
+        {/* The full-size lockup (211px) + CTA + burger overflowed <=390px phones
+            (FP-012). A smaller lockup below sm keeps the row within a 375px
+            viewport. Wrapper spans toggle visibility because the Logo sets an
+            inline `display`, which a Tailwind `hidden` class can't override. */}
         <Link href="/" className="flex items-center" aria-label="CompliDrop — home">
-          <Logo variant="primary" height={36} decorative />
+          <span className="sm:hidden">
+            <Logo variant="primary" height={28} decorative />
+          </span>
+          <span className="hidden sm:inline-flex">
+            <Logo variant="primary" height={36} decorative />
+          </span>
         </Link>
 
         <nav className="flex items-center gap-1 sm:gap-3">
@@ -87,8 +96,10 @@ export function MarketingHeader() {
           </div>
 
           {authed ? (
+            // Shorten the authed CTA below md so the bar fits a phone (FP-012).
             <Link href="/dashboard" className={ctaClass}>
-              Go to dashboard
+              <span className="md:hidden">Dashboard</span>
+              <span className="hidden md:inline">Go to dashboard</span>
             </Link>
           ) : (
             <>

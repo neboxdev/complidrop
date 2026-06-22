@@ -153,9 +153,9 @@ export default function EventVenuesPage() {
               certificate; CompliDrop reads the dates, limits, and coverage and
               checks them against your venue&rsquo;s requirements &mdash; flagging
               anyone who&rsquo;s short or who listed you as certificate holder
-              instead of additional insured. Reminders go out automatically as
-              the event approaches, so the week of the wedding you&rsquo;re
-              looking at a clean list, not a phone in your hand.
+              instead of additional insured. Reminders go out automatically
+              before a certificate expires, so by the day of the event
+              you&rsquo;re looking at a clean list, not a phone in your hand.
             </p>
           </section>
 
