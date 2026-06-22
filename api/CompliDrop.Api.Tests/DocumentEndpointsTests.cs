@@ -452,6 +452,68 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         updated.VendorId.Should().BeNull();
     }
 
+    // ---- #246 data-integrity audit: the raw extraction payload must not bloat the audit log ----
+
+    [Fact]
+    public async Task Document_update_audit_omits_the_raw_extraction_payload_but_keeps_the_meaningful_fields()
+    {
+        // Golden-snapshot control for the #246 interceptor fix (AuditSaveChangesInterceptor). A
+        // fully-extracted document carries a large ExtractionRawJson (raw OCR + LLM payload, up to
+        // ~20 KB of OCR text). A user-context modification (PATCH) audits the Document via the
+        // interceptor — that Before/After must NOT carry the raw payload (the JsonDocument skip already
+        // drops ExtractionFields; ExtractionRawJson is its string sibling the type-check missed, so it
+        // slipped into BOTH Before and After of every durable, user-exportable audit row). The control
+        // half asserts the meaningful small columns DO survive, so the skip didn't gut the audit diff.
+        var auth = await RegisterAndLoginAsync();
+        var ocrSentinel = $"OCR_SENTINEL_{Guid.NewGuid():N}";
+        Guid docId;
+        await using (var seed = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            docId = Guid.NewGuid();
+            seed.Documents.Add(new Document
+            {
+                Id = docId,
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "coi.pdf",
+                BlobStorageUrl = "memory://x",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed,
+                ComplianceStatus = ComplianceStatus.Pending,
+                // The raw OCR+LLM payload (string) that must stay OUT of the audit log.
+                ExtractionRawJson = $"{{\"ocr\":{{\"text\":\"{ocrSentinel} lots and lots of OCR text\"}}}}",
+                // The JsonDocument sibling (already skipped by type) — pinned here too.
+                ExtractionFields = System.Text.Json.JsonDocument.Parse($"{{\"policy_number\":\"{ocrSentinel}-FIELDS\"}}"),
+                ExpirationDate = now.AddDays(365),
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+            await seed.SaveChangesAsync(); // seeded via SystemDbContext (no current user) → not itself audited
+        }
+
+        (await auth.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { documentType = "permit" }))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var read = CreateSystemDb();
+        var rows = await read.AuditLogs
+            .Where(a => a.OrganizationId == auth.OrgId && a.EntityType == nameof(Document) && a.EntityId == docId)
+            .Select(a => new { a.BeforeJson, a.AfterJson })
+            .ToListAsync();
+
+        rows.Should().NotBeEmpty("the PATCH must audit the document update");
+        var combined = string.Concat(rows.Select(r => (r.BeforeJson ?? "") + (r.AfterJson ?? "")));
+        // The fix: the raw payload (and its OCR text) is absent from every Before/After.
+        combined.Should().NotContain(ocrSentinel, "the raw OCR/LLM payload must never land in the audit log");
+        combined.Should().NotContain("ExtractionRawJson", "the raw-payload column is omitted from the audit snapshot");
+        combined.Should().NotContain("ExtractionFields", "the JsonDocument extraction payload stays skipped too");
+        // The control: the meaningful, small columns DO survive (the skip didn't gut the audit diff).
+        rows.Should().Contain(
+            r => r.AfterJson != null && r.AfterJson.Contains("OriginalFileName") && r.AfterJson.Contains("ComplianceStatus"),
+            "the meaningful small columns must still be captured in the audit After snapshot");
+    }
+
     [Fact]
     public async Task An_unrecognized_document_type_is_rejected()
     {

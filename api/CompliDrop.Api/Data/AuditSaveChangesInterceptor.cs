@@ -160,12 +160,27 @@ public class AuditSaveChangesInterceptor(Func<ICurrentUser?> currentUserAccessor
         nameof(Entities.User.PasswordHash),
     };
 
+    // Large derived-payload columns OMITTED from the audit snapshot entirely (not redacted to "***" —
+    // they aren't secrets, just bulky derived blobs that don't belong in a Before/After diff). The
+    // type-based skip below already drops the JsonDocument `Document.ExtractionFields`; this catches its
+    // string sibling `Document.ExtractionRawJson` — the raw OCR + LLM payload (OCR text up to ~20 KB)
+    // that the type check misses because it is stored as a string, not a JsonDocument. Without it, every
+    // user-context Document modification (PATCH / fields edit / verify / re-extract) serialized that
+    // payload into BOTH Before and After of a (durable, user-exportable) AuditLog row — unbounded
+    // growth, and the same large-extraction-payload the JsonDocument skip clearly intends to exclude.
+    // (#246 data-integrity audit.)
+    private static readonly HashSet<string> SkippedLargePayloadProperties = new(StringComparer.Ordinal)
+    {
+        nameof(Entities.Document.ExtractionRawJson),
+    };
+
     private static string SerializeSnapshot(EntityEntry entry, bool current)
     {
         var dict = new Dictionary<string, object?>();
         foreach (var prop in entry.Properties)
         {
             if (prop.Metadata.IsShadowProperty()) continue;
+            if (SkippedLargePayloadProperties.Contains(prop.Metadata.Name)) continue;
             if (RedactedProperties.Contains(prop.Metadata.Name))
             {
                 dict[prop.Metadata.Name] = "***";
