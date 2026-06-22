@@ -113,6 +113,7 @@ describe("form labels wired via htmlFor + id (#76)", () => {
           portalLinks: [],
           createdAt: "2026-01-01T00:00:00Z",
           updatedAt: "2026-05-26T00:00:00Z",
+          coverage: { status: "NoRequirements", missingTypes: [] },
         }),
       ),
       http.get(url("/api/compliance/templates"), () => jsonOk([])),
@@ -124,7 +125,7 @@ describe("form labels wired via htmlFor + id (#76)", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { name: /acme/i }),
+        screen.getByRole("heading", { level: 1, name: /acme/i }),
       ).toBeInTheDocument(),
     );
 

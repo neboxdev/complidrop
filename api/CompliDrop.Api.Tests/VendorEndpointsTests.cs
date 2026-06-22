@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
@@ -110,6 +111,98 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         });
         resp.EnsureSuccessStatusCode();
         return (await Data(resp)).GetProperty("id").GetGuid();
+    }
+
+    private static async Task<HttpResponseMessage> AddRuleAsync(
+        HttpClient client, Guid templateId, string documentType, string fieldName, string op, string? expectedValue = null) =>
+        await client.PostAsJsonAsync($"/api/compliance/templates/{templateId}/rules", new
+        {
+            documentType, fieldName, @operator = op, expectedValue, errorMessage = "required", sortOrder = 1,
+        });
+
+    private async Task SeedVendorDocAsync(Guid orgId, Guid vendorId, string documentType, ComplianceStatus status)
+    {
+        await using var db = CreateSystemDb();
+        var now = DateTime.UtcNow;
+        db.Documents.Add(new Document
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            VendorId = vendorId,
+            OriginalFileName = "doc.pdf",
+            BlobStorageUrl = "memory://x",
+            BlobStoragePath = $"path/{Guid.NewGuid():N}",
+            FileSizeBytes = 1,
+            ContentType = "application/pdf",
+            DocumentType = documentType,
+            ComplianceStatus = status,
+            ExtractionStatus = ExtractionStatus.Completed,
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private static JsonElement CoverageFor(JsonElement[] list, Guid vendorId) =>
+        list.First(v => v.GetProperty("id").GetGuid() == vendorId).GetProperty("coverage");
+
+    [Fact]
+    public async Task ListVendors_rolls_up_per_vendor_coverage_in_one_query()
+    {
+        // #319 FP-074: the list must answer "who is NOT ok?" — Covered / Action needed /
+        // Missing: <types> / no requirements — computed server-side.
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+
+        var missingV = await CreateVendorAsync(auth.Client, "Missing LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, missingV, template)).EnsureSuccessStatusCode();
+
+        var coveredV = await CreateVendorAsync(auth.Client, "Covered LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, coveredV, template)).EnsureSuccessStatusCode();
+        await SeedVendorDocAsync(auth.OrgId, coveredV, "coi", ComplianceStatus.Compliant);
+
+        var actionV = await CreateVendorAsync(auth.Client, "Action LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, actionV, template)).EnsureSuccessStatusCode();
+        await SeedVendorDocAsync(auth.OrgId, actionV, "coi", ComplianceStatus.NonCompliant);
+
+        // An ExpiringSoon doc is VALID coverage (renew-soon), not a hard fail — it must read Covered,
+        // matching every other surface (#319 FP-074 review): a valid-but-expiring vendor is not red.
+        var expiringV = await CreateVendorAsync(auth.Client, "Expiring LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, expiringV, template)).EnsureSuccessStatusCode();
+        await SeedVendorDocAsync(auth.OrgId, expiringV, "coi", ComplianceStatus.ExpiringSoon);
+
+        var noReqV = await CreateVendorAsync(auth.Client, "NoReq LLC", null);
+
+        var list = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+
+        CoverageFor(list, missingV).GetProperty("status").GetString().Should().Be("Missing");
+        CoverageFor(list, missingV).GetProperty("missingTypes").EnumerateArray()
+            .Select(e => e.GetString()).Should().Contain("insurance");
+        CoverageFor(list, coveredV).GetProperty("status").GetString().Should().Be("Covered");
+        CoverageFor(list, actionV).GetProperty("status").GetString().Should().Be("ActionNeeded");
+        CoverageFor(list, expiringV).GetProperty("status").GetString().Should().Be("Covered");
+        CoverageFor(list, noReqV).GetProperty("status").GetString().Should().Be("NoRequirements");
+    }
+
+    [Fact]
+    public async Task Adding_a_duplicate_requirement_is_rejected_409()
+    {
+        // #319 FP-081: the same (documentType, fieldName, operator) added twice produces confusing
+        // double sentences + double failures. The backend dedupes (the frontend also grays it out).
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "min_value", "1000000"))
+            .EnsureSuccessStatusCode();
+
+        var dup = await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "min_value", "2000000");
+        dup.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        (await ErrorCode(dup)).Should().Be("complianceRule.duplicate");
+
+        // A DIFFERENT operator on the same field is a distinct requirement — still allowed.
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required"))
+            .EnsureSuccessStatusCode();
     }
 
     private static Task<HttpResponseMessage> UpdateVendorTemplateAsync(HttpClient client, Guid vendorId, Guid? templateId) =>

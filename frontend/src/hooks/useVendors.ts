@@ -3,6 +3,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
+/** Per-vendor coverage rollup (#319 FP-074) — computed server-side in ListVendors. */
+export type VendorCoverage = {
+  /** "NoRequirements" | "Missing" | "ActionNeeded" | "Covered". */
+  status: "NoRequirements" | "Missing" | "ActionNeeded" | "Covered";
+  /** Short type nouns ("insurance", "license") for the "Missing: …" label; only set when Missing. */
+  missingTypes: string[];
+};
+
 export type VendorSummary = {
   id: string;
   name: string;
@@ -15,6 +23,7 @@ export type VendorSummary = {
   activePortalLinks: number;
   /** True for the demo's sample vendor (#238) so the vendors list can badge it "Sample". */
   isSample: boolean;
+  coverage: VendorCoverage;
 };
 
 export type PortalLink = {
@@ -39,6 +48,7 @@ export type VendorDetail = {
   portalLinks: PortalLink[];
   createdAt: string;
   updatedAt: string;
+  coverage: VendorCoverage;
 };
 
 export type VendorUpsert = {

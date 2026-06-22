@@ -1,16 +1,18 @@
 "use client";
 
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
-import { api, friendly } from "@/lib/api";
+import { AlertTriangle, Check, Pencil, Plus, RotateCw, Trash2, X } from "lucide-react";
+import { api, friendly, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import {
   REQUIREMENT_GROUPS,
   REQUIREMENT_TYPES,
   MONEY_PRESETS,
   formatMoney,
   parseMoneyInput,
+  isSuspiciouslyLowMoney,
   requirementSentence,
   findRequirementType,
   type RequirementType,
@@ -23,6 +25,19 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+
+// Lower-case noun per document type for the per-type compliance summary (#319 FP-083):
+// "Each certificate of insurance must prove…". The engine scopes each rule to its type.
+function docTypeNoun(type: string): string {
+  switch (type.toLowerCase()) {
+    case "coi": return "certificate of insurance";
+    case "license": return "license";
+    case "permit": return "permit";
+    case "certification": return "certification";
+    case "contract": return "contract";
+    default: return "document";
+  }
+}
 
 type TemplateSummary = {
   id: string;
@@ -64,6 +79,17 @@ type RulePayload = {
 export default function RulesPage() {
   const qc = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // On phones the editor renders ~2 screens below the rail, so tapping a checklist
+  // looked like nothing happened (#319 FP-080). Scroll the editor into view on
+  // selection below md, where the two columns stack. Desktop (md+) is side-by-side,
+  // so it skips the scroll — guarded on the same breakpoint the grid uses.
+  const editorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!selectedId || !editorRef.current) return;
+    if (typeof window !== "undefined" && window.matchMedia?.("(max-width: 767px)").matches) {
+      editorRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [selectedId]);
 
   const templates = useQuery<TemplateSummary[]>({
     queryKey: ["templates"],
@@ -184,52 +210,105 @@ export default function RulesPage() {
             pending={createChecklist.isPending}
           />
 
-          <div className="space-y-1.5">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-              Your checklists
-            </h2>
-            {yours.length === 0 ? (
-              <p className="text-sm text-slate-500">
-                {suggestedInUse
-                  ? "You’re using a suggested checklist (below). Create your own above, or open it and click “Use this” for an editable copy."
-                  : "None yet — create one above, or start from a suggested checklist below."}
-              </p>
-            ) : (
-              yours.map((t) => (
-                <ChecklistButton
-                  key={t.id}
-                  template={t}
-                  selected={selectedId === t.id}
-                  onSelect={() => setSelectedId(t.id)}
-                />
-              ))
-            )}
-          </div>
-
-          {suggested.length > 0 && (
-            <div className="space-y-1.5">
-              <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Suggested checklists
-              </h2>
-              {suggested.map((t) => (
-                <SuggestedChecklist
-                  key={t.id}
-                  template={t}
-                  selected={selectedId === t.id}
-                  onPreview={() => setSelectedId(t.id)}
-                  onUse={() => cloneChecklist.mutate(t)}
-                  using={cloneChecklist.isPending}
-                />
+          {/* FP-082: a backend outage must not render as "None yet" + zero suggested
+              checklists. Skeletons while loading, an error card + Retry on failure. */}
+          {templates.isLoading ? (
+            <div className="space-y-2" role="status" aria-label="Loading checklists">
+              {[0, 1, 2].map((i) => (
+                <Skeleton key={i} className="h-12 w-full rounded-md" />
               ))}
             </div>
+          ) : templates.isError ? (
+            <div
+              className="rounded-md border border-rose-100 bg-rose-50/40 px-3 py-4 text-center"
+              role="alert"
+            >
+              <AlertTriangle className="mx-auto h-6 w-6 text-rose-500" />
+              <p className="mt-2 text-sm font-medium text-slate-800">Couldn&apos;t load checklists.</p>
+              <p className="text-xs text-slate-500">
+                {templates.error?.message?.trim() || GENERIC_FALLBACK_MESSAGE}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => templates.refetch()}
+                disabled={templates.isFetching}
+              >
+                <RotateCw className={`w-3.5 h-3.5 mr-1 ${templates.isFetching ? "animate-spin" : ""}`} />
+                Retry
+              </Button>
+            </div>
+          ) : (
+            <>
+              <div className="space-y-1.5">
+                <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Your checklists
+                </h2>
+                {yours.length === 0 ? (
+                  <p className="text-sm text-slate-500">
+                    {suggestedInUse
+                      ? "You’re using a suggested checklist (below). Create your own above, or open it and click “Use this” for an editable copy."
+                      : "None yet — create one above, or start from a suggested checklist below."}
+                  </p>
+                ) : (
+                  yours.map((t) => (
+                    <ChecklistButton
+                      key={t.id}
+                      template={t}
+                      selected={selectedId === t.id}
+                      onSelect={() => setSelectedId(t.id)}
+                    />
+                  ))
+                )}
+              </div>
+
+              {suggested.length > 0 && (
+                <div className="space-y-1.5">
+                  <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Suggested checklists
+                  </h2>
+                  {suggested.map((t) => (
+                    <SuggestedChecklist
+                      key={t.id}
+                      template={t}
+                      selected={selectedId === t.id}
+                      onPreview={() => setSelectedId(t.id)}
+                      onUse={() => cloneChecklist.mutate(t)}
+                      using={cloneChecklist.isPending}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </aside>
 
-        <section>
+        <section ref={editorRef}>
           {!selectedId ? (
             <Card>
               <CardContent className="p-8 text-sm text-slate-500">
                 Pick a checklist on the left, or create one, to set what a vendor must prove.
+              </CardContent>
+            </Card>
+          ) : detail.isError ? (
+            <Card>
+              <CardContent className="p-8 text-center" role="alert">
+                <AlertTriangle className="mx-auto h-7 w-7 text-rose-500" />
+                <p className="mt-2 text-sm font-medium text-slate-800">Couldn&apos;t load this checklist.</p>
+                <p className="text-xs text-slate-500">
+                  {detail.error?.message?.trim() || GENERIC_FALLBACK_MESSAGE}
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  onClick={() => detail.refetch()}
+                  disabled={detail.isFetching}
+                >
+                  <RotateCw className={`w-3.5 h-3.5 mr-1 ${detail.isFetching ? "animate-spin" : ""}`} />
+                  Retry
+                </Button>
               </CardContent>
             </Card>
           ) : detail.isLoading || !detail.data ? (
@@ -244,6 +323,7 @@ export default function RulesPage() {
           ) : (
             <ChecklistEditor
               detail={detail.data}
+              vendorCount={all.find((t) => t.id === detail.data!.id)?.vendorCount ?? 0}
               onAddRequirement={(rule) =>
                 upsertRule.mutate({
                   templateId: detail.data!.id,
@@ -397,6 +477,7 @@ function NewChecklistForm({
 
 function ChecklistEditor({
   detail,
+  vendorCount,
   onAddRequirement,
   onEditRequirement,
   onRemoveRequirement,
@@ -405,6 +486,7 @@ function ChecklistEditor({
   using,
 }: {
   detail: TemplateDetail;
+  vendorCount: number;
   onAddRequirement: (rule: RulePayload) => void;
   onEditRequirement: (ruleId: string, rule: RulePayload, sortOrder: number) => void;
   onRemoveRequirement: (ruleId: string) => void;
@@ -433,7 +515,12 @@ function ChecklistEditor({
         ) : (
           <ConfirmDialog
             title={`Delete ${detail.name}?`}
-            description="This removes the checklist and all of its requirements. Vendors assigned to it will no longer be checked against it."
+            description={
+              "This removes the checklist and all of its requirements." +
+              (vendorCount > 0
+                ? ` ${vendorCount} vendor${vendorCount === 1 ? "" : "s"} assigned to it will no longer be checked against it.`
+                : " No vendors are assigned to it.")
+            }
             confirmLabel="Delete"
             destructive
             onConfirm={onDeleteChecklist}
@@ -467,25 +554,68 @@ function ChecklistEditor({
             </ul>
           )}
 
-          {!readOnly && <AddRequirement onAdd={onAddRequirement} />}
+          {!readOnly && <AddRequirement onAdd={onAddRequirement} existingRules={rules} />}
         </CardContent>
       </Card>
 
       {rules.length > 0 && <ComplianceSummary name={detail.name} rules={rules} />}
+
+      {/* Editor dead-ended after authoring — the tip promises assignment but offered no
+          path to it (#319 FP-086). Surface the next step for an editable checklist. */}
+      {!readOnly && rules.length > 0 && (
+        <p className="text-sm text-slate-600">
+          {vendorCount > 0 ? (
+            <>
+              Used by {vendorCount} vendor{vendorCount === 1 ? "" : "s"}.{" "}
+              <Link href="/vendors" className="font-medium text-sky-700 hover:underline">
+                Assign it to more →
+              </Link>
+            </>
+          ) : (
+            <>
+              Ready?{" "}
+              <Link href="/vendors" className="font-medium text-sky-700 hover:underline">
+                Assign this checklist to a vendor →
+              </Link>
+            </>
+          )}
+        </p>
+      )}
     </div>
   );
 }
 
+function joinClauses(clauses: string[]): string {
+  return clauses.length === 1
+    ? clauses[0]
+    : `${clauses.slice(0, -1).join("; ")}; and ${clauses[clauses.length - 1]}`;
+}
+
 function ComplianceSummary({ name, rules }: { name: string; rules: TemplateRule[] }) {
-  const clauses = rules.map((r) => requirementSentence(r));
-  const list =
-    clauses.length === 1
-      ? clauses[0]
-      : `${clauses.slice(0, -1).join("; ")}; and ${clauses[clauses.length - 1]}`;
+  // Group by document type (#319 FP-083): the engine scopes each rule to its type, so a
+  // certificate of insurance is NEVER checked for a license requirement. The old "every
+  // document proves: [all rules]" taught a false model (a single COI can't satisfy a
+  // license rule). One truthful sentence per type, in first-appearance order.
+  const order: string[] = [];
+  const byType = new Map<string, string[]>();
+  for (const r of rules) {
+    if (!byType.has(r.documentType)) {
+      byType.set(r.documentType, []);
+      order.push(r.documentType);
+    }
+    byType.get(r.documentType)!.push(requirementSentence(r));
+  }
   return (
-    <p className="rounded-lg border border-emerald-100 bg-emerald-50/60 px-4 py-3 text-sm text-emerald-900">
-      <span className="font-medium">A {name} is compliant when</span> every document proves: {list}.
-    </p>
+    <div className="space-y-1.5 rounded-lg border border-emerald-100 bg-emerald-50/60 px-4 py-3 text-sm text-emerald-900">
+      <p className="font-medium">For a {name} to be covered:</p>
+      <ul className="space-y-1">
+        {order.map((type) => (
+          <li key={type}>
+            Each {docTypeNoun(type)} must prove: {joinClauses(byType.get(type)!)}.
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -571,9 +701,24 @@ function buildPayload(type: RequirementType, rawValue: string): RulePayload {
   };
 }
 
-function AddRequirement({ onAdd }: { onAdd: (rule: RulePayload) => void }) {
+function AddRequirement({
+  onAdd,
+  existingRules,
+}: {
+  onAdd: (rule: RulePayload) => void;
+  existingRules: TemplateRule[];
+}) {
   const [open, setOpen] = useState(false);
   const [picked, setPicked] = useState<RequirementType | null>(null);
+
+  // A requirement type is already on the checklist when a rule shares its
+  // (documentType, fieldName, operator) — the same key the backend dedupes on
+  // (#319 FP-081). Gray those out with an "edit it instead" hint rather than
+  // letting the user add a confusing duplicate.
+  const isAdded = (t: RequirementType) =>
+    existingRules.some(
+      (r) => r.documentType === t.documentType && r.fieldName === t.fieldName && r.operator === t.operator,
+    );
 
   if (!open) {
     return (
@@ -613,15 +758,26 @@ function AddRequirement({ onAdd }: { onAdd: (rule: RulePayload) => void }) {
         <div key={group}>
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{group}</p>
           <div className="mt-1 space-y-1">
-            {REQUIREMENT_TYPES.filter((t) => t.group === group).map((t) => (
-              <button
-                key={t.key}
-                onClick={() => setPicked(t)}
-                className="block w-full rounded px-2 py-1.5 text-left text-sm text-slate-700 hover:bg-sky-50 pointer-coarse:min-h-11"
-              >
-                {t.menuLabel}
-              </button>
-            ))}
+            {REQUIREMENT_TYPES.filter((t) => t.group === group).map((t) =>
+              isAdded(t) ? (
+                <div
+                  key={t.key}
+                  aria-disabled="true"
+                  className="flex items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm text-slate-400"
+                >
+                  <span>{t.menuLabel}</span>
+                  <span className="shrink-0 text-xs">Already added — edit it instead</span>
+                </div>
+              ) : (
+                <button
+                  key={t.key}
+                  onClick={() => setPicked(t)}
+                  className="block w-full rounded px-2 py-1.5 text-left text-sm text-slate-700 hover:bg-sky-50 pointer-coarse:min-h-11"
+                >
+                  {t.menuLabel}
+                </button>
+              ),
+            )}
           </div>
         </div>
       ))}
@@ -700,6 +856,17 @@ function RequirementValueForm({
             onBlur={() => moneyAmount != null && setValue(formatMoney(moneyAmount))}
             placeholder="$1,000,000"
           />
+          {/* FP-084: a tiny amount is almost always a typo — "$2" passes every COI. Nudge
+              (non-blocking) toward the millions, and hint the k/m shorthand. */}
+          {isSuspiciouslyLowMoney(moneyAmount) && (
+            <p role="status" className="flex items-start gap-1.5 text-xs text-amber-700">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span>
+                That&apos;s only {formatMoney(moneyAmount!)} — coverage limits are usually in the
+                millions. You can type shorthand like <strong>2M</strong> or <strong>500k</strong>.
+              </span>
+            </p>
+          )}
         </div>
       )}
 

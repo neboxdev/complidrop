@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import VendorDetailPage from "./page";
 import type { VendorDetail } from "@/hooks/useVendors";
 import {
@@ -50,6 +50,7 @@ const VENDOR_DETAIL = {
   ],
   createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-05-26T00:00:00Z",
+  coverage: { status: "NoRequirements" as const, missingTypes: [] as string[] },
 };
 
 describe("VendorDetailPage — requirement contents at decision time (#239)", () => {
@@ -140,7 +141,7 @@ describe("VendorDetailPage — smoke (#36)", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { name: /acme subcontractor/i }),
+        screen.getByRole("heading", { level: 1, name: /acme subcontractor/i }),
       ).toBeInTheDocument(),
     );
     // Portal link URL surfaces somewhere — readable input field or
@@ -172,7 +173,7 @@ describe("VendorDetailPage — smoke (#36)", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { name: /acme subcontractor/i }),
+        screen.getByRole("heading", { level: 1, name: /acme subcontractor/i }),
       ).toBeInTheDocument(),
     );
 
@@ -295,7 +296,7 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
       [{ id: "t1", name: "Caterer", isSystemTemplate: true }],
     );
     // Wait for the page to settle on its loaded state.
-    await screen.findByRole("heading", { name: /acme subcontractor/i });
+    await screen.findByRole("heading", { level: 1, name: /acme subcontractor/i });
     expect(
       screen.queryByText(/won't be marked covered or not until you choose one/i),
     ).toBeNull();
@@ -345,7 +346,7 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
     // list (the name is the row's link) — the client blocks the save with a
     // reason; the server enforces the same 400.
     mountWith(VENDOR_DETAIL);
-    await screen.findByRole("heading", { name: /acme subcontractor/i });
+    await screen.findByRole("heading", { level: 1, name: /acme subcontractor/i });
 
     const name = screen.getByLabelText("Name");
     const save = screen.getByRole("button", { name: /save changes/i });
@@ -501,5 +502,33 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
     expect(toastArg).not.toMatch(/typeerror/i);
     expect(toastArg).toBe("Something went wrong. Try again.");
     expect(toastSuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe("VendorDetailPage — remove vendor (#319 FP-073)", () => {
+  it("removes the vendor behind a confirm, then routes back to /vendors", async () => {
+    let deleteCalls = 0;
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+      http.delete(url("/api/vendors/:id"), () => {
+        deleteCalls += 1;
+        return jsonOk({ id: "v_acme_01" });
+      }),
+    );
+    const pushSpy = vi.fn();
+    renderWithProviders(<VendorDetailPage />, {
+      auth: authedMe,
+      params: { id: "v_acme_01" },
+      router: { push: pushSpy },
+    });
+
+    // Open the confirm from the header, then confirm inside the dialog.
+    fireEvent.click(await screen.findByRole("button", { name: /remove vendor/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /remove vendor/i }));
+
+    await waitFor(() => expect(deleteCalls).toBe(1));
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledWith("/vendors"));
   });
 });
