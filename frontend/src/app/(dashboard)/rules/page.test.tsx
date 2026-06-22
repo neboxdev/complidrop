@@ -292,8 +292,9 @@ describe("RulesPage — plain-English authoring (#192)", () => {
     expect(
       (await screen.findAllByText(/carries at least \$1,000,000 in general liability insurance/i)).length,
     ).toBeGreaterThanOrEqual(2);
-    // Live summary reads back the checklist.
-    expect(screen.getByText(/a caterer is compliant when/i)).toBeInTheDocument();
+    // Live summary reads back the checklist, grouped per document type (#319 FP-083).
+    expect(screen.getByText(/for a caterer to be covered/i)).toBeInTheDocument();
+    expect(screen.getByText(/each certificate of insurance must prove/i)).toBeInTheDocument();
     // No raw tokens leak.
     expect(screen.queryByText("general_liability_limit")).toBeNull();
     expect(screen.queryByText("min_value")).toBeNull();

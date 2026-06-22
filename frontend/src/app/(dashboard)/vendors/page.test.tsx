@@ -30,6 +30,7 @@ const VENDORS = [
     complianceTemplateName: "Default COI",
     documentCount: 3,
     activePortalLinks: 1,
+    coverage: { status: "Covered", missingTypes: [] },
   },
 ];
 
@@ -49,6 +50,7 @@ describe("VendorsPage — sample badge (#238)", () => {
             documentCount: 1,
             activePortalLinks: 0,
             isSample: true,
+            coverage: { status: "Covered", missingTypes: [] },
           },
           {
             id: "v_real",
@@ -61,6 +63,7 @@ describe("VendorsPage — sample badge (#238)", () => {
             documentCount: 0,
             activePortalLinks: 0,
             isSample: false,
+            coverage: { status: "NoRequirements", missingTypes: [] },
           },
         ]),
       ),
@@ -352,6 +355,7 @@ function makeVendorRow(i: number) {
     complianceTemplateName: null,
     documentCount: 0,
     activePortalLinks: 0,
+    coverage: { status: "NoRequirements", missingTypes: [] },
   };
 }
 

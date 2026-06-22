@@ -169,6 +169,19 @@ public static class ComplianceEndpoints
             .FirstOrDefaultAsync(t => t.Id == templateId && !t.IsSystemTemplate, ct);
         if (template is null) return NotFound();
 
+        // Dedupe on (documentType, fieldName, operator) (#319 FP-081): the same requirement added
+        // twice produces confusing double sentences and double failures. Excludes the rule being
+        // edited (req.Id) so re-saving an existing rule is fine. The frontend also grays out
+        // already-added types, but this is the authoritative guard.
+        var isDuplicate = template.Rules.Any(r =>
+            r.Id != req.Id &&
+            string.Equals(r.DocumentType, req.DocumentType, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(r.FieldName, req.FieldName, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(r.Operator, req.Operator, StringComparison.OrdinalIgnoreCase));
+        if (isDuplicate)
+            return Error(409, "complianceRule.duplicate",
+                "That requirement is already on this checklist — edit the existing one instead.");
+
         ComplianceRule rule;
         if (req.Id is Guid ruleId)
         {

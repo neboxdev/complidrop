@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useVendors, useCreateVendor } from "@/hooks/useVendors";
+import { VendorCoverageBadge } from "@/components/VendorCoverageBadge";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { isAuthError } from "@/lib/query-client";
@@ -35,6 +36,7 @@ export default function VendorsPage() {
   // readers announce the field context (#76).
   const nameId = useId();
   const emailId = useId();
+  const emailErrId = useId();
 
   // Client-side search + pagination over the loaded vendor list (#187).
   // The /api/vendors endpoint returns the full array — kept that way because
@@ -61,6 +63,14 @@ export default function VendorsPage() {
   const safePage = Math.min(page, totalPages);
   const pageItems = filtered.slice((safePage - 1) * VENDOR_PAGE_SIZE, safePage * VENDOR_PAGE_SIZE);
 
+  // Add-vendor form validation (FP-076 / FP-073): block an obviously-malformed email,
+  // and warn (non-blocking) when the name duplicates an existing vendor.
+  const trimmedName = name.trim();
+  const trimmedEmail = email.trim();
+  const emailInvalid = trimmedEmail !== "" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
+  const duplicateName =
+    trimmedName !== "" && all.some((v) => v.name.trim().toLowerCase() === trimmedName.toLowerCase());
+
   return (
     <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
       <header>
@@ -74,21 +84,16 @@ export default function VendorsPage() {
       </PageTip>
 
       <Card>
-        <CardContent className="p-5 flex flex-col sm:flex-row gap-3 sm:items-end">
-          <div className="flex-1">
-            <label htmlFor={nameId} className="text-xs text-slate-500">Name</label>
-            <Input id={nameId} value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme Catering" />
-          </div>
-          <div className="flex-1">
-            <label htmlFor={emailId} className="text-xs text-slate-500">Contact email</label>
-            <Input id={emailId} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="ops@acmecatering.com" />
-          </div>
-          <Button
-            className="w-full sm:w-auto"
-            disabled={!name.trim() || createVendor.isPending}
-            onClick={async () => {
+        <CardContent className="p-5">
+          {/* A real <form> so Enter submits (FP-076); type="email" + a light format check
+              so a typo'd address isn't accepted silently, and a duplicate-name hint (FP-073). */}
+          <form
+            className="flex flex-col gap-3 sm:flex-row sm:items-end"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (!trimmedName || emailInvalid) return;
               try {
-                await createVendor.mutateAsync({ name, contactEmail: email || null });
+                await createVendor.mutateAsync({ name: trimmedName, contactEmail: trimmedEmail || null });
                 toast.success("Vendor added");
                 setName("");
                 setEmail("");
@@ -97,8 +102,34 @@ export default function VendorsPage() {
               }
             }}
           >
-            <Plus className="w-4 h-4 mr-1" /> Add vendor
-          </Button>
+            <div className="flex-1">
+              <label htmlFor={nameId} className="text-xs text-slate-500">Name</label>
+              <Input id={nameId} value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme Catering" autoComplete="organization" />
+              {duplicateName && (
+                <p className="mt-1 text-xs text-amber-700">You already have a vendor named “{trimmedName}”.</p>
+              )}
+            </div>
+            <div className="flex-1">
+              <label htmlFor={emailId} className="text-xs text-slate-500">Contact email</label>
+              <Input
+                id={emailId}
+                type="email"
+                inputMode="email"
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="ops@acmecatering.com"
+                aria-invalid={emailInvalid || undefined}
+                aria-describedby={emailInvalid ? emailErrId : undefined}
+              />
+              {emailInvalid && (
+                <p id={emailErrId} className="mt-1 text-xs text-red-600">Enter a valid email address.</p>
+              )}
+            </div>
+            <Button type="submit" className="w-full sm:w-auto" disabled={!trimmedName || emailInvalid || createVendor.isPending}>
+              <Plus className="w-4 h-4 mr-1" /> Add vendor
+            </Button>
+          </form>
         </CardContent>
       </Card>
 
@@ -125,6 +156,7 @@ export default function VendorsPage() {
               <tr>
                 <th className="px-4 py-3 text-left">Vendor</th>
                 <th className="px-4 py-3 text-left">Requirements</th>
+                <th className="px-4 py-3 text-left">Status</th>
                 <th className="px-4 py-3 text-left">Docs</th>
                 <th className="px-4 py-3 text-left">Active links</th>
                 <th />
@@ -142,6 +174,7 @@ export default function VendorsPage() {
                   >
                     <td className="px-4 py-4"><Skeleton className="h-4 w-40" /></td>
                     <td className="px-4 py-4"><Skeleton className="h-4 w-28" /></td>
+                    <td className="px-4 py-4"><Skeleton className="h-4 w-20" /></td>
                     <td className="px-4 py-4"><Skeleton className="h-4 w-8" /></td>
                     <td className="px-4 py-4"><Skeleton className="h-4 w-8" /></td>
                     <td className="px-4 py-4"><Skeleton className="h-4 w-16" /></td>
@@ -164,7 +197,7 @@ export default function VendorsPage() {
                 // tech the moment isError flips true, matching the
                 // convention in frontend/src/test/example.test.tsx.
                 <tr>
-                  <td colSpan={5} className="py-12 text-center" role="alert">
+                  <td colSpan={6} className="py-12 text-center" role="alert">
                     <AlertTriangle className="w-8 h-8 mx-auto text-rose-500" />
                     <p className="mt-2 text-sm font-medium text-slate-800">
                       Couldn&apos;t load vendors.
@@ -190,9 +223,9 @@ export default function VendorsPage() {
                   </td>
                 </tr>
               ) : all.length === 0 ? (
-                <tr><td colSpan={5} className="py-10 text-center text-slate-500">No vendors yet — add your first one above to start tracking their COIs and licenses.</td></tr>
+                <tr><td colSpan={6} className="py-10 text-center text-slate-500">No vendors yet — add your first one above to start tracking their COIs and licenses.</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={5} className="py-10 text-center text-slate-500">No vendors match your search.</td></tr>
+                <tr><td colSpan={6} className="py-10 text-center text-slate-500">No vendors match your search.</td></tr>
               ) : pageItems.map((v) => (
                 <tr key={v.id} className="border-t border-slate-100">
                   <td className="px-4 py-3">
@@ -213,7 +246,25 @@ export default function VendorsPage() {
                       </Link>
                     )}
                   </td>
-                  <td data-label="Docs" className="px-4 py-3 text-slate-600">{v.documentCount}</td>
+                  <td data-label="Status" className="px-4 py-3">
+                    {/* FP-074: who is NOT ok? Covered / Action needed / Missing: <types>. For a
+                        vendor with no checklist the Requirements column already links to set one. */}
+                    {v.coverage.status === "NoRequirements" ? (
+                      <span className="text-xs text-slate-400">—</span>
+                    ) : (
+                      <VendorCoverageBadge coverage={v.coverage} />
+                    )}
+                  </td>
+                  <td data-label="Docs" className="px-4 py-3 text-slate-600">
+                    {/* FP-071: the count links to this vendor's filtered documents. */}
+                    {v.documentCount > 0 ? (
+                      <Link href={`/documents?vendor=${v.id}`} className="text-sky-700 hover:underline">
+                        {v.documentCount}
+                      </Link>
+                    ) : (
+                      v.documentCount
+                    )}
+                  </td>
                   <td data-label="Active links" className="px-4 py-3">
                     {v.activePortalLinks > 0 ? (
                       <Badge className="bg-emerald-100 text-emerald-700 border-transparent">

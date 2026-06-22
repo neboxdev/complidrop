@@ -6,9 +6,11 @@ import { describe, it, expect } from "vitest";
 import {
   formatMoney,
   parseMoneyInput,
+  isSuspiciouslyLowMoney,
   requirementSentence,
   findRequirementType,
   REQUIREMENT_TYPES,
+  REQUIREMENT_GROUPS,
 } from "./requirements";
 
 describe("money helpers (#192)", () => {
@@ -31,6 +33,46 @@ describe("money helpers (#192)", () => {
     expect(parseMoneyInput("$1,000,000.50")).toBe(1_000_000);
     expect(parseMoneyInput("12.99")).toBe(12);
     expect(parseMoneyInput(".50")).toBeNull(); // no whole-dollar part
+  });
+
+  it("honors k/m suffixes so '2M' isn't truncated to $2 (#319 FP-084)", () => {
+    expect(parseMoneyInput("2M")).toBe(2_000_000);
+    expect(parseMoneyInput("2m")).toBe(2_000_000);
+    expect(parseMoneyInput("1.5M")).toBe(1_500_000);
+    expect(parseMoneyInput("500k")).toBe(500_000);
+    expect(parseMoneyInput("$2 m")).toBe(2_000_000);
+    // No suffix still parses as whole dollars; a plain "$2" stays $2 (the form warns).
+    expect(parseMoneyInput("$2")).toBe(2);
+  });
+
+  it("flags a suspiciously-low coverage amount (#319 FP-084)", () => {
+    expect(isSuspiciouslyLowMoney(2)).toBe(true);
+    expect(isSuspiciouslyLowMoney(9_999)).toBe(true);
+    expect(isSuspiciouslyLowMoney(10_000)).toBe(false);
+    expect(isSuspiciouslyLowMoney(1_000_000)).toBe(false);
+    expect(isSuspiciouslyLowMoney(0)).toBe(false);
+    expect(isSuspiciouslyLowMoney(null)).toBe(false);
+  });
+});
+
+describe("Certifications catalog group (#319 FP-085)", () => {
+  it("exposes a Certifications group and matches the seeded cert rule", () => {
+    expect(REQUIREMENT_GROUPS).toContain("Certifications");
+    expect(REQUIREMENT_TYPES.some((t) => t.group === "Certifications")).toBe(true);
+    // The seeded "Security Service" rule (certification / expiration_date / required) now has a
+    // real catalog home, so it renders a curated sentence + gets an Edit/re-add path.
+    const match = findRequirementType({
+      documentType: "certification",
+      fieldName: "expiration_date",
+      operator: "required",
+    });
+    expect(match?.group).toBe("Certifications");
+    expect(requirementSentence({
+      documentType: "certification",
+      fieldName: "expiration_date",
+      operator: "required",
+      expectedValue: null,
+    })).toMatch(/certification has not expired/i);
   });
 });
 

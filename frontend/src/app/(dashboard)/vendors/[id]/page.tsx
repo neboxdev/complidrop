@@ -1,22 +1,27 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
-import { ArrowLeft, AlertTriangle, Check, Copy, Link as LinkIcon, Mail, XCircle } from "lucide-react";
+import { ArrowLeft, AlertTriangle, Check, Copy, FileText, Link as LinkIcon, Mail, RotateCw, Trash2, XCircle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { VendorCoverageBadge } from "@/components/VendorCoverageBadge";
 import { requirementSentence } from "@/lib/requirements";
+import { complianceStatusLabel } from "@/lib/display-labels";
 import {
   useVendor,
   useGeneratePortalLink,
   useEmailPortalLink,
   useRevokePortalLink,
   useUpdateVendor,
+  useDeleteVendor,
   type VendorDetail,
 } from "@/hooks/useVendors";
+import { useDocuments } from "@/hooks/useDocuments";
 import { useSubscription } from "@/hooks/useSubscription";
 import { useQuery } from "@tanstack/react-query";
 import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
@@ -40,6 +45,29 @@ export default function VendorDetailPage() {
   const params = useParams<{ id: string }>();
   const vendor = useVendor(params.id);
 
+  // FP-072: a load error used to hang on "Loading vendor…" forever. Show a real
+  // error card + Retry, mirroring the vendors-list pattern.
+  if (vendor.isError) {
+    return (
+      <div className="max-w-5xl mx-auto px-6 py-8">
+        <Link href="/vendors" className="inline-flex items-center gap-1 text-sm text-sky-700">
+          <ArrowLeft className="w-4 h-4" /> All vendors
+        </Link>
+        <Card className="mt-6">
+          <CardContent className="p-8 text-center" role="alert">
+            <AlertTriangle className="mx-auto h-8 w-8 text-rose-500" />
+            <p className="mt-2 text-sm font-medium text-slate-800">Couldn&apos;t load this vendor.</p>
+            <p className="text-xs text-slate-500">{vendor.error?.message?.trim() || GENERIC_FALLBACK_MESSAGE}</p>
+            <Button variant="outline" size="sm" className="mt-3" onClick={() => vendor.refetch()} disabled={vendor.isFetching}>
+              <RotateCw className={`w-3.5 h-3.5 mr-1 ${vendor.isFetching ? "animate-spin" : ""}`} />
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   if (vendor.isLoading || !vendor.data) {
     return <div className="p-8 text-sm text-slate-500">Loading vendor…</div>;
   }
@@ -50,15 +78,24 @@ export default function VendorDetailPage() {
 }
 
 function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendorId: string }) {
+  const router = useRouter();
   const update = useUpdateVendor(vendorId);
   const generate = useGeneratePortalLink(vendorId);
   const emailLink = useEmailPortalLink(vendorId);
   const revoke = useRevokePortalLink(vendorId);
+  const del = useDeleteVendor();
+  // FP-071: the vendor's own documents, surfaced on its home page. Recent few; "View all"
+  // deep-links to the filtered documents list.
+  const vendorDocs = useDocuments({ vendorId, pageSize: 5 });
 
   const templates = useQuery<TemplateSummary[]>({
     queryKey: ["templates"],
     queryFn: ({ signal }) => api.get<TemplateSummary[]>("/api/compliance/templates", { signal }),
   });
+  // FP-070: group the picker so a vendor's own checklists are distinct from the system
+  // suggestions (which otherwise listed flat — and looked duplicated when both seed sets exist).
+  const yourTemplates = (templates.data ?? []).filter((t) => !t.isSystemTemplate);
+  const suggestedTemplates = (templates.data ?? []).filter((t) => t.isSystemTemplate);
 
   // Gate the "Email link" button on the SAVED contact email (vendor.contactEmail),
   // not the editable form field — the server emails the persisted address, so an
@@ -121,6 +158,17 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
     }
   }
 
+  // FP-075: the per-row copy lacked a try/catch — a clipboard denial surfaced a raw browser
+  // error. Emit the generic fallback per the error-message policy.
+  async function copyRowUrl(url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success("Copied");
+    } catch {
+      toast.error(GENERIC_FALLBACK_MESSAGE);
+    }
+  }
+
   const [form, setForm] = useState({
     name: vendor.name,
     contactEmail: vendor.contactEmail ?? "",
@@ -153,7 +201,14 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
 
       <Card>
         <CardContent className="p-6 space-y-4">
-          <h1 className="text-xl font-semibold text-sky-900">{vendor.name}</h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-xl font-semibold text-sky-900">{vendor.name}</h1>
+            {/* FP-074: the coverage verdict, front and center. NoRequirements is already
+                explained by the amber notice under the checklist picker below. */}
+            {vendor.coverage.status !== "NoRequirements" && (
+              <VendorCoverageBadge coverage={vendor.coverage} />
+            )}
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <LabeledInput label="Name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
             <LabeledInput label="Contact email" value={form.contactEmail} onChange={(v) => setForm({ ...form, contactEmail: v })} />
@@ -168,9 +223,20 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                 className="mt-1 w-full border border-input rounded-md h-9 px-2 text-sm focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <option value="">— No requirements set —</option>
-                {(templates.data ?? []).map((t) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
+                {yourTemplates.length > 0 && (
+                  <optgroup label="Your checklists">
+                    {yourTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </optgroup>
+                )}
+                {suggestedTemplates.length > 0 && (
+                  <optgroup label="Suggested by CompliDrop">
+                    {suggestedTemplates.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
               <p className="mt-1 text-xs text-slate-500">
                 Pick the checklist for their type — we check every document against it.
@@ -227,35 +293,58 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
               )}
             </div>
           </div>
-          <div className="flex items-center justify-end gap-3">
-            {/* A blank name would render an invisible, unclickable row in the vendors
-                list (the name is the row's link) — block it client-side with a visible
-                reason; the server enforces the same 400 (#264 / FP-074). */}
-            {!form.name.trim() && (
-              <p role="status" className="text-xs text-rose-600">
-                Vendor name is required.
-              </p>
-            )}
-            <Button
-              onClick={async () => {
-                try {
-                  await update.mutateAsync({
-                    name: form.name.trim(),
-                    contactEmail: form.contactEmail || null,
-                    contactPhone: form.contactPhone || null,
-                    category: form.category || null,
-                    complianceTemplateId: form.complianceTemplateId || null,
-                  });
-                  toast.success("Vendor updated");
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Failed to update vendor");
-                }
-              }}
-              disabled={update.isPending || !form.name.trim()}
-              title={form.name.trim() ? undefined : "Vendor name is required."}
-            >
-              Save changes
-            </Button>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            {/* FP-073: a vendor can finally be removed (behind a confirm). Deactivating its links
+                and soft-deleting the vendor is handled server-side (#269); uploaded docs are kept. */}
+            <ConfirmDialog
+              title={`Remove ${vendor.name}?`}
+              description="This removes the vendor and deactivates any upload links you shared with them. Documents they already sent stay in your account. This can’t be undone."
+              confirmLabel="Remove vendor"
+              destructive
+              onConfirm={() =>
+                del.mutate(vendorId, {
+                  onSuccess: () => {
+                    toast.success("Vendor removed");
+                    router.push("/vendors");
+                  },
+                })
+              }
+              trigger={
+                <Button variant="outline" size="sm" className="text-rose-600 hover:bg-rose-50" disabled={del.isPending}>
+                  <Trash2 className="w-4 h-4 mr-1" /> Remove vendor
+                </Button>
+              }
+            />
+            <div className="flex items-center gap-3">
+              {/* A blank name would render an invisible, unclickable row in the vendors
+                  list (the name is the row's link) — block it client-side with a visible
+                  reason; the server enforces the same 400 (#264 / FP-074). */}
+              {!form.name.trim() && (
+                <p role="status" className="text-xs text-rose-600">
+                  Vendor name is required.
+                </p>
+              )}
+              <Button
+                onClick={async () => {
+                  try {
+                    await update.mutateAsync({
+                      name: form.name.trim(),
+                      contactEmail: form.contactEmail || null,
+                      contactPhone: form.contactPhone || null,
+                      category: form.category || null,
+                      complianceTemplateId: form.complianceTemplateId || null,
+                    });
+                    toast.success("Vendor updated");
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "Failed to update vendor");
+                  }
+                }}
+                disabled={update.isPending || !form.name.trim()}
+                title={form.name.trim() ? undefined : "Vendor name is required."}
+              >
+                Save changes
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -307,33 +396,92 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
           ) : (
             <ul className="space-y-2">
               {vendor.portalLinks.map((l) => (
-                <li key={l.id} className="flex items-center gap-3 px-3 py-2 rounded-md border border-slate-100 bg-slate-50/50">
-                  <Input value={l.fullUrl} readOnly className="flex-1 h-8 font-mono text-xs" />
-                  {/* Gated with the top-level actions (#261 review): a lapsed org
-                      hand-copying a row URL would distribute a link the portal
-                      answers 404 for. Revoke stays enabled — killing a link is a
-                      safety action, not a portal feature. */}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    aria-label="Copy upload link"
-                    disabled={portalGated}
-                    onClick={async () => {
-                      await navigator.clipboard.writeText(l.fullUrl);
-                      toast.success("Copied");
-                    }}
-                  >
-                    <Copy className="w-3 h-3" />
-                  </Button>
+                // flex-wrap + the URL on its own full-width line so the row doesn't overflow a
+                // 375px phone (FP-076). The controls wrap below it.
+                <li key={l.id} className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-md border border-slate-100 bg-slate-50/50">
+                  <Input value={l.fullUrl} readOnly className="w-full h-8 font-mono text-xs" />
                   <Badge className={l.isActive ? "bg-emerald-100 text-emerald-700 border-transparent" : "bg-slate-100 text-slate-600 border-transparent"}>
-                    {l.isActive ? "active" : "inactive"}
+                    {l.isActive ? "active" : "revoked"}
                   </Badge>
                   <span className="text-xs text-slate-500">{l.uploadCount}/{l.maxUploads} uploads</span>
-                  {l.isActive && (
-                    <Button size="sm" variant="ghost" aria-label="Revoke link" onClick={() => revoke.mutate(l.id)}>
-                      <XCircle className="w-4 h-4 text-slate-500 hover:text-rose-600" />
-                    </Button>
-                  )}
+                  <div className="ml-auto flex items-center gap-1">
+                    {l.isActive ? (
+                      <>
+                        {/* Gated with the top-level actions (#261 review): a lapsed org hand-copying a
+                            row URL would distribute a link the portal answers 404 for. Copy is hidden on
+                            REVOKED rows entirely (FP-075) — copying a dead link is never useful. */}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          aria-label="Copy upload link"
+                          disabled={portalGated}
+                          onClick={() => copyRowUrl(l.fullUrl)}
+                        >
+                          <Copy className="w-3 h-3" />
+                        </Button>
+                        {/* Revoke now confirms first (FP-075) — an unconfirmed one-tap ✕ killed a live
+                            link with no undo — and toasts on success. Revoke stays enabled even when
+                            gated: killing a link is a safety action, not a portal feature. */}
+                        <ConfirmDialog
+                          title="Revoke this upload link?"
+                          description={`${vendor.name} will no longer be able to upload with this link. You can generate a new one anytime.`}
+                          confirmLabel="Revoke"
+                          destructive
+                          onConfirm={() => revoke.mutate(l.id, { onSuccess: () => toast.success("Link revoked") })}
+                          trigger={
+                            <Button size="sm" variant="ghost" aria-label="Revoke link">
+                              <XCircle className="w-4 h-4 text-slate-500 hover:text-rose-600" />
+                            </Button>
+                          }
+                        />
+                      </>
+                    ) : (
+                      <span className="text-xs text-slate-400">Revoked — generate a new link to share</span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* FP-071: the vendor's documents, on the vendor's own page. The list "Docs N" used to be
+          dead text and there was no view of them here. */}
+      <Card>
+        <CardContent className="p-6 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="font-semibold text-slate-800">Documents from {vendor.name}</h2>
+            {(vendorDocs.data?.total ?? 0) > 0 && (
+              <Link href={`/documents?vendor=${vendorId}`} className="text-sm text-sky-700 hover:underline">
+                View all ({vendorDocs.data!.total})
+              </Link>
+            )}
+          </div>
+          {vendorDocs.isLoading ? (
+            <p className="text-sm text-slate-500" role="status">Loading documents…</p>
+          ) : vendorDocs.isError ? (
+            <p className="text-sm text-slate-600" role="alert">
+              Couldn&apos;t load this vendor&apos;s documents.{" "}
+              <button type="button" className="font-medium text-sky-700 hover:underline" onClick={() => vendorDocs.refetch()}>
+                Try again
+              </button>
+            </p>
+          ) : (vendorDocs.data?.items.length ?? 0) === 0 ? (
+            <p className="text-sm text-slate-500">
+              No documents yet — share an upload link above, or upload one on the Documents page.
+            </p>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {vendorDocs.data!.items.map((d) => (
+                <li key={d.id} className="flex items-center justify-between gap-3 py-2">
+                  <Link href={`/documents/${d.id}`} className="flex min-w-0 items-center gap-2 text-sm text-sky-700 hover:underline">
+                    <FileText className="h-4 w-4 shrink-0 text-slate-400" aria-hidden="true" />
+                    <span className="truncate">{d.originalFileName}</span>
+                  </Link>
+                  <Badge className={`shrink-0 border-transparent ${complianceBadgeClass(d.complianceStatus)}`}>
+                    {complianceStatusLabel(d.complianceStatus)}
+                  </Badge>
                 </li>
               ))}
             </ul>
@@ -342,6 +490,17 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
       </Card>
     </div>
   );
+}
+
+// Hue for a compliance-status badge (module scope per the static-components rule).
+function complianceBadgeClass(status: string): string {
+  switch (status) {
+    case "Compliant": return "bg-emerald-100 text-emerald-800";
+    case "NonCompliant":
+    case "Expired": return "bg-rose-100 text-rose-700";
+    case "ExpiringSoon": return "bg-amber-100 text-amber-800";
+    default: return "bg-slate-100 text-slate-600";
+  }
 }
 
 function LabeledInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {

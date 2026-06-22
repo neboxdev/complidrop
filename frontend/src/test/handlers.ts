@@ -46,4 +46,9 @@ export const defaultHandlers = [
   // Pending/no-vendor doc would otherwise hit an unhandled /api/vendors. Empty
   // list is the do-nothing-surprising state; tests asserting vendor options override.
   http.get(url("/api/vendors"), () => jsonOk([])),
+  // Empty documents baseline (#319). The vendor detail page's "Documents from {vendor}"
+  // card (FP-071) now fires useDocuments({ vendorId }), so — same rationale as the
+  // defaults above — any test rendering that page would otherwise hit an unhandled
+  // /api/documents. Empty page; tests asserting documents override.
+  http.get(url("/api/documents"), () => jsonOk({ items: [], total: 0, page: 1, pageSize: 25 })),
 ];

@@ -22,7 +22,7 @@
 
 import { fieldLabel, operatorLabel } from "@/lib/display-labels";
 
-export type RequirementGroup = "Insurance" | "Dates" | "Licenses & permits";
+export type RequirementGroup = "Insurance" | "Dates" | "Licenses & permits" | "Certifications";
 export type RequirementValueKind = "money" | "text" | "none";
 
 export type RequirementType = {
@@ -61,12 +61,38 @@ export function formatMoney(amount: number): string {
  * "$1,000,000" / "1,000,000" / "1000000" → 1000000; blank / non-numeric → null.
  * Coverage limits are whole dollars, so a pasted decimal is TRUNCATED at the
  * point ("$1,000,000.50" → 1000000), never concatenated into 100000050.
+ *
+ * k/m suffixes are honored (#319 FP-084): "2M" → 2000000, "1.5M" → 1500000,
+ * "500k" → 500000. Before this, the non-digit strip turned "2M" into $2 — an
+ * always-green requirement (every COI on earth carries more than $2). The suffix
+ * is matched case-insensitively with an optional decimal multiplier.
  */
 export function parseMoneyInput(raw: string): number | null {
-  const digits = raw.split(".")[0].replace(/[^0-9]/g, "");
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === "") return null;
+  // Leading $/space/commas, a number (with optional decimal), then a k or m unit.
+  const suffix = trimmed.match(/^[\s$,]*([0-9]+(?:\.[0-9]+)?)\s*([km])/);
+  if (suffix) {
+    const base = Number.parseFloat(suffix[1]);
+    if (!Number.isFinite(base)) return null;
+    return Math.round(base * (suffix[2] === "m" ? 1_000_000 : 1_000));
+  }
+  // No suffix: whole dollars — truncate at the decimal point, strip separators.
+  const digits = trimmed.split(".")[0].replace(/[^0-9]/g, "");
   if (digits === "") return null;
   const n = Number.parseInt(digits, 10);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * A coverage amount this small (< $10,000) is almost certainly a typo — a "$2"
+ * GL minimum passes every certificate on earth (#319 FP-084). Drives a
+ * non-blocking "did you mean…?" nudge in the requirement form. 0 / null are not
+ * flagged (the form already blocks an empty amount).
+ */
+export const SUSPICIOUSLY_LOW_MONEY = 10_000;
+export function isSuspiciouslyLowMoney(amount: number | null): boolean {
+  return amount != null && amount > 0 && amount < SUSPICIOUSLY_LOW_MONEY;
 }
 
 /** Format a stored expectedValue string as money, tolerating a non-numeric value. */
@@ -210,9 +236,54 @@ export const REQUIREMENT_TYPES: RequirementType[] = [
     sentence: () => "License has not expired",
     errorMessage: () => "No expiration date was found, so we can’t confirm the license is current.",
   },
+
+  // ---- Certifications ----
+  // Gives the seeded "Security Service" certification rule a real catalog home (#319 FP-085) —
+  // it used to render as a context-free fallback with no Edit and no re-add path.
+  {
+    key: "certification_not_expired",
+    group: "Certifications",
+    menuLabel: "Certification must not be expired",
+    documentType: "certification",
+    fieldName: "expiration_date",
+    operator: "required",
+    valueKind: "none",
+    helper: NOT_EXPIRED_HELPER,
+    sentence: () => "Certification has not expired",
+    errorMessage: () => "No expiration date was found, so we can’t confirm the certification is current.",
+  },
+  {
+    key: "certification_number",
+    group: "Certifications",
+    menuLabel: "Has a certification number on file",
+    documentType: "certification",
+    fieldName: "certification_number",
+    operator: "required",
+    valueKind: "none",
+    sentence: () => "Has a certification number on file",
+    errorMessage: () => "No certification number was found on the document.",
+  },
+  {
+    key: "certification_name",
+    group: "Certifications",
+    menuLabel: "Holds a specific certification",
+    documentType: "certification",
+    fieldName: "certification_name",
+    operator: "equals",
+    valueKind: "text",
+    valueLabel: "Certification name",
+    valuePlaceholder: "e.g. Certified Protection Professional",
+    sentence: (v) => `Holds a “${(v ?? "").trim() || "specific"}” certification`,
+    errorMessage: (v) => `The certification is not “${(v ?? "").trim() || "the one you require"}”.`,
+  },
 ];
 
-export const REQUIREMENT_GROUPS: RequirementGroup[] = ["Insurance", "Dates", "Licenses & permits"];
+export const REQUIREMENT_GROUPS: RequirementGroup[] = [
+  "Insurance",
+  "Dates",
+  "Licenses & permits",
+  "Certifications",
+];
 
 /** The catalog item for a stored rule, matched on (documentType, fieldName, operator). */
 export function findRequirementType(rule: {
