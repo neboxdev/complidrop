@@ -13,6 +13,7 @@ import { http, HttpResponse } from "msw";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import DashboardLayout from "./layout";
 import { ME_KEY } from "@/hooks/useAuth";
+import { ApiError } from "@/lib/api";
 import { renderWithProviders, authedMe, makeMe, server, url, jsonOk, jsonError, navState } from "@/test";
 
 const NAV_LABELS = [
@@ -217,6 +218,34 @@ describe("DashboardLayout — session resilience (#182)", () => {
     await waitFor(() => expect(screen.getByText("protected child")).toBeInTheDocument());
     expect(screen.getAllByText("Acme Inc").length).toBeGreaterThan(0);
     expect(navState.router.replace).not.toHaveBeenCalled();
+  });
+
+  it("an INVOLUNTARY mid-task eviction redirects to /login?expired=1 with a returnTo (#318 FP-045)", async () => {
+    // The real session-expiry path: a NON-/me query 401s with the definitive auth code while Pat is
+    // working. The global QueryCache.onError (query-client.handleAuthError) flags the eviction
+    // (markSessionExpired) and nulls the Me cache; the layout consumes the flag and carries a notice
+    // + a validated returnTo, distinct from a deliberate logout (which lands on a bare /login, pinned
+    // by the test below). Removing the markSessionExpired wiring or the layout's consume branch would
+    // fail HERE — the /me-swallow test below would stay green either way.
+    const { queryClient } = renderWithProviders(
+      <DashboardLayout>
+        <div>protected child</div>
+      </DashboardLayout>,
+      { auth: authedMe, pathname: "/documents" },
+    );
+    expect(screen.getByText("protected child")).toBeInTheDocument();
+
+    await queryClient
+      .fetchQuery({
+        queryKey: ["probe-401"],
+        queryFn: () => Promise.reject(new ApiError("auth.unauthorized", "Session expired.", 401)),
+        retry: false,
+      })
+      .catch(() => {});
+
+    await waitFor(() =>
+      expect(navState.router.replace).toHaveBeenCalledWith("/login?expired=1&returnTo=%2Fdocuments"),
+    );
   });
 
   it("STILL redirects to /login on a genuine expired/absent session", async () => {

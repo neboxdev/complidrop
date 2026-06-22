@@ -348,11 +348,11 @@ hard-zeros-flash gate (FP-046) and should re-measure ~8. Dashboard (with data)
 contradiction (#257, landed), the API-error-as-empty-account (FP-040), and the
 duplicated activity feed (FP-043) — and should re-measure ~8. App shell (was 6)
 clears the silent-session-eviction (FP-045) and no-help-affordance (FP-048)
-gates and should re-measure ~8. **Deferred** (real tickets under #150, both
-labelled `bug`): the FP-042 *supersession* half — bucketing Expired by
-latest-doc-per-(vendor,type) — is a cross-surface data-semantics change that must
-stay consistent across the dashboard, documents list, reminders, and export, so
-it warrants its own ADR rather than a one-screen edit; and the FP-049
+gates and should re-measure ~8. **Deferred** (real tickets under #150): the
+FP-042 *supersession* half — bucketing Expired by latest-doc-per-(vendor,type) —
+is a cross-surface data-semantics change that must stay consistent across the
+dashboard, documents list, reminders, and export, so it warrants its own ADR
+rather than a one-screen edit (**#327**, `bug`); and the FP-049
 *entity-names-in-the-feed* half needs polymorphic name resolution
-(Document/Vendor/Template → name) in the RecentActivity query. The closing
-per-page re-score table lands once Batches E–G complete.
+(Document/Vendor/Template → name) in the RecentActivity query (**#328**, `task`).
+The closing per-page re-score table lands once Batches E–G complete.

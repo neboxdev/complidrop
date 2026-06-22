@@ -148,6 +148,9 @@ public static class DashboardEndpoints
     /// </summary>
     private static readonly string[] FeedVisibleActions =
     [
+        // "document.uploaded" is no longer EMITTED (the owner-upload explicit row was dropped in
+        // FP-043; uploads now record "document.created" via the interceptor) — but it stays whitelisted
+        // + labelled so HISTORICAL rows from before #318 still render in the feed.
         "document.created", "document.uploaded", "document.updated", "document.deleted",
         "document.verified", "document.fields_edited", "document.reextract_queued", "document.processed",
         "vendor.created", "vendor.updated", "vendor.deleted",
@@ -160,9 +163,20 @@ public static class DashboardEndpoints
         "user.email_verified", "user.email_changed", "user.account_deleted",
     ];
 
-    /// <summary>The interceptor's generic update action for an entity type, e.g. <c>vendor.updated</c>.</summary>
-    private static bool IsGenericUpdate(string action, string entityType) =>
-        string.Equals(action, $"{entityType.ToLowerInvariant()}.updated", StringComparison.Ordinal);
+    /// <summary>
+    /// The interceptor's GENERIC entity action for a type — <c>{type}.created</c> or
+    /// <c>{type}.updated</c>. In a collapse group these LOSE to an explicit REFINED twin so the feed
+    /// shows the meaningful verb: <c>compliancerule.upserted</c> beats the interceptor's
+    /// <c>compliancerule.created</c> ("Requirement saved", not "Requirement added"), and
+    /// <c>document.verified</c> beats <c>document.updated</c>. A standalone generic action (no refined
+    /// twin in its group) is the group's only row and still shows. (#318 FP-043 + review S1)
+    /// </summary>
+    private static bool IsGenericEntityMutation(string action, string entityType)
+    {
+        var prefix = entityType.ToLowerInvariant();
+        return string.Equals(action, $"{prefix}.updated", StringComparison.Ordinal)
+            || string.Equals(action, $"{prefix}.created", StringComparison.Ordinal);
+    }
 
     private static async Task<IResult> RecentActivity(AppDbContext db, CancellationToken ct)
     {
@@ -189,7 +203,7 @@ public static class DashboardEndpoints
             .GroupBy(a => (a.CorrelationId, a.EntityType, a.EntityId,
                 Distinct: a.CorrelationId != null && a.EntityId != null ? (Guid?)null : a.Id))
             .Select(g => g
-                .OrderBy(a => IsGenericUpdate(a.Action, a.EntityType) ? 1 : 0) // specific action wins the twin
+                .OrderBy(a => IsGenericEntityMutation(a.Action, a.EntityType) ? 1 : 0) // specific action wins the twin
                 .ThenByDescending(a => a.CreatedAt)
                 .First())
             .OrderByDescending(a => a.CreatedAt)

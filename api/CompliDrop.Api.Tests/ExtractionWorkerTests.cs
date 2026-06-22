@@ -270,6 +270,44 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             .Should().Be(Extraction.Result.Fields.Count);
     }
 
+    [Fact]
+    public async Task Successful_extraction_writes_one_system_document_processed_audit_event()
+    {
+        // #318 FP-043: extraction finishes in the worker, which has no ICurrentUser, so the audit
+        // interceptor can't record it — PersistSuccess writes an explicit system "document.processed"
+        // row (org-scoped, UserId null) so the read appears in the activity feed. Exactly one per
+        // successful read.
+        var (orgId, docId) = await SeedDocAsync(status: ExtractionStatus.Processing, subscriptionSpendUsd: 0m);
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+
+        await using var db = CreateSystemDb();
+        var processed = await db.AuditLogs
+            .Where(a => a.Action == "document.processed" && a.EntityId == docId)
+            .ToListAsync();
+        processed.Should().ContainSingle("a successful read writes exactly one document.processed event");
+        processed[0].OrganizationId.Should().Be(orgId);
+        processed[0].UserId.Should().BeNull("the background worker has no current user");
+    }
+
+    [Fact]
+    public async Task A_failed_extraction_writes_no_document_processed_audit_event()
+    {
+        // The system event is for terminal SUCCESS only — a failed read (here a missing blob) must
+        // never claim the document was processed.
+        var (_, docId) = await SeedDocAsync(
+            status: ExtractionStatus.Processing, blobPath: null, subscriptionSpendUsd: 0m);
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        await using var db = CreateSystemDb();
+        (await db.AuditLogs.AnyAsync(a => a.Action == "document.processed" && a.EntityId == docId))
+            .Should().BeFalse("a failed extraction must not emit a processed event");
+    }
+
     // ----- AC4: FOR UPDATE SKIP LOCKED --------------------------------------------------------
 
     [Fact]

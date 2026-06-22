@@ -41,20 +41,23 @@ public sealed class DashboardStatsTests(IntegrationTestFixture fixture) : Integr
     }
 
     [Fact]
-    public async Task complianceRate_excludes_not_yet_evaluated_documents()
+    public async Task complianceRate_excludes_only_not_yet_evaluated_documents()
     {
-        // #318 FP-042: a freshly-uploaded doc sits ComplianceStatus.Pending until the worker grades
-        // it. Counting those in the denominator flashed a demoralizing "0%" right after the first
-        // upload. Rate = compliant / docs-with-a-verdict, so 2 compliant + 1 pending reads 100%, not 67%.
+        // #318 FP-042: a freshly-uploaded doc sits ComplianceStatus.Pending until the worker grades it.
+        // Counting those in the denominator flashed a demoralizing "0%" right after the first upload.
+        // Rate = compliant / GRADED docs: 2 Compliant + 1 NonCompliant + 1 Pending → 2/3 = 66.7%. This
+        // pins BOTH that Pending is excluded AND that NonCompliant stays IN the denominator (a regression
+        // defining "graded" as compliant-only would read 100% and slip through a Compliant+Pending test).
         var auth = await RegisterAndLoginAsync();
         await SeedDocsAsync(auth.OrgId,
             ComplianceStatus.Compliant,
             ComplianceStatus.Compliant,
+            ComplianceStatus.NonCompliant,
             ComplianceStatus.Pending);
 
         var data = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/dashboard/stats")).GetProperty("data");
-        data.GetProperty("complianceRate").GetDouble().Should().Be(100,
-            "the Pending (still-being-read) document must be excluded from the compliance-rate denominator");
+        data.GetProperty("complianceRate").GetDouble().Should().Be(66.7,
+            "2 of 3 graded docs are compliant; the Pending doc is excluded, the NonCompliant doc is not");
     }
 
     private async Task SeedDocsAsync(Guid orgId, params ComplianceStatus[] statuses)
