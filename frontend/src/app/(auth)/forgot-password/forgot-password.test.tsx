@@ -27,13 +27,22 @@ describe("ForgotPasswordPage (#183)", () => {
     expect(captured).toEqual({ email: "owner@acme.test" });
   });
 
-  it("shows the SAME confirmation even on a server error (no enumeration leak)", async () => {
-    server.use(http.post(url("/api/auth/forgot-password"), () => jsonError("server.error", "boom", { status: 500 })));
+  // Anti-enumeration is preserved by the FIRST test (a 200 for any email → the
+  // same neutral confirmation). A THROWN failure (network/429/5xx) is different:
+  // the request did NOT succeed, so flipping to "check your email" would have the
+  // user trust a link that never sent. FP-031: show the error, not false success.
+  it("shows an error (not a false 'check your email') when the request fails", async () => {
+    server.use(
+      http.post(url("/api/auth/forgot-password"), () =>
+        jsonError("server.error", "We couldn't send the email. Try again in a minute.", { status: 500 }),
+      ),
+    );
     renderWithProviders(<ForgotPasswordPage />, { auth: null });
 
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: "owner@acme.test" } });
     fireEvent.click(screen.getByRole("button", { name: /send reset link/i }));
 
-    await waitFor(() => expect(screen.getByText(/check your email/i)).toBeInTheDocument());
+    expect(await screen.findByRole("alert")).toHaveTextContent(/couldn't send the email/i);
+    expect(screen.queryByText(/check your email/i)).not.toBeInTheDocument();
   });
 });

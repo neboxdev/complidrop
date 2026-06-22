@@ -1,19 +1,24 @@
 "use client";
 
-import { useId } from "react";
+import { useId, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { Check, Circle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/PasswordInput";
+import { PasswordChecklist } from "@/components/PasswordChecklist";
 import { Card, CardContent } from "@/components/ui/card";
 import { useRegister } from "@/hooks/useAuth";
-import { cn } from "@/lib/utils";
+import { ApiError, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+
+// Re-exported so register-form.test.tsx's `import { PASSWORD_RULES } from
+// "./register-form"` keeps resolving after the checklist moved to a shared
+// component (#316 FP-035).
+export { PASSWORD_RULES } from "@/components/PasswordChecklist";
 
 export const schema = z.object({
   fullName: z.string().min(2, "Your full name is required"),
@@ -65,42 +70,6 @@ const PLAN_HEADINGS: Record<
   },
 };
 
-// Live password-criteria checklist — each rule turns green as the user satisfies
-// it, so the 12-char minimum reads as guidance instead of a post-submit rejection.
-// Rules mirror the zod schema above. Module scope per the static-components rule (#73). (#195)
-export const PASSWORD_RULES: ReadonlyArray<{ label: string; test: (v: string) => boolean }> = [
-  { label: "At least 12 characters", test: (v) => v.length >= 12 },
-  { label: "A letter", test: (v) => /[A-Za-z]/.test(v) },
-  { label: "A number", test: (v) => /[0-9]/.test(v) },
-];
-
-function PasswordChecklist({ value, id }: { value: string; id: string }) {
-  return (
-    <ul id={id} className="mt-2 space-y-1">
-      {PASSWORD_RULES.map((rule) => {
-        const ok = rule.test(value);
-        return (
-          <li
-            key={rule.label}
-            data-met={ok ? "true" : "false"}
-            className={cn(
-              "flex items-center gap-1.5 text-xs",
-              ok ? "text-emerald-700" : "text-slate-500",
-            )}
-          >
-            {ok ? (
-              <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />
-            ) : (
-              <Circle className="h-3 w-3 shrink-0" aria-hidden />
-            )}
-            {rule.label}
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
 export default function RegisterForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -127,6 +96,9 @@ export default function RegisterForm() {
   const companyNameErrId = useId();
   const emailErrId = useId();
   const passwordErrId = useId();
+  const serverErrId = useId();
+  const [serverError, setServerError] = useState<string | null>(null);
+  const [emailTaken, setEmailTaken] = useState(false);
   const {
     register: r,
     handleSubmit,
@@ -144,14 +116,22 @@ export default function RegisterForm() {
   const passwordValue = useWatch({ control, name: "password" }) ?? "";
 
   const onSubmit = async (values: RegisterForm) => {
+    setServerError(null);
+    setEmailTaken(false);
     try {
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
       await register.mutateAsync({ ...values, timeZone: tz });
       toast.success("Account created. Welcome!");
-      router.push("/dashboard");
+      // A paid-plan signup wanted to pay — land them on Settings billing (the
+      // upgrade tiles + one-click checkout) instead of a free dashboard that
+      // silently ignores the plan they picked. Free signups go to onboarding.
+      // (Full post-signup Stripe handoff is #31.) (#316 FP-030)
+      router.push(plan === "free" ? "/dashboard" : "/settings");
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Sign up failed.";
-      toast.error(message);
+      // Duplicate-email + other server errors must persist inline, not vanish in
+      // a 4-second toast; the email-taken case offers the two real exits. (#316 FP-033)
+      setEmailTaken(err instanceof ApiError && err.code === "auth.email_taken");
+      setServerError(err instanceof Error && err.message ? err.message : GENERIC_FALLBACK_MESSAGE);
     }
   };
 
@@ -248,16 +228,29 @@ export default function RegisterForm() {
               <Input {...r("companySize")} id={companySizeId} placeholder="10-30" className="mt-1" />
             </div>
           </div>
+          {serverError && (
+            <div id={serverErrId} role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              <p>{serverError}</p>
+              {emailTaken && (
+                <p className="mt-1">
+                  <Link href="/login" className="font-medium text-sky-700 hover:underline">Sign in instead</Link>
+                  {" · "}
+                  <Link href="/forgot-password" className="font-medium text-sky-700 hover:underline">Reset your password</Link>
+                </p>
+              )}
+            </div>
+          )}
           <Button type="submit" className="w-full" disabled={register.isPending}>
             {register.isPending ? "Creating account…" : "Create my account"}
           </Button>
           {/* Plan-aware reassurance at the commit point — must not promise "free,
               no card" when a paid plan is selected (that contradicts the banner
-              above). Free/default → risk-free framing; paid → cancel-anytime. (#195) */}
+              above). Free/default → risk-free framing; paid → payment comes next
+              (the form lands them on Settings billing). (#195, #316 FP-030) */}
           <p className="text-center text-xs text-slate-500">
             {plan === "free"
               ? "Free for your first 5 documents. No credit card required."
-              : "Cancel anytime. No long-term contract."}
+              : "You'll set up payment on the next screen. Cancel anytime."}
           </p>
           {/* Affirmative assent so the Terms + Privacy Policy actually bind the
               user (clickwrap-style), with both links discoverable at signup. (#194) */}

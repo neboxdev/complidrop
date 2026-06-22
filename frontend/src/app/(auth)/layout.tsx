@@ -1,5 +1,14 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { Logo } from "@/components/Logo";
+
+// Auth screens are utility pages, never search-landing pages: keep them out of
+// the index (robots noindex) and give the tab a sensible default title that
+// per-page metadata overrides via the `%s` template. (#316 FP-013)
+export const metadata: Metadata = {
+  title: { default: "Account", template: "%s · CompliDrop" },
+  robots: { index: false, follow: false },
+};
 
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
   return (

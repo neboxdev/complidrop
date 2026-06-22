@@ -18,7 +18,7 @@
  * the "one server for the whole run" invariant `server.ts` relies on.
  */
 import { http } from "msw";
-import { jsonError, url } from "./helpers";
+import { jsonError, jsonOk, url } from "./helpers";
 
 export const defaultHandlers = [
   // Anonymous baseline. Tests that need an authed Me override this OR prime
@@ -40,4 +40,10 @@ export const defaultHandlers = [
   http.get(url("/api/billing/subscription"), () =>
     jsonError("auth.unauthorized", "Not authenticated", { status: 401 }),
   ),
+  // Empty vendor book baseline (#316). The VendorPicker's useVendors now fires
+  // from the document-detail "not checked yet" orphan-assign explainer (FP-063),
+  // so — like the subscription default above (#261) — any test rendering a
+  // Pending/no-vendor doc would otherwise hit an unhandled /api/vendors. Empty
+  // list is the do-nothing-surprising state; tests asserting vendor options override.
+  http.get(url("/api/vendors"), () => jsonOk([])),
 ];

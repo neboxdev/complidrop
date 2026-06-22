@@ -211,7 +211,7 @@ const STEPS = [
     step: "3",
     icon: BellRing,
     title: "Forget it",
-    body: "Reminders go out at 60, 30, 14, and 7 days before expiration — to you and straight to your vendor. They get a simple upload link (no login, no account) and send the new document themselves. You stop being the bad guy.",
+    body: "Reminders go out at 60, 30, 14, and 7 days before expiration. As the deadline nears, your vendor gets them too — a simple upload link (no login, no account) so they send the new document themselves. You stop being the bad guy.",
   },
 ] as const;
 

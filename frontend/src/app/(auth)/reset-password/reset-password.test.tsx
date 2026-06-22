@@ -13,7 +13,6 @@ import {
   url,
   jsonOk,
   jsonError,
-  toastError,
   resetSonner,
 } from "@/test";
 
@@ -56,7 +55,7 @@ describe("ResetPasswordClient (#183)", () => {
     expect(called).toBe(false);
   });
 
-  it("surfaces a jargon-free toast when the token is invalid/expired", async () => {
+  it("swaps to the expired-link card with a 'Request a new link' path when the token is invalid/expired (FP-032)", async () => {
     server.use(
       http.post(url("/api/auth/reset-password"), () =>
         jsonError("auth.reset_invalid", "This reset link is invalid or has expired. Request a new one.", { status: 400 }),
@@ -68,9 +67,11 @@ describe("ResetPasswordClient (#183)", () => {
     fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "BrandNewPass123" } });
     fireEvent.click(screen.getByRole("button", { name: /reset password/i }));
 
-    await waitFor(() =>
-      expect(toastError).toHaveBeenCalledWith("This reset link is invalid or has expired. Request a new one."),
-    );
+    // Terminal token error swaps the form for a recovery card — not a vanishing
+    // toast over a now-dead form.
+    expect(await screen.findByText(/this reset link has expired/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /request a new link/i })).toHaveAttribute("href", "/forgot-password");
+    expect(screen.queryByRole("button", { name: /reset password/i })).toBeNull();
   });
 
   it("shows an invalid-link state with no request when the token is missing", () => {

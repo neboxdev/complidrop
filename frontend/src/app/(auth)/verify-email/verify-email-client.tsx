@@ -7,7 +7,7 @@ import { CheckCircle2, Loader2, MailX } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { useVerifyEmail } from "@/hooks/useAuth";
+import { hasSessionHint, useVerifyEmail } from "@/hooks/useAuth";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 
 /**
@@ -22,6 +22,12 @@ export function VerifyEmailClient() {
   const searchParams = useSearchParams();
   const token = searchParams.get("token")?.trim() ?? "";
   const verify = useVerifyEmail();
+  // The link often opens in a logged-out browser. The non-httpOnly session-hint
+  // cookie tells us — synchronously, no /me round-trip — whether this browser is
+  // authenticated, so we can send them somewhere that works instead of bouncing
+  // them to /login unexplained. (Using useMe() here would fetch /me and reset the
+  // ME_KEY invalidation this page's success triggers.) (#316 FP-037)
+  const loggedIn = hasSessionHint();
   const firedRef = useRef(false);
 
   useEffect(() => {
@@ -35,8 +41,8 @@ export function VerifyEmailClient() {
       <VerifyCard
         icon={<MailX className="mx-auto h-10 w-10 text-rose-500" />}
         title="Invalid verification link"
-        body="This link is missing its token. Open the most recent verification email, or resend a new link from your dashboard."
-        action={<DashboardLink />}
+        body="This link looks incomplete. Open the most recent verification email, or resend a new one from your dashboard."
+        action={<ContinueCta loggedIn={loggedIn} resend />}
       />
     );
   }
@@ -49,7 +55,7 @@ export function VerifyEmailClient() {
         // Server message first (e.g. "link has expired"), else the jargon-free
         // fallback — never raw HTTP status text (frontend error-message policy).
         body={verify.error?.message?.trim() || GENERIC_FALLBACK_MESSAGE}
-        action={<DashboardLink label="Go to dashboard to resend" />}
+        action={<ContinueCta loggedIn={loggedIn} resend />}
       />
     );
   }
@@ -60,7 +66,7 @@ export function VerifyEmailClient() {
         icon={<CheckCircle2 className="mx-auto h-10 w-10 text-emerald-500" />}
         title="Email confirmed"
         body={verify.data?.message?.trim() || "Your email is confirmed — reminders will reach you."}
-        action={<DashboardLink label="Continue to dashboard" primary />}
+        action={<ContinueCta loggedIn={loggedIn} primary />}
       />
     );
   }
@@ -98,11 +104,27 @@ function VerifyCard({
   );
 }
 
-function DashboardLink({ label = "Go to dashboard", primary = false }: { label?: string; primary?: boolean }) {
-  // base-ui's Button has no `asChild`, so style the Link with buttonVariants
-  // (the exported cva) — the canonical link-as-button idiom for this codebase.
+function ContinueCta({
+  loggedIn,
+  primary = false,
+  resend = false,
+}: {
+  loggedIn: boolean;
+  primary?: boolean;
+  resend?: boolean;
+}) {
+  // A logged-out visitor sent to /dashboard just bounces to /login unexplained
+  // (#316 FP-037). Send them to sign in with honest copy; the resend action
+  // lives on the dashboard, so logged-in users go there. base-ui's Button has no
+  // `asChild`, so style the Link with buttonVariants — the link-as-button idiom.
+  const href = loggedIn ? "/dashboard" : "/login";
+  const label = loggedIn
+    ? resend
+      ? "Go to dashboard to resend"
+      : "Continue to dashboard"
+    : "Sign in to continue";
   return (
-    <Link href="/dashboard" className={cn(buttonVariants({ variant: primary ? "default" : "outline" }), "mt-2")}>
+    <Link href={href} className={cn(buttonVariants({ variant: primary ? "default" : "outline" }), "mt-2")}>
       {label}
     </Link>
   );
