@@ -149,6 +149,23 @@ public sealed class ComplianceSweepBackgroundServiceTests(IntegrationTestFixture
     }
 
     [Fact]
+    public async Task Sweep_leaves_a_doc_expiring_exactly_today_as_ExpiringSoon_not_Expired()
+    {
+        // The Expired LOWER edge at the exact flip instant: a doc expiring at today's UTC midnight is
+        // NOT yet expired (the sweep's `ExpirationDate < today` is strict), so it reads ExpiringSoon —
+        // matching ComplianceStatusDeriver.Effective (`expiry < todayDate`). Pins the worker SQL
+        // boundary so an off-by-one to `<=` (flipping a doc expiring TODAY to Expired) fails here; the
+        // past-date Expired case stays covered by Sweep_flips_a_compliant_doc_past_its_expiration_to_Expired.
+        // (#244 time/TZ audit — lower-edge guard for the worker SQL path.)
+        var id = await SeedAsync(ComplianceStatus.Compliant, Anchor.Date);
+
+        await BuildSweep().SweepAsync(CancellationToken.None);
+
+        (await StatusAsync(id)).Should().Be(ComplianceStatus.ExpiringSoon,
+            "a doc expiring at today's midnight is not yet Expired — the boundary is strict (< today)");
+    }
+
+    [Fact]
     public async Task Sweep_leaves_a_time_bearing_expiry_just_past_the_window_Compliant()
     {
         // The exclusive bound must not over-reach: a noon expiry on day 31 is beyond the 30-day
