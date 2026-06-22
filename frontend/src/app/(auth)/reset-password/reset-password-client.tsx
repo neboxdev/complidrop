@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useForm, useWatch } from "react-hook-form";
@@ -38,10 +38,20 @@ export function ResetPasswordClient() {
   const passwordId = useId();
   const confirmId = useId();
   const passwordHintId = useId();
+  const passwordErrId = useId();
+  const confirmErrId = useId();
   const errId = useId();
   const [done, setDone] = useState(false);
   const [invalid, setInvalid] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // FP-131/FP-036: a terminal card (success, or a dead/expired-link message) REPLACES the form, so
+  // move focus to its heading — otherwise a screen-reader user is left on a now-removed input with no
+  // signal anything changed. One ref serves whichever terminal card renders (only one shows at a time).
+  const terminalHeadingRef = useRef<HTMLHeadingElement>(null);
+  const showTerminal = !token || invalid || done;
+  useEffect(() => {
+    if (showTerminal) terminalHeadingRef.current?.focus();
+  }, [showTerminal]);
   const {
     register,
     handleSubmit,
@@ -74,7 +84,7 @@ export function ResetPasswordClient() {
     return (
       <Card className="border-sky-100 shadow-lg">
         <CardContent className="space-y-3 p-8 text-center">
-          <h1 className="text-xl font-semibold text-sky-900">
+          <h1 ref={terminalHeadingRef} tabIndex={-1} className="text-xl font-semibold text-sky-900 focus:outline-none">
             {invalid ? "This reset link has expired" : "Invalid reset link"}
           </h1>
           <p className="text-sm text-slate-500">
@@ -94,7 +104,9 @@ export function ResetPasswordClient() {
     return (
       <Card className="border-sky-100 shadow-lg">
         <CardContent className="space-y-3 p-8 text-center">
-          <h1 className="text-xl font-semibold text-sky-900">Password reset</h1>
+          <h1 ref={terminalHeadingRef} tabIndex={-1} className="text-xl font-semibold text-sky-900 focus:outline-none">
+            Password reset
+          </h1>
           <p className="text-sm text-slate-500">Taking you to sign in…</p>
         </CardContent>
       </Card>
@@ -117,15 +129,25 @@ export function ResetPasswordClient() {
               id={passwordId}
               autoComplete="new-password"
               className="mt-1"
-              aria-describedby={passwordHintId}
+              aria-invalid={errors.password ? true : undefined}
+              // FP-131: associate BOTH the validation error and the checklist hint. aria-describedby
+              // takes a space-separated id list, so a screen reader hears the error first, then the hint.
+              aria-describedby={errors.password ? `${passwordErrId} ${passwordHintId}` : passwordHintId}
             />
-            {errors.password && <p className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
+            {errors.password && <p id={passwordErrId} className="text-xs text-red-600 mt-1">{errors.password.message}</p>}
             <PasswordChecklist value={passwordValue} id={passwordHintId} />
           </div>
           <div>
             <label htmlFor={confirmId} className="text-sm font-medium text-slate-700">Confirm new password</label>
-            <PasswordInput {...register("confirm")} id={confirmId} autoComplete="new-password" className="mt-1" />
-            {errors.confirm && <p className="text-xs text-red-600 mt-1">{errors.confirm.message}</p>}
+            <PasswordInput
+              {...register("confirm")}
+              id={confirmId}
+              autoComplete="new-password"
+              className="mt-1"
+              aria-invalid={errors.confirm ? true : undefined}
+              aria-describedby={errors.confirm ? confirmErrId : undefined}
+            />
+            {errors.confirm && <p id={confirmErrId} className="text-xs text-red-600 mt-1">{errors.confirm.message}</p>}
           </div>
           {submitError && (
             <p id={errId} role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

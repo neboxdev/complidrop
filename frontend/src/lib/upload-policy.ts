@@ -16,7 +16,10 @@ export function rejectionCopy(rejections: FileRejection[]): string | null {
       // server-side (#220), so the old "switch to Most Compatible" workaround is gone.
       // This now only fires for genuinely unsupported types (a Word doc, a video, a
       // .zip) — point at the formats that do work.
-      return "We can't read that file type. Please upload a PDF or a photo (JPEG, PNG, or HEIC).";
+      // FP-125: name the accepted FORMATS rather than saying "upload … a photo" — a vendor
+      // whose WebP/GIF was rejected DID send a photo, so the old copy read as a contradiction.
+      // Listing the exact formats is unambiguous and never implies their image "isn't a photo".
+      return "We can't read that file format. Please upload a PDF, JPEG, PNG, or HEIC.";
     case "file-too-large":
       // Drop the desktop "split/compress" language — on a phone-photo surface the
       // actionable fix is to reshoot from further back or send a PDF. (#196 review)

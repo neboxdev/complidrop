@@ -421,3 +421,44 @@ re-measure ~8. Settings (was 6) clears the raw-IANA-wheel gate (FP-112) + the pa
 gate (FP-113) and should re-measure ~8. **Deferred** (a product/pricing decision, not polish): the
 FP-113 Founding "first 50" cap enforcement + Founding-vs-Annual pricing-tile logic (**#331**, `task`).
 The closing per-page re-score table lands once Batch G completes.
+
+### Batch G — portal & accessibility (#321, merged 2026-06-22)
+
+Closed the vendor-portal + cross-cutting-a11y cluster — the last child of #241. **FP-120** (P0 — a
+transient load failure no longer tells Tony the link is permanently dead and to go bother Pat:
+`fetchInfo` now distinguishes 404/410 dead-link from 5xx/network/timeout, reserves the "ask for a
+fresh link" copy for genuinely-gone links, and gives a transient "We couldn't load this page" + Try
+again affordance, with a 15s fetch timeout so a black-hole network can't spin on the skeleton
+forever). **FP-121** (the quota counter now counts in-session uploads — `uploadCount + uploaded.length`
+— so it resolves after a successful upload and the dropzone disables on the last in-session upload
+without a reload; the "what happens next" Received card from #240 already closes the "am I done?"
+loop). **FP-122** (the instructions card is retitled to the neutral "What to upload" — the backend
+text is generic boilerplate today, so it no longer masquerades as Pat's personalized ask; the real
+owner-instructions channel is the deferred bigger half). **FP-124** (the file-preserving Retry now
+renders on EVERY retryable failure — a network blip AND a rate-limit, not only rate-limit — and names
+the failed file so a multi-file dropper knows which one to re-send; `quota_exhausted` stays excluded).
+**FP-123** cluster (HEIC named in the formats copy; a 0-byte pick rejected client-side with clear copy
+via `minSize`; the dropzone disabled mid-upload so a double-tap can't duplicate; a real tab title; the
+rate-limit copy no longer invites a futile immediate retry). **FP-125** (the type-rejection copy names
+the accepted FORMATS instead of telling a WebP/GIF sender they didn't send "a photo"). **FP-130** (P1
+a11y — a polite sr-only live region announces the upload's in-flight and complete states, which the
+visual "Uploading…"/Received card never did; and the VendorPicker is now a real ARIA 1.2 combobox —
+`role=combobox/listbox/option`, `aria-activedescendant`, Arrow/Enter/Escape keyboard nav, a
+result-count live region — replacing the permanently-true bare `aria-expanded`; coarse-pointer retry
+target). **FP-131** (the instructions scroll-box is keyboard-reachable; reset-password wires error
+association on both password fields; forgot/reset move focus to the success/terminal card heading; the
+settings native time-zone select gets a 44px coarse-pointer touch target).
+
+**Effect on the score table:** Vendor portal (happy path was 7, edge states was 4) clears the P0
+dead-link misdirection (FP-120), the never-resolving "Processing…"/stuck-quota (FP-121), the
+fake-personalization card (FP-122), and the retry/format/empty-file edge cluster (FP-123/124/125) — so
+both portal rows should re-measure ~8. The portal & forms accessibility rows (FP-130/131) clear with
+the live regions, the real combobox, the error-association wiring, and the touch targets.
+**Deferred** (1, legitimate — needs backend design): the public portal upload route has no
+`Idempotency-Key` dedupe and the existing tenant-scoped `IIdempotencyService` can't be honored on an
+unauthenticated route, so a non-tenant-scoped idempotency story is its own decision (**#333**, `bug`,
+rolling epic #48); Batch G's dropzone-disable closes the realistic double-tap window in the meantime.
+FP-122's real owner-instructions channel (a backend data-model change) also stays out of scope.
+
+With Batch G merged, all seven #241 batches (A–G) are shipped; the closing per-page re-score table
+follows below.

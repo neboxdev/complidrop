@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -21,6 +21,12 @@ export default function ForgotPasswordForm() {
   const errId = useId();
   const [sent, setSent] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // FP-131/FP-036: when the form is replaced by the confirmation card, move focus to its heading
+  // so a screen-reader user learns the submit succeeded instead of being stranded on a removed form.
+  const sentHeadingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (sent) sentHeadingRef.current?.focus();
+  }, [sent]);
   const {
     register,
     handleSubmit,
@@ -46,7 +52,9 @@ export default function ForgotPasswordForm() {
     return (
       <Card className="border-sky-100 shadow-lg">
         <CardContent className="space-y-3 p-8 text-center">
-          <h1 className="text-xl font-semibold text-sky-900">Check your email</h1>
+          <h1 ref={sentHeadingRef} tabIndex={-1} className="text-xl font-semibold text-sky-900 focus:outline-none">
+            Check your email
+          </h1>
           <p className="text-sm text-slate-500">
             If that email is registered, we&apos;ve sent a link to reset your password. It expires in 45 minutes.
           </p>
