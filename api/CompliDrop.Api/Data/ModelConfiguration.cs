@@ -113,6 +113,22 @@ internal static class ModelConfiguration
                 .HasFilter("\"IsSample\" AND \"DeletedAt\" IS NULL")
                 .HasDatabaseName("IX_Documents_OrganizationId_SampleUnique");
 
+            // ExtractionWorker's claim/zombie-reclaim query (ExtractionWorker.ClaimSql) scans for the
+            // next processable document SYSTEM-WIDE — it has NO OrganizationId predicate (a single
+            // shared extraction queue across all tenants) — so none of the org-leading indexes above
+            // can serve it. Without a dedicated index it degrades to a full "Documents" sequential scan
+            // + sort on every 5-second poll, per worker instance, scaling with total table size rather
+            // than queue depth — and terminal rows are never deleted (ADR 0013), so the table only
+            // grows. A partial index on "CreatedAt" over just the in-flight statuses stays tiny
+            // (terminal rows excluded) and satisfies the `ORDER BY "CreatedAt" … LIMIT 1` as a forward
+            // index range scan. Covers both claim arms: the Pending claim and the stale-Processing
+            // zombie reclaim (the `ProcessingStartedAt < now() - interval '5 minutes'` predicate is a
+            // cheap residual filter once the index has narrowed to the handful of in-flight rows).
+            // (#243 concurrency-audit performance finding.)
+            e.HasIndex(d => d.CreatedAt)
+                .HasFilter("\"DeletedAt\" IS NULL AND \"ExtractionStatus\" IN ('Pending', 'Processing')")
+                .HasDatabaseName("IX_Documents_ExtractionQueue");
+
             e.HasOne(d => d.Organization).WithMany(o => o.Documents)
                 .HasForeignKey(d => d.OrganizationId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne(d => d.Vendor).WithMany(v => v.Documents)

@@ -309,7 +309,14 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             PostWithIdempotency(auth.Client, key),
             PostWithIdempotency(auth.Client, key));
 
-        responses.Should().OnlyContain(r => r.StatusCode == HttpStatusCode.Created);
+        // The BINDING assertion is the side-effect count below (exactly one Document). The status
+        // shape is left deliberately loose: #336 must still decide what the losing concurrent request
+        // returns (replay the winner's 201/200, or a 409 "in progress"), so pinning a specific code
+        // here would pre-judge that open contract and could fail this test for the wrong reason.
+        responses.Should().OnlyContain(r =>
+            r.StatusCode == HttpStatusCode.Created
+            || r.StatusCode == HttpStatusCode.OK
+            || r.StatusCode == HttpStatusCode.Conflict);
 
         await using var db = CreateSystemDb();
         (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId)).Should().Be(1);
