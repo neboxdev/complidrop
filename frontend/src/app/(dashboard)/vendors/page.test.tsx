@@ -127,6 +127,45 @@ describe("VendorsPage — sample badge (#238)", () => {
   });
 });
 
+describe("VendorsPage — dead contact email badge (#340)", () => {
+  it("badges a vendor whose contact email bounced / was marked as spam, leaving a deliverable one unbadged", async () => {
+    server.use(
+      http.get(url("/api/vendors"), () =>
+        jsonOk([
+          {
+            id: "v_bounced", name: "Bounce LLC", contactEmail: "dead@bounce.test",
+            contactPhone: null, category: null, complianceTemplateId: null, complianceTemplateName: null,
+            documentCount: 0, activePortalLinks: 0, isSample: false,
+            coverage: { status: "NoRequirements", missingTypes: [] }, contactEmailStatus: "bounced",
+          },
+          {
+            id: "v_spam", name: "Spam LLC", contactEmail: "spam@x.test",
+            contactPhone: null, category: null, complianceTemplateId: null, complianceTemplateName: null,
+            documentCount: 0, activePortalLinks: 0, isSample: false,
+            coverage: { status: "NoRequirements", missingTypes: [] }, contactEmailStatus: "complained",
+          },
+          {
+            id: "v_ok", name: "Fine LLC", contactEmail: "ok@x.test",
+            contactPhone: null, category: null, complianceTemplateId: null, complianceTemplateName: null,
+            documentCount: 0, activePortalLinks: 0, isSample: false,
+            coverage: { status: "NoRequirements", missingTypes: [] }, contactEmailStatus: null,
+          },
+        ]),
+      ),
+    );
+
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+
+    const bouncedRow = await screen.findByRole("row", { name: /Bounce LLC/i });
+    expect(within(bouncedRow).getByText("Bounced")).toBeInTheDocument();
+    const spamRow = screen.getByRole("row", { name: /Spam LLC/i });
+    expect(within(spamRow).getByText("Spam report")).toBeInTheDocument();
+    const okRow = screen.getByRole("row", { name: /Fine LLC/i });
+    expect(within(okRow).queryByText("Bounced")).toBeNull();
+    expect(within(okRow).queryByText("Spam report")).toBeNull();
+  });
+});
+
 describe("VendorsPage — state matrix (#36)", () => {
   it("loading: renders the loading row before the fetch resolves", () => {
     const settled = new Promise<void>(() => {});

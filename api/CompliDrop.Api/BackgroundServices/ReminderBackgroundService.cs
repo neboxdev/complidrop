@@ -187,6 +187,17 @@ public class ReminderBackgroundService(
                         .AnyAsync(s => s.OrganizationId == org.Id && s.HasVendorPortal, ct);
                     var vendorPortalUrls = new Dictionary<Guid, string?>();
 
+                    // #340: addresses this org has hard-bounced or had a spam complaint on — the engine must
+                    // not re-send to them (a known-dead/opted-out mailbox). Loaded once per org-tick and
+                    // checked per recipient below. Resend's account-level suppression backstops actual
+                    // delivery; this stops us even trying (no wasted send / log row) and is what surfaces the
+                    // dead address to the operator (the vendor badge + the feed event the webhook wrote).
+                    var suppressed = (await db.EmailSuppressions
+                            .Where(s => s.OrganizationId == org.Id)
+                            .Select(s => s.Email)
+                            .ToListAsync(ct))
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
                     async Task<string?> ResolveVendorPortalUrlAsync(Guid vendorId)
                     {
                         if (vendorPortalUrls.TryGetValue(vendorId, out var cached)) return cached;
@@ -328,6 +339,10 @@ public class ReminderBackgroundService(
                             foreach (var recipient in recipients)
                             {
                                 if (alreadyServed.Contains(recipient)) continue;
+                                // #340: never re-send to a hard-bounced / complained address. Skip silently
+                                // (no log row, no cost) — the dead address is already surfaced on the vendor
+                                // and the feed via the suppression the webhook recorded.
+                                if (suppressed.Contains(recipient)) continue;
 
                                 failedToday.TryGetValue(recipient, out var failedRow);
 

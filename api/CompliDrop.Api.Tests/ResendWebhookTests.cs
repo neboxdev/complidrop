@@ -57,6 +57,15 @@ public sealed class ResendWebhookTests(IntegrationTestFixture fixture) : Integra
 
     private static string DeliveredPayload(string messageId) => EventPayload("email.delivered", messageId);
 
+    // #340: a real Resend email.bounced carries data.bounce.type (Permanent | Transient | Undetermined).
+    private static string BouncedPayload(string messageId, string bounceType) => JsonSerializer.Serialize(new
+    {
+        type = "email.bounced",
+        data = new { email_id = messageId, bounce = new { type = bounceType } }
+    });
+
+    private static string ComplainedPayload(string messageId) => EventPayload("email.complained", messageId);
+
     /// <summary>Builds the three Svix headers for a payload, signed with the harness secret.</summary>
     private static (string id, string timestamp, string signature) Sign(string payload, DateTimeOffset? when = null)
     {
@@ -161,6 +170,115 @@ public sealed class ResendWebhookTests(IntegrationTestFixture fixture) : Integra
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         (await StatusOf(messageId)).Should().Be(expectedStatus);
+    }
+
+    // ───────── #340: bounce / complaint suppression ─────────
+
+    [Fact]
+    public async Task A_complaint_suppresses_the_address_and_writes_a_feed_event()
+    {
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var payload = ComplainedPayload(messageId);
+
+        (await PostWebhook(payload, Sign(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var sup = await db.EmailSuppressions.SingleAsync(s => s.Email == "vendor@example.com");
+        sup.Reason.Should().Be(EmailSuppressionReason.Complained);
+        (await db.AuditLogs.AnyAsync(a => a.Action == "reminder.recipient_suppressed" && a.OrganizationId == sup.OrganizationId))
+            .Should().BeTrue("a dead/opted-out address surfaces in the activity feed, not just on a ReminderLog row");
+    }
+
+    [Fact]
+    public async Task A_permanent_bounce_suppresses_the_address()
+    {
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var payload = BouncedPayload(messageId, "Permanent");
+
+        (await PostWebhook(payload, Sign(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var sup = await db.EmailSuppressions.SingleOrDefaultAsync(s => s.Email == "vendor@example.com");
+        sup.Should().NotBeNull();
+        sup!.Reason.Should().Be(EmailSuppressionReason.Bounced);
+    }
+
+    [Fact]
+    public async Task A_transient_bounce_records_the_status_but_does_not_suppress_the_address()
+    {
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var payload = BouncedPayload(messageId, "Transient");
+
+        (await PostWebhook(payload, Sign(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        (await db.EmailSuppressions.AnyAsync(s => s.Email == "vendor@example.com"))
+            .Should().BeFalse("a soft/transient bounce self-recovers — Resend retries it, no app-level suppression");
+        (await StatusOf(messageId)).Should().Be("bounced", "the ReminderLog still records the bounce status");
+    }
+
+    [Fact]
+    public async Task A_bounce_then_a_complaint_upgrades_the_reason_and_never_downgrades()
+    {
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var bounce = BouncedPayload(messageId, "Permanent");
+        (await PostWebhook(bounce, Sign(bounce))).StatusCode.Should().Be(HttpStatusCode.OK);
+        var complaint = ComplainedPayload(messageId);
+        (await PostWebhook(complaint, Sign(complaint))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var sups = await db.EmailSuppressions.Where(s => s.Email == "vendor@example.com").ToListAsync();
+        sups.Should().ContainSingle("one suppression per (org, email)");
+        sups[0].Reason.Should().Be(EmailSuppressionReason.Complained, "a complaint upgrades a prior bounce, never downgrades");
+    }
+
+    [Fact]
+    public async Task A_complaint_then_a_bounce_never_downgrades_the_reason()
+    {
+        // The harmful direction the `reason > existing.Reason` guard exists to block: a recorded complaint
+        // (permanent opt-out) must NOT be downgraded to a mere bounce by a later bounce event.
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var complaint = ComplainedPayload(messageId);
+        (await PostWebhook(complaint, Sign(complaint))).StatusCode.Should().Be(HttpStatusCode.OK);
+        var bounce = BouncedPayload(messageId, "Permanent");
+        (await PostWebhook(bounce, Sign(bounce))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var sup = await db.EmailSuppressions.SingleAsync(s => s.Email == "vendor@example.com");
+        sup.Reason.Should().Be(EmailSuppressionReason.Complained, "a later bounce must never downgrade a complaint");
+    }
+
+    [Fact]
+    public async Task Concurrent_identical_bounces_yield_one_suppression_and_one_feed_event()
+    {
+        // The (org, email) unique index + the concurrent-insert catch make suppression idempotent under
+        // webhook redelivery: two identical bounces racing produce exactly one suppression and one event.
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var payload = BouncedPayload(messageId, "Permanent");
+
+        var results = await Task.WhenAll(
+            PostWebhook(payload, Sign(payload)),
+            PostWebhook(payload, Sign(payload)));
+        results.Should().OnlyContain(r => r.StatusCode == HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        (await db.EmailSuppressions.CountAsync(s => s.Email == "vendor@example.com")).Should().Be(1);
+        (await db.AuditLogs.CountAsync(a => a.Action == "reminder.recipient_suppressed"))
+            .Should().Be(1, "the duplicate insert (and its would-be feed event) is rolled back");
+    }
+
+    [Fact]
+    public async Task A_bounce_for_an_unknown_message_id_writes_no_suppression()
+    {
+        // The suppression path no-ops when the message id matches no ReminderLog (distinct from the
+        // delivered-event no-op) — nothing to attribute the dead address to.
+        await SeedReminderLogAsync(status: "sent"); // a row exists, but for a DIFFERENT message id
+        var payload = BouncedPayload($"resend_unknown_{Guid.NewGuid():N}", "Permanent");
+
+        (await PostWebhook(payload, Sign(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        (await db.EmailSuppressions.AnyAsync()).Should().BeFalse("no ReminderLog matched, so nothing is suppressed");
     }
 
     [Fact]

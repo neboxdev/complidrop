@@ -51,6 +51,7 @@ const VENDOR_DETAIL = {
   createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-05-26T00:00:00Z",
   coverage: { status: "NoRequirements" as const, missingTypes: [] as string[] },
+  contactEmailStatus: null,
 };
 
 describe("VendorDetailPage — requirement contents at decision time (#239)", () => {
@@ -311,6 +312,23 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
     expect(
       screen.getByText(/add a contact email above and save to email the upload link/i),
     ).toBeInTheDocument();
+  });
+
+  it("warns that reminders are paused when the contact email was marked as spam (#340)", async () => {
+    mountWith({ ...VENDOR_DETAIL, contactEmailStatus: "complained" });
+    expect(await screen.findByText(/marked a reminder as spam/i)).toBeInTheDocument();
+    expect(screen.getByText(/reminders to it are paused/i)).toBeInTheDocument();
+  });
+
+  it("warns that reminders are paused when the contact email bounced (#340)", async () => {
+    mountWith({ ...VENDOR_DETAIL, contactEmailStatus: "bounced" });
+    expect(await screen.findByText(/is undeliverable/i)).toBeInTheDocument();
+  });
+
+  it("shows no email-status warning when the contact email is deliverable (#340)", async () => {
+    mountWith(VENDOR_DETAIL); // contactEmailStatus: null
+    await screen.findByRole("heading", { level: 1, name: /acme subcontractor/i });
+    expect(screen.queryByText(/reminders to it are paused/i)).toBeNull();
   });
 
   it("surfaces a friendly toast (no HTTP jargon) when emailing fails", async () => {

@@ -209,6 +209,15 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
               <VendorCoverageBadge coverage={vendor.coverage} />
             )}
           </div>
+          {/* #340: a dead/opted-out contact email surfaced front-and-center — reminders to it are paused,
+              so the operator knows the vendor isn't being chased and why. Update the email to resume. */}
+          {vendor.contactEmailStatus && (
+            <div role="alert" className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              {vendor.contactEmailStatus === "complained"
+                ? `${savedEmail || "This contact email"} marked a reminder as spam, so reminders to it are paused. Update the contact email to resume reminders.`
+                : `${savedEmail || "This contact email"} is undeliverable — it bounced, so reminders to it are paused. Update the contact email to resume reminders.`}
+            </div>
+          )}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <LabeledInput label="Name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
             <LabeledInput label="Contact email" value={form.contactEmail} onChange={(v) => setForm({ ...form, contactEmail: v })} />

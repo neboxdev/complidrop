@@ -202,7 +202,99 @@ public static class ReminderEndpoints
         await db.ReminderLogs
             .Where(l => l.ResendMessageId == messageId && !ignoreCurrent.Contains(l.Status))
             .ExecuteUpdateAsync(s => s.SetProperty(l => l.Status, status), ct);
+
+        // #340: a hard bounce or a complaint suppresses the address for this org so the reminder engine
+        // stops firing into a known-dead / opted-out mailbox, and the dead address surfaces to the operator
+        // (on the vendor + the activity feed) instead of being buried on this ReminderLog row. A complaint
+        // is an affirmative consent opt-out — always suppress; a bounce suppresses only when Resend
+        // classifies it Permanent (transient/undetermined bounces self-recover and are left to Resend's own
+        // retry). See ADR 0031.
+        if (status is ReminderLogStatus.Complained)
+            await RecordSuppressionAsync(db, messageId, EmailSuppressionReason.Complained, timeProvider, ct);
+        else if (status is ReminderLogStatus.Bounced && IsPermanentBounce(data))
+            await RecordSuppressionAsync(db, messageId, EmailSuppressionReason.Bounced, timeProvider, ct);
+
         return Results.Ok(new { data = (object?)null, error = (object?)null });
+    }
+
+    /// <summary>
+    /// True only when Resend classifies the bounce as <c>Permanent</c> (a hard bounce — the address is
+    /// durably undeliverable). Transient / Undetermined / absent classification returns false so we never
+    /// over-suppress an address that may still recover; those are left to Resend's own retry (#340).
+    /// </summary>
+    private static bool IsPermanentBounce(System.Text.Json.JsonElement data) =>
+        data.ValueKind == System.Text.Json.JsonValueKind.Object
+        && data.TryGetProperty("bounce", out var bounce)
+        && bounce.ValueKind == System.Text.Json.JsonValueKind.Object
+        && bounce.TryGetProperty("type", out var bounceType)
+        && bounceType.ValueKind == System.Text.Json.JsonValueKind.String
+        && string.Equals(bounceType.GetString(), "Permanent", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Upserts the per-(org, email) suppression for the address behind <paramref name="messageId"/>, and
+    /// on FIRST suppression writes a system "reminder.recipient_suppressed" audit/feed event. Never
+    /// downgrades (a complaint outranks a bounce). Idempotent under concurrent webhook redelivery via the
+    /// (OrganizationId, Email) unique index (#340).
+    /// </summary>
+    private static async Task RecordSuppressionAsync(
+        SystemDbContext db, string messageId, EmailSuppressionReason reason, TimeProvider timeProvider, CancellationToken ct)
+    {
+        var row = await db.ReminderLogs.AsNoTracking()
+            .Where(l => l.ResendMessageId == messageId)
+            .Select(l => new { l.Id, l.OrganizationId, l.RecipientEmail })
+            .FirstOrDefaultAsync(ct);
+        if (row is null || string.IsNullOrWhiteSpace(row.RecipientEmail)) return;
+
+        var email = row.RecipientEmail.Trim().ToLowerInvariant();
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+
+        var existing = await db.EmailSuppressions
+            .FirstOrDefaultAsync(s => s.OrganizationId == row.OrganizationId && s.Email == email, ct);
+        if (existing is not null)
+        {
+            // Never downgrade Complained → Bounced; refresh provenance + timestamp. No new feed event on a
+            // repeat/upgrade — the address is already known dead.
+            if (reason > existing.Reason) existing.Reason = reason;
+            existing.SourceReminderLogId = row.Id;
+            existing.UpdatedAt = now;
+            await db.SaveChangesAsync(ct);
+            return;
+        }
+
+        var suppression = new EmailSuppression
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = row.OrganizationId,
+            Email = email,
+            Reason = reason,
+            SourceReminderLogId = row.Id,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        db.EmailSuppressions.Add(suppression);
+        // Explicit system event (the webhook has no current user, so the interceptor can't audit it) so a
+        // dead address appears in the org's activity trail, not only on a ReminderLog row.
+        db.AuditLogs.Add(new AuditLog
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = row.OrganizationId,
+            UserId = null,
+            Action = "reminder.recipient_suppressed",
+            EntityType = nameof(EmailSuppression),
+            EntityId = suppression.Id,
+            AfterJson = System.Text.Json.JsonSerializer.Serialize(new { email, reason = reason.ToString() }),
+            CreatedAt = now,
+        });
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation })
+        {
+            // A concurrent webhook delivery inserted the same (org, email) first — the suppression goal is
+            // already met. Drop our duplicate (and its would-be feed event) and move on.
+            db.ChangeTracker.Clear();
+        }
     }
 
     /// <summary>

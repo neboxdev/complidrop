@@ -638,4 +638,41 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         (await ErrorCode(resp)).Should().Be("vendor.not_found");
         Email.Sends.Should().BeEmpty();
     }
+
+    // ───────── #340: a dead contact email surfaces on the vendor ─────────
+
+    [Fact]
+    public async Task A_suppressed_contact_email_surfaces_on_the_vendor_detail_and_list()
+    {
+        var auth = await RegisterAndLoginAsync();
+        // Vendor email stored as-typed (mixed case); the suppression stores lowercased — the match must be
+        // case-insensitive.
+        var vendorId = await CreateVendorAsync(auth.Client, "Acme", "Ops@Acme.test");
+        await using (var db = CreateSystemDb())
+        {
+            db.EmailSuppressions.Add(new EmailSuppression
+            {
+                Id = Guid.NewGuid(), OrganizationId = auth.OrgId, Email = "ops@acme.test",
+                Reason = EmailSuppressionReason.Complained, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var detail = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/vendors/{vendorId}");
+        detail.GetProperty("data").GetProperty("contactEmailStatus").GetString().Should().Be("complained");
+
+        var list = await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors");
+        var row = list.GetProperty("data").EnumerateArray().Single(v => v.GetProperty("id").GetGuid() == vendorId);
+        row.GetProperty("contactEmailStatus").GetString().Should().Be("complained");
+    }
+
+    [Fact]
+    public async Task A_deliverable_contact_email_has_a_null_status()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Acme", "ops@acme.test");
+
+        var detail = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/vendors/{vendorId}");
+        detail.GetProperty("data").GetProperty("contactEmailStatus").ValueKind.Should().Be(JsonValueKind.Null);
+    }
 }

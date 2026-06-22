@@ -50,6 +50,7 @@ const VENDORS: VendorSummary[] = [
     activePortalLinks: 1,
     isSample: false,
     coverage: { status: "Covered", missingTypes: [] },
+    contactEmailStatus: null,
   },
   {
     id: "v_beach_01",
@@ -63,6 +64,7 @@ const VENDORS: VendorSummary[] = [
     activePortalLinks: 0,
     isSample: false,
     coverage: { status: "NoRequirements", missingTypes: [] },
+    contactEmailStatus: null,
   },
 ];
 
@@ -89,6 +91,7 @@ const VENDOR_DETAIL: VendorDetail = {
   createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-05-26T00:00:00Z",
   coverage: { status: "Covered", missingTypes: [] },
+  contactEmailStatus: null,
 };
 
 describe("useVendors — list query (#36)", () => {

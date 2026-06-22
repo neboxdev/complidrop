@@ -60,6 +60,20 @@ public sealed class RecentActivityFeedTests(IntegrationTestFixture fixture) : In
     }
 
     [Fact]
+    public async Task A_recipient_suppression_event_surfaces_in_the_feed()
+    {
+        // #340 / ADR 0031: the dead-address suppression the Resend webhook records is a co-equal
+        // operator-visibility surface — it must be whitelisted so it actually appears in the feed (it
+        // renders the curated "Reminders paused — bad email" label, pinned by the display-labels tests).
+        var auth = await RegisterAndLoginAsync();
+        await SeedAsync(auth.OrgId, ("reminder.recipient_suppressed", nameof(EmailSuppression), Guid.NewGuid(), null, 5));
+
+        var actions = (await FeedAsync(auth)).Select(a => a.GetProperty("action").GetString()).ToArray();
+
+        actions.Should().Contain("reminder.recipient_suppressed", "a suppressed dead address must surface in the activity feed");
+    }
+
+    [Fact]
     public async Task Two_separate_requests_on_the_same_entity_are_not_collapsed()
     {
         // Two genuine updates to the same vendor (different requests → different CorrelationIds) are

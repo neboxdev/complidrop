@@ -92,6 +92,7 @@ public class DisplayLabelsTests
     [InlineData("vendorPortalLink.revoked")]
     [InlineData("complianceTemplate.created")]
     [InlineData("complianceRule.upserted")]
+    [InlineData("reminder.recipient_suppressed")]
     [InlineData("user.logged_in")]
     [InlineData("user.password_changed")]
     [InlineData("user.account_deleted")]

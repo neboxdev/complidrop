@@ -81,6 +81,7 @@ public static class DisplayLabels
             ["compliancerule.updated"] = "Requirement updated",
             ["compliancerule.upserted"] = "Requirement saved",
             ["compliancerule.deleted"] = "Requirement removed",
+            ["reminder.recipient_suppressed"] = "Reminders paused — bad email",
             ["user.registered"] = "Account created",
             ["user.logged_in"] = "Signed in",
             ["user.login_failed"] = "Sign-in failed",
