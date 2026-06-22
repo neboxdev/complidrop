@@ -135,6 +135,56 @@ public sealed class ReminderEndpointsTests(IntegrationTestFixture fixture) : Int
         recipients.Should().NotContain("secret@other.example", "org A must never see another org's reminder logs");
     }
 
+    [Fact]
+    public async Task History_names_the_document_vendor_and_rung_and_nulls_them_when_removed()
+    {
+        // FP-090: history must name WHICH document/vendor/rung — the correlated subqueries resolve
+        // those from the related rows, and fall back to null when the document is gone (soft-deleted).
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = Guid.NewGuid();
+        var docId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        Guid reminderId;
+        int daysBefore;
+        await using (var db = CreateSystemDb())
+        {
+            var reminder = await db.Reminders.FirstAsync(r => r.OrganizationId == auth.OrgId);
+            reminderId = reminder.Id;
+            daysBefore = reminder.DaysBefore;
+            db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = auth.OrgId, Name = "Acme Catering", CreatedAt = now, UpdatedAt = now });
+            db.Documents.Add(new Document
+            {
+                Id = docId, OrganizationId = auth.OrgId, VendorId = vendorId,
+                OriginalFileName = "acme-coi.pdf", BlobStorageUrl = "blob://x", FileSizeBytes = 1,
+                ContentType = "application/pdf", CreatedAt = now, UpdatedAt = now,
+            });
+            db.ReminderLogs.Add(new ReminderLog
+            {
+                Id = Guid.NewGuid(), OrganizationId = auth.OrgId, ReminderId = reminderId, DocumentId = docId,
+                RecipientEmail = "ops@acme.test", SentAt = now, SendDate = DateOnly.FromDateTime(now),
+                Status = ReminderLogStatus.Sent,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var row = (await Data(await auth.Client.GetAsync("/api/reminders/history"))).EnumerateArray().First();
+        row.GetProperty("documentName").GetString().Should().Be("acme-coi.pdf");
+        row.GetProperty("vendorName").GetString().Should().Be("Acme Catering");
+        row.GetProperty("daysBefore").GetInt32().Should().Be(daysBefore);
+
+        // Soft-delete the document → the name fields fall back to null, but the log row remains.
+        await using (var db = CreateSystemDb())
+        {
+            var doc = await db.Documents.SingleAsync(d => d.Id == docId);
+            doc.DeletedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+        }
+
+        var afterDelete = (await Data(await auth.Client.GetAsync("/api/reminders/history"))).EnumerateArray().First();
+        afterDelete.GetProperty("documentName").ValueKind.Should().Be(JsonValueKind.Null);
+        afterDelete.GetProperty("vendorName").ValueKind.Should().Be(JsonValueKind.Null);
+    }
+
     private static ReminderLog HistoryLog(Guid orgId, Guid reminderId, string recipient, DateTime sentAt) => new()
     {
         Id = Guid.NewGuid(),

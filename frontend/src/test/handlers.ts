@@ -51,4 +51,7 @@ export const defaultHandlers = [
   // defaults above — any test rendering that page would otherwise hit an unhandled
   // /api/documents. Empty page; tests asserting documents override.
   http.get(url("/api/documents"), () => jsonOk({ items: [], total: 0, page: 1, pageSize: 25 })),
+  // No-gaps baseline (#320). The reminders page fires /api/reminders/gaps for the FP-091 no-send
+  // disclosure; default to zero gaps (no banner) — tests asserting the disclosure override.
+  http.get(url("/api/reminders/gaps"), () => jsonOk({ vendorsWithoutEmail: 0, documentsWithoutExpiration: 0 })),
 ];

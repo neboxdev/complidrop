@@ -277,3 +277,72 @@ describe("RemindersPage — humanized delivery status (#188)", () => {
     expect(screen.queryByText("bounced")).toBeNull();
   });
 });
+
+describe("RemindersPage — Batch F (#320)", () => {
+  const ONE_REMINDER = [
+    { id: "r_01", daysBefore: 30, notifyInternalUser: true, notifyVendor: true, isActive: true, emailSubjectTemplate: null },
+  ];
+
+  it("FP-091: discloses vendors with no email + documents with no expiration date", async () => {
+    server.use(
+      http.get(url("/api/reminders"), () => jsonOk(ONE_REMINDER)),
+      http.get(url("/api/reminders/history"), () => jsonOk([])),
+      http.get(url("/api/reminders/gaps"), () => jsonOk({ vendorsWithoutEmail: 3, documentsWithoutExpiration: 2 })),
+    );
+    renderWithProviders(<RemindersPage />, { auth: authedMe });
+
+    expect(await screen.findByText(/3 vendors have no contact email/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 documents have no expiration date/i)).toBeInTheDocument();
+  });
+
+  it("FP-094: a history fetch error shows an error card + Retry, NOT 'No reminders sent yet'", async () => {
+    server.use(
+      http.get(url("/api/reminders"), () => jsonOk(ONE_REMINDER)),
+      http.get(url("/api/reminders/history"), () => jsonError("server.error", "history down", { status: 500 })),
+    );
+    renderWithProviders(<RemindersPage />, { auth: authedMe });
+
+    expect(await screen.findByText(/couldn't load recent deliveries/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+    expect(screen.queryByText(/no reminders sent yet/i)).toBeNull();
+  });
+
+  it("FP-094: a schedule fetch error shows an error card, not an empty (reminders-off-looking) table", async () => {
+    server.use(
+      http.get(url("/api/reminders"), () => jsonError("server.error", "schedule down", { status: 500 })),
+      http.get(url("/api/reminders/history"), () => jsonOk([])),
+    );
+    renderWithProviders(<RemindersPage />, { auth: authedMe });
+
+    expect(await screen.findByText(/couldn't load your reminder schedule/i)).toBeInTheDocument();
+  });
+
+  it("FP-090: history names the document (linked), vendor, and rung", async () => {
+    server.use(
+      http.get(url("/api/reminders"), () => jsonOk(ONE_REMINDER)),
+      http.get(url("/api/reminders/history"), () =>
+        jsonOk([
+          {
+            id: "h_01",
+            recipient: "ops@acme.test",
+            sentAt: "2026-06-20T08:00:00Z",
+            sendDate: "2026-06-20",
+            status: "delivered",
+            reminderId: "r_01",
+            documentId: "d_42",
+            documentName: "acme-coi.pdf",
+            vendorName: "Acme Catering",
+            daysBefore: 30,
+          },
+        ]),
+      ),
+    );
+    renderWithProviders(<RemindersPage />, { auth: authedMe });
+
+    const docLink = await screen.findByRole("link", { name: "acme-coi.pdf" });
+    expect(docLink).toHaveAttribute("href", "/documents/d_42");
+    expect(screen.getByText("Acme Catering")).toBeInTheDocument();
+    // Exact match: the schedule row says "30 days before a document expires" (substring collision).
+    expect(screen.getByText("30 days before")).toBeInTheDocument();
+  });
+});

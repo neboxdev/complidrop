@@ -17,6 +17,22 @@ const FALLBACK_ZONES = [
 ];
 
 /**
+ * Curated, friendly-labeled US-first zones for the top of the settings picker (#320 FP-112).
+ * The raw ~400-entry IANA wheel (starting "Africa/Abidjan") made finding your own zone the hard
+ * part; these cover the SMB beachhead. The full IANA list is still offered below as "All time zones".
+ */
+export const CURATED_TIMEZONES: ReadonlyArray<{ value: string; label: string }> = [
+  { value: "America/New_York", label: "Eastern Time — New York" },
+  { value: "America/Chicago", label: "Central Time — Chicago" },
+  { value: "America/Denver", label: "Mountain Time — Denver" },
+  { value: "America/Phoenix", label: "Mountain Time (no DST) — Phoenix" },
+  { value: "America/Los_Angeles", label: "Pacific Time — Los Angeles" },
+  { value: "America/Anchorage", label: "Alaska Time — Anchorage" },
+  { value: "Pacific/Honolulu", label: "Hawaii Time — Honolulu" },
+  { value: "UTC", label: "UTC" },
+];
+
+/**
  * The full IANA zone list for the `<select>`, with `current` guaranteed present
  * and first (so a saved-but-unusual zone always renders selected). Uses
  * `Intl.supportedValuesOf("timeZone")` — the canonical list — when available.

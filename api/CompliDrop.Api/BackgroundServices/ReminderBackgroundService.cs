@@ -1,10 +1,12 @@
 using System.Data;
 using System.Data.Common;
 using System.Net;
+using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace CompliDrop.Api.BackgroundServices;
 
@@ -62,6 +64,8 @@ public class ReminderBackgroundService(
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<SystemDbContext>();
         var email = scope.ServiceProvider.GetRequiredService<IEmailService>();
+        // Base URL for vendor upload links embedded in vendor reminder emails (#320 FP-092).
+        var frontend = scope.ServiceProvider.GetRequiredService<IOptions<FrontendSettings>>().Value;
 
         if (!email.IsEnabled)
         {
@@ -173,6 +177,51 @@ public class ReminderBackgroundService(
                         logger.LogWarning(
                             "Reminder tick: org {OrgId} has {Count} unverified internal recipient(s); reminders may dead-letter to {Emails}.",
                             org.Id, unverifiedInternal.Count, string.Join(", ", unverifiedInternal));
+
+                    // FP-092: a vendor reminder embeds the vendor's active upload link so the vendor can
+                    // actually act — they have no CompliDrop account to "log in" to. The link is a Pro
+                    // entitlement (#261), so only mint/embed when the org has the portal; resolve+mint
+                    // once per vendor per tick (cached) so a vendor with several expiring docs doesn't
+                    // spawn several links. A worker-minted link mirrors GeneratePortalLink's shape.
+                    var orgHasPortal = await db.Subscriptions
+                        .AnyAsync(s => s.OrganizationId == org.Id && s.HasVendorPortal, ct);
+                    var vendorPortalUrls = new Dictionary<Guid, string?>();
+
+                    async Task<string?> ResolveVendorPortalUrlAsync(Guid vendorId)
+                    {
+                        if (vendorPortalUrls.TryGetValue(vendorId, out var cached)) return cached;
+                        string? url = null;
+                        if (orgHasPortal)
+                        {
+                            var existing = await db.VendorPortalLinks
+                                .Where(l => l.VendorId == vendorId && l.IsActive)
+                                .OrderByDescending(l => l.CreatedAt)
+                                .Select(l => l.Token)
+                                .FirstOrDefaultAsync(ct);
+                            if (existing is not null)
+                            {
+                                url = PortalLink.Url(frontend, existing);
+                            }
+                            else
+                            {
+                                var token = PortalLink.GenerateToken();
+                                db.VendorPortalLinks.Add(new VendorPortalLink
+                                {
+                                    Id = Guid.NewGuid(),
+                                    VendorId = vendorId,
+                                    Token = token,
+                                    IsActive = true,
+                                    MaxUploads = PortalLink.DefaultMaxUploads,
+                                    UploadCount = 0,
+                                    CreatedAt = nowUtc,
+                                });
+                                await db.SaveChangesAsync(ct);
+                                url = PortalLink.Url(frontend, token);
+                            }
+                        }
+                        vendorPortalUrls[vendorId] = url;
+                        return url;
+                    }
 
                     foreach (var reminder in reminders)
                     {
@@ -286,7 +335,16 @@ public class ReminderBackgroundService(
                                 {
                                     var subject = reminder.EmailSubjectTemplate
                                                   ?? $"[{org.Name}] {doc.OriginalFileName} expires in {reminder.DaysBefore} days";
-                                    var body = BuildBody(org.Name, doc, reminder.DaysBefore);
+                                    // Recipient-aware body (FP-092): the vendor (no account) gets the
+                                    // upload-link copy; internal users get the log-in-and-review copy.
+                                    var isVendorRecipient =
+                                        reminder.NotifyVendor
+                                        && !string.IsNullOrWhiteSpace(doc.Vendor?.ContactEmail)
+                                        && string.Equals(recipient, doc.Vendor!.ContactEmail, StringComparison.OrdinalIgnoreCase);
+                                    var body = isVendorRecipient
+                                        ? BuildVendorBody(org.Name, doc, reminder.DaysBefore,
+                                            doc.VendorId is Guid vId ? await ResolveVendorPortalUrlAsync(vId) : null)
+                                        : BuildInternalBody(org.Name, doc, reminder.DaysBefore);
                                     var idempotencyKey = BuildSendIdempotencyKey(
                                         reminder.Id, doc.Id, sendDate, recipient, failedRow?.SentAt);
                                     var messageId = await email.SendAsync(recipient, subject, body, ct, idempotencyKey);
@@ -516,14 +574,16 @@ public class ReminderBackgroundService(
     /// Delegates to the shared <see cref="Services.TimeZones"/> policy (#262).</summary>
     private static TimeZoneInfo? TryFindTimeZone(string tz) => Services.TimeZones.TryFind(tz);
 
-    private static string BuildBody(string orgName, Document doc, int daysBefore)
+    // HTML-encode every caller-influenced value before interpolating into the email HTML. The org
+    // name is user-editable (#185) and file/vendor names come from uploads + vendor records; reminder
+    // emails reach vendors (outside the org's trust boundary), so an unescaped value is a stored
+    // HTML-injection sink. The portal URL is config BaseUrl + a base64url token (no HTML-significant
+    // chars), matching the auth/portal-invite email pattern.
+
+    /// <summary>The INTERNAL (team) reminder body — they have an account, so "review in CompliDrop".</summary>
+    private static string BuildInternalBody(string orgName, Document doc, int daysBefore)
     {
         var expiration = doc.ExpirationDate?.ToString("MMMM d, yyyy") ?? "an upcoming date";
-        // HTML-encode every caller-influenced value before interpolating into the
-        // email HTML. The org name is user-editable (#185) and the file/vendor
-        // names come from uploads + vendor records; reminder emails are delivered
-        // to vendors (outside the org's trust boundary), so an unescaped value
-        // would be a stored HTML-injection sink. Encode at the render sink.
         var vendor = WebUtility.HtmlEncode(doc.Vendor?.Name ?? "a vendor");
         var fileName = WebUtility.HtmlEncode(doc.OriginalFileName);
         var org = WebUtility.HtmlEncode(orgName);
@@ -532,9 +592,39 @@ public class ReminderBackgroundService(
               <h2 style="color: #0284c7;">Compliance reminder</h2>
               <p>Hi there,</p>
               <p>Your document <strong>{fileName}</strong> from <strong>{vendor}</strong> expires on <strong>{expiration}</strong> — that's {daysBefore} days from today.</p>
-              <p>Log in to {org} on CompliDrop to review and upload the renewal.</p>
-              <p style="color: #64748b; font-size: 12px;">Sent automatically by CompliDrop. You can adjust reminder cadence in Settings → Reminders.</p>
+              <p>Open {org} on CompliDrop to review it and collect the renewal.</p>
+              <p style="color: #64748b; font-size: 12px;">Sent automatically by CompliDrop. Manage reminders on the Reminders page.</p>
             </div>
             """;
     }
+
+    /// <summary>
+    /// The VENDOR reminder body (#320 FP-092). Vendors have NO account, so it never says "log in":
+    /// it embeds the secure upload link (no login needed) when the org has the portal, or — when it
+    /// doesn't — asks them to send the renewal to the org. Never the "Settings → Reminders" footer
+    /// (vendors have no app). <paramref name="portalUrl"/> is null when the org lacks the portal.
+    /// </summary>
+    private static string BuildVendorBody(string orgName, Document doc, int daysBefore, string? portalUrl)
+    {
+        var expiration = doc.ExpirationDate?.ToString("MMMM d, yyyy") ?? "an upcoming date";
+        var fileName = WebUtility.HtmlEncode(doc.OriginalFileName);
+        var org = WebUtility.HtmlEncode(orgName);
+        var action = portalUrl is not null
+            ? $"""
+              <p>Please upload the renewal — no account or password needed:</p>
+              <p><a href="{portalUrl}" style="display:inline-block;background:#0284c7;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;">Upload my renewal</a></p>
+              <p style="color: #64748b; font-size: 12px;">Or paste this link into your browser:<br>{portalUrl}</p>
+              """
+            : $"<p>Please send your renewal to {org} so they can keep your file current.</p>";
+        return $"""
+            <div style="font-family: system-ui, sans-serif; color: #0c4a6e;">
+              <h2 style="color: #0284c7;">Your document expires soon</h2>
+              <p>Hi there,</p>
+              <p>Your <strong>{fileName}</strong> on file with <strong>{org}</strong> expires on <strong>{expiration}</strong> — that's {daysBefore} days from today.</p>
+              {action}
+              <p style="color: #64748b; font-size: 12px;">Sent on behalf of {org} via CompliDrop.</p>
+            </div>
+            """;
+    }
+
 }

@@ -392,3 +392,32 @@ landed), the never-re-grades assignment (#257 landed), and the error-hangs-as-Lo
 (FP-083), the DeleteRule 500 (#269 landed), and the outage-as-"None yet" (FP-082), and
 should re-measure ~8. No deferrals this batch. The closing per-page re-score table lands
 once Batches F–G complete.
+
+### Batch F — reminders, export & settings (#320, merged 2026-06-22)
+
+Closed the reminders/export/settings cluster. **FP-092** (P0 — the reminder email is now
+recipient-aware: the VENDOR body, who has no account, embeds the active upload link — minted in the
+worker via a shared `PortalLink` helper when the org has the portal entitlement (#261), or falls
+back to "send your renewal to {org}" — and never says "Log in"; the internal body keeps the review
+copy; the bogus "Settings → Reminders" cadence footer is gone). **FP-090** (reminder history names
+the document — linked — plus vendor + rung, was just recipient/status). **FP-091, disclosure half**
+(a `/api/reminders/gaps` endpoint + banner surfacing vendors with no email and read-but-undated
+documents — the silent no-send paths; the send-semantics halves stay #270). **FP-093/094/095**
+("When" + "N days before a document expires" + an intro naming who's emailed; schedule & history
+loading/error branches so an outage no longer reads as "No reminders sent yet"; the deliveries table
+gets `overflow-x-auto`). **FP-101** (verified the export downloads already route through `api.getBlob`
+— #254's 401-refresh + friendly errors — and migrated the account-data export off its hand-rolled
+bare-fetch refresh too). **FP-102** (export default range uses LOCAL not UTC day; CSV literacy — Id
+last, `Status`→`ProcessingStatus`, Excel-parseable timestamp). **FP-112** (friendly US-first timezone
+picker — `<optgroup>` Common + All time zones, IANA values kept, the next-send preview retained).
+**FP-113** (password rules shown up front; "Export your data" moved out of the red Danger zone into
+its own section; readable AI-cost reassurance; over-limit + portal-off tile explanations).
+
+**Effect on the score table:** Reminders (was 5) clears the can't-name-the-document gate (FP-090),
+the silent no-send paths (FP-091 disclosure + #270's send-semantics, landed), and the toggle race
+(#264, landed) — and the P0 vendor-email lie (FP-092) is fixed — so it should re-measure ~8. Export
+(was 6) clears the "To" day exclusion (#262, landed) + the CSV-literacy gate (FP-102) and should
+re-measure ~8. Settings (was 6) clears the raw-IANA-wheel gate (FP-112) + the password-rules-post-hoc
+gate (FP-113) and should re-measure ~8. **Deferred** (a product/pricing decision, not polish): the
+FP-113 Founding "first 50" cap enforcement + Founding-vs-Annual pricing-tile logic (**#331**, `task`).
+The closing per-page re-score table lands once Batch G completes.

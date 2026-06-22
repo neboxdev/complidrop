@@ -239,22 +239,25 @@ public class ExportService(SystemDbContext db) : IExportService
         await using var csv = new CsvWriter(writer, config);
         var today = DateTime.UtcNow.Date; // date-overlay the verdict at generation time (#257)
 
-        csv.WriteField("Id");
+        // FP-102 CSV literacy: the human-meaningful columns lead; the raw GUID moves LAST (it was a
+        // confusing leading column); the extraction-state column is named "ProcessingStatus" so it
+        // isn't mistaken for the "Compliance" verdict next to it; timestamps are Excel-parseable.
         csv.WriteField("FileName");
         csv.WriteField("Vendor");
         csv.WriteField("Type");
-        csv.WriteField("Status");
+        csv.WriteField("ProcessingStatus");
         csv.WriteField("Compliance");
         csv.WriteField("EffectiveDate");
         csv.WriteField("ExpirationDate");
         csv.WriteField("GeneralLiabilityLimit");
         csv.WriteField("UploadedBy");
         csv.WriteField("CreatedAt");
+        csv.WriteField("Id");
         await csv.NextRecordAsync();
 
         foreach (var d in docs)
         {
-            csv.WriteField(d.Id);
+            // Column order MUST match the header above (FileName … CreatedAt, Id last).
             csv.WriteField(d.OriginalFileName);
             csv.WriteField(d.Vendor?.Name ?? "");
             csv.WriteField(DisplayLabels.DocumentType(d.DocumentType));
@@ -265,7 +268,10 @@ public class ExportService(SystemDbContext db) : IExportService
             csv.WriteField(d.ExpirationDate?.ToString("yyyy-MM-dd"));
             csv.WriteField(d.GeneralLiabilityLimit?.ToString(CultureInfo.InvariantCulture));
             csv.WriteField(d.UploadedBy ?? "");
-            csv.WriteField(d.CreatedAt.ToString("u"));
+            // "yyyy-MM-dd HH:mm:ss" (no trailing 'Z'), which Excel parses as a datetime — the old
+            // "u" format's trailing Z left it as opaque text (#320 FP-102).
+            csv.WriteField(d.CreatedAt.ToString("yyyy-MM-dd HH:mm:ss"));
+            csv.WriteField(d.Id);
             await csv.NextRecordAsync();
         }
         await writer.FlushAsync(ct);

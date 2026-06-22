@@ -16,6 +16,7 @@ public static class ReminderEndpoints
         group.MapGet("/", ListReminders);
         group.MapPut("/{id:guid}", UpdateReminder);
         group.MapGet("/history", ListHistory);
+        group.MapGet("/gaps", ListGaps);
 
         app.MapPost("/api/reminders/resend-webhook", ResendWebhook);
     }
@@ -78,10 +79,36 @@ public static class ReminderEndpoints
                 status = l.Status,
                 resendMessageId = l.ResendMessageId,
                 reminderId = l.ReminderId,
-                documentId = l.DocumentId
+                documentId = l.DocumentId,
+                // FP-090: name WHICH document (+ vendor + rung) the reminder was about — "ops@acme —
+                // Delivered" alone is unactionable. Correlated subqueries so it stays one query; a
+                // soft-deleted doc / removed reminder resolves to null and the UI shows a fallback.
+                documentName = db.Documents.Where(d => d.Id == l.DocumentId).Select(d => d.OriginalFileName).FirstOrDefault(),
+                vendorName = db.Documents.Where(d => d.Id == l.DocumentId).Select(d => d.Vendor!.Name).FirstOrDefault(),
+                daysBefore = db.Reminders.Where(r => r.Id == l.ReminderId).Select(r => (int?)r.DaysBefore).FirstOrDefault(),
             })
             .ToListAsync(ct);
         return Results.Ok(new { data = logs, error = (object?)null });
+    }
+
+    /// <summary>
+    /// Silent no-send disclosure (#320 FP-091): vendors with no contact email never receive a
+    /// reminder, and documents with no expiration date never match a reminder window — both happen
+    /// without a trace today. Surface the counts so Pat can see (and fix) the gap. Disclosure ONLY —
+    /// the catch-up/failed-retry send-semantics are #270. "Documents without an expiration date" is
+    /// scoped to fully-READ docs so an in-flight upload (no date yet) isn't miscounted as a gap.
+    /// </summary>
+    private static async Task<IResult> ListGaps(AppDbContext db, CancellationToken ct)
+    {
+        var vendorsWithoutEmail = await db.Vendors
+            .CountAsync(v => v.ContactEmail == null || v.ContactEmail == "", ct);
+        var documentsWithoutExpiration = await db.Documents
+            .CountAsync(d => d.ExpirationDate == null && d.ExtractionStatus == ExtractionStatus.Completed, ct);
+        return Results.Ok(new
+        {
+            data = new { vendorsWithoutEmail, documentsWithoutExpiration },
+            error = (object?)null,
+        });
     }
 
     private static async Task<IResult> ResendWebhook(

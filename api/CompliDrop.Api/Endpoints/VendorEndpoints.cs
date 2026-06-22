@@ -139,7 +139,7 @@ public static class VendorEndpoints
             v.ComplianceTemplateId,
             v.ComplianceTemplate?.Name,
             v.PortalLinks.OrderByDescending(l => l.CreatedAt).Select(l => new PortalLinkDto(
-                l.Id, l.Token, PortalUrl(frontend.Value, l.Token),
+                l.Id, l.Token, PortalLink.Url(frontend.Value, l.Token),
                 l.IsActive, l.UploadCount, l.MaxUploads, l.ExpiresAt, l.CreatedAt
             )).ToArray(),
             v.CreatedAt, v.UpdatedAt, coverage);
@@ -278,7 +278,7 @@ public static class VendorEndpoints
         // 404 they always did — the 403 only ever fires for the caller's own vendor.
         if (!await PortalIncludedInPlanAsync(db, ct)) return PortalNotIncluded();
 
-        var token = GenerateToken();
+        var token = PortalLink.GenerateToken();
         var link = new VendorPortalLink
         {
             Id = Guid.NewGuid(),
@@ -286,7 +286,7 @@ public static class VendorEndpoints
             Token = token,
             IsActive = true,
             CreatedAt = DateTime.UtcNow,
-            MaxUploads = 20,
+            MaxUploads = PortalLink.DefaultMaxUploads,
             UploadCount = 0
         };
         db.VendorPortalLinks.Add(link);
@@ -299,7 +299,7 @@ public static class VendorEndpoints
             {
                 id = link.Id,
                 token,
-                url = PortalUrl(frontend.Value, token),
+                url = PortalLink.Url(frontend.Value, token),
                 maxUploads = link.MaxUploads
             },
             error = (object?)null
@@ -368,7 +368,7 @@ public static class VendorEndpoints
             return Error(503, "email.not_configured",
                 "Email isn't set up yet, so we couldn't send it. Copy the link and send it to your vendor instead.");
 
-        var url = PortalUrl(frontend.Value, link.Token);
+        var url = PortalLink.Url(frontend.Value, link.Token);
         var orgName = vendor.Organization?.Name ?? "A business you work with";
         var subject = $"{orgName} needs your compliance documents";
         var body = BuildPortalInviteEmail(orgName, vendor.Name, url);
@@ -457,16 +457,6 @@ public static class VendorEndpoints
     private static IResult PortalNotIncluded() =>
         Error(403, "plan.portal_not_included",
             "Vendor upload links are a Pro feature. Upgrade your plan to collect documents straight from your vendors.");
-
-    private static string GenerateToken()
-    {
-        Span<byte> bytes = stackalloc byte[24];
-        System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
-        return Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_').TrimEnd('=');
-    }
-
-    private static string PortalUrl(FrontendSettings cfg, string token) =>
-        $"{cfg.BaseUrl.TrimEnd('/')}/portal/{token}";
 
     private static IResult Unauthorized() =>
         Results.Json(new { data = (object?)null, error = new { code = "auth.unauthorized", message = "Not authenticated." } }, statusCode: 401);
