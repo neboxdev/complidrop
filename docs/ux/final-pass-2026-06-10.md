@@ -245,3 +245,33 @@ page is *re-scored to 8 yet* — the pages whose contrast was a named gate still
 carry non-contrast gates from later batches (e.g. Landing still needs FP-012
 header overflow + FP-011/020 promise drift, both Batch B). Per-page numbers move
 when those land.
+
+### Batch B — truth, money-path & marketing (#316, merged 2026-06-22)
+
+Closed the trust/honesty cluster: **FP-031** (forgot-password no longer shows a
+false "Check your email" on a failed send; anti-enumeration preserved),
+**FP-032** (expired reset link → recovery card, not a vanishing toast),
+**FP-033** (login/register server errors persist inline; email-taken offers
+Sign-in + Reset exits), **FP-035** (shared live PasswordChecklist on reset),
+**FP-037** (verify-email drops "token" jargon; logged-out → "Sign in to
+continue"), **FP-013** (auth pages noindex + per-page titles), **FP-030**
+(paid-plan signups land on Settings billing with honest copy; full Stripe
+handoff stays #31), **FP-111** (billing card gates tiles on the loaded
+subscription — no "free + Upgrade" during an outage), **FP-114** (post-checkout
+polling instead of a URL-param toast), **FP-115** (Renews-on date; the
+renew-vs-end distinction needs `cancel_at_period_end` → #323), **FP-012**
+(marketing header fits <=390px), **FP-020** (truthful FAQ flagging copy),
+**FP-011** (reminder/venue copy aligned to reality), **FP-063** (a "not checked
+yet" doc explains the cause + fixes it inline — orphan vendor picker / set-up
+link; also lands FP-065's orphan picker), **FP-064** (manual entry replaces the
+Failed/zero-field dead end).
+
+**Effect on the score table:** Forgot/reset password (was 5) and Billing/upgrade
+(was 4) clear their named gates here — but Billing's remaining 8-bar also assumed
+#255 (landed) so it should re-measure ~8; Auth (Register/Login/Verify, was 7)
+clear their toast-only + jargon gates. Document detail (was 5) loses the
+"awaiting-review dead end" gate (FP-063) but still needs FP-062 "Read again"
+confirm + FP-065's vendor-name link (Batch C) to reach 8. **Deferred:** #323
+(cancel_at_period_end), #324 (the "Awaiting review"→"Not checked yet" relabel —
+the explainer makes the current label coherent meanwhile). Final per-page table
+lands with the closing re-score once Batches C–G complete.
