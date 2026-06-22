@@ -51,6 +51,39 @@ const ACTIVITY = [
   },
 ];
 
+describe("DashboardPage — clickable stat cards (#317 FP-041)", () => {
+  it("the Non-compliant card deep-links to the filtered documents view", async () => {
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+    const link = await screen.findByRole("link", { name: /non-compliant: 1\. view these documents/i });
+    expect(link).toHaveAttribute("href", "/documents?status=NonCompliant");
+  });
+
+  it("every stat card + the Expired/Next-30 buckets deep-link to the right filtered view", async () => {
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    // Wait for the stats to LOAD (cards fall back to 0 before the query resolves)
+    // by anchoring on a loaded value, then assert every deep-link href. A typo'd
+    // href would ship green without these.
+    expect(await screen.findByRole("link", { name: /compliant: 8\. view these documents/i })).toHaveAttribute("href", "/documents?status=Compliant");
+    expect(screen.getByRole("link", { name: /total documents: 12\. view these documents/i })).toHaveAttribute("href", "/documents");
+    expect(screen.getByRole("link", { name: /non-compliant: 1\. view these documents/i })).toHaveAttribute("href", "/documents?status=NonCompliant");
+    expect(screen.getByRole("link", { name: /expiring ≤ 30d: 2\. view these documents/i })).toHaveAttribute("href", "/documents?status=ExpiringSoon");
+    // Pipeline buckets (distinct aria-label format + the expiresWithin param path).
+    expect(screen.getByRole("link", { name: /expired: 1 documents\. view them/i })).toHaveAttribute("href", "/documents?status=Expired");
+    expect(screen.getByRole("link", { name: /next 30 days: 2 documents\. view them/i })).toHaveAttribute("href", "/documents?expiresWithin=30");
+  });
+});
+
 describe("DashboardPage — state matrix (#36)", () => {
   it("loading (no responses yet): page chrome renders, recent-activity shows the loading copy", () => {
     // Hold all three responses so the test observes the loading branch.

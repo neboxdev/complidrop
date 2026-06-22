@@ -30,6 +30,7 @@ import {
   dropFilesIn,
   makeFile,
   toastError,
+  toastInfo,
 } from "@/test";
 
 afterEach(() => {
@@ -43,6 +44,93 @@ afterEach(() => {
 // harness (see vitest.setup.ts + src/test/sonner.ts). The harness's
 // afterEach resets all toast spies between tests — no per-file
 // beforeEach mockClear needed (#74).
+
+describe("DocumentsPage — URL-addressable filters (#317 FP-041)", () => {
+  it("seeds the status filter from ?status= and sends it to the server", async () => {
+    let requestedUrl = "";
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        requestedUrl = request.url;
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, searchParams: { status: "NonCompliant" } });
+    await waitFor(() => expect(requestedUrl).toContain("status=NonCompliant"));
+  });
+
+  it("honors a ?vendor= deep link by filtering the list to that vendor (FP-071 pairing)", async () => {
+    let requestedUrl = "";
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        requestedUrl = request.url;
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, searchParams: { vendor: "v_123" } });
+    await waitFor(() => expect(requestedUrl).toContain("vendorId=v_123"));
+  });
+
+  it("mirrors the active filters back into the URL so the view is shareable", async () => {
+    const replaceSpy = vi.fn();
+    server.use(http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))));
+    renderWithProviders(<DocumentsPage />, {
+      auth: authedMe,
+      searchParams: { status: "Expired" },
+      router: { replace: replaceSpy },
+    });
+    await waitFor(() => expect(replaceSpy).toHaveBeenCalled());
+    expect(replaceSpy.mock.calls.some(([href]) => String(href).includes("status=Expired"))).toBe(true);
+  });
+
+  it("Clear drops a ?vendor= deep link from the URL (regression: Clear was a dead control)", async () => {
+    const replaceSpy = vi.fn();
+    server.use(http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))));
+    renderWithProviders(<DocumentsPage />, {
+      auth: authedMe,
+      searchParams: { vendor: "v1" },
+      router: { replace: replaceSpy },
+    });
+    // The Clear button is present because the vendor filter is active.
+    fireEvent.click(await screen.findByRole("button", { name: /^clear$/i }));
+    // The fix: Clear navigates to the bare path so the read-only vendor param goes too.
+    expect(replaceSpy).toHaveBeenCalledWith("/documents", { scroll: false });
+  });
+});
+
+describe("DocumentsPage — upload UX (#317 FP-054/FP-055)", () => {
+  it("FP-055: the staging copy is count-aware for a multi-file batch", async () => {
+    server.use(http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))));
+    const { container } = renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    dropFilesIn(container, [makeFile("a.pdf"), makeFile("b.pdf")]);
+    expect(await screen.findByText(/these 2 files are for/i)).toBeInTheDocument();
+  });
+
+  it("FP-054: warns that an active filter may be hiding a just-uploaded doc", async () => {
+    server.use(
+      http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))),
+      http.get(url("/api/vendors"), () => jsonOk([{ id: "v1", name: "Acme Catering" }])),
+      http.post(url("/api/documents/upload"), () =>
+        jsonOk({ id: "d1", originalFileName: "a.pdf", extractionStatus: "Pending" }),
+      ),
+    );
+    const { container } = renderWithProviders(<DocumentsPage />, {
+      auth: authedMe,
+      searchParams: { status: "Expired" },
+    });
+    await waitFor(() => expect(screen.getByText(/no documents match your filters/i)).toBeInTheDocument());
+
+    dropFilesIn(container, [makeFile("a.pdf")]);
+    fireEvent.click(await screen.findByRole("button", { name: "Acme Catering" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /upload 1 file/i })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole("button", { name: /upload 1 file/i }));
+
+    await waitFor(() =>
+      expect(toastInfo).toHaveBeenCalledWith(expect.stringMatching(/active filter may be hiding/i)),
+    );
+  });
+});
 
 describe("DocumentsPage — sample badge (#238)", () => {
   it("badges a sample document and leaves a normal one unbadged", async () => {
