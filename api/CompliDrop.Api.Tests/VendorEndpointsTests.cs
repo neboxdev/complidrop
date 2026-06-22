@@ -166,6 +166,12 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         (await UpdateVendorTemplateAsync(auth.Client, actionV, template)).EnsureSuccessStatusCode();
         await SeedVendorDocAsync(auth.OrgId, actionV, "coi", ComplianceStatus.NonCompliant);
 
+        // An ExpiringSoon doc is VALID coverage (renew-soon), not a hard fail — it must read Covered,
+        // matching every other surface (#319 FP-074 review): a valid-but-expiring vendor is not red.
+        var expiringV = await CreateVendorAsync(auth.Client, "Expiring LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, expiringV, template)).EnsureSuccessStatusCode();
+        await SeedVendorDocAsync(auth.OrgId, expiringV, "coi", ComplianceStatus.ExpiringSoon);
+
         var noReqV = await CreateVendorAsync(auth.Client, "NoReq LLC", null);
 
         var list = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
@@ -176,6 +182,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             .Select(e => e.GetString()).Should().Contain("insurance");
         CoverageFor(list, coveredV).GetProperty("status").GetString().Should().Be("Covered");
         CoverageFor(list, actionV).GetProperty("status").GetString().Should().Be("ActionNeeded");
+        CoverageFor(list, expiringV).GetProperty("status").GetString().Should().Be("Covered");
         CoverageFor(list, noReqV).GetProperty("status").GetString().Should().Be("NoRequirements");
     }
 

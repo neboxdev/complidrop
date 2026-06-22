@@ -43,6 +43,8 @@ describe("money helpers (#192)", () => {
     expect(parseMoneyInput("$2 m")).toBe(2_000_000);
     // No suffix still parses as whole dollars; a plain "$2" stays $2 (the form warns).
     expect(parseMoneyInput("$2")).toBe(2);
+    // Trailing junk after the unit does NOT read as millions — falls through to whole dollars.
+    expect(parseMoneyInput("2MB")).toBe(2);
   });
 
   it("flags a suspiciously-low coverage amount (#319 FP-084)", () => {

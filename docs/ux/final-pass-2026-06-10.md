@@ -356,3 +356,39 @@ rather than a one-screen edit (**#327**, `bug`); and the FP-049
 *entity-names-in-the-feed* half needs polymorphic name resolution
 (Document/Vendor/Template → name) in the RecentActivity query (**#328**, `task`).
 The closing per-page re-score table lands once Batches E–G complete.
+
+### Batch E — vendors & requirements (#319, merged 2026-06-22)
+
+Closed the vendors + requirements cluster. **FP-074** (the list + detail can finally
+answer "who is NOT ok?" — a per-vendor coverage rollup, **Covered / Action needed /
+Missing: <types> / no requirements**, computed server-side inside the single
+`ListVendors` projection (and `GetVendor`) via a shared `ComputeCoverage`, surfaced
+through a shared `VendorCoverageBadge`; "covered" uses the SAME effective-status overlay
+as every other surface — `ComplianceStatusDeriver`/ADR 0027 — so a valid-but-expiring
+vendor reads covered, not red). **FP-071** (the list "Docs N" deep-links to
+`/documents?vendor=`, and the detail page grows a "Documents from {vendor}" card).
+**FP-072** (vendor-detail load error → error card + Retry, was "Loading vendor…"
+forever). **FP-073** (Remove-vendor behind a `ConfirmDialog` + a duplicate-name hint on
+add). **FP-075/076** (add-vendor in a real `<form>` so Enter submits, `type="email"` +
+a light format check; per-row Copy hidden on revoked links + a try/catch; revoke now
+confirms + toasts; link rows `flex-wrap` at 375px). **FP-070** (the assign picker is
+`<optgroup>`'d into "Your checklists" / "Suggested by CompliDrop"). Requirements:
+**FP-081** (the same requirement can't be added twice — backend dedupe on
+`(template, documentType, fieldName, operator)` → 409, frontend grays the type out).
+**FP-083** (the compliance summary now reads PER document type — "Each certificate of
+insurance must prove… / Each license must prove…" — instead of the false "every
+document proves [all rules]" model). **FP-084** (money accepts k/m shorthand: "2M" →
+$2,000,000 not $2, plus a "that's only $X" nudge under $10k). **FP-085** (a
+Certifications catalog group gives the seeded cert rule a real home + Edit/re-add path).
+**FP-080** (tapping a checklist scrolls the editor into view on mobile), **FP-082** (rail
++ detail loading/error branches), **FP-086** (an "Assign to vendors" affordance after
+authoring + the vendor count interpolated into the delete-checklist confirm).
+
+**Effect on the score table:** Vendors list (was 6) clears its named gates — "can't
+answer who's not OK?" (FP-074) and "no delete" (FP-073) — and should re-measure ~8.
+Vendor detail (was 4) clears the duplicate-checklist-names dropdown (FP-070 + #251/#273
+landed), the never-re-grades assignment (#257 landed), and the error-hangs-as-Loading
+(FP-072), and should re-measure ~8. Requirements (was 5) clears the false-model summary
+(FP-083), the DeleteRule 500 (#269 landed), and the outage-as-"None yet" (FP-082), and
+should re-measure ~8. No deferrals this batch. The closing per-page re-score table lands
+once Batches F–G complete.

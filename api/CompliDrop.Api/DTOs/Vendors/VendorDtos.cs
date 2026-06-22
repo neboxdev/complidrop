@@ -20,8 +20,9 @@ public record VendorSummary(
 /// distinct document types its rules require (#319 FP-074). Computed server-side in the single
 /// ListVendors projection — never per-vendor round trips. <see cref="Status"/> is one of:
 /// <c>NoRequirements</c> (no checklist / no rules), <c>Missing</c> (a required document type has no
-/// document — <see cref="MissingTypes"/> names them), <c>ActionNeeded</c> (every required type has a
-/// document but at least one latest doc isn't currently compliant), or <c>Covered</c>.
+/// document — <see cref="MissingTypes"/> names them), <c>ActionNeeded</c> (a required type's latest
+/// doc is effectively Expired / NonCompliant / not-yet-graded), or <c>Covered</c> (every required
+/// type's latest doc is effectively Compliant or ExpiringSoon).
 /// </summary>
 public record VendorCoverage(string Status, string[] MissingTypes);
 

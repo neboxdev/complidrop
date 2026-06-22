@@ -70,8 +70,9 @@ export function formatMoney(amount: number): string {
 export function parseMoneyInput(raw: string): number | null {
   const trimmed = raw.trim().toLowerCase();
   if (trimmed === "") return null;
-  // Leading $/space/commas, a number (with optional decimal), then a k or m unit.
-  const suffix = trimmed.match(/^[\s$,]*([0-9]+(?:\.[0-9]+)?)\s*([km])/);
+  // Leading $/space/commas, a number (with optional decimal), then a k or m unit — END-ANCHORED so
+  // trailing junk ("2MB", "2m!!") doesn't get read as "$2,000,000"; it falls through to whole-dollars.
+  const suffix = trimmed.match(/^[\s$,]*([0-9]+(?:\.[0-9]+)?)\s*([km])\s*$/);
   if (suffix) {
     const base = Number.parseFloat(suffix[1]);
     if (!Number.isFinite(base)) return null;

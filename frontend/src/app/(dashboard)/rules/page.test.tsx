@@ -448,3 +448,66 @@ describe("RulesPage — delete-checklist confirm dialog (#189 carried over)", ()
     await waitFor(() => expect(deleteCalls).toBe(1));
   });
 });
+
+describe("RulesPage — FP-081 / FP-082 / FP-083 (Batch E #319)", () => {
+  it("grays out an already-added requirement type (FP-081)", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL)),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /add a requirement/i }));
+
+    // General liability is already on the checklist (DETAIL) → rendered grayed-out, not clickable.
+    expect(screen.getByText(/already added — edit it instead/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /general liability — minimum coverage/i }),
+    ).toBeNull();
+    // A type NOT yet added stays a clickable menu button.
+    expect(
+      screen.getByRole("button", { name: /auto liability — minimum coverage/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows an error card + Retry when the checklists fail to load, not 'None yet' (FP-082)", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () =>
+        jsonError("server.error", "Checklists down.", { status: 500 }),
+      ),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+
+    expect(await screen.findByText(/couldn't load checklists/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+    expect(screen.queryByText(/none yet/i)).toBeNull();
+  });
+
+  it("groups the live summary by document type (FP-083)", async () => {
+    const twoType = {
+      ...DETAIL,
+      rules: [
+        DETAIL.rules[0], // coi
+        {
+          id: "r_lic",
+          documentType: "license",
+          fieldName: "license_number",
+          operator: "required",
+          expectedValue: null,
+          errorMessage: null,
+          sortOrder: 2,
+        },
+      ],
+    };
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(twoType)),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    // One truthful sentence PER document type — the engine scopes rules per type.
+    expect(await screen.findByText(/each certificate of insurance must prove/i)).toBeInTheDocument();
+    expect(screen.getByText(/each license must prove/i)).toBeInTheDocument();
+  });
+});

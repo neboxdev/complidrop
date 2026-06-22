@@ -34,6 +34,54 @@ const VENDORS = [
   },
 ];
 
+describe("VendorsPage — coverage Status column (#319 FP-074)", () => {
+  it("renders the coverage verdict per row and deep-links the doc count", async () => {
+    server.use(
+      http.get(url("/api/vendors"), () =>
+        jsonOk([
+          {
+            id: "v_missing",
+            name: "Gaps LLC",
+            contactEmail: null,
+            contactPhone: null,
+            category: null,
+            complianceTemplateId: "t1",
+            complianceTemplateName: "Caterer",
+            documentCount: 2,
+            activePortalLinks: 0,
+            isSample: false,
+            coverage: { status: "Missing", missingTypes: ["insurance", "license"] },
+          },
+          {
+            id: "v_ok",
+            name: "Solid LLC",
+            contactEmail: null,
+            contactPhone: null,
+            category: null,
+            complianceTemplateId: "t1",
+            complianceTemplateName: "Caterer",
+            documentCount: 3,
+            activePortalLinks: 0,
+            isSample: false,
+            coverage: { status: "Covered", missingTypes: [] },
+          },
+        ]),
+      ),
+    );
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+
+    // The "who is NOT ok?" answer is right in the list (FP-074).
+    expect(await screen.findByText(/missing: insurance, license/i)).toBeInTheDocument();
+    expect(screen.getByText("Covered")).toBeInTheDocument();
+    // The doc count links to the vendor's filtered documents (FP-071).
+    const missingRow = screen.getByRole("row", { name: /gaps llc/i });
+    expect(within(missingRow).getByRole("link", { name: "2" })).toHaveAttribute(
+      "href",
+      "/documents?vendor=v_missing",
+    );
+  });
+});
+
 describe("VendorsPage — sample badge (#238)", () => {
   it("badges the sample vendor and leaves a normal one unbadged", async () => {
     server.use(

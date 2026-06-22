@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import VendorDetailPage from "./page";
 import type { VendorDetail } from "@/hooks/useVendors";
 import {
@@ -502,5 +502,33 @@ describe("VendorDetailPage — requirement UX + email link (#190)", () => {
     expect(toastArg).not.toMatch(/typeerror/i);
     expect(toastArg).toBe("Something went wrong. Try again.");
     expect(toastSuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe("VendorDetailPage — remove vendor (#319 FP-073)", () => {
+  it("removes the vendor behind a confirm, then routes back to /vendors", async () => {
+    let deleteCalls = 0;
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(VENDOR_DETAIL)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+      http.delete(url("/api/vendors/:id"), () => {
+        deleteCalls += 1;
+        return jsonOk({ id: "v_acme_01" });
+      }),
+    );
+    const pushSpy = vi.fn();
+    renderWithProviders(<VendorDetailPage />, {
+      auth: authedMe,
+      params: { id: "v_acme_01" },
+      router: { push: pushSpy },
+    });
+
+    // Open the confirm from the header, then confirm inside the dialog.
+    fireEvent.click(await screen.findByRole("button", { name: /remove vendor/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /remove vendor/i }));
+
+    await waitFor(() => expect(deleteCalls).toBe(1));
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledWith("/vendors"));
   });
 });

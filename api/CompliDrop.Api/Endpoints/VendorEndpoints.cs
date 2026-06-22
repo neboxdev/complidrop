@@ -63,10 +63,10 @@ public static class VendorEndpoints
 
     /// <summary>
     /// Rolls a vendor's documents up against the distinct document types its checklist requires
-    /// (#319 FP-074). A required type is "covered" when its LATEST document (most recent upload) is
-    /// stored Compliant AND not past its expiration; any required type with no document is "missing".
-    /// Reads stored ComplianceStatus + the date — the engine re-grades on rule/assignment change since
-    /// #257, so this rollup isn't built on stale verdicts.
+    /// (#319 FP-074). A required type is "covered" when its LATEST document's EFFECTIVE status
+    /// (ComplianceStatusDeriver, ADR 0027) is Compliant or ExpiringSoon; any required type with no
+    /// document is "missing"; otherwise (Expired / NonCompliant / not-yet-graded) it's action-needed.
+    /// The engine re-grades on rule/assignment change since #257, so this isn't built on stale verdicts.
     /// </summary>
     private static VendorCoverage ComputeCoverage(
         bool hasTemplate, List<string> requiredTypes, List<DocCoverageInfo> docs, DateTime today)
@@ -82,8 +82,12 @@ public static class VendorEndpoints
                 .OrderByDescending(d => d.CreatedAt)
                 .FirstOrDefault();
             if (latest is null) { missing.Add(ShortTypeLabel(type)); continue; }
-            var expired = latest.ExpirationDate is { } exp && exp < today;
-            var covered = latest.ComplianceStatus == Entities.ComplianceStatus.Compliant && !expired;
+            // Overlay the date the SAME way every other surface does (ComplianceStatusDeriver, ADR 0027)
+            // instead of hand-rolling a 4th copy of the window math. A valid-but-expiring-soon doc is
+            // benign coverage (ExpiringSoon), NOT a hard "action needed" — only Expired / NonCompliant /
+            // not-yet-graded (Pending) leave a required type uncovered.
+            var effective = ComplianceStatusDeriver.Effective(latest.ComplianceStatus, latest.ExpirationDate, today);
+            var covered = effective is Entities.ComplianceStatus.Compliant or Entities.ComplianceStatus.ExpiringSoon;
             if (!covered) actionNeeded = true;
         }
 
@@ -111,14 +115,23 @@ public static class VendorEndpoints
         var v = await db.Vendors
             .Include(v => v.ComplianceTemplate).ThenInclude(t => t!.Rules)
             .Include(v => v.PortalLinks)
-            .Include(v => v.Documents)
             .FirstOrDefaultAsync(v => v.Id == id, ct);
         if (v is null) return NotFound();
+
+        // Coverage docs are PROJECTED in a separate lightweight query rather than Include(Documents):
+        // a third sibling collection Include would cartesian-multiply the result AND re-ship each
+        // Document's fat ExtractionRawJson / ExtractionFields jsonb (the split-query convention in
+        // GetDocument / ComplianceCheckService). The projection ships only the four scalar fields the
+        // rollup needs. Tenant-scoped via the global Documents filter; VendorId scopes to this vendor.
+        var coverageDocs = await db.Documents
+            .Where(d => d.VendorId == id)
+            .Select(d => new DocCoverageInfo(d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.CreatedAt))
+            .ToListAsync(ct);
 
         var coverage = ComputeCoverage(
             v.ComplianceTemplateId is not null,
             v.ComplianceTemplate is null ? [] : v.ComplianceTemplate.Rules.Select(r => r.DocumentType).Distinct().ToList(),
-            v.Documents.Select(d => new DocCoverageInfo(d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.CreatedAt)).ToList(),
+            coverageDocs,
             DateTime.UtcNow.Date);
 
         var detail = new VendorDetail(
