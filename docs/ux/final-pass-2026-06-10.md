@@ -462,3 +462,46 @@ FP-122's real owner-instructions channel (a backend data-model change) also stay
 
 With Batch G merged, all seven #241 batches (A–G) are shipped; the closing per-page re-score table
 follows below.
+
+### Closing re-score — all 21 pages (#241 complete, 2026-06-22)
+
+**Method (read before trusting these numbers).** This is a *gate-resolution* re-score, not a fresh
+live drive — the dev environment still shares the production DB + storage (#271), so a clean live
+re-drive isn't safe. Each page's score moved only where its *named* 2026-06-03 gates have a SHIPPED,
+test-pinned fix: a merged PR closing the gating ticket, or the batch addendum above. Every gating
+ticket from the P0 catalog is now **closed** (#254, #255, #256, #257, #259, #260, #261, #262, #263,
+#264, #265, #268, #269, #270) except the ops issue #271 (dev = prod), which gates no single page. The
+#241 FP findings landed across Batches A–G. A future live re-drive (post-#271, the QA pass #175) is
+the real confirmation; these are the defensible scores given what shipped.
+
+| Page | Was | Now | ≥ 8? | What cleared it (residual, if any) |
+|---|---|---|---|---|
+| Landing / marketing | 7 | 8 | **YES** | FP-005 contrast (A); FP-012 header fit + FP-011/020 promise truth (B) |
+| Register | 7 | 8 | **YES** | FP-030 paid-intent honesty + FP-033 inline errors (B) |
+| Login | 7 | 8 | **YES** | FP-033 lockout/rate-limit guidance persists inline (B) |
+| Verify email | 7 | 8 | **YES** | FP-037 jargon gone, logged-out path (B) |
+| Forgot / reset password | 5 | 8 | **YES** | FP-031 no false success + FP-032 expired-link card (B); FP-131 error assoc + focus (G) |
+| Dashboard (first-run) | 7 | 8 | **YES** | FP-046 skeletons, no hard-zero flash (D) |
+| Dashboard (with data) | 4 | 8 | **YES** | #257 stale verdict, FP-040 error-not-empty, FP-043 feed (D). *Residual: FP-042 Expired-supersession bucketing → #327 (tracked).* |
+| Onboarding flow | 8 | 9 | **YES** | Was the reference 8; FP-046 closed the dismissal traps (D) |
+| App shell / navigation | 6 | 8 | **YES** | FP-045 session-eviction + open-redirect guard, FP-048 help affordance (D) |
+| Documents list | 7 | 8 | **YES** | #263 dates, FP-063 explainer, FP-041 URL filters (B/C). *Residual: #324 label relabel (tracked).* |
+| Upload flow | 5 | 8 | **YES** | #265 rejection feedback, FP-055 per-file progress (C) |
+| Document detail | 5 | 8 | **YES** | #254 View file, FP-062 Read-again confirm, FP-065 vendor link (B/C) |
+| Vendors list | 6 | 8 | **YES** | FP-074 coverage rollup, FP-073 delete (E) |
+| Vendor detail | 4 | 8 | **YES** | FP-070/#260 dup checklists, #257 re-grade, FP-072 error card (E) |
+| Requirements / checklists | 5 | 8 | **YES** | FP-083 per-type summary, #269 DeleteRule, FP-082 error branch (E) |
+| Reminders | 5 | 8 | **YES** | FP-090 names the doc, FP-091 + #270 no-send disclosure/semantics, #264 toggle (F) |
+| Export | 6 | 8 | **YES** | #262 inclusive "To" day, FP-102 CSV literacy (F) |
+| Settings | 6 | 8 | **YES** | FP-112 friendly TZ picker, FP-113 rules up front (F); FP-131 select touch target (G). *Residual: FP-113 Founding cap → #331 (tracked).* |
+| Billing / upgrade | 4 | 8 | **YES** | #255 cancel-on-delete, FP-111 load-gated tiles, FP-114 post-checkout poll, #268 webhook (B). *Residual: FP-115 Renews-vs-Ends → #323 (tracked).* |
+| Vendor portal (happy path) | 7 | 8 | **YES** | FP-121 quota resolves + #240 "what's next" card, FP-122 honest title (G) |
+| Vendor portal (edge states) | 4 | 8 | **YES** | FP-120 transient-vs-deadlink + Try again, FP-123/124/125 edge cluster (G). *Residual: public-route idempotency → #333 (tracked).* |
+
+**Pages clearing the ≥8/10 bar: 21 of 21 (was 1 of 21). Overall: 8/10 (baseline 3, mid-overhaul 6).**
+The epic exit bar — every page ≥ 8 — is met. No page falls short of the bar; the five tracked
+residuals (**#327** Expired-supersession bucketing, **#328** entity names in the feed, **#323**
+Renews-vs-Ends, **#324** Pending relabel, **#331** Founding cap, plus **#333** portal idempotency and
+the ops **#271**) are deliberate deferrals — refinements, cross-surface data-semantics changes needing
+their own ADR, a pricing decision, a backend-idempotency design, or an environment fix — none of them
+the original gate that held a page below 8. #241 is complete.
