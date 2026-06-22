@@ -235,7 +235,17 @@ public class ExportService(SystemDbContext db) : IExportService
 
         await using var ms = new MemoryStream();
         await using var writer = new StreamWriter(ms, leaveOpen: true);
-        var config = new CsvConfiguration(CultureInfo.InvariantCulture) { HasHeaderRecord = true };
+        var config = new CsvConfiguration(CultureInfo.InvariantCulture)
+        {
+            HasHeaderRecord = true,
+            // Neutralize spreadsheet formula injection (#246 review — security). FileName / Vendor /
+            // UploadedBy are user- and VENDOR-controlled (the PUBLIC portal stores the raw uploaded
+            // file name), so a value beginning =, +, -, @, TAB or CR would execute as a formula when
+            // the org opens the export in Excel/Sheets — a stored injection across the vendor→customer
+            // trust boundary. Escape prefixes CsvHelper's injection-escape character so the cell renders
+            // as literal text. (CsvHelper defaults InjectionOptions to None.)
+            InjectionOptions = InjectionOptions.Escape,
+        };
         await using var csv = new CsvWriter(writer, config);
         var today = DateTime.UtcNow.Date; // date-overlay the verdict at generation time (#257)
 
