@@ -9,10 +9,11 @@ gets a written verdict — a disproof (SAFE) citing the exact code path, or a fi
 
 | # | Class | Verdict | Evidence / ticket |
 |---|---|---|---|
-| 1 | Stripe event ordering (updated-before-completed; retries reorder) | SAFE | `IsStaleEvent` fence on `Subscription.LastStripeEventAt` skips events created before the newest applied; checkout fetches LIVE Stripe truth to block resurrection (ADR 0023, #275) |
+| 1 | Stripe event ordering (updated-before-completed; retries reorder) | SAFE (for retry-reorder) | `IsStaleEvent` fence on `Subscription.LastStripeEventAt` skips events created before the newest applied; checkout fetches LIVE Stripe truth to block resurrection (ADR 0023, #275). The fence's read-check-write concurrent-interleave residual (ADR 0023 §Negative) is a multi-instance concern in the #243 concurrency lane, not the retry-reorder this class asks about |
 | 2 | Stripe dedupe transactionality (crash between handler & dedupe) | SAFE | at-least-once + idempotent upsert handlers (ADR 0020): dedupe (`ProcessedStripeEvent`) recorded AFTER the handler; the crash window re-applies benignly; concurrent same-id 23505 absorbed |
-| 3 | Subscription lapse behavior (terminal payment failure) | SAFE / intended | grace during Stripe dunning (`past_due`/`unpaid` keep Pro), drop to free on `subscription.deleted` (portal off, cap 5); entitlements gate on flags, fail-closed on missing row — **written down in ADR 0024** + `FreePlanFenceTests` |
-| 4 | Resend bounce/complaint suppression | **GAP → [#340](https://github.com/neboxdev/complidrop/issues/340)** | the mark lands only on the per-send `ReminderLog` row; no address-level suppression, so the worker keeps sending to a dead vendor address on future cycles, with no operator visibility. Delivery backstopped only by Resend's own suppression |
+| 3 | Subscription lapse behavior (terminal payment failure) | SAFE / intended | grace during Stripe dunning (`past_due`/`unpaid` keep Pro), drop to free on `subscription.deleted` (portal off, cap 5); entitlements gate on flags, fail-closed on missing row — **written down in ADR 0024** + `FreePlanFenceTests`. A checkout completing on a non-terminal `incomplete`/`past_due` live status keeps the optimistic paid grant and converges via later subscription.* events |
+| 4 | Resend bounce/complaint suppression | **GAP → [#340](https://github.com/neboxdev/complidrop/issues/340)** | the mark lands only on the per-send `ReminderLog` row; no address-level suppression, so the worker keeps sending to a dead vendor address on future cycles, no operator visibility. Bounce = deliverability (Resend backstops); **complaint = a CAN-SPAM/consent opt-out and the higher-priority half** |
+| 4b | Reminder send — outbound failure mid-batch (does retry duplicate the already-sent portion?) | SAFE | per-recipient `ReminderLog` rows + the `alreadyServed` (non-`Failed`) skip mean an already-accepted recipient is not re-sent on a later tick; the sole crash-after-accept-before-commit window is deduped server-side by the deterministic Resend `Idempotency-Key` (ADR 0025) |
 | 5 | Resend delivery-status webhook (Svix, out-of-order/redelivery) | SAFE | `ReminderStatusPrecedence` atomic conditional `ExecuteUpdate` (negative-wins, no-rollback, idempotent under redelivery, race-free via Read-Committed re-evaluation) |
 | 6 | Extraction provider failures (5xx/timeout/safety-block/malformed JSON) | SAFE | deterministic failures (`MAX_TOKENS`, content-block) → `NonRetryableExtractionException` (fail fast); transient → bounded retries (`MaxAttempts=5`); never stuck `Processing` (per-attempt timeout + zombie reclaim + `MaxClaims`, #259/#243); terminal `Failed` visible |
 | 7 | Azure Blob consistency (orphan blob / row-without-blob) | SAFE / acceptable | the dangerous inverse (row without blob) cannot occur — the row is added only after a successful upload; a rare post-upload `SaveChanges` failure leaves a harmless orphan blob (no dangling reference) |
@@ -44,7 +45,19 @@ order/idempotency suites, `ReminderStatusPrecedence` exhaustive cross-check, `Bl
   "stale checkout retry resurrects a canceled sub" side door. Backfills identity links (`??=`) even on a
   stale checkout so later `customer.subscription.*` events can still resolve the row. Ties (same-second
   `created`) re-apply by design so the crash-window re-delivery and a same-second checkout+created pair
-  both land. **SAFE.**
+  both land. **SAFE** for the at-least-once retry-reorder this class asks about — the fence is a
+  read-check-write with no row lock, so a *concurrent* interleave of two different same-subscription
+  events can bypass it (ADR 0023 §Negative records this accepted residual), which is a multi-instance
+  concern in the #243 concurrency lane, not retry-reordering.
+
+A checkout whose live status is **non-terminal but not `active`** — `incomplete` (initial invoice still
+settling: SCA/3DS pending or charge uncaptured) or `past_due` — falls through the `canceled`/`incomplete_expired`
+guard into the optimistic grant: it records the real status and keeps the paid entitlement (`Plan=pro`,
+`DocumentLimit=null`, `HasVendorPortal=true`), relying on Stripe's subsequent `subscription.*` events to
+converge (an `incomplete` that never settles auto-expires to `incomplete_expired` within ~23h, which the
+terminal branch then demotes). Intended optimistic-grant policy, consistent with the `BillingEndpoints`
+409 re-checkout guard's treatment of `incomplete`; pinned by `StripeServiceCheckoutLiveStateTests`
+(`incomplete` + `past_due` non-terminal fixtures).
 
 ## 3. Subscription lapse behavior
 
@@ -70,6 +83,22 @@ expires uncollected. **Filed as [#340](https://github.com/neboxdev/complidrop/is
 deferred: app-level suppression + operator visibility is a feature needing product/compliance decisions
 (bounce vs complaint permanence, scope, where to surface) — its own `/start` ticket, with the proving
 test (a bounced recipient is not re-sent next tick) landing alongside the fix.
+
+The two negatives are NOT equivalent and #340 must treat them separately: a **hard bounce** is a
+*deliverability* signal (Resend's own suppression backstops actual delivery; the app harm is the
+missing operator visibility), whereas a **complaint** is an affirmative *consent opt-out* — continuing
+to send to a spam-complainer is a CAN-SPAM / sender-reputation hazard amplified by the shared sending
+domain, and is the higher-priority half. The eventual fix should treat `complained` as immediate,
+permanent, address-level suppression rather than lumping it with bounce backoff.
+
+**Outbound failure mid-batch (a distinct, SAFE question):** if a send throws partway through a tick's
+recipient loop, retry does NOT duplicate the already-sent portion. Each recipient gets its own
+`ReminderLog` row, and the next qualifying tick rebuilds `alreadyServed` from the non-`Failed` rows and
+skips them — so an already-accepted recipient is never re-sent. The only double-send window (Resend
+accepted the mail but the per-doc `SaveChangesAsync` crashed before committing the row) is closed by the
+deterministic Resend `Idempotency-Key` (`BuildSendIdempotencyKey`, ADR 0025), which dedupes the
+re-attempt server-side; the #243 concurrency audit §2 independently covers the same crash-before-commit
+seam. SAFE.
 
 ## 5. Resend delivery-status webhook (Svix)
 
@@ -127,3 +156,16 @@ idempotency + lifecycle tests (ADR 0020/0023, `FreePlanFenceTests`), `ReminderSt
 exhaustive `ShouldApply` ↔ `CurrentStatusesToIgnore` cross-check + the signed-webhook tests,
 `BlobStorageServiceTests` (fail-fast + 503 mapping + retry-after-failure), and `ExtractionWorkerTests`
 (#259 non-retryable + timeout + cost-ceiling + terminal-status paths).
+
+Three guards added during the careful-review pass to pin SAFE verdicts that were credited in code but
+not directly asserted:
+- `StripeWebhookTests.Dunning_state_event_preserves_paid_entitlements` — pins the §3 grace half: a
+  `past_due` `customer.subscription.updated` records the status but leaves `HasVendorPortal`/`DocumentLimit`
+  untouched (a regression zeroing entitlements mid-dunning would otherwise pass — the existing state-event
+  test asserts only Status/Plan).
+- `StripeWebhookTests.Concurrent_same_event_id_is_recorded_once` — fires two identical signed deliveries
+  via `Task.WhenAll`, asserts both 200 and `ProcessedStripeEvents` count == 1 (exercises the §2
+  concurrent-dedupe contract / `23505` catch the audit credits).
+- `StripeServiceCheckoutLiveStateTests.Checkout_with_an_incomplete_live_status_keeps_the_optimistic_paid_grant`
+  — pins the §1/§3 `incomplete` non-terminal optimistic grant (the prior fixtures used only `active` and
+  `past_due`).
