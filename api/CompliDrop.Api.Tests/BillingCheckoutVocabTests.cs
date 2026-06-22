@@ -199,6 +199,30 @@ public sealed class BillingCheckoutVocabTests(IntegrationTestFixture fixture) : 
         FakeStripe.LastCheckout.Should().BeNull();
     }
 
+    [Fact]
+    public async Task Concurrent_same_idempotency_key_commits_one_record_and_both_get_a_session_url()
+    {
+        // #336 co-commit on the checkout path: two in-flight same-key checkouts each create a Stripe
+        // session (≤2, harmless per ADR 0029), but only one IdempotencyRecord commit wins; the loser
+        // catches the unique violation and replays the winner's sessionUrl. Pins the new catch-and-replay
+        // block (no concurrent billing coverage existed before).
+        var auth = await RegisterAndLoginAsync();
+        var key = $"ikey_{Guid.NewGuid():N}";
+
+        var results = await Task.WhenAll(
+            PostCheckoutAsync(auth.Client, "pro", key),
+            PostCheckoutAsync(auth.Client, "pro", key));
+
+        results.Should().OnlyContain(r => r.Response.StatusCode == HttpStatusCode.OK);
+        foreach (var (_, body) in results)
+            SessionUrl(body).Should().NotBeNullOrWhiteSpace();
+
+        // Exactly one dedupe record committed — the unique index serialized the racers.
+        await using var db = CreateSystemDb();
+        (await db.IdempotencyRecords.CountAsync(i => i.OrganizationId == auth.OrgId && i.Key == key))
+            .Should().Be(1);
+    }
+
     // ───────── already-subscribed guard (#255) ─────────
 
     /// <summary>Flips the org's subscription to a live Stripe-linked state, as the

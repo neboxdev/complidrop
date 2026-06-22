@@ -293,13 +293,13 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId)).Should().Be(1);
     }
 
-    // Parked repro for the #243 concurrency-audit finding (filed as #336). The current
-    // IIdempotencyService is check-then-store: two CONCURRENT same-key uploads both miss
-    // TryGetAsync and each create a Document. This asserts the post-fix contract (insert-first
-    // reservation → exactly one doc, the loser replays the winner), so it stays Skip until #336
-    // lands — at which point it becomes the proving regression test. Sequential replay is already
-    // guarded above by Same_idempotency_key_replays_without_creating_a_duplicate.
-    [Fact(Skip = "Blocked on #336 (idempotency insert-first reservation); see docs/audits/concurrency-2026-06-22.md")]
+    // The #336 proving regression test (was parked under the #243 audit). The old check-then-store let
+    // two CONCURRENT same-key uploads both miss TryGetAsync and each create a Document. The insert-first
+    // co-commit (the dedupe record shares the Document's transaction, guarded by the (orgId, key) unique
+    // index) makes exactly one commit win; the loser catches the unique violation and REPLAYS the winner
+    // (ADR 0029). So both racing requests return the winner's 201 with the SAME document id, and exactly
+    // one Document lands. Sequential replay is guarded by Same_idempotency_key_replays_without_creating_a_duplicate.
+    [Fact]
     public async Task Concurrent_same_idempotency_key_creates_only_one_document()
     {
         var auth = await RegisterAndLoginAsync();
@@ -309,17 +309,92 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             PostWithIdempotency(auth.Client, key),
             PostWithIdempotency(auth.Client, key));
 
-        // The BINDING assertion is the side-effect count below (exactly one Document). The status
-        // shape is left deliberately loose: #336 must still decide what the losing concurrent request
-        // returns (replay the winner's 201/200, or a 409 "in progress"), so pinning a specific code
-        // here would pre-judge that open contract and could fail this test for the wrong reason.
-        responses.Should().OnlyContain(r =>
-            r.StatusCode == HttpStatusCode.Created
-            || r.StatusCode == HttpStatusCode.OK
-            || r.StatusCode == HttpStatusCode.Conflict);
+        // Decided loser contract (ADR 0029): replay the winner — the unique-violation conflict proves the
+        // winner already committed, so its response is readable immediately, no 409 wait. Both 201, same id.
+        responses.Should().OnlyContain(r => r.StatusCode == HttpStatusCode.Created);
+        var ids = await Task.WhenAll(responses.Select(UploadedId));
+        ids.Should().OnlyContain(id => id == ids[0], "both racers resolve to the single winning document");
 
         await using var db = CreateSystemDb();
         (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId)).Should().Be(1);
+
+        // The loser rolled its orphaned blob back (it uploaded before the SaveChanges conflict), so exactly
+        // one blob — the winner's — survives. Pins the TryDeleteBlobAsync cleanup on the lost-race path.
+        var blobs = (FakeBlobStorageService)Fixture.Factory.Services.GetRequiredService<IBlobStorageService>();
+        blobs.BlobCount.Should().Be(1, "the losing racer cleans up the blob it uploaded before losing");
+    }
+
+    [Fact]
+    public async Task Expired_idempotency_record_still_replays_rather_than_creating_a_duplicate()
+    {
+        // ADR 0029: a committed record is a PERMANENT claim — TryGetAsync no longer filters by ExpiresAt,
+        // so even a past-TTL record replays (single-use keys make "replay forever" safe, and it keeps the
+        // (orgId,key) unique index an airtight backstop with no "present but ignored" rows). Pins that the
+        // expiry filter stays dropped: re-introducing it would re-open the create-a-duplicate-after-TTL door.
+        var auth = await RegisterAndLoginAsync();
+        var key = Guid.NewGuid().ToString("N");
+        var existingId = Guid.NewGuid();
+        await using (var seed = CreateSystemDb())
+        {
+            seed.IdempotencyRecords.Add(new IdempotencyRecord
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                Key = key,
+                RequestPath = "/api/documents/upload",
+                StatusCode = 201,
+                ResponseJson = $"{{\"data\":{{\"id\":\"{existingId}\",\"originalFileName\":\"prior.pdf\",\"extractionStatus\":\"Pending\",\"createdAt\":\"2020-01-01T00:00:00Z\"}},\"error\":null}}",
+                CreatedAt = DateTime.UtcNow.AddHours(-48),
+                ExpiresAt = DateTime.UtcNow.AddHours(-24), // already past the old 24h TTL
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var resp = await PostWithIdempotency(auth.Client, key);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        (await UploadedId(resp)).Should().Be(existingId, "the expired record is replayed, not bypassed");
+        await using var db = CreateSystemDb();
+        (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId))
+            .Should().Be(0, "replay must not create a new Document");
+    }
+
+    // Pins IdempotencyService.IsKeyConflict's hard-coded index name to the model's actual one, so a
+    // future index rename is caught here rather than silently turning the concurrent-loser replay path
+    // back into an unhandled 500 (IsKeyConflict matching on ConstraintName would stop matching). The
+    // concurrent test above proves it end-to-end; this is the fast, direct guard.
+    [Fact]
+    public void IsKeyConflict_constant_matches_the_idempotency_unique_index_name()
+    {
+        using var db = CreateSystemDb();
+        var index = db.Model.FindEntityType(typeof(IdempotencyRecord))!
+            .GetIndexes()
+            .Single(i => i.IsUnique && i.Properties.Select(p => p.Name).SequenceEqual(
+                new[] { nameof(IdempotencyRecord.OrganizationId), nameof(IdempotencyRecord.Key) }));
+        index.GetDatabaseName().Should().Be(IdempotencyService.KeyIndexName);
+    }
+
+    [Fact]
+    public void IsKeyConflict_matches_only_the_key_index_not_other_unique_violations()
+    {
+        // Pins that IsKeyConflict keys off the INDEX NAME, not just SqlState 23505 — so an unrelated
+        // unique violation in the same transaction (e.g. the sample partial index) is NOT swallowed as a
+        // key conflict but surfaces. A future broadening to a SqlState-only check would fail this.
+        using var db = CreateSystemDb();
+        var service = new IdempotencyService(db);
+
+        var keyConflict = new DbUpdateException("dup", new Npgsql.PostgresException(
+            "duplicate key", "ERROR", "ERROR", Npgsql.PostgresErrorCodes.UniqueViolation,
+            constraintName: IdempotencyService.KeyIndexName));
+        service.IsKeyConflict(keyConflict).Should().BeTrue();
+
+        var otherIndexConflict = new DbUpdateException("dup", new Npgsql.PostgresException(
+            "duplicate key", "ERROR", "ERROR", Npgsql.PostgresErrorCodes.UniqueViolation,
+            constraintName: "IX_Documents_OrganizationId_SampleUnique"));
+        service.IsKeyConflict(otherIndexConflict).Should().BeFalse("a different unique index must surface, not be swallowed");
+
+        service.IsKeyConflict(new DbUpdateException("x", new InvalidOperationException("not postgres")))
+            .Should().BeFalse();
     }
 
     private async Task<HttpResponseMessage> PostWithIdempotency(HttpClient client, string key)

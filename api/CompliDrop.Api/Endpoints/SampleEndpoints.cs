@@ -49,9 +49,7 @@ public static class SampleEndpoints
         {
             var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
             if (hit is not null)
-                return Results.Json(
-                    hit.ResponseJson is null ? null : JsonSerializer.Deserialize<object>(hit.ResponseJson),
-                    statusCode: hit.StatusCode);
+                return IdempotencyResults.Replay(hit);
         }
 
         // Primary idempotency (#238): one sample per org. A repeat click returns the existing sample
@@ -124,25 +122,43 @@ public static class SampleEndpoints
         };
         db.Documents.Add(doc);
 
+        var response = SampleEnvelope(doc.Id, vendor.Id);
+        // Idempotency (#336): co-commit the dedupe record (if a key was sent) in the SAME transaction as
+        // the sample document, the same way the upload endpoint does. Sample seeding was already
+        // concurrent-safe via IX_Documents_OrganizationId_SampleUnique; this just folds the old
+        // check-then-store StoreAsync into the atomic commit so the key path matches the shared contract.
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+            db.IdempotencyRecords.Add(
+                idem.BuildRecord(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status201Created, response));
+
         try
         {
             await db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException ex) when (IsSampleUniqueViolation(ex))
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
         {
-            // Lost a concurrent-double-click race against IX_Documents_OrganizationId_SampleUnique:
-            // another request seeded first. Roll our just-uploaded blob back and return the winner's
-            // sample so the caller still lands on a verdict (idempotent).
+            // Lost a concurrent-seed race — on EITHER the sample partial index
+            // (IX_Documents_OrganizationId_SampleUnique) OR the idempotency-key index. Both mean another
+            // request seeded first: roll our just-uploaded blob back and replay the winner so the caller
+            // still lands on a verdict (idempotent). Disambiguate by the violated INDEX (not just the
+            // SqlState) so an UNRELATED future 23505 is surfaced, never silently masked as a sample replay.
             await TryDeleteBlobAsync(blobs, blobName, loggerFactory, ct);
             db.ChangeTracker.Clear();
-            var winner = await CurrentSampleAsync(db, ct);
-            if (winner is not null)
-                return Results.Ok(SampleEnvelope(winner.Value.DocumentId, winner.Value.VendorId));
-            // 23505 with no sample to return means the violation was on some OTHER unique constraint
-            // (IsSampleUniqueViolation only knows the SqlState, not which index) — surface it rather
-            // than swallow it. Log first so an operator can tell a genuine sample race apart from this.
+            if (!string.IsNullOrWhiteSpace(idempotencyKey) && idem.IsKeyConflict(ex))
+            {
+                var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
+                if (hit is not null) return IdempotencyResults.Replay(hit);
+            }
+            if (IsSampleUniqueViolation(ex))
+            {
+                var winner = await CurrentSampleAsync(db, ct);
+                if (winner is not null)
+                    return Results.Ok(SampleEnvelope(winner.Value.DocumentId, winner.Value.VendorId));
+            }
+            // Neither index we expect here, or the expected winner row vanished — surface it rather than
+            // swallow it. Log first so an operator can tell a genuine race apart from this.
             loggerFactory.CreateLogger("SampleEndpoints")
-                .LogWarning(ex, "Sample seed hit a unique violation but found no existing sample to return; re-throwing.");
+                .LogWarning(ex, "Sample seed hit a unique violation it could not resolve to a winner; re-throwing.");
             throw;
         }
         catch
@@ -153,10 +169,6 @@ public static class SampleEndpoints
         }
 
         await audit.LogAsync("sample.seeded", nameof(Document), doc.Id, after: new { doc.Id, vendorId = vendor.Id });
-
-        var response = SampleEnvelope(doc.Id, vendor.Id);
-        if (!string.IsNullOrWhiteSpace(idempotencyKey))
-            await idem.StoreAsync(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status201Created, response, ct);
 
         return Results.Json(response, statusCode: StatusCodes.Status201Created);
     }
@@ -242,8 +254,18 @@ public static class SampleEndpoints
     private static object SampleEnvelope(Guid documentId, Guid? vendorId) =>
         new { data = new { documentId, vendorId }, error = (object?)null };
 
+    // Gate for the catch: any unique-constraint violation (23505). The seed's SaveChanges can conflict on
+    // either the sample partial index or the idempotency-key index; the handler then disambiguates by the
+    // specific index (IsKeyConflict / IsSampleUniqueViolation) so an unrelated 23505 is re-thrown.
+    private static bool IsUniqueViolation(DbUpdateException ex) =>
+        ex.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation };
+
+    // Specifically the one-sample-per-org partial unique index (IX_Documents_OrganizationId_SampleUnique),
+    // matched on the index name so it never swallows an unrelated unique violation.
+    private const string SampleUniqueIndexName = "IX_Documents_OrganizationId_SampleUnique";
     private static bool IsSampleUniqueViolation(DbUpdateException ex) =>
-        ex.InnerException is Npgsql.PostgresException { SqlState: "23505" };
+        ex.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation } pg
+        && string.Equals(pg.ConstraintName, SampleUniqueIndexName, StringComparison.Ordinal);
 
     private static async Task TryDeleteBlobAsync(
         IBlobStorageService blobs, string blobName, ILoggerFactory loggerFactory, CancellationToken ct)

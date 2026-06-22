@@ -12,6 +12,10 @@ public sealed class FakeBlobStorageService : IBlobStorageService
 {
     private readonly ConcurrentDictionary<string, byte[]> _blobs = new();
 
+    /// <summary>Number of blobs currently stored — lets a test assert orphan-cleanup (e.g. the
+    /// idempotency-race loser rolling its blob back, #336).</summary>
+    public int BlobCount => _blobs.Count;
+
     /// <summary>When true, <see cref="UploadAsync"/> throws <see cref="BlobStorageUnavailableException"/>
     /// — simulates a storage outage so the upload endpoints' friendly-503 mapping can be tested (#248).</summary>
     public bool ThrowUnavailableOnUpload { get; set; }
