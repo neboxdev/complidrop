@@ -24,6 +24,9 @@ export type VendorSummary = {
   /** True for the demo's sample vendor (#238) so the vendors list can badge it "Sample". */
   isSample: boolean;
   coverage: VendorCoverage;
+  /** null when deliverable, else "bounced" / "complained" — the reminder engine has stopped sending to
+   * this contact email (#340), so the UI can badge it. */
+  contactEmailStatus: "bounced" | "complained" | null;
 };
 
 export type PortalLink = {
@@ -49,6 +52,9 @@ export type VendorDetail = {
   createdAt: string;
   updatedAt: string;
   coverage: VendorCoverage;
+  /** null when deliverable, else "bounced" / "complained" — reminders are paused to this contact
+   * email because it hard-bounced or was marked as spam (#340). */
+  contactEmailStatus: "bounced" | "complained" | null;
 };
 
 export type VendorUpsert = {

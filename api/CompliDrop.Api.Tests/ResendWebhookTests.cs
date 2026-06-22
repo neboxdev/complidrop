@@ -57,6 +57,15 @@ public sealed class ResendWebhookTests(IntegrationTestFixture fixture) : Integra
 
     private static string DeliveredPayload(string messageId) => EventPayload("email.delivered", messageId);
 
+    // #340: a real Resend email.bounced carries data.bounce.type (Permanent | Transient | Undetermined).
+    private static string BouncedPayload(string messageId, string bounceType) => JsonSerializer.Serialize(new
+    {
+        type = "email.bounced",
+        data = new { email_id = messageId, bounce = new { type = bounceType } }
+    });
+
+    private static string ComplainedPayload(string messageId) => EventPayload("email.complained", messageId);
+
     /// <summary>Builds the three Svix headers for a payload, signed with the harness secret.</summary>
     private static (string id, string timestamp, string signature) Sign(string payload, DateTimeOffset? when = null)
     {
@@ -161,6 +170,66 @@ public sealed class ResendWebhookTests(IntegrationTestFixture fixture) : Integra
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         (await StatusOf(messageId)).Should().Be(expectedStatus);
+    }
+
+    // ───────── #340: bounce / complaint suppression ─────────
+
+    [Fact]
+    public async Task A_complaint_suppresses_the_address_and_writes_a_feed_event()
+    {
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var payload = ComplainedPayload(messageId);
+
+        (await PostWebhook(payload, Sign(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var sup = await db.EmailSuppressions.SingleAsync(s => s.Email == "vendor@example.com");
+        sup.Reason.Should().Be(EmailSuppressionReason.Complained);
+        (await db.AuditLogs.AnyAsync(a => a.Action == "reminder.recipient_suppressed" && a.OrganizationId == sup.OrganizationId))
+            .Should().BeTrue("a dead/opted-out address surfaces in the activity feed, not just on a ReminderLog row");
+    }
+
+    [Fact]
+    public async Task A_permanent_bounce_suppresses_the_address()
+    {
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var payload = BouncedPayload(messageId, "Permanent");
+
+        (await PostWebhook(payload, Sign(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var sup = await db.EmailSuppressions.SingleOrDefaultAsync(s => s.Email == "vendor@example.com");
+        sup.Should().NotBeNull();
+        sup!.Reason.Should().Be(EmailSuppressionReason.Bounced);
+    }
+
+    [Fact]
+    public async Task A_transient_bounce_records_the_status_but_does_not_suppress_the_address()
+    {
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var payload = BouncedPayload(messageId, "Transient");
+
+        (await PostWebhook(payload, Sign(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        (await db.EmailSuppressions.AnyAsync(s => s.Email == "vendor@example.com"))
+            .Should().BeFalse("a soft/transient bounce self-recovers — Resend retries it, no app-level suppression");
+        (await StatusOf(messageId)).Should().Be("bounced", "the ReminderLog still records the bounce status");
+    }
+
+    [Fact]
+    public async Task A_bounce_then_a_complaint_upgrades_the_reason_and_never_downgrades()
+    {
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var bounce = BouncedPayload(messageId, "Permanent");
+        (await PostWebhook(bounce, Sign(bounce))).StatusCode.Should().Be(HttpStatusCode.OK);
+        var complaint = ComplainedPayload(messageId);
+        (await PostWebhook(complaint, Sign(complaint))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var sups = await db.EmailSuppressions.Where(s => s.Email == "vendor@example.com").ToListAsync();
+        sups.Should().ContainSingle("one suppression per (org, email)");
+        sups[0].Reason.Should().Be(EmailSuppressionReason.Complained, "a complaint upgrades a prior bounce, never downgrades");
     }
 
     [Fact]

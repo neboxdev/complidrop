@@ -13,7 +13,10 @@ public record VendorSummary(
     // True for the demo's sample vendor (#238) so the vendors list can badge it "Sample".
     bool IsSample,
     // Per-vendor coverage rollup so the list can answer "who is NOT ok?" (#319 FP-074).
-    VendorCoverage Coverage);
+    VendorCoverage Coverage,
+    // null when deliverable, else "bounced" / "complained" — so the list can badge a vendor whose
+    // ContactEmail the reminder engine has stopped sending to (#340).
+    string? ContactEmailStatus);
 
 /// <summary>
 /// Whether a vendor's documents currently satisfy its assigned checklist, rolled up across the
@@ -39,7 +42,10 @@ public record VendorDetail(
     DateTime UpdatedAt,
     // Same per-vendor coverage rollup as the list (#319 FP-074), so the detail page can show the
     // verdict badge from one server-side source of truth (shared ComputeCoverage).
-    VendorCoverage Coverage);
+    VendorCoverage Coverage,
+    // null when deliverable, else "bounced" / "complained" — the reminder engine has stopped sending to
+    // this ContactEmail (#340), so the detail page surfaces it ("reminders paused").
+    string? ContactEmailStatus);
 
 public record PortalLinkDto(
     Guid Id,

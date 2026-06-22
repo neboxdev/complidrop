@@ -31,6 +31,7 @@ public class AppDbContext(
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<IdempotencyRecord> IdempotencyRecords => Set<IdempotencyRecord>();
     public DbSet<ProcessedStripeEvent> ProcessedStripeEvents => Set<ProcessedStripeEvent>();
+    public DbSet<EmailSuppression> EmailSuppressions => Set<EmailSuppression>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -59,5 +60,8 @@ public class AppDbContext(
         builder.Entity<Subscription>().HasQueryFilter(s => s.OrganizationId == CurrentOrgId);
         builder.Entity<AuditLog>().HasQueryFilter(a => a.OrganizationId == CurrentOrgId);
         builder.Entity<IdempotencyRecord>().HasQueryFilter(i => i.OrganizationId == CurrentOrgId);
+        // Tenant guard so a request-path read of suppressions (the vendor badge) can only see its own org;
+        // the Resend webhook + reminder worker use SystemDbContext and write/read across orgs (#340).
+        builder.Entity<EmailSuppression>().HasQueryFilter(e => e.OrganizationId == CurrentOrgId);
     }
 }

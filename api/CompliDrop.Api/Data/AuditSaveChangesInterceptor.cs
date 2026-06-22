@@ -21,6 +21,9 @@ public class AuditSaveChangesInterceptor(Func<ICurrentUser?> currentUserAccessor
         nameof(IdempotencyRecord),
         nameof(ProcessedStripeEvent),
         nameof(WaitlistEntry),
+        // Infra row written by the Resend webhook (no current user); the suppression EVENT is audited
+        // explicitly via "reminder.recipient_suppressed" so the row itself isn't double-recorded (#340).
+        nameof(EmailSuppression),
         // Short-lived auth infra (#184/#183). Excluded so the interceptor never
         // serializes a TokenHash into AuditLog.AfterJson — the entities'
         // hash-only-storage contract must hold in the audit log too. The

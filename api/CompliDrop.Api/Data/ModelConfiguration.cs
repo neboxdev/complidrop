@@ -269,6 +269,14 @@ internal static class ModelConfiguration
             e.Property(p => p.Id).HasMaxLength(200);
             e.Property(p => p.Type).HasMaxLength(100);
         });
+
+        builder.Entity<EmailSuppression>(e =>
+        {
+            e.Property(s => s.Email).HasMaxLength(320); // RFC 5321 max address length
+            // One suppression per (org, email). The webhook upserts under this index; the worker reads
+            // it per org (#340).
+            e.HasIndex(s => new { s.OrganizationId, s.Email }).IsUnique();
+        });
     }
 
     public static void ApplySoftDeleteFilters(ModelBuilder builder)

@@ -237,7 +237,18 @@ export default function VendorsPage() {
                         </Badge>
                       )}
                     </span>
-                    {v.contactEmail && <p className="text-xs text-slate-500">{v.contactEmail}</p>}
+                    {v.contactEmail && (
+                      <p className="text-xs text-slate-500">
+                        {v.contactEmail}
+                        {/* #340: a dead/opted-out contact email is scannable in the list — reminders to it
+                            are paused. The detail page explains it and how to resume. */}
+                        {v.contactEmailStatus && (
+                          <Badge className="ml-2 bg-amber-100 text-amber-800 border-transparent text-[10px] uppercase tracking-wide">
+                            {v.contactEmailStatus === "complained" ? "Spam report" : "Bounced"}
+                          </Badge>
+                        )}
+                      </p>
+                    )}
                   </td>
                   <td data-label="Requirements" className="px-4 py-3 text-slate-600">
                     {v.complianceTemplateName ?? (

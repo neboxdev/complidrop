@@ -23,6 +23,7 @@ public class SystemDbContext(DbContextOptions<SystemDbContext> options) : DbCont
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<IdempotencyRecord> IdempotencyRecords => Set<IdempotencyRecord>();
     public DbSet<ProcessedStripeEvent> ProcessedStripeEvents => Set<ProcessedStripeEvent>();
+    public DbSet<EmailSuppression> EmailSuppressions => Set<EmailSuppression>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {

@@ -170,6 +170,51 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
     }
 
+    // ───────── #340: bounce / complaint suppression ─────────
+
+    private async Task SuppressAsync(Guid orgId, string email, EmailSuppressionReason reason, DateTimeOffset at)
+    {
+        await using var db = CreateSystemDb();
+        db.EmailSuppressions.Add(new EmailSuppression
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            Email = email.ToLowerInvariant(),
+            Reason = reason,
+            CreatedAt = at.UtcDateTime,
+            UpdatedAt = at.UtcDateTime,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task A_suppressed_recipient_is_not_re_sent_on_the_next_tick()
+    {
+        // The core #340 guarantee: a vendor address with a recorded hard bounce / complaint is skipped —
+        // the engine stops firing into a known-dead / opted-out mailbox.
+        var seed = await SeedReminderAsync(NyEightAm, notifyInternal: false, notifyVendor: true, vendorEmail: "dead@vendor.test");
+        await SuppressAsync(seed.OrgId, "dead@vendor.test", EmailSuppressionReason.Bounced, NyEightAm);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().BeEmpty("a suppressed vendor address must not be re-sent");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(0, "a skipped recipient writes no log row");
+    }
+
+    [Fact]
+    public async Task Suppression_skips_only_the_dead_address_other_recipients_still_get_the_reminder()
+    {
+        // The skip is per-address: a complained vendor is dropped while the org's (deliverable) internal
+        // user still gets the same document's reminder.
+        var seed = await SeedReminderAsync(NyEightAm, notifyInternal: true, internalEmail: "owner@example.com",
+            internalEmailVerified: true, notifyVendor: true, vendorEmail: "dead@vendor.test");
+        await SuppressAsync(seed.OrgId, "dead@vendor.test", EmailSuppressionReason.Complained, NyEightAm);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Select(s => s.ToEmail).Should().BeEquivalentTo(new[] { "owner@example.com" });
+    }
+
     [Theory]
     [InlineData(12)] // 07:00 NY — one hour before the window opens
     [InlineData(11)] // 06:00 NY

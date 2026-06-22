@@ -49,10 +49,18 @@ public static class VendorEndpoints
             })
             .ToListAsync(ct);
 
+        // The org's suppressed addresses (#340), loaded once and matched in memory — avoids a correlated
+        // subquery per vendor row. db.EmailSuppressions is already tenant-scoped by the query filter.
+        var suppressions = (await db.EmailSuppressions
+                .Select(s => new { s.Email, s.Reason })
+                .ToListAsync(ct))
+            .ToDictionary(s => s.Email, s => s.Reason, StringComparer.OrdinalIgnoreCase);
+
         var vendors = rows.Select(v => new VendorSummary(
             v.Id, v.Name, v.ContactEmail, v.ContactPhone, v.Category,
             v.ComplianceTemplateId, v.TemplateName, v.DocumentCount, v.ActivePortalLinks, v.IsSample,
-            ComputeCoverage(v.ComplianceTemplateId is not null, v.RequiredTypes, v.Docs, today)));
+            ComputeCoverage(v.ComplianceTemplateId is not null, v.RequiredTypes, v.Docs, today),
+            ContactEmailStatusLabel(v.ContactEmail, suppressions)));
 
         return Results.Ok(new { data = vendors, error = (object?)null });
     }
@@ -134,6 +142,17 @@ public static class VendorEndpoints
             coverageDocs,
             DateTime.UtcNow.Date);
 
+        // #340: is this vendor's ContactEmail one the reminder engine has stopped sending to?
+        EmailSuppressionReason? emailReason = null;
+        if (!string.IsNullOrWhiteSpace(v.ContactEmail))
+        {
+            var lowered = v.ContactEmail.ToLowerInvariant();
+            emailReason = await db.EmailSuppressions
+                .Where(s => s.Email == lowered)
+                .Select(s => (EmailSuppressionReason?)s.Reason)
+                .FirstOrDefaultAsync(ct);
+        }
+
         var detail = new VendorDetail(
             v.Id, v.Name, v.ContactEmail, v.ContactPhone, v.Category,
             v.ComplianceTemplateId,
@@ -142,7 +161,7 @@ public static class VendorEndpoints
                 l.Id, l.Token, PortalLink.Url(frontend.Value, l.Token),
                 l.IsActive, l.UploadCount, l.MaxUploads, l.ExpiresAt, l.CreatedAt
             )).ToArray(),
-            v.CreatedAt, v.UpdatedAt, coverage);
+            v.CreatedAt, v.UpdatedAt, coverage, LabelOf(emailReason));
         return Results.Ok(new { data = detail, error = (object?)null });
     }
 
@@ -457,6 +476,21 @@ public static class VendorEndpoints
     private static IResult PortalNotIncluded() =>
         Error(403, "plan.portal_not_included",
             "Vendor upload links are a Pro feature. Upgrade your plan to collect documents straight from your vendors.");
+
+    // #340: maps the per-(org, email) suppression reason to the wire label the vendor badge renders
+    // (null = deliverable). Shared by the list (dict lookup) and the detail (single lookup).
+    private static string? LabelOf(EmailSuppressionReason? reason) => reason switch
+    {
+        EmailSuppressionReason.Bounced => "bounced",
+        EmailSuppressionReason.Complained => "complained",
+        _ => null
+    };
+
+    private static string? ContactEmailStatusLabel(
+        string? contactEmail, IReadOnlyDictionary<string, EmailSuppressionReason> suppressions) =>
+        !string.IsNullOrWhiteSpace(contactEmail) && suppressions.TryGetValue(contactEmail, out var reason)
+            ? LabelOf(reason)
+            : null;
 
     private static IResult Unauthorized() =>
         Results.Json(new { data = (object?)null, error = new { code = "auth.unauthorized", message = "Not authenticated." } }, statusCode: 401);
