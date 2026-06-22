@@ -81,6 +81,20 @@ describe("DocumentsPage — URL-addressable filters (#317 FP-041)", () => {
     await waitFor(() => expect(replaceSpy).toHaveBeenCalled());
     expect(replaceSpy.mock.calls.some(([href]) => String(href).includes("status=Expired"))).toBe(true);
   });
+
+  it("Clear drops a ?vendor= deep link from the URL (regression: Clear was a dead control)", async () => {
+    const replaceSpy = vi.fn();
+    server.use(http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))));
+    renderWithProviders(<DocumentsPage />, {
+      auth: authedMe,
+      searchParams: { vendor: "v1" },
+      router: { replace: replaceSpy },
+    });
+    // The Clear button is present because the vendor filter is active.
+    fireEvent.click(await screen.findByRole("button", { name: /^clear$/i }));
+    // The fix: Clear navigates to the bare path so the read-only vendor param goes too.
+    expect(replaceSpy).toHaveBeenCalledWith("/documents", { scroll: false });
+  });
 });
 
 describe("DocumentsPage — upload UX (#317 FP-054/FP-055)", () => {
