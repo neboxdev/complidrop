@@ -404,7 +404,8 @@ function OrgSettingsForm({ me }: { me: Me }) {
               id={tzId}
               value={timeZone}
               onChange={(e) => setTimeZone(e.target.value)}
-              className="mt-1 block w-full rounded-md border border-input bg-white px-3 py-2 text-sm text-slate-900 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring"
+              // pointer-coarse:min-h-11 gives the native select a 44px touch target on phones (FP-131).
+              className="mt-1 block w-full rounded-md border border-input bg-white px-3 py-2 text-sm text-slate-900 pointer-coarse:min-h-11 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring"
             >
               {/* FP-112: friendly US-first zones up top; the full IANA list under "All time zones"
                   for everyone else. Finding your own zone shouldn't mean scrolling from Africa/Abidjan. */}

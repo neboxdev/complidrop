@@ -122,7 +122,7 @@ describe("DocumentsPage — upload UX (#317 FP-054/FP-055)", () => {
     await waitFor(() => expect(screen.getByText(/no documents match your filters/i)).toBeInTheDocument());
 
     dropFilesIn(container, [makeFile("a.pdf")]);
-    fireEvent.click(await screen.findByRole("button", { name: "Acme Catering" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Acme Catering" }));
     await waitFor(() => expect(screen.getByRole("button", { name: /upload 1 file/i })).not.toBeDisabled());
     fireEvent.click(screen.getByRole("button", { name: /upload 1 file/i }));
 
@@ -871,7 +871,7 @@ describe("DocumentsPage — capture vendor + type at upload (#186)", () => {
 
       // Pick the vendor AND change the document type away from the default,
       // then upload.
-      fireEvent.click(await screen.findByRole("button", { name: "Acme Catering" }));
+      fireEvent.click(await screen.findByRole("option", { name: "Acme Catering" }));
       fireEvent.change(screen.getByLabelText(/^document type$/i), {
         target: { value: "permit" },
       });
@@ -1134,7 +1134,7 @@ describe("DocumentsPage — capture vendor + type at upload (#186)", () => {
     await waitFor(() => expect(screen.getByText("fileA.pdf")).toBeInTheDocument());
     expect(screen.getByText("fileB.pdf")).toBeInTheDocument();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Acme Catering" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Acme Catering" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /upload 2 files/i })).not.toBeDisabled(),
     );
@@ -1189,7 +1189,7 @@ describe("DocumentsPage — capture vendor + type at upload (#186)", () => {
 
     // The orphaned vendor cell shows an assign affordance instead of "—".
     fireEvent.click(screen.getByRole("button", { name: /assign vendor/i }));
-    fireEvent.click(await screen.findByRole("button", { name: "Acme Catering" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Acme Catering" }));
 
     await waitFor(() => expect(patchedId).toBe("d_orphan"));
     expect(patchBody).toEqual({ vendorId: "v1" });
@@ -1273,7 +1273,7 @@ describe("DocumentsPage — dropzone rejection feedback (#265)", () => {
 
     await waitFor(() =>
       expect(toastError).toHaveBeenCalledWith(
-        expect.stringMatching(/can't read that file type/i),
+        expect.stringMatching(/can't read that file format/i),
       ),
     );
     // Nothing staged → the details card never appears.
@@ -1313,7 +1313,7 @@ describe("DocumentsPage — dropzone rejection feedback (#265)", () => {
 
     await waitFor(() =>
       expect(toastError).toHaveBeenCalledWith(
-        expect.stringMatching(/can't read that file type/i),
+        expect.stringMatching(/can't read that file format/i),
       ),
     );
     await waitFor(() =>

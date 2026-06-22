@@ -21,8 +21,10 @@ describe("rejectionCopy (#265)", () => {
   });
 
   it("maps file-invalid-type to the formats-that-work copy", () => {
+    // FP-125: copy names the accepted FORMATS ("file format" + an explicit list) rather than
+    // "upload … a photo" — a vendor whose WebP/GIF was rejected DID send a photo.
     expect(rejectionCopy([rejection("file-invalid-type")])).toMatch(
-      /can't read that file type.*PDF or a photo \(JPEG, PNG, or HEIC\)/i,
+      /can't read that file format.*PDF, JPEG, PNG, or HEIC/i,
     );
   });
 

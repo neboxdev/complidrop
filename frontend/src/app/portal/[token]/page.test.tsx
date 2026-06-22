@@ -22,7 +22,7 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import { http, HttpResponse } from "msw";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import PortalPage from "./page";
 import {
   renderWithProviders,
@@ -102,11 +102,13 @@ describe("PortalPage — success state (#37)", () => {
         }),
       ).toBeInTheDocument(),
     );
-    // Org context appears in exactly two intended places now: the subhead
-    // ("{org} asked for…") AND the "What {org} needs from you" instructions header.
+    // Org context on initial render appears in exactly one place: the subhead
+    // ("{org} asked for…"). FP-122 retitled the instructions card to the neutral
+    // "What to upload" (no org name), and the sr-only live region is empty until an
+    // upload happens — so the count is 1, not 2.
     expect(
       screen.getAllByText(new RegExp(portalInfo.orgName)),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
     // The owner's instructions are now RENDERED (previously fetched but never
     // shown — the core #196 bug). Assert a unique phrase from the fixture.
     expect(
@@ -114,6 +116,8 @@ describe("PortalPage — success state (#37)", () => {
     ).toBeInTheDocument();
     // Quota counter reflects 1/5 used (the wording is "X / Y uploads used").
     expect(screen.getByText(/1\s*\/\s*5\s+uploads used/i)).toBeInTheDocument();
+    // FP-123: the tab title names the page (and the org) instead of the marketing default.
+    expect(document.title).toMatch(/upload for acme inc/i);
   });
 
   // Both empty AND whitespace-only must suppress the block — the production
@@ -134,8 +138,8 @@ describe("PortalPage — success state (#37)", () => {
         screen.getByRole("heading", { name: new RegExp(`hi ${portalInfo.vendorName}`, "i") }),
       ).toBeInTheDocument(),
     );
-    // No "What … needs from you" header when there are no instructions.
-    expect(screen.queryByText(/needs from you/i)).toBeNull();
+    // No "What to upload" instructions header when there are no instructions (FP-122 retitle).
+    expect(screen.queryByText(/what to upload/i)).toBeNull();
   });
 
   it("surfaces the camera on mobile: the file input accepts images + the copy mentions a photo (#196)", async () => {
@@ -193,8 +197,9 @@ describe("PortalPage — success state (#37)", () => {
         screen.getByText(/drag a file here or click to select/i),
       ).toBeInTheDocument(),
     );
+    // FP-123: HEIC is now named in the accepted-formats line (it's accepted + transcoded server-side).
     expect(
-      screen.getByText(/pdf, jpeg, or png · 10 mb max/i),
+      screen.getByText(/pdf, jpeg, png, or heic · 10 mb max/i),
     ).toBeInTheDocument();
   });
 });
@@ -228,12 +233,10 @@ describe("PortalPage — bad-link state (#37)", () => {
     expect(document.body.textContent ?? "").not.toContain("portal.expired");
   });
 
-  it("transient 5xx with curated server message: recovery copy AND the server's human text both render", async () => {
-    // Driven by the review finding that hardcoding the static fallback
-    // alone would hide actionable diagnostics. The bad-link branch
-    // shows the static recovery copy (always) AND any non-duplicate
-    // server message as a small detail line — so a 503 the vendor
-    // could retry stays visible.
+  it("FP-120: transient 5xx renders the TRANSIENT 'try again' state, NOT the dead-link copy", async () => {
+    // FP-120 [P0]: a 5xx (or network blip) does NOT mean the link is gone. Telling Tony
+    // "this link is no longer available — ask your customer" on a transient failure sent him
+    // to bother Pat over a healthy link. A 5xx must land in the retryable transient branch.
     server.use(
       http.get(url(`/api/portal/${TOKEN}`), () =>
         jsonError(
@@ -246,28 +249,54 @@ describe("PortalPage — bad-link state (#37)", () => {
 
     ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
-    // Static recovery line still renders.
+    // Transient recovery copy + a Try again affordance.
     await waitFor(() =>
-      expect(
-        screen.getByText(/ask your customer for a fresh upload link/i),
-      ).toBeInTheDocument(),
+      expect(screen.getByText(/we couldn't load this page/i)).toBeInTheDocument(),
     );
-    // Curated server message renders as a small detail line.
     expect(
-      screen.getByText(/service temporarily unavailable/i),
+      screen.getByRole("button", { name: /try again/i }),
     ).toBeInTheDocument();
+    expect(screen.getByText(/your upload link is probably fine/i)).toBeInTheDocument();
+    // The DEAD-LINK copy must NOT render on a transient failure — that was the P0 misdirection.
+    expect(
+      screen.queryByText(/ask your customer for a fresh upload link/i),
+    ).toBeNull();
+    expect(screen.queryByText(/this link is no longer available/i)).toBeNull();
     // Code is suppressed.
     expect(document.body.textContent ?? "").not.toContain("server.unavailable");
   });
 
-  it("real fetch rejection (network failure): bad-link branch fires WITHOUT leaking the thrown error string", async () => {
-    // HttpResponse.error() routes through MSW v2's FetchInterceptor
-    // errorWith path and ACTUALLY rejects the response promise — so
-    // the page's catch handler fires (not the throw-handler → 500
-    // synthetic body path, which would resolve normally). This pins
-    // that a network failure still lands in the bad-link branch and
-    // that no JS error string (e.g. "TypeError: Failed to fetch")
-    // leaks through to the rendered DOM.
+  it("FP-120: clicking 'Try again' refetches and recovers when the blip clears", async () => {
+    // The transient branch's whole point: the link is fine, so a retry that now succeeds
+    // must drop the error and render the real upload page.
+    let attempt = 0;
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => {
+        attempt++;
+        if (attempt === 1) return jsonError("server.unavailable", "Down briefly.", { status: 503 });
+        return jsonOk(portalInfo);
+      }),
+    );
+
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+
+    const tryAgain = await screen.findByRole("button", { name: /try again/i });
+    fireEvent.click(tryAgain);
+
+    // Second fetch succeeds → the greeting renders, the error state is gone.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: new RegExp(`hi ${portalInfo.vendorName}`, "i") }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/we couldn't load this page/i)).toBeNull();
+    expect(attempt).toBe(2);
+  });
+
+  it("FP-120: a real fetch rejection (network failure) also lands in the transient branch WITHOUT leaking jargon", async () => {
+    // HttpResponse.error() rejects the response promise so the page's catch handler fires.
+    // A network failure is transient (not a dead link), and no JS error string
+    // ("TypeError: Failed to fetch") may leak into the DOM.
     server.use(
       http.get(url(`/api/portal/${TOKEN}`), () => HttpResponse.error()),
     );
@@ -275,15 +304,13 @@ describe("PortalPage — bad-link state (#37)", () => {
     ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
     await waitFor(() =>
-      expect(
-        screen.getByText(/ask your customer for a fresh upload link/i),
-      ).toBeInTheDocument(),
+      expect(screen.getByText(/we couldn't load this page/i)).toBeInTheDocument(),
     );
-    // No stack trace, no error-prefix string, no "Failed to fetch"
-    // leaking through. The page falls back to "Could not load portal."
-    // — which IS displayed as a small detail line, but that string is
-    // a human-curated copy. The thrown-error class names must NEVER
-    // appear.
+    // Transient, not dead-link.
+    expect(
+      screen.queryByText(/ask your customer for a fresh upload link/i),
+    ).toBeNull();
+    // No stack trace / error-prefix / "Failed to fetch" leaking through.
     const visible = document.body.textContent ?? "";
     expect(visible).not.toMatch(/\bTypeError\b/);
     expect(visible).not.toMatch(/\bError:/);
@@ -410,7 +437,8 @@ describe("PortalPage — file-rejected state (#37)", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText(/we can't read that file type/i),
+        // FP-125: copy reworded to name the accepted FORMATS ("file format", not "file type").
+        screen.getByText(/we can't read that file format/i),
       ).toBeInTheDocument(),
     );
     // No request was attempted.
@@ -442,6 +470,32 @@ describe("PortalPage — file-rejected state (#37)", () => {
 
     await waitFor(() =>
       expect(screen.getByText(/over the 10 mb limit/i)).toBeInTheDocument(),
+    );
+    expect(uploadCalls).toBe(0);
+    expect(screen.queryByText(/^received$/i)).toBeNull();
+  });
+
+  it("FP-123: a 0-byte file is rejected client-side with the empty-file copy; no upload fires", async () => {
+    let uploadCalls = 0;
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () => {
+        uploadCalls++;
+        return jsonOk({ uploadId: "x", extractionStatus: "Pending", message: "" });
+      }),
+    );
+
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+
+    // minSize: 1 on the dropzone → a 0-byte pick is rejected as file-too-small with clear copy,
+    // never sent to the backend (which would otherwise return a wrong-shaped message).
+    dropFiles([makeFile("empty.pdf", "application/pdf", 0)]);
+
+    await waitFor(() =>
+      expect(screen.getByText(/that file is empty/i)).toBeInTheDocument(),
     );
     expect(uploadCalls).toBe(0);
     expect(screen.queryByText(/^received$/i)).toBeNull();
@@ -555,10 +609,15 @@ describe("PortalPage — happy upload + partial-batch failure (#37)", () => {
         screen.getByText(/could not process this file/i),
       ).toBeInTheDocument(),
     );
-    expect(screen.getByText("ok-1.pdf")).toBeInTheDocument();
-    // The failed file MUST NOT appear in the Received list (it didn't
-    // get a 200 — the page must not optimistically show it).
-    expect(screen.queryByText("fail.pdf")).toBeNull();
+    // ok-1.pdf is in the Received list. fail.pdf is NAMED in the error block (FP-124) but must NOT
+    // appear in Received (it never got a 200). ok-3.pdf was never attempted (loop broke), so it's
+    // nowhere. Scope the Received-exclusion with within() now that the failed file is named elsewhere.
+    const received = screen.getByText(/^received$/i).closest("div")!;
+    expect(within(received).getByText("ok-1.pdf")).toBeInTheDocument();
+    expect(within(received).queryByText("fail.pdf")).toBeNull();
+    // FP-124: the failed file is named inside the error region.
+    const errorBlock = screen.getByTestId("portal-error-other");
+    expect(within(errorBlock).getByText("fail.pdf")).toBeInTheDocument();
     expect(screen.queryByText("ok-3.pdf")).toBeNull();
     // Two calls, not three — confirms the for-loop broke on the throw.
     expect(calls).toBe(2);
@@ -671,9 +730,10 @@ describe("PortalPage — 429 discriminator branching (#145)", () => {
         screen.getByText(/too many requests\. please try again later/i),
       ).toBeInTheDocument(),
     );
-    // Transient-error guidance — the discriminator-specific copy.
+    // Transient-error guidance — the discriminator-specific copy. FP-123 dropped the
+    // "or retry now" invitation (the button itself is the retry; the copy sets the wait expectation).
     expect(
-      screen.getByText(/try again in about an hour, or retry now/i),
+      screen.getByText(/try again in about an hour/i),
     ).toBeInTheDocument();
     // Retry affordance is present and reachable as a real button.
     expect(
@@ -771,19 +831,20 @@ describe("PortalPage — 429 discriminator branching (#145)", () => {
     );
   });
 
-  it("'other' kind with retryFile: NO retry button (button is gated on kind, not on retryFile presence)", async () => {
-    // The `uploadFile` catch path returns `{ kind: "other", retryFile: file }`
-    // when fetch itself rejects (network failure / parse error). The retry
-    // button is conjoined-gated by `error.kind === "rate_limit" &&
-    // error.retryFile` — a future refactor that loosened the guard to
-    // `error.retryFile` alone would silently show the retry button on
-    // the "other" branch, which doesn't have the rate-limit context. This
-    // pins that the button is gated on KIND, not on retryFile presence.
+  it("FP-124: 'other' kind (network failure) NOW shows a file-preserving retry + names the failed file", async () => {
+    // FP-124 [P1]: previously the retry button rendered ONLY on the rate-limit branch, so a
+    // mid-upload network blip stranded the vendor with no recovery despite the file being captured
+    // in state. Now retry renders on EVERY retryable failure (kind !== quota_exhausted) AND the
+    // failed file is named. This test pins the new contract end-to-end: failure → named file +
+    // retry button → click replays the SAME file → success.
+    let attempt = 0;
     server.use(
       http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
-      http.post(url(`/api/portal/${TOKEN}/upload`), () =>
-        HttpResponse.error(),
-      ),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () => {
+        attempt++;
+        if (attempt === 1) return HttpResponse.error(); // network failure → kind "other"
+        return jsonOk({ uploadId: "u_ok", extractionStatus: "Pending", message: "Received" });
+      }),
     );
 
     await renderAndDrop(makeFile("doomed.pdf"));
@@ -792,21 +853,53 @@ describe("PortalPage — 429 discriminator branching (#145)", () => {
     const alert = await screen.findByTestId("portal-error-other");
     expect(alert).toHaveAttribute("role", "alert");
     expect(alert).toHaveAttribute("aria-live", "polite");
-    // The retry button MUST NOT render — kind="other" never qualifies,
-    // even though the catch path captured the file.
-    expect(
-      screen.queryByRole("button", { name: /retry upload/i }),
-    ).toBeNull();
-    // Neither branch's specific copy renders.
+    expect(screen.getByText(/upload failed\. please try again/i)).toBeInTheDocument();
+    // FP-124: the failed file is NAMED so a multi-file dropper knows which one to re-send.
+    expect(screen.getByText("doomed.pdf")).toBeInTheDocument();
+    // FP-124: the retry button NOW renders for kind="other" (it's retryable — only quota is dead).
+    const retryBtn = screen.getByRole("button", { name: /retry upload/i });
+    // The rate-limit-only escalation/quota copy must NOT appear on this branch.
     expect(screen.queryByText(/try again in about an hour/i)).toBeNull();
     expect(screen.queryByText(/this link is exhausted/i)).toBeNull();
-    // Mutual exclusivity at the testid level.
     expect(screen.queryByTestId("portal-error-rate_limit")).toBeNull();
     expect(screen.queryByTestId("portal-error-quota_exhausted")).toBeNull();
     // No browser internals leak.
     const visible = document.body.textContent ?? "";
     expect(visible).not.toMatch(/\bTypeError\b/);
     expect(visible).not.toMatch(/failed to fetch/i);
+
+    // Clicking retry replays the captured file; the second attempt succeeds.
+    fireEvent.click(retryBtn);
+    await waitFor(() => {
+      expect(screen.getByText(/^received$/i)).toBeInTheDocument();
+      expect(screen.queryByTestId("portal-error-other")).toBeNull();
+    });
+    expect(attempt).toBe(2);
+  });
+
+  it("FP-124: quota_exhausted from the SERVER shows NO retry button (a burned link is not retryable)", async () => {
+    // uploadFile captures retryFile on every server error, INCLUDING the permanent quota one — so
+    // the retry gate must exclude quota_exhausted explicitly (kind !== "quota_exhausted"), or a dead
+    // link would offer a futile retry. This pins that exclusion.
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () =>
+        jsonOk(makePortalInfo({ uploadCount: 4, maxUploads: 5 })),
+      ),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () =>
+        jsonError("vendor.portal_quota_exceeded", "Upload quota reached for this link.", {
+          status: 429,
+        }),
+      ),
+    );
+
+    await renderAndDrop(makeFile("coi.pdf"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("portal-error-quota_exhausted")).toBeInTheDocument(),
+    );
+    // Even though uploadFile captured the file, the permanent kind shows no retry.
+    expect(screen.queryByRole("button", { name: /retry upload/i })).toBeNull();
+    expect(screen.getByText(/this link is exhausted/i)).toBeInTheDocument();
   });
 
   it("rate_limit retry: clicking 'Retry upload' replays the SAME file once and clears the error on success", async () => {
@@ -951,6 +1044,11 @@ describe("PortalPage — uploading-in-flight state (#37)", () => {
       await waitFor(() =>
         expect(screen.getByText(/uploading…/i)).toBeInTheDocument(),
       );
+      // FP-130: the polite sr-only region also announces the in-flight state (distinct wording from
+      // the visible "Uploading…" so the two don't collide in getByText).
+      expect(
+        screen.getByText(/uploading your document, please wait/i),
+      ).toBeInTheDocument();
     } finally {
       release();
     }
@@ -963,5 +1061,84 @@ describe("PortalPage — uploading-in-flight state (#37)", () => {
       expect(screen.getByText(/^received$/i)).toBeInTheDocument();
       expect(screen.queryByText(/uploading…/i)).toBeNull();
     });
+  });
+});
+
+describe("PortalPage — FP-121 in-session quota counting", () => {
+  it("a successful upload increments the quota counter without a reload", async () => {
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () =>
+        jsonOk(makePortalInfo({ uploadCount: 1, maxUploads: 3 })),
+      ),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () =>
+        jsonOk({ uploadId: "u1", extractionStatus: "Pending", message: "Received" }),
+      ),
+    );
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/1\s*\/\s*3\s+uploads used/i)).toBeInTheDocument(),
+    );
+
+    dropFiles([makeFile("coi.pdf")]);
+
+    // FP-121: the old code only ever rendered the initial server count, so it stuck at "1 / 3"
+    // after a success. The counter must reflect the in-session upload (2 / 3) live.
+    await waitFor(() =>
+      expect(screen.getByText(/2\s*\/\s*3\s+uploads used/i)).toBeInTheDocument(),
+    );
+  });
+
+  it("the final in-session upload disables the dropzone (atQuota counts in-session uploads)", async () => {
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () =>
+        jsonOk(makePortalInfo({ uploadCount: 1, maxUploads: 2 })),
+      ),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () =>
+        jsonOk({ uploadId: "u1", extractionStatus: "Pending", message: "Received" }),
+      ),
+    );
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+
+    dropFiles([makeFile("coi.pdf")]); // 1 (server) + 1 (in-session) = 2 = max
+
+    await waitFor(() =>
+      expect(screen.getByText(/2\s*\/\s*2\s+uploads used/i)).toBeInTheDocument(),
+    );
+    // The dropzone flips to the exhausted state with NO reload — atQuota now counts uploaded.length.
+    expect(screen.getByText(/upload limit reached on this link/i)).toBeInTheDocument();
+  });
+});
+
+describe("PortalPage — FP-130 accessibility", () => {
+  it("announces the upload outcome in a polite live region (distinct from the visual Received card)", async () => {
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () =>
+        jsonOk({ uploadId: "u1", extractionStatus: "Pending", message: "Received" }),
+      ),
+    );
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+
+    dropFiles([makeFile("coi.pdf")]);
+
+    // A blind vendor must HEAR completion — the visible Received card is otherwise silent.
+    await waitFor(() =>
+      expect(screen.getByText(/upload complete\./i)).toBeInTheDocument(),
+    );
+  });
+
+  it("the instructions scroll-box is keyboard-reachable (tabIndex + region role)", async () => {
+    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+    renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+
+    // FP-131: the capped/scrollable instructions box is focusable so a keyboard user can scroll it.
+    const region = await screen.findByRole("region", { name: /upload instructions/i });
+    expect(region).toHaveAttribute("tabindex", "0");
   });
 });
