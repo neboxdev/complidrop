@@ -81,9 +81,7 @@ public static class BillingEndpoints
         {
             var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
             if (hit is not null)
-                return Results.Json(
-                    hit.ResponseJson is null ? null : System.Text.Json.JsonSerializer.Deserialize<object>(hit.ResponseJson),
-                    statusCode: hit.StatusCode);
+                return IdempotencyResults.Replay(hit);
         }
 
         var baseUrl = frontend.Value.BaseUrl.TrimEnd('/');
@@ -95,8 +93,26 @@ public static class BillingEndpoints
             ct);
 
         var response = new { data = new { sessionUrl = url }, error = (object?)null };
-        if (!string.IsNullOrWhiteSpace(idempotencyKey))
-            await idem.StoreAsync(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status200OK, response, ct);
+        if (string.IsNullOrWhiteSpace(idempotencyKey))
+            return Results.Ok(response);
+
+        // Idempotency (#336): persist the dedupe record under the (OrganizationId, Key) unique index. Two
+        // CONCURRENT same-key checkouts each create a Stripe session (≤2, harmless — the already-subscribed
+        // guard + one-subscription invariant mean at most one is ever completed), but only one record commit
+        // wins; the loser catches the unique violation and replays the winner's sessionUrl. The old
+        // check-then-store left this to luck; the conflict catch makes it deterministic.
+        db.IdempotencyRecords.Add(
+            idem.BuildRecord(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status200OK, response));
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (idem.IsKeyConflict(ex))
+        {
+            db.ChangeTracker.Clear();
+            var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
+            return hit is not null ? IdempotencyResults.Replay(hit) : IdempotencyResults.InProgressConflict();
+        }
         return Results.Ok(response);
     }
 

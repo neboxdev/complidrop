@@ -124,23 +124,39 @@ public static class SampleEndpoints
         };
         db.Documents.Add(doc);
 
+        var response = SampleEnvelope(doc.Id, vendor.Id);
+        // Idempotency (#336): co-commit the dedupe record (if a key was sent) in the SAME transaction as
+        // the sample document, the same way the upload endpoint does. Sample seeding was already
+        // concurrent-safe via IX_Documents_OrganizationId_SampleUnique; this just folds the old
+        // check-then-store StoreAsync into the atomic commit so the key path matches the shared contract.
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+            db.IdempotencyRecords.Add(
+                idem.BuildRecord(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status201Created, response));
+
         try
         {
             await db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException ex) when (IsSampleUniqueViolation(ex))
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
         {
-            // Lost a concurrent-double-click race against IX_Documents_OrganizationId_SampleUnique:
-            // another request seeded first. Roll our just-uploaded blob back and return the winner's
-            // sample so the caller still lands on a verdict (idempotent).
+            // Lost a concurrent-seed race — on EITHER the sample partial index
+            // (IX_Documents_OrganizationId_SampleUnique) OR the idempotency-key index. Both mean another
+            // request seeded first: roll our just-uploaded blob back and replay the winner so the caller
+            // still lands on a verdict (idempotent). Prefer the exact cached key response when present,
+            // else fall back to the sample's own one-per-org idempotency.
             await TryDeleteBlobAsync(blobs, blobName, loggerFactory, ct);
             db.ChangeTracker.Clear();
+            if (!string.IsNullOrWhiteSpace(idempotencyKey))
+            {
+                var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
+                if (hit is not null) return IdempotencyResults.Replay(hit);
+            }
             var winner = await CurrentSampleAsync(db, ct);
             if (winner is not null)
                 return Results.Ok(SampleEnvelope(winner.Value.DocumentId, winner.Value.VendorId));
-            // 23505 with no sample to return means the violation was on some OTHER unique constraint
-            // (IsSampleUniqueViolation only knows the SqlState, not which index) — surface it rather
-            // than swallow it. Log first so an operator can tell a genuine sample race apart from this.
+            // 23505 with neither a cached key response nor a sample to return means the violation was on
+            // some OTHER unique constraint — surface it rather than swallow it. Log first so an operator
+            // can tell a genuine race apart from this.
             loggerFactory.CreateLogger("SampleEndpoints")
                 .LogWarning(ex, "Sample seed hit a unique violation but found no existing sample to return; re-throwing.");
             throw;
@@ -153,10 +169,6 @@ public static class SampleEndpoints
         }
 
         await audit.LogAsync("sample.seeded", nameof(Document), doc.Id, after: new { doc.Id, vendorId = vendor.Id });
-
-        var response = SampleEnvelope(doc.Id, vendor.Id);
-        if (!string.IsNullOrWhiteSpace(idempotencyKey))
-            await idem.StoreAsync(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status201Created, response, ct);
 
         return Results.Json(response, statusCode: StatusCodes.Status201Created);
     }
@@ -242,8 +254,11 @@ public static class SampleEndpoints
     private static object SampleEnvelope(Guid documentId, Guid? vendorId) =>
         new { data = new { documentId, vendorId }, error = (object?)null };
 
-    private static bool IsSampleUniqueViolation(DbUpdateException ex) =>
-        ex.InnerException is Npgsql.PostgresException { SqlState: "23505" };
+    // Any unique-constraint violation (23505). The seed's SaveChanges can conflict on either the sample
+    // partial index or the idempotency-key index; the catch handler disambiguates by replaying the
+    // appropriate winner, so a SqlState-only check is sufficient here.
+    private static bool IsUniqueViolation(DbUpdateException ex) =>
+        ex.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation };
 
     private static async Task TryDeleteBlobAsync(
         IBlobStorageService blobs, string blobName, ILoggerFactory loggerFactory, CancellationToken ct)

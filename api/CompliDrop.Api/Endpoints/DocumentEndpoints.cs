@@ -384,6 +384,7 @@ public static class DocumentEndpoints
         IImageTranscoder transcoder,
         IIdempotencyService idem,
         ICurrentUser currentUser,
+        ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
@@ -394,11 +395,7 @@ public static class DocumentEndpoints
         {
             var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
             if (hit is not null)
-            {
-                return Results.Json(
-                    hit.ResponseJson is null ? null : System.Text.Json.JsonSerializer.Deserialize<object>(hit.ResponseJson),
-                    statusCode: hit.StatusCode);
-            }
+                return IdempotencyResults.Replay(hit);
         }
 
         var sub = await sysDb.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == orgId, ct);
@@ -481,7 +478,6 @@ public static class DocumentEndpoints
             UpdatedAt = DateTime.UtcNow
         };
         db.Documents.Add(doc);
-        await db.SaveChangesAsync(ct);
 
         var response = new
         {
@@ -495,8 +491,30 @@ public static class DocumentEndpoints
             error = (object?)null
         };
 
+        // Idempotency (#336): co-commit the dedupe record in the SAME transaction as the Document, so the
+        // (OrganizationId, Key) unique index is an atomic claim. Two CONCURRENT same-key uploads both pass
+        // validation and both upload a blob, but only one SaveChanges wins — the loser's commit fails the
+        // unique violation we catch below, rolls its blob back, and replays the winner. Exactly one
+        // Document, never two (the torn outcome the old check-then-store allowed). This generalizes the
+        // sample endpoint's existing partial-unique-index race backstop to the shared idempotency key.
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
-            await idem.StoreAsync(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status201Created, response, ct);
+            db.IdempotencyRecords.Add(
+                idem.BuildRecord(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status201Created, response));
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (!string.IsNullOrWhiteSpace(idempotencyKey) && idem.IsKeyConflict(ex))
+        {
+            // Lost the concurrent same-key race: another request committed this key first. Our Document
+            // never committed (same transaction → rolled back with the conflicting record), so only the
+            // orphaned blob needs cleanup; then replay the winner so the caller still gets exactly one doc.
+            await TryDeleteBlobAsync(blobs, blobName, loggerFactory, ct);
+            db.ChangeTracker.Clear();
+            var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
+            return hit is not null ? IdempotencyResults.Replay(hit) : IdempotencyResults.InProgressConflict();
+        }
 
         // No explicit "document.uploaded": the interceptor already records this owner upload as the
         // entity mutation "document.created" (#318 FP-043) — the two firing in the same request was
@@ -664,6 +682,23 @@ public static class DocumentEndpoints
         doc.IsManuallyVerified = true;
         if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
             doc.ExtractionStatus = ExtractionStatus.Completed;
+    }
+
+    // Best-effort rollback of a blob whose owning Document never committed (lost the concurrent
+    // idempotency-key race). Mirrors SampleEndpoints.TryDeleteBlobAsync: a failure here only leaves an
+    // orphan blob, never a failed request, so it's logged and swallowed.
+    private static async Task TryDeleteBlobAsync(
+        IBlobStorageService blobs, string blobName, ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        try
+        {
+            await blobs.DeleteAsync(blobName, ct);
+        }
+        catch (Exception ex)
+        {
+            loggerFactory.CreateLogger("DocumentEndpoints")
+                .LogWarning(ex, "Failed to roll back orphaned upload blob {BlobName} after an idempotency-key race", blobName);
+        }
     }
 
     private static string SanitizeFileName(string? name)
