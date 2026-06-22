@@ -100,7 +100,10 @@ public static class BillingEndpoints
         // CONCURRENT same-key checkouts each create a Stripe session (≤2, harmless — the already-subscribed
         // guard + one-subscription invariant mean at most one is ever completed), but only one record commit
         // wins; the loser catches the unique violation and replays the winner's sessionUrl. The old
-        // check-then-store left this to luck; the conflict catch makes it deterministic.
+        // check-then-store left this to luck; the conflict catch makes it deterministic. This is the
+        // degenerate co-commit case (ADR 0029): checkout has no EF side-effect entity to bind the record to
+        // (the Stripe session is an external call), so the record commits alone on SystemDbContext — the
+        // unique index still serializes concurrent claimants, which is all this path needs.
         db.IdempotencyRecords.Add(
             idem.BuildRecord(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status200OK, response));
         try

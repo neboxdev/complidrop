@@ -46,6 +46,7 @@ This is achievable with no waiting precisely *because* the claim is co-committed
 ### Neutral
 - No schema change. The existing `(OrganizationId, Key)` unique index and the `IdempotencyRecord` columns are reused; `StatusCode` always holds a real HTTP status (no sentinel/placeholder state, because records are only ever written already-completed).
 - `IdempotencyRecord` remains in `AuditSaveChangesInterceptor`'s non-audited set, so co-committing it emits no audit rows.
+- **Billing checkout is the degenerate co-commit case.** It has no EF side-effect entity to bind the record to (the Stripe session is an external call), so the record commits alone on `SystemDbContext` — the unique index still serializes concurrent claimants, which is all that path needs. Document upload and sample seed are the cases where the co-commit's atomicity with a real entity carries its weight.
 
 ## Alternatives considered
 

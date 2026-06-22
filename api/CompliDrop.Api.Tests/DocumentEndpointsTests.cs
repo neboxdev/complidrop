@@ -317,6 +317,46 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
 
         await using var db = CreateSystemDb();
         (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId)).Should().Be(1);
+
+        // The loser rolled its orphaned blob back (it uploaded before the SaveChanges conflict), so exactly
+        // one blob — the winner's — survives. Pins the TryDeleteBlobAsync cleanup on the lost-race path.
+        var blobs = (FakeBlobStorageService)Fixture.Factory.Services.GetRequiredService<IBlobStorageService>();
+        blobs.BlobCount.Should().Be(1, "the losing racer cleans up the blob it uploaded before losing");
+    }
+
+    [Fact]
+    public async Task Expired_idempotency_record_still_replays_rather_than_creating_a_duplicate()
+    {
+        // ADR 0029: a committed record is a PERMANENT claim — TryGetAsync no longer filters by ExpiresAt,
+        // so even a past-TTL record replays (single-use keys make "replay forever" safe, and it keeps the
+        // (orgId,key) unique index an airtight backstop with no "present but ignored" rows). Pins that the
+        // expiry filter stays dropped: re-introducing it would re-open the create-a-duplicate-after-TTL door.
+        var auth = await RegisterAndLoginAsync();
+        var key = Guid.NewGuid().ToString("N");
+        var existingId = Guid.NewGuid();
+        await using (var seed = CreateSystemDb())
+        {
+            seed.IdempotencyRecords.Add(new IdempotencyRecord
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                Key = key,
+                RequestPath = "/api/documents/upload",
+                StatusCode = 201,
+                ResponseJson = $"{{\"data\":{{\"id\":\"{existingId}\",\"originalFileName\":\"prior.pdf\",\"extractionStatus\":\"Pending\",\"createdAt\":\"2020-01-01T00:00:00Z\"}},\"error\":null}}",
+                CreatedAt = DateTime.UtcNow.AddHours(-48),
+                ExpiresAt = DateTime.UtcNow.AddHours(-24), // already past the old 24h TTL
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var resp = await PostWithIdempotency(auth.Client, key);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        (await UploadedId(resp)).Should().Be(existingId, "the expired record is replayed, not bypassed");
+        await using var db = CreateSystemDb();
+        (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId))
+            .Should().Be(0, "replay must not create a new Document");
     }
 
     // Pins IdempotencyService.IsKeyConflict's hard-coded index name to the model's actual one, so a
@@ -332,6 +372,29 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             .Single(i => i.IsUnique && i.Properties.Select(p => p.Name).SequenceEqual(
                 new[] { nameof(IdempotencyRecord.OrganizationId), nameof(IdempotencyRecord.Key) }));
         index.GetDatabaseName().Should().Be(IdempotencyService.KeyIndexName);
+    }
+
+    [Fact]
+    public void IsKeyConflict_matches_only_the_key_index_not_other_unique_violations()
+    {
+        // Pins that IsKeyConflict keys off the INDEX NAME, not just SqlState 23505 — so an unrelated
+        // unique violation in the same transaction (e.g. the sample partial index) is NOT swallowed as a
+        // key conflict but surfaces. A future broadening to a SqlState-only check would fail this.
+        using var db = CreateSystemDb();
+        var service = new IdempotencyService(db);
+
+        var keyConflict = new DbUpdateException("dup", new Npgsql.PostgresException(
+            "duplicate key", "ERROR", "ERROR", Npgsql.PostgresErrorCodes.UniqueViolation,
+            constraintName: IdempotencyService.KeyIndexName));
+        service.IsKeyConflict(keyConflict).Should().BeTrue();
+
+        var otherIndexConflict = new DbUpdateException("dup", new Npgsql.PostgresException(
+            "duplicate key", "ERROR", "ERROR", Npgsql.PostgresErrorCodes.UniqueViolation,
+            constraintName: "IX_Documents_OrganizationId_SampleUnique"));
+        service.IsKeyConflict(otherIndexConflict).Should().BeFalse("a different unique index must surface, not be swallowed");
+
+        service.IsKeyConflict(new DbUpdateException("x", new InvalidOperationException("not postgres")))
+            .Should().BeFalse();
     }
 
     private async Task<HttpResponseMessage> PostWithIdempotency(HttpClient client, string key)

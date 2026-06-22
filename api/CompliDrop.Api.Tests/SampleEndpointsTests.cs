@@ -417,6 +417,32 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
             .CountAsync(d => d.OrganizationId == auth.OrgId && d.IsSample && d.DeletedAt == null)).Should().Be(1);
     }
 
+    [Fact]
+    public async Task Concurrent_same_key_seed_requests_create_exactly_one_sample()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var key = Guid.NewGuid().ToString("N");
+
+        // Same Idempotency-Key on every racer — exercises the NEW #336 key co-commit branch, distinct from
+        // the sibling no-key test which only proves the IX_Documents_OrganizationId_SampleUnique backstop.
+        // Losers catch the unique violation and replay the winner via the cached key response.
+        var responses = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => SeedSampleAsync(auth.Client, key)));
+
+        foreach (var r in responses)
+            r.StatusCode.Should().BeOneOf(HttpStatusCode.Created, HttpStatusCode.OK);
+
+        var docIds = new HashSet<Guid>();
+        foreach (var r in responses)
+            docIds.Add(DocumentId(await r.Content.ReadFromJsonAsync<JsonElement>()));
+        docIds.Should().HaveCount(1, "every racing request resolves to the same single sample");
+
+        await using var db = CreateSystemDb();
+        (await db.Documents.IgnoreQueryFilters()
+            .CountAsync(d => d.OrganizationId == auth.OrgId && d.IsSample && d.DeletedAt == null)).Should().Be(1);
+        (await db.Vendors.IgnoreQueryFilters()
+            .CountAsync(v => v.OrganizationId == auth.OrgId && v.IsSample && v.DeletedAt == null)).Should().Be(1);
+    }
+
     // ---- helpers ----
 
     private static async Task<HttpResponseMessage> SeedSampleAsync(HttpClient client, string? idempotencyKey = null)
