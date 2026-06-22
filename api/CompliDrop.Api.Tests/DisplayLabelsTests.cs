@@ -51,6 +51,11 @@ public class DisplayLabelsTests
     [InlineData("user.logged_in", "Signed in")]
     [InlineData("complianceRule.upserted", "Requirement saved")]
     [InlineData("vendorPortalLink.revoked", "Portal link revoked")]
+    // #318 FP-043 feed labels: the portal upload, the link email, and the worker's
+    // system "document processed" event.
+    [InlineData("vendorPortalLink.upload_processed", "Vendor sent a document")]
+    [InlineData("vendorPortalLink.emailed", "Upload link emailed")]
+    [InlineData("document.processed", "Document read")]
     public void Action_humanizes_known_actions(string action, string expected)
         => DisplayLabels.Action(action).Should().Be(expected);
 

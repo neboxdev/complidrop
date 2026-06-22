@@ -100,6 +100,7 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   "document.verified": "Document verified",
   "document.fields_edited": "Document details edited",
   "document.reextract_queued": "Document re-read",
+  "document.processed": "Document read",
   "documentfield.created": "Document detail added",
   "documentfield.updated": "Document detail edited",
   "vendor.created": "Vendor added",
@@ -108,6 +109,8 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   "vendorportallink.created": "Portal link created",
   "vendorportallink.revoked": "Portal link revoked",
   "vendorportallink.deleted": "Portal link revoked",
+  "vendorportallink.emailed": "Upload link emailed",
+  "vendorportallink.upload_processed": "Vendor sent a document",
   "compliancetemplate.created": "Requirement set created",
   "compliancetemplate.updated": "Requirement set updated",
   "compliancetemplate.deleted": "Requirement set removed",
@@ -142,6 +145,31 @@ export function actionLabel(action: string): string {
     .replace(/\./g, " · ")
     .replace(/_/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// -------- Relative time (activity feed) --------
+
+/**
+ * Compact relative time for the activity feed ("just now", "5m ago", "3h ago",
+ * "2d ago"), falling back to a localized date for anything older than ~a week —
+ * far friendlier than a raw `toLocaleString()` timestamp for a "what just
+ * happened" feed (#318 FP-049). Pure given `now` (defaults to the current time)
+ * so it's deterministically testable. A future/clock-skewed timestamp reads
+ * "just now" rather than a nonsensical negative.
+ */
+export function relativeTime(iso: string | null | undefined, now: number = Date.now()): string {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return "";
+  const diffSec = Math.round((now - then) / 1000);
+  if (diffSec < 45) return "just now";
+  const min = Math.round(diffSec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const days = Math.round(hr / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(then).toLocaleDateString();
 }
 
 // -------- Compliance-rule operators (the rules / requirements page) --------

@@ -225,7 +225,7 @@ describe("GetStartedChecklist — plan-aware document hint (#261)", () => {
     // findByText waits for the subscription to resolve — the upload-link
     // phrasing only renders once hasVendorPortal=true lands.
     expect(
-      await screen.findByText(/upload a coi, or send the vendor an upload link/i),
+      await screen.findByText(/insurance certificate \(coi\), or send the vendor an upload link/i),
     ).toBeInTheDocument();
   });
 
@@ -244,7 +244,7 @@ describe("GetStartedChecklist — plan-aware document hint (#261)", () => {
     await waitFor(() =>
       expect(queryClient.getQueryState(["billing", "subscription"])?.status).toBe("success"),
     );
-    expect(screen.getByText(/upload a coi you have on file/i)).toBeInTheDocument();
+    expect(screen.getByText(/insurance certificate \(coi\) you have on file/i)).toBeInTheDocument();
     expect(screen.queryByText(/send the vendor an upload link/i)).toBeNull();
   });
 
@@ -256,7 +256,7 @@ describe("GetStartedChecklist — plan-aware document hint (#261)", () => {
 
     renderWithProviders(<ChecklistHarness />, { auth: authedMe });
 
-    expect(await screen.findByText(/upload a coi you have on file/i)).toBeInTheDocument();
+    expect(await screen.findByText(/insurance certificate \(coi\) you have on file/i)).toBeInTheDocument();
     expect(screen.queryByText(/send the vendor an upload link/i)).toBeNull();
   });
 });

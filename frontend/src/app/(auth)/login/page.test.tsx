@@ -228,6 +228,46 @@ describe("LoginPage — loading state (#35)", () => {
   });
 });
 
+describe("LoginPage — session-expiry notice + returnTo (#318 FP-045)", () => {
+  it("shows the 'you were signed out' notice when ?expired=1", () => {
+    renderWithProviders(<LoginPage />, { auth: null, searchParams: { expired: "1" } });
+    expect(screen.getByText(/signed out to keep your account safe/i)).toBeInTheDocument();
+  });
+
+  it("does NOT show the notice on a normal visit", () => {
+    renderWithProviders(<LoginPage />, { auth: null });
+    expect(screen.queryByText(/signed out to keep your account safe/i)).toBeNull();
+  });
+
+  it("on success returns to a safe relative returnTo", async () => {
+    server.use(http.post(url("/api/auth/login"), () => jsonOk(authedMe)));
+    const pushSpy = vi.fn();
+    const { container } = renderWithProviders(<LoginPage />, {
+      auth: null,
+      router: { push: pushSpy },
+      searchParams: { expired: "1", returnTo: "/documents?status=Expired" },
+    });
+    fillByLabel(/^email$/i, "owner@acme.test");
+    fillByLabel(/^password$/i, "verystrongpass1");
+    submitFormIn(container);
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledWith("/documents?status=Expired"));
+  });
+
+  it("ignores an off-origin returnTo and falls back to /dashboard (open-redirect guard)", async () => {
+    server.use(http.post(url("/api/auth/login"), () => jsonOk(authedMe)));
+    const pushSpy = vi.fn();
+    const { container } = renderWithProviders(<LoginPage />, {
+      auth: null,
+      router: { push: pushSpy },
+      searchParams: { returnTo: "//evil.com/phish" },
+    });
+    fillByLabel(/^email$/i, "owner@acme.test");
+    fillByLabel(/^password$/i, "verystrongpass1");
+    submitFormIn(container);
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledWith("/dashboard"));
+  });
+});
+
 describe("LoginPage — form error a11y (#189)", () => {
   it("wires aria-invalid + aria-describedby on a field error so a screen reader hears it", async () => {
     const { container } = renderWithProviders(<LoginPage />, { auth: null });

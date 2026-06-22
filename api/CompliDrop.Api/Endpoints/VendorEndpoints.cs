@@ -70,7 +70,6 @@ public static class VendorEndpoints
         VendorUpsertRequest req,
         AppDbContext db,
         ICurrentUser currentUser,
-        IAuditLogger audit,
         CancellationToken ct)
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
@@ -91,7 +90,11 @@ public static class VendorEndpoints
         };
         db.Vendors.Add(vendor);
         await db.SaveChangesAsync(ct);
-        await audit.LogAsync("vendor.created", nameof(Vendor), vendor.Id, after: new { vendor.Name });
+        // No explicit IAuditLogger call (#318 FP-043): creating a Vendor is an ENTITY mutation the
+        // AuditSaveChangesInterceptor already records as "vendor.created" with a full snapshot —
+        // the explicit row was a pure duplicate that doubled the export. Per the CLAUDE.md audit
+        // rule, manual IAuditLogger is reserved for NON-entity events (the no-user portal path,
+        // ExecuteUpdate writes the interceptor can't see). Same for Update/Delete below.
         return Results.Ok(new { data = new { id = vendor.Id }, error = (object?)null });
     }
 
@@ -100,7 +103,6 @@ public static class VendorEndpoints
         VendorUpsertRequest req,
         AppDbContext db,
         IComplianceCheckService checker,
-        IAuditLogger audit,
         CancellationToken ct)
     {
         // Same guard as CreateVendor: a blank name renders an invisible, unclickable row
@@ -127,7 +129,7 @@ public static class VendorEndpoints
         if (templateChanged)
             await checker.ReevaluateForVendorAsync(id, ct);
 
-        await audit.LogAsync("vendor.updated", nameof(Vendor), id);
+        // Interceptor records "vendor.updated" — no explicit duplicate (#318 FP-043).
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }
 
@@ -172,11 +174,13 @@ public static class VendorEndpoints
             await tx.CommitAsync(ct);
         }
 
+        // Only the link-deactivation row is explicit: ExecuteUpdate bypasses the audit interceptor,
+        // so without it that mutation would leave no trace. The vendor soft-delete itself is recorded
+        // by the interceptor as "vendor.deleted" — the explicit duplicate was dropped (#318 FP-043).
         if (linkIds.Count > 0)
             await audit.LogAsync(
                 "vendorPortalLink.deactivated_on_vendor_delete", nameof(Vendor), id,
                 after: new { count = linkIds.Count, linkIds });
-        await audit.LogAsync("vendor.deleted", nameof(Vendor), id);
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }
 
@@ -184,7 +188,6 @@ public static class VendorEndpoints
         Guid id,
         AppDbContext db,
         IOptions<FrontendSettings> frontend,
-        IAuditLogger audit,
         CancellationToken ct)
     {
         var v = await db.Vendors.FirstOrDefaultAsync(x => x.Id == id, ct);
@@ -208,7 +211,7 @@ public static class VendorEndpoints
         };
         db.VendorPortalLinks.Add(link);
         await db.SaveChangesAsync(ct);
-        await audit.LogAsync("vendorPortalLink.created", nameof(VendorPortalLink), link.Id);
+        // Interceptor records "vendorportallink.created" — no explicit duplicate (#318 FP-043).
 
         return Results.Ok(new
         {

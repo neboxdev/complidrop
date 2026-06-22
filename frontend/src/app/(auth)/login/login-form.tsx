@@ -2,17 +2,19 @@
 
 import { useId, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
+import { Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/PasswordInput";
 import { Card, CardContent } from "@/components/ui/card";
 import { useLogin } from "@/hooks/useAuth";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { safeReturnTo } from "@/lib/session-expiry";
 
 const schema = z.object({
   email: z.string().email("Enter a valid email"),
@@ -23,7 +25,17 @@ type LoginForm = z.infer<typeof schema>;
 
 export default function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const login = useLogin();
+
+  // Session-expiry handoff (#318 FP-045): the dashboard layout sends an evicted
+  // user here with `?expired=1` (+ a `returnTo`), so we can explain the sign-out
+  // instead of it reading as a random log-out. `returnTo` arrives in the URL and
+  // is therefore attacker-controllable — `safeReturnTo` rejects anything that
+  // isn't a same-origin relative path (open-redirect guard); we fall back to
+  // /dashboard. A deliberate log-out arrives with no params and sees neither.
+  const wasExpired = searchParams.get("expired") === "1";
+  const returnTo = safeReturnTo(searchParams.get("returnTo")) ?? "/dashboard";
   // React Hook Form's `register("name")` does NOT auto-emit an id, so
   // we generate one per field with `useId()` and thread it into both
   // the label's `htmlFor` and the input's `id` prop. Wires screen-
@@ -46,7 +58,7 @@ export default function LoginForm() {
     try {
       await login.mutateAsync(values);
       toast.success("Welcome back!");
-      router.push("/dashboard");
+      router.push(returnTo);
     } catch (err) {
       // Wrong password, the lockout message (which carries the ONLY instructions
       // for getting back in — reset your password), and 429 rate-limits must
@@ -62,6 +74,16 @@ export default function LoginForm() {
           <h1 className="text-2xl font-semibold text-sky-900">Welcome back</h1>
           <p className="text-sm text-slate-500">Sign in to your CompliDrop workspace.</p>
         </div>
+
+        {wasExpired && (
+          <div
+            role="status"
+            className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900"
+          >
+            <Info className="mt-0.5 h-4 w-4 shrink-0 text-sky-600" aria-hidden="true" />
+            <span>You were signed out to keep your account safe. Sign in to pick up where you left off.</span>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div>

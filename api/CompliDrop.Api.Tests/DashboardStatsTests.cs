@@ -40,6 +40,46 @@ public sealed class DashboardStatsTests(IntegrationTestFixture fixture) : Integr
         (await FlagAsync(auth.Client)).Should().BeFalse();
     }
 
+    [Fact]
+    public async Task complianceRate_excludes_not_yet_evaluated_documents()
+    {
+        // #318 FP-042: a freshly-uploaded doc sits ComplianceStatus.Pending until the worker grades
+        // it. Counting those in the denominator flashed a demoralizing "0%" right after the first
+        // upload. Rate = compliant / docs-with-a-verdict, so 2 compliant + 1 pending reads 100%, not 67%.
+        var auth = await RegisterAndLoginAsync();
+        await SeedDocsAsync(auth.OrgId,
+            ComplianceStatus.Compliant,
+            ComplianceStatus.Compliant,
+            ComplianceStatus.Pending);
+
+        var data = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/dashboard/stats")).GetProperty("data");
+        data.GetProperty("complianceRate").GetDouble().Should().Be(100,
+            "the Pending (still-being-read) document must be excluded from the compliance-rate denominator");
+    }
+
+    private async Task SeedDocsAsync(Guid orgId, params ComplianceStatus[] statuses)
+    {
+        await using var db = CreateSystemDb();
+        var now = DateTime.UtcNow;
+        var i = 0;
+        foreach (var status in statuses)
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = orgId,
+                OriginalFileName = $"doc{i++}.pdf",
+                BlobStorageUrl = "memory://x",
+                BlobStoragePath = $"path/{Guid.NewGuid():N}",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                ComplianceStatus = status,
+                ExtractionStatus = ExtractionStatus.Completed,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        await db.SaveChangesAsync();
+    }
+
     private async Task AddActiveLinkAsync(Guid orgId, bool isActive = true)
     {
         await using var db = CreateSystemDb();

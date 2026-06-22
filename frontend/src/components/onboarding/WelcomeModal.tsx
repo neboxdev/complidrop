@@ -20,7 +20,7 @@ const SLIDES = [
   {
     title: "Stay audit-ready without the chase",
     description:
-      "CompliDrop keeps your vendors' COIs, licenses, and permits on file — and warns you before any of them expire.",
+      "CompliDrop keeps your vendors' insurance certificates (COIs), licenses, and permits on file — and warns you before any of them expire.",
     showSteps: false,
   },
   {
@@ -40,12 +40,24 @@ const SLIDES = [
  * First-run welcome modal (#191) — a 3-slide, skippable intro built on the app's
  * Base UI Dialog (focus trap, scroll-lock, Escape/backdrop dismissal for free).
  *
- * Controlled: the parent owns `open` and handles `onClose` (which persists
- * completion server-side). EVERY close path — Skip, the X, Escape, backdrop,
- * and the final CTA — funnels through `onOpenChange`, so `onClose` fires exactly
- * once per dismissal.
+ * Controlled: the parent owns `open`. Two distinct close intents (#318 FP-046):
+ *   - `onComplete` — an EXPLICIT dismissal (the X / "Skip", or the final CTA):
+ *     persists completion so the tour never re-fires.
+ *   - `onMinimize` — an INCIDENTAL dismissal (backdrop click or Escape): closes
+ *     for now but does NOT persist, so a stray click doesn't end the tour
+ *     forever — it re-appears next visit, and "Restart tour" lives in Settings.
+ * Base UI reports the close reason via `eventDetails.reason`, so we route the two
+ * cases without extra wiring.
  */
-export function WelcomeModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function WelcomeModal({
+  open,
+  onComplete,
+  onMinimize,
+}: {
+  open: boolean;
+  onComplete: () => void;
+  onMinimize: () => void;
+}) {
   const router = useRouter();
   const [slide, setSlide] = useState(0);
   const last = SLIDES.length - 1;
@@ -54,12 +66,17 @@ export function WelcomeModal({ open, onClose }: { open: boolean; onClose: () => 
   return (
     <Dialog.Root
       open={open}
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen) {
-          // Reset to slide 0 on close so the next open (e.g. "Restart tour") starts
-          // fresh — avoids a reset effect, and every close funnels through here.
-          setSlide(0);
-          onClose();
+      onOpenChange={(nextOpen, eventDetails) => {
+        if (nextOpen) return;
+        // Reset to slide 0 on close so the next open (e.g. "Restart tour") starts
+        // fresh — avoids a reset effect, and every close funnels through here.
+        setSlide(0);
+        // Backdrop / Escape are incidental → minimize; the X, "Skip", and the
+        // final CTA are explicit close-press → complete.
+        if (eventDetails.reason === "outside-press" || eventDetails.reason === "escape-key") {
+          onMinimize();
+        } else {
+          onComplete();
         }
       }}
     >
