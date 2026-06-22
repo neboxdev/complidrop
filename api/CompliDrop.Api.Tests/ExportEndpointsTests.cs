@@ -57,6 +57,49 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
     }
 
     [Fact]
+    public async Task Csv_export_neutralizes_spreadsheet_formula_injection_in_the_filename()
+    {
+        // #246 review — security. FileName is user/VENDOR-controlled (the PUBLIC portal stores the raw
+        // uploaded file name), so a value beginning '=' would execute as a formula when the org opens
+        // the export in Excel/Sheets — a stored injection across the vendor→customer trust boundary.
+        // InjectionOptions.Escape must neutralize it: the value is preserved but no cell starts with a
+        // raw formula trigger. Would FAIL with the prior config (InjectionOptions defaulted to None).
+        var auth = await RegisterAndLoginAsync();
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "=DANGER_FORMULA", // no comma/quote → a clean leading-field probe
+                BlobStorageUrl = "memory://x",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed,
+                ComplianceStatus = ComplianceStatus.Pending,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var csv = await (await auth.Client.GetAsync("/api/export/csv")).Content.ReadAsStringAsync();
+
+        // The value survives (escaped, not silently stripped)…
+        csv.Should().Contain("DANGER_FORMULA");
+        // …but no CSV cell presents it as a raw formula. FileName leads each data row, so a raw lead
+        // would surface as a line starting "=DANGER_FORMULA" (or a quoted "\"=DANGER_FORMULA"); Escape
+        // prepends the injection-escape character, so neither cell-start shape occurs (independent of
+        // which escape char CsvHelper uses).
+        csv.Should().NotContain("\n=DANGER_FORMULA",
+            "Escape must stop a '='-leading filename from starting a spreadsheet cell as a formula");
+        csv.Should().NotContain("\"=DANGER_FORMULA",
+            "nor may the raw formula lead a quoted cell");
+    }
+
+    [Fact]
     public async Task Csv_export_leads_with_human_columns_GUID_last_and_an_excel_parseable_timestamp()
     {
         // FP-102: the leading raw GUID moved LAST; the extraction-state column is "ProcessingStatus"

@@ -512,6 +512,10 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         rows.Should().Contain(
             r => r.AfterJson != null && r.AfterJson.Contains("OriginalFileName") && r.AfterJson.Contains("ComplianceStatus"),
             "the meaningful small columns must still be captured in the audit After snapshot");
+        // Belt-and-suspenders size bound: with the bulk payload omitted, a Document mutation's audit
+        // JSON stays small. Trips if a future large string column re-introduces the leak the skip closes.
+        combined.Length.Should().BeLessThan(4096,
+            "the audit Before/After for a Document mutation must not carry a bulk extraction payload");
     }
 
     [Fact]
