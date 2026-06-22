@@ -57,6 +57,46 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
     }
 
     [Fact]
+    public async Task Csv_export_leads_with_human_columns_GUID_last_and_an_excel_parseable_timestamp()
+    {
+        // FP-102: the leading raw GUID moved LAST; the extraction-state column is "ProcessingStatus"
+        // (not "Status", confusable with the Compliance verdict beside it); CreatedAt is Excel-parseable
+        // (no trailing 'Z'). Existing CSV tests only substring-match, so this pins the exact shape.
+        var auth = await RegisterAndLoginAsync();
+        var docId = Guid.NewGuid();
+        await using (var db = CreateSystemDb())
+        {
+            var now = new DateTime(2026, 6, 20, 14, 5, 32, DateTimeKind.Utc);
+            db.Documents.Add(new Document
+            {
+                Id = docId,
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "acme-coi.pdf",
+                BlobStorageUrl = "memory://x",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed,
+                ComplianceStatus = ComplianceStatus.Compliant,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var csv = await (await auth.Client.GetAsync("/api/export/csv")).Content.ReadAsStringAsync();
+        var lines = csv.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToArray();
+
+        lines[0].Should().Be(
+            "FileName,Vendor,Type,ProcessingStatus,Compliance,EffectiveDate,ExpirationDate,GeneralLiabilityLimit,UploadedBy,CreatedAt,Id");
+
+        var fields = lines[1].Split(',');
+        fields[0].Should().Be("acme-coi.pdf", "the filename leads, not the GUID");
+        fields[^1].Should().Be(docId.ToString(), "the raw GUID is last");
+        fields[9].Should().MatchRegex(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", "CreatedAt is Excel-parseable, no trailing Z");
+    }
+
+    [Fact]
     public void UserLabel_renders_a_name_or_System_never_a_guid()
     {
         // The audit report must show WHO acted, not a raw GUID. (#197)

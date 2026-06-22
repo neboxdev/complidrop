@@ -341,6 +341,16 @@ describe("SettingsPage — editable organization (#185)", () => {
     expect(screen.getByText(/reminders send at 8:00 AM/i)).toBeInTheDocument();
   });
 
+  it("FP-112: shows curated US-first zones with friendly labels and no duplicate in 'All time zones'", () => {
+    mockFreePlanSubscription();
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    // A curated friendly label appears in the "Common" group…
+    expect(screen.getByText(/eastern time/i)).toBeInTheDocument();
+    // …and the raw IANA id is NOT also listed (curated zones are filtered out of "All time zones").
+    expect(screen.queryByText("America/New_York")).toBeNull();
+  });
+
   it("saves the new name + time zone, toasts, and writes the SERVER response into the Me cache", async () => {
     mockFreePlanSubscription();
     let captured: { name: string; timeZone: string } | null = null;

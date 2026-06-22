@@ -200,23 +200,23 @@ public class ReminderBackgroundService(
                                 .FirstOrDefaultAsync(ct);
                             if (existing is not null)
                             {
-                                url = PortalUrl(frontend, existing);
+                                url = PortalLink.Url(frontend, existing);
                             }
                             else
                             {
-                                var token = GeneratePortalToken();
+                                var token = PortalLink.GenerateToken();
                                 db.VendorPortalLinks.Add(new VendorPortalLink
                                 {
                                     Id = Guid.NewGuid(),
                                     VendorId = vendorId,
                                     Token = token,
                                     IsActive = true,
-                                    MaxUploads = 20,
+                                    MaxUploads = PortalLink.DefaultMaxUploads,
                                     UploadCount = 0,
                                     CreatedAt = nowUtc,
                                 });
                                 await db.SaveChangesAsync(ct);
-                                url = PortalUrl(frontend, token);
+                                url = PortalLink.Url(frontend, token);
                             }
                         }
                         vendorPortalUrls[vendorId] = url;
@@ -627,13 +627,4 @@ public class ReminderBackgroundService(
             """;
     }
 
-    private static string GeneratePortalToken()
-    {
-        Span<byte> bytes = stackalloc byte[24];
-        System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
-        return Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_').TrimEnd('=');
-    }
-
-    private static string PortalUrl(FrontendSettings cfg, string token) =>
-        $"{cfg.BaseUrl.TrimEnd('/')}/portal/{token}";
 }

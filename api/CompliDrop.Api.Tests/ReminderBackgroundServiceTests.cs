@@ -688,8 +688,10 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         var internalSend = Email.Sends.Single(s => s.ToEmail == "owner@example.com");
 
         vendorSend.HtmlBody.Should().Contain("/portal/", "the vendor gets a working upload link");
+        vendorSend.HtmlBody.Should().Contain("Upload my renewal", "the vendor body uses the upload CTA, not the internal review copy");
         vendorSend.HtmlBody.Should().NotContain("Log in", "vendors have no account to log in to");
         internalSend.HtmlBody.Should().NotContain("/portal/");
+        internalSend.HtmlBody.Should().NotContain("Upload my renewal");
 
         // A link was minted for the vendor (none existed before).
         await using var verify = CreateSystemDb();
@@ -703,6 +705,25 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         // A Free org (no portal) can't offer an upload link — the vendor body falls back to "send your
         // renewal to {org}" and still never says "Log in" (and never mints a link it isn't entitled to).
         var seed = await SeedReminderAsync(NyEightAm, daysBefore: 30, notifyVendor: true, vendorEmail: "vendor@example.com");
+        // Seed a Subscription row with HasVendorPortal=FALSE (every org gets one at registration), so
+        // the test genuinely exercises the `&& s.HasVendorPortal` predicate — not just a missing row.
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            db.Subscriptions.Add(new Subscription
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
+                Plan = "free",
+                Status = "active",
+                HasVendorPortal = false,
+                ExtractionSpendThisMonthUsd = 0m,
+                SpendMonthStart = DateOnly.FromDateTime(now),
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
 
         await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
 
