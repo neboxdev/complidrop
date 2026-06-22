@@ -6,8 +6,10 @@ using CompliDrop.Api.Services;
 using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -329,6 +331,115 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         await using var db = CreateSystemDb();
         (await db.AuditLogs.AnyAsync(a => a.Action == "document.processed" && a.EntityId == docId))
             .Should().BeFalse("a failed extraction must not emit a processed event");
+    }
+
+    // ----- #337: the worker grades inside PersistSuccess (combined unit of work) --------------
+
+    // Seeds an org + zero-spend subscription + a vendor on a checklist carrying a single
+    // "general_liability_limit >= minLimit" COI rule + a Pending document assigned to that vendor, with a
+    // far-future expiry so the verdict is purely rule-driven. The blob is NOT uploaded here — each test
+    // uploads it to the fakes of the host whose worker it drives (the default host, or a derived one).
+    private async Task<(Guid OrgId, Guid DocId, string BlobPath)> SeedGradableDocAsync(string minLimit)
+    {
+        var orgId = Guid.NewGuid();
+        var docId = Guid.NewGuid();
+        var vendorId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        var blobPath = $"blob/grade/{docId:N}.pdf";
+        var now = DateTime.UtcNow;
+        await using var db = CreateSystemDb();
+        db.Organizations.Add(new Organization { Id = orgId, Name = $"Org-{orgId:N}", TimeZone = "America/New_York", CreatedAt = now, UpdatedAt = now });
+        db.Subscriptions.Add(new Subscription
+        {
+            Id = Guid.NewGuid(), OrganizationId = orgId, Plan = "free", Status = "active",
+            ExtractionSpendThisMonthUsd = 0m,
+            SpendMonthStart = CostTrackingService.MonthStart(DateOnly.FromDateTime(now)),
+            CreatedAt = now, UpdatedAt = now,
+        });
+        db.ComplianceTemplates.Add(new ComplianceTemplate { Id = templateId, OrganizationId = orgId, Name = "T", CreatedAt = now });
+        db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = orgId, Name = "V", ComplianceTemplateId = templateId, CreatedAt = now, UpdatedAt = now });
+        db.ComplianceRules.Add(new ComplianceRule
+        {
+            Id = Guid.NewGuid(), ComplianceTemplateId = templateId, DocumentType = "coi",
+            FieldName = "general_liability_limit", Operator = "min_value", ExpectedValue = minLimit, SortOrder = 0,
+        });
+        db.Documents.Add(new Document
+        {
+            Id = docId, OrganizationId = orgId, VendorId = vendorId,
+            OriginalFileName = "doc.pdf", BlobStorageUrl = "blob://doc", BlobStoragePath = blobPath,
+            FileSizeBytes = 1024, ContentType = "application/pdf", DocumentType = "coi",
+            ExtractionStatus = ExtractionStatus.Pending, ComplianceStatus = ComplianceStatus.Pending,
+            ExpirationDate = now.AddYears(1), CreatedAt = now, UpdatedAt = now,
+        });
+        await db.SaveChangesAsync();
+        return (orgId, docId, blobPath);
+    }
+
+    private static ExtractionResult GlResult(string generalLiabilityLimit) => new(
+        DocumentType: "coi",
+        DocumentSubType: null,
+        Fields: [new ExtractedField("general_liability_limit", generalLiabilityLimit, "currency", 0.95)],
+        NeedsReprocessing: false,
+        Usage: new ExtractionUsage(InputTokens: 1000, OutputTokens: 200, EstimatedCostUsd: 0.01m));
+
+    [Theory]
+    [InlineData("3000000", ComplianceStatus.Compliant)]    // 3M >= 2M rule → Compliant
+    [InlineData("1000000", ComplianceStatus.NonCompliant)] // 1M < 2M rule  → NonCompliant
+    public async Task Successful_extraction_commits_the_real_compliance_verdict_atomically(
+        string extractedGl, ComplianceStatus expected)
+    {
+        // #337: the worker now grades INSIDE PersistSuccess (combined unit of work) — the extracted inputs
+        // and the verdict they imply commit in ONE transaction. Pin that a normal extraction reaches the
+        // REAL verdict (Compliant / NonCompliant), never the intermediate Pending the old separate
+        // EvaluateForSystemAsync pass briefly left. If PersistSuccess ever dropped the ApplyEvaluationAsync
+        // call, this catches the silent loss of grading.
+        var (_, docId, blobPath) = await SeedGradableDocAsync(minLimit: "2000000");
+        await Fixture.Factory.Services.GetRequiredService<IBlobStorageService>()
+            .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
+        Extraction.Result = GlResult(extractedGl);
+        var worker = BuildWorker();
+
+        var claimed = await worker.ClaimNextAsync(CancellationToken.None);
+        claimed.Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var done = await GetDocAsync(docId);
+        done.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        done.GeneralLiabilityLimit.Should().Be(decimal.Parse(extractedGl));
+        done.ComplianceStatus.Should().Be(expected,
+            "the worker grades inside PersistSuccess (#337) — the real verdict commits with the extracted inputs, not Pending");
+    }
+
+    [Fact]
+    public async Task Extraction_completes_with_Pending_when_grading_throws()
+    {
+        // #337 best-effort (worker half): if ApplyEvaluationAsync throws inside PersistSuccess, the
+        // extraction must still COMPLETE (inputs persisted, cost recorded) with ComplianceStatus degraded
+        // to a safe Pending — never fail the whole extraction into a costly re-OCR/LLM retry, and never a
+        // confident verdict from stale inputs. Swaps in a throwing IComplianceCheckService on a derived
+        // host (its own fakes; shares the test DB).
+        await using var factory = Fixture.Factory.WithWebHostBuilder(b =>
+            b.ConfigureTestServices(s =>
+            {
+                s.RemoveAll<IComplianceCheckService>();
+                s.AddScoped<IComplianceCheckService, ThrowingComplianceCheckService>();
+            }));
+        var (_, docId, blobPath) = await SeedGradableDocAsync(minLimit: "2000000");
+        // The derived host has its OWN singleton fakes — upload the blob and set the extraction result there.
+        await factory.Services.GetRequiredService<IBlobStorageService>()
+            .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
+        factory.Services.GetRequiredService<FakeExtractionClient>().Result = GlResult("3000000"); // would grade Compliant
+        var worker = new ExtractionWorker(
+            factory.Services.GetRequiredService<IServiceScopeFactory>(),
+            Options.Create(new ExtractionSettings()),
+            NullLogger<ExtractionWorker>.Instance);
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var done = await GetDocAsync(docId);
+        done.ExtractionStatus.Should().Be(ExtractionStatus.Completed, "a grading failure must not fail the extraction");
+        done.ComplianceStatus.Should().Be(ComplianceStatus.Pending, "the verdict degrades to safe Pending, never a stale confident value");
+        done.GeneralLiabilityLimit.Should().Be(3_000_000m, "the extracted inputs still persisted");
     }
 
     // ----- AC4: FOR UPDATE SKIP LOCKED --------------------------------------------------------

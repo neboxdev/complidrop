@@ -13,6 +13,17 @@ public interface IComplianceCheckService
     Task<ComplianceStatus> EvaluateForSystemAsync(Guid documentId, CancellationToken ct);
 
     /// <summary>
+    /// Evaluates the verdict for an ALREADY-TRACKED document and applies it (<see cref="Document.ComplianceStatus"/>
+    /// + the <see cref="ComplianceCheck"/> rows) to the SAME <paramref name="context"/> WITHOUT saving — so the
+    /// caller commits the canonical inputs and the verdict they imply in ONE transaction. This is the fix for the
+    /// torn <c>(inputs, verdict)</c> state (#337 / ADR 0030): a verdict written in a transaction SEPARATE from its
+    /// inputs can be left contradicting them under a manual-edit-vs-(re)extraction race. The caller owns the unit
+    /// of work and MUST <c>SaveChanges</c>. Loads Vendor → ComplianceTemplate → Rules against the document's
+    /// current (possibly just-edited) <see cref="Document.VendorId"/>.
+    /// </summary>
+    Task ApplyEvaluationAsync(DbContext context, Document doc, CancellationToken ct);
+
+    /// <summary>
     /// Re-evaluates every document whose vendor is assigned the given template. The fan-out that
     /// keeps verdicts fresh after a rule/template MUTATION — pure DB work, no LLM cost (#257).
     /// Batched a page at a time so a template shared by a large vendor base no longer turns a single
@@ -51,10 +62,10 @@ public class ComplianceCheckService(
     public const int DefaultReevaluationPageSize = 200;
 
     public Task<ComplianceStatus> EvaluateAsync(Guid documentId, CancellationToken ct) =>
-        EvaluateInternalAsync(db, documentId, timeProvider.GetUtcNow().UtcDateTime, ct);
+        EvaluateInternalAsync(db, documentId, ct);
 
     public Task<ComplianceStatus> EvaluateForSystemAsync(Guid documentId, CancellationToken ct) =>
-        EvaluateInternalAsync(sysDb, documentId, timeProvider.GetUtcNow().UtcDateTime, ct);
+        EvaluateInternalAsync(sysDb, documentId, ct);
 
     public Task ReevaluateForTemplateAsync(Guid templateId, CancellationToken ct) =>
         // Tenant-filtered db: only the caller org's documents are touched. The vendor → template
@@ -164,22 +175,32 @@ public class ComplianceCheckService(
         await db.SaveChangesAsync(ct);
     }
 
-    // nowUtc is injected (via TimeProvider) instead of read from DateTime.UtcNow so the
-    // expiration / expiring-soon date boundaries are deterministically testable.
-    private static async Task<ComplianceStatus> EvaluateInternalAsync(
-        DbContext context,
-        Guid documentId,
-        DateTime nowUtc,
-        CancellationToken ct)
+    // nowUtc is injected (via TimeProvider) instead of read from DateTime.UtcNow so the expiration /
+    // expiring-soon date boundaries are deterministically testable.
+    public async Task ApplyEvaluationAsync(DbContext context, Document doc, CancellationToken ct)
     {
-        var doc = await context.Set<Document>()
-            .Include(d => d.Vendor)
-                .ThenInclude(v => v!.ComplianceTemplate)
+        // Load Vendor → ComplianceTemplate → Rules for the verdict computation, against the doc's CURRENT
+        // (possibly just-edited, uncommitted) VendorId, fixing up doc.Vendor on this same context. A
+        // SINGLE query (no AsSplitQuery): the root is ONE Vendor (not a set of Documents) and the only
+        // collection in the chain is template.Rules, so there is no cartesian payload multiplication — the
+        // batched fan-out splits because its root IS a set of documents whose ExtractionFields JSON would
+        // be re-shipped per rule, which does not apply here. The nav query honors the Vendor soft-delete
+        // filter, so a deleted vendor reads as no-template (Pending) exactly as the prior Include did.
+        var vendorRef = context.Entry(doc).Reference(d => d.Vendor);
+        if (doc.VendorId is not null)
+            await vendorRef.Query()
+                .Include(v => v!.ComplianceTemplate)
                     .ThenInclude(t => t!.Rules)
-            .FirstOrDefaultAsync(d => d.Id == documentId, ct);
+                .LoadAsync(ct);
+        else
+        {
+            // No vendor assigned: force the in-memory navigation to match the FK so ComputeOutcome reads
+            // no-template (Pending) even if a caller ever hands us a tracked doc with a stale Vendor loaded.
+            doc.Vendor = null;
+            vendorRef.IsLoaded = true;
+        }
 
-        if (doc is null) return ComplianceStatus.Pending;
-
+        var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
         var outcome = ComputeOutcome(doc, nowUtc);
 
         if (outcome.ClearExistingChecks)
@@ -196,8 +217,22 @@ public class ComplianceCheckService(
 
         doc.ComplianceStatus = outcome.Status;
         doc.UpdatedAt = nowUtc;
+        // No SaveChanges — the caller commits the inputs and this verdict in ONE transaction (#337).
+    }
+
+    // Loads the document, applies the verdict in place, and SAVES — the read-then-write convenience used
+    // by the pure RE-GRADE callers (Check-again, vendor/type assign's recompute, the template fan-outs)
+    // that do not themselves change the canonical inputs. The input-CHANGING paths (manual field edit in
+    // DocumentEndpoints.UpdateFields, extraction persist in ExtractionWorker.PersistSuccess) instead call
+    // ApplyEvaluationAsync directly and fold the verdict into their OWN SaveChanges, so inputs and verdict
+    // commit atomically and can never be left torn (#337).
+    private async Task<ComplianceStatus> EvaluateInternalAsync(DbContext context, Guid documentId, CancellationToken ct)
+    {
+        var doc = await context.Set<Document>().FirstOrDefaultAsync(d => d.Id == documentId, ct);
+        if (doc is null) return ComplianceStatus.Pending;
+        await ApplyEvaluationAsync(context, doc, ct);
         await context.SaveChangesAsync(ct);
-        return outcome.Status;
+        return doc.ComplianceStatus;
     }
 
     internal readonly record struct EvaluationOutcome(
