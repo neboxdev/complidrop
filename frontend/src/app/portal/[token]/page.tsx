@@ -61,6 +61,10 @@ type UploadError = {
   // the vendor to drag it again. Null for non-upload errors (e.g.
   // file-rejection copy from react-dropzone) where retry doesn't apply.
   retryFile: File | null;
+  // The Idempotency-Key used for the failed attempt, so a Retry resubmits with the SAME key (#333):
+  // if the original actually committed but the response was lost, the server replays it instead of
+  // creating a duplicate Document / burning a second permit. Null when retry doesn't apply.
+  idempotencyKey: string | null;
 };
 
 // rejectionCopy moved to @/lib/upload-policy (#265) — the dashboard documents
@@ -161,12 +165,15 @@ export default function PortalPage() {
   // server returned 429). Returns the discriminated UploadError on
   // failure, or null on success.
   const uploadFile = useCallback(
-    async (file: File): Promise<UploadError | null> => {
+    async (file: File, idempotencyKey: string): Promise<UploadError | null> => {
       const form = new FormData();
       form.append("file", file);
       try {
         const res = await fetch(`${API_BASE}/api/portal/${params.token}/upload`, {
           method: "POST",
+          // #333: dedupe a double-submit / retried POST server-side. Stable across a retry (the caller
+          // reuses the key) so a succeeded-but-response-lost upload replays instead of duplicating.
+          headers: { "Idempotency-Key": idempotencyKey },
           body: form,
         });
         const body = (await res.json()) as ApiEnvelope<UploadResponse>;
@@ -175,6 +182,7 @@ export default function PortalPage() {
             kind: classifyUploadError(body.error.code),
             message: body.error.message,
             retryFile: file,
+            idempotencyKey,
           };
         }
         if (body.data) {
@@ -191,6 +199,7 @@ export default function PortalPage() {
           kind: "other",
           message: "Upload failed. Please try again.",
           retryFile: file,
+          idempotencyKey,
         };
       }
     },
@@ -205,7 +214,7 @@ export default function PortalPage() {
       // one-shot upload surface.
       const rejectionMessage = rejectionCopy(rejected);
       if (rejectionMessage) {
-        setError({ kind: "other", message: rejectionMessage, retryFile: null });
+        setError({ kind: "other", message: rejectionMessage, retryFile: null, idempotencyKey: null });
         // Don't return: still process any ACCEPTED files alongside.
       }
       if (accepted.length === 0) return;
@@ -221,6 +230,7 @@ export default function PortalPage() {
           message:
             "You've used every upload on this link. Ask your customer for a fresh link if you need to send more.",
           retryFile: null,
+          idempotencyKey: null,
         });
         return;
       }
@@ -229,7 +239,9 @@ export default function PortalPage() {
       if (!rejectionMessage) setError(null);
       try {
         for (const file of accepted) {
-          const err = await uploadFile(file);
+          // A fresh key per file (#333) — a transport re-send of THIS request reuses it (dedup); a Retry
+          // reuses it via the captured error.idempotencyKey below.
+          const err = await uploadFile(file, crypto.randomUUID());
           if (err) {
             setError(err);
             // Match the previous for-loop semantics: stop the batch on
@@ -256,17 +268,20 @@ export default function PortalPage() {
   // changes — avoids re-binding on incidental error-message tweaks and
   // makes the data dependency self-documenting. (#145 review)
   const retryFile = error?.retryFile;
+  // Reuse the failed attempt's key so the retry is idempotent (#333) — a succeeded-but-lost upload
+  // replays the winner rather than creating a second Document. Fall back to a fresh key defensively.
+  const retryKey = error?.idempotencyKey ?? null;
   const onRetry = useCallback(async () => {
     if (!retryFile) return;
     setUploading(true);
     setError(null);
     try {
-      const err = await uploadFile(retryFile);
+      const err = await uploadFile(retryFile, retryKey ?? crypto.randomUUID());
       if (err) setError(err);
     } finally {
       setUploading(false);
     }
-  }, [retryFile, uploadFile]);
+  }, [retryFile, retryKey, uploadFile]);
 
   // Quota-exhausted disables the dropzone client-side. The backend still enforces via 409 — this is a
   // UX guard, not a security one. Counts in-session uploads (FP-121) so the dropzone disables the

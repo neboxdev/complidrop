@@ -27,6 +27,19 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         HttpClient client, string token, byte[] bytes, string fileName, string contentType) =>
         client.PostAsync($"/api/portal/{token}/upload", UploadForm(bytes, fileName, contentType));
 
+    private static async Task<HttpResponseMessage> UploadWithKeyAsync(HttpClient client, string token, string idempotencyKey)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/api/portal/{token}/upload")
+        {
+            Content = UploadForm(PdfBytes(), "coi.pdf", "application/pdf")
+        };
+        req.Headers.Add("Idempotency-Key", idempotencyKey);
+        return await client.SendAsync(req);
+    }
+
+    private static async Task<Guid> UploadIdOf(HttpResponseMessage resp) =>
+        (await Data(resp)).GetProperty("uploadId").GetGuid();
+
     private static async Task<string?> ErrorCode(HttpResponseMessage resp) =>
         (await resp.Content.ReadFromJsonAsync<JsonElement>())
             .GetProperty("error").GetProperty("code").GetString();
@@ -785,5 +798,113 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
             info.StatusCode.Should().Be(HttpStatusCode.OK,
                 $"read {i + 1}/40 must not be throttled by the upload's per-IP bucket — the buckets are independent");
         }
+    }
+
+    // ============================================================================================
+    // #333 — idempotency: a double-submit must not duplicate the Document or burn a second permit
+    // ============================================================================================
+
+    [Fact]
+    public async Task Repeat_upload_with_the_same_idempotency_key_creates_one_document_and_burns_one_permit()
+    {
+        var seeded = await SeedLinkAsync(maxUploads: 5);
+        var client = CreateClient();
+        var key = Guid.NewGuid().ToString("N");
+
+        var first = await UploadWithKeyAsync(client, seeded.Token, key);
+        var second = await UploadWithKeyAsync(client, seeded.Token, key);
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        second.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await UploadIdOf(second)).Should().Be(await UploadIdOf(first), "the repeat replays the winner's document");
+
+        await using var db = CreateSystemDb();
+        (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId)).Should().Be(1);
+        (await db.VendorPortalLinks.IgnoreQueryFilters().Where(l => l.Id == seeded.LinkId)
+            .Select(l => l.UploadCount).FirstAsync())
+            .Should().Be(1, "the repeat upload must not burn a second permit");
+    }
+
+    [Fact]
+    public async Task Concurrent_same_key_uploads_create_one_document_and_burn_one_permit()
+    {
+        var seeded = await SeedLinkAsync(maxUploads: 5);
+        var key = Guid.NewGuid().ToString("N");
+
+        // Separate clients so the two POSTs truly race; the (org, key) unique index + the co-commit make
+        // exactly one win — and because the permit reservation is in the same transaction, the loser's
+        // conflict rolls its increment back, so only one permit is consumed.
+        var responses = await Task.WhenAll(
+            UploadWithKeyAsync(CreateClient(), seeded.Token, key),
+            UploadWithKeyAsync(CreateClient(), seeded.Token, key));
+
+        responses.Should().OnlyContain(r => r.StatusCode == HttpStatusCode.OK);
+        var ids = await Task.WhenAll(responses.Select(UploadIdOf));
+        ids.Should().OnlyContain(id => id == ids[0], "both racers resolve to the single winning document");
+
+        await using var db = CreateSystemDb();
+        (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId)).Should().Be(1);
+        (await db.VendorPortalLinks.IgnoreQueryFilters().Where(l => l.Id == seeded.LinkId)
+            .Select(l => l.UploadCount).FirstAsync())
+            .Should().Be(1, "the losing racer's permit increment rolls back with its conflicted transaction");
+    }
+
+    [Fact]
+    public async Task A_repeat_replays_even_when_it_would_otherwise_be_the_last_permit()
+    {
+        // Pins that the idempotency replay sits BEFORE the MaxUploads cap check: a retry of the upload
+        // that took the LAST permit must replay the winner, not 429 (the burned-permit-on-retry bug, at
+        // the boundary). maxUploads:1 — the first upload spends the only permit.
+        var seeded = await SeedLinkAsync(maxUploads: 1);
+        var client = CreateClient();
+        var key = Guid.NewGuid().ToString("N");
+
+        var first = await UploadWithKeyAsync(client, seeded.Token, key);
+        var second = await UploadWithKeyAsync(client, seeded.Token, key);
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        second.StatusCode.Should().Be(HttpStatusCode.OK, "the repeat replays the winner, it does not tip over the cap");
+        (await UploadIdOf(second)).Should().Be(await UploadIdOf(first));
+
+        await using var db = CreateSystemDb();
+        (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId)).Should().Be(1);
+        (await db.VendorPortalLinks.IgnoreQueryFilters().Where(l => l.Id == seeded.LinkId)
+            .Select(l => l.UploadCount).FirstAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task An_oversize_client_key_degrades_to_no_dedupe_never_a_500()
+    {
+        // The untrusted-route guard: a client key longer than the honored bound is ignored (the upload
+        // proceeds without dedupe), never overflowing IdempotencyRecord.Key (varchar 200) into a 500.
+        var seeded = await SeedLinkAsync(maxUploads: 5);
+        var client = CreateClient();
+        var oversize = new string('a', 200);
+
+        var first = await UploadWithKeyAsync(client, seeded.Token, oversize);
+        var second = await UploadWithKeyAsync(client, seeded.Token, oversize);
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        second.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId))
+            .Should().Be(2, "an oversize key is ignored — both uploads proceed (no dedupe), neither 500s");
+    }
+
+    [Fact]
+    public async Task Distinct_idempotency_keys_create_two_documents_and_burn_two_permits()
+    {
+        // Sanity: idempotency never OVER-dedupes — two genuinely distinct uploads still both land.
+        var seeded = await SeedLinkAsync(maxUploads: 5);
+        var client = CreateClient();
+
+        (await UploadWithKeyAsync(client, seeded.Token, Guid.NewGuid().ToString("N"))).StatusCode.Should().Be(HttpStatusCode.OK);
+        (await UploadWithKeyAsync(client, seeded.Token, Guid.NewGuid().ToString("N"))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId)).Should().Be(2);
+        (await db.VendorPortalLinks.IgnoreQueryFilters().Where(l => l.Id == seeded.LinkId)
+            .Select(l => l.UploadCount).FirstAsync()).Should().Be(2);
     }
 }

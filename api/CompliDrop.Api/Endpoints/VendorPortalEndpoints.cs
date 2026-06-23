@@ -77,26 +77,53 @@ public static class VendorPortalEndpoints
         IFileValidationService validator,
         IImageTranscoder transcoder,
         IAuditLogger audit,
+        IIdempotencyService idem,
         ILogger<VendorPortalLink> logger,
         CancellationToken ct)
     {
         var link = await db.VendorPortalLinks
             .Include(l => l.Vendor).ThenInclude(v => v.Organization).ThenInclude(o => o.Subscription)
             .FirstOrDefaultAsync(l => l.Token == token, ct);
-        if (link is null || !link.IsActive)
+        if (link is null)
             return Error(404, "vendor.portal_token_invalid", "This upload link is no longer active.");
 
-        // Defense in depth (#269): same dead-link treatment as PortalInfo (and same
-        // before-expiry ordering, so a dead tenant never answers 410) — a soft-deleted
-        // vendor would NRE on link.Vendor below, and a soft-deleted ORG must not keep
-        // accepting uploads into its tenant via a direct POST that skips the info page.
+        // Defense in depth (#269): a soft-deleted vendor would NRE on link.Vendor below, and a
+        // soft-deleted ORG must not keep accepting uploads into its tenant via a direct POST that skips
+        // the info page. Resolved here (before expiry, so a dead tenant never answers 410) because the
+        // idempotency replay below also needs the link's org.
         if (link.Vendor?.Organization is null)
             return Error(404, "vendor.portal_token_invalid", "This upload link is no longer active.");
 
-        // Monetization fence (#261, ADR 0024), same as PortalInfo: a lapsed plan's links
-        // answer the neutral revoked-link message (no billing-status leak to the vendor),
-        // checked before expiry, links never mutated so re-subscribing revives them. A
-        // direct POST that skips the info page must hit the same wall.
+        // Fast-path idempotency replay (#333 / ADR 0032), placed BEFORE the link-state guards: a double-
+        // submit (double-tap, retried POST) must not duplicate the Document or burn a MaxUploads permit.
+        // A repeat of a committed upload replays its cached response even when that upload took the LAST
+        // permit and auto-deactivated the link (or the link was since revoked) — replaying a PAST success
+        // creates no new Document/permit, so the "usable for a NEW upload" guards (active / plan / expiry /
+        // quota) below don't gate it. The public route has no authenticated principal, so the key is scoped
+        // per (org-of-the-link, "portal:{token}:{clientKey}") — token-namespaced so it can't collide with a
+        // dashboard upload's key in the same org. Honored only at a sane length (untrusted route, Key is
+        // varchar(200)); otherwise the upload proceeds without dedupe. The co-commit below makes it
+        // concurrency-safe.
+        var portalOrgId = link.Vendor.OrganizationId;
+        var clientKey = http.Request.Headers["Idempotency-Key"].FirstOrDefault();
+        var idempotencyKey = !string.IsNullOrWhiteSpace(clientKey) && clientKey.Length <= MaxClientIdempotencyKeyLength
+            ? $"portal:{token}:{clientKey}"
+            : null;
+        if (idempotencyKey is not null)
+        {
+            var hit = await idem.TryGetAsync(portalOrgId, idempotencyKey, ct);
+            if (hit is not null)
+                return IdempotencyResults.Replay(hit);
+        }
+
+        // Link-state guards — these gate a NEW upload (a replay above has already returned).
+        if (!link.IsActive)
+            return Error(404, "vendor.portal_token_invalid", "This upload link is no longer active.");
+
+        // Monetization fence (#261, ADR 0024), same as PortalInfo: a lapsed plan's links answer the
+        // neutral revoked-link message (no billing-status leak to the vendor), checked before expiry,
+        // links never mutated so re-subscribing revives them. A direct POST that skips the info page must
+        // hit the same wall.
         if (link.Vendor.Organization.Subscription is not { HasVendorPortal: true } sub)
             return Error(404, "vendor.portal_token_invalid", "This upload link is no longer active.");
 
@@ -184,6 +211,19 @@ public static class VendorPortalEndpoints
             UpdatedAt = DateTime.UtcNow
         };
 
+        // Built before the transaction so the idempotency record can carry it (replayed verbatim to a
+        // concurrent/repeat double-submit). Same shape the success return uses below.
+        var response = new
+        {
+            data = new
+            {
+                uploadId = doc.Id,
+                extractionStatus = doc.ExtractionStatus.ToString(),
+                message = "Thanks — we're processing your document."
+            },
+            error = (object?)null
+        };
+
         // Atomic reservation + Document insert + audit row, all in one explicit transaction. The
         // cheap `UploadCount >= MaxUploads` check above is racy: two concurrent requests can both
         // see count=N-1 with cap=N and both pass. The atomic UPDATE-WHERE clause is re-evaluated
@@ -219,6 +259,14 @@ public static class VendorPortalEndpoints
             }
 
             db.Documents.Add(doc);
+            // Co-commit the idempotency record in this SAME transaction (#333 / ADR 0032), so the
+            // (OrganizationId, Key) unique index makes a CONCURRENT same-key upload's commit fail — and
+            // because the permit reservation above is in this transaction too, that conflict rolls the
+            // permit increment back. So the loser duplicates neither the Document NOR the burned permit;
+            // it replays the winner (the catch below).
+            if (idempotencyKey is not null)
+                db.IdempotencyRecords.Add(
+                    idem.BuildRecord(portalOrgId, idempotencyKey, http.Request.Path, StatusCodes.Status200OK, response));
             await db.SaveChangesAsync(ct);
 
             // Explicit audit row for the link mutation — ExecuteUpdateAsync bypasses the
@@ -236,6 +284,16 @@ public static class VendorPortalEndpoints
             await tx.CommitAsync(ct);
             documentPersisted = true;
         }
+        catch (DbUpdateException ex) when (idempotencyKey is not null && idem.IsKeyConflict(ex))
+        {
+            // Lost the concurrent same-key race: another request committed this key first. The exception
+            // unwound the transaction (so OUR permit increment rolled back — no burned permit) and the
+            // `finally` deletes our orphaned blob; replay the winner so the caller still gets exactly one
+            // Document and the same uploadId.
+            db.ChangeTracker.Clear();
+            var hit = await idem.TryGetAsync(portalOrgId, idempotencyKey, ct);
+            return hit is not null ? IdempotencyResults.Replay(hit) : IdempotencyResults.InProgressConflict();
+        }
         finally
         {
             if (!documentPersisted)
@@ -250,17 +308,15 @@ public static class VendorPortalEndpoints
             }
         }
 
-        return Results.Ok(new
-        {
-            data = new
-            {
-                uploadId = doc.Id,
-                extractionStatus = doc.ExtractionStatus.ToString(),
-                message = "Thanks — we're processing your document."
-            },
-            error = (object?)null
-        });
+        return Results.Ok(response);
     }
+
+    // The client Idempotency-Key is honored only up to this length: the route is untrusted (#333) and the
+    // namespaced "portal:{token}:{key}" must fit the IdempotencyRecord.Key varchar(200). A token is 32
+    // chars (24 bytes base64url) + the "portal::" wrapper (8), so the worst case is 8 + 32 + 128 = 168,
+    // ample headroom under 200; a normal UUID/nonce is well under. An oversize key is simply ignored (the
+    // upload proceeds without dedupe), never a 500.
+    private const int MaxClientIdempotencyKeyLength = 128;
 
     private static Task<int> DeactivateAsync(SystemDbContext db, Guid linkId, CancellationToken ct) =>
         db.VendorPortalLinks
