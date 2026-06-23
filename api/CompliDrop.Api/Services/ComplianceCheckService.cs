@@ -175,8 +175,6 @@ public class ComplianceCheckService(
         await db.SaveChangesAsync(ct);
     }
 
-    // nowUtc is injected (via TimeProvider) instead of read from DateTime.UtcNow so the expiration /
-    // expiring-soon date boundaries are deterministically testable.
     public async Task ApplyEvaluationAsync(DbContext context, Document doc, CancellationToken ct)
     {
         // Load Vendor → ComplianceTemplate → Rules for the verdict computation, against the doc's CURRENT
@@ -200,6 +198,8 @@ public class ComplianceCheckService(
             vendorRef.IsLoaded = true;
         }
 
+        // nowUtc comes from TimeProvider (not DateTime.UtcNow) so the expiration / expiring-soon date
+        // boundaries in ComputeOutcome are deterministically testable.
         var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
         var outcome = ComputeOutcome(doc, nowUtc);
 

@@ -292,8 +292,20 @@ public static class ReminderEndpoints
         catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation })
         {
             // A concurrent webhook delivery inserted the same (org, email) first — the suppression goal is
-            // already met. Drop our duplicate (and its would-be feed event) and move on.
+            // already met. Drop our duplicate insert (and its would-be feed event; the winner emitted one).
             db.ChangeTracker.Clear();
+            // …but still apply OUR reason as an upgrade if it outranks the winner's, so a complaint racing a
+            // bounce can't be lost to the weaker "Bounced" (the never-downgrade invariant must hold under the
+            // race too, not just the sequential path). Upgrade-only ⇒ convergent under concurrent upgrades.
+            var winner = await db.EmailSuppressions
+                .FirstOrDefaultAsync(s => s.OrganizationId == row.OrganizationId && s.Email == email, ct);
+            if (winner is not null && reason > winner.Reason)
+            {
+                winner.Reason = reason;
+                winner.SourceReminderLogId = row.Id;
+                winner.UpdatedAt = now;
+                await db.SaveChangesAsync(ct);
+            }
         }
     }
 

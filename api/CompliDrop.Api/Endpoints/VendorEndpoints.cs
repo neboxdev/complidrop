@@ -180,7 +180,7 @@ public static class VendorEndpoints
             Id = Guid.NewGuid(),
             OrganizationId = currentUser.OrganizationId.Value,
             Name = req.Name.Trim(),
-            ContactEmail = req.ContactEmail,
+            ContactEmail = NormalizeContactEmail(req.ContactEmail),
             ContactPhone = req.ContactPhone,
             Category = req.Category,
             ComplianceTemplateId = req.ComplianceTemplateId,
@@ -214,7 +214,7 @@ public static class VendorEndpoints
         if (!await TemplateIsAssignable(req.ComplianceTemplateId, db, ct)) return TemplateNotFound();
         var templateChanged = v.ComplianceTemplateId != req.ComplianceTemplateId;
         v.Name = req.Name.Trim();
-        v.ContactEmail = req.ContactEmail;
+        v.ContactEmail = NormalizeContactEmail(req.ContactEmail);
         v.ContactPhone = req.ContactPhone;
         v.Category = req.Category;
         v.ComplianceTemplateId = req.ComplianceTemplateId;
@@ -476,6 +476,15 @@ public static class VendorEndpoints
     private static IResult PortalNotIncluded() =>
         Error(403, "plan.portal_not_included",
             "Vendor upload links are a Pro feature. Upgrade your plan to collect documents straight from your vendors.");
+
+    // #340: normalize the contact email on write (trim; blank → null) so it round-trips EXACTLY against
+    // the per-(org, email) suppression key, which the Resend webhook stores Trim()'d. Without this a padded
+    // address ("  dead@x ") is sent + logged verbatim but the suppression is keyed trimmed, so the worker's
+    // recipient match (and the vendor badge lookup) misses and reminders keep firing into the dead mailbox.
+    // Casing is already handled at every comparison site (OrdinalIgnoreCase / both-lowered), so we trim only
+    // and preserve the vendor's chosen display casing. Mirrors the Name.Trim() on the same write.
+    private static string? NormalizeContactEmail(string? email) =>
+        string.IsNullOrWhiteSpace(email) ? null : email.Trim();
 
     // #340: maps the per-(org, email) suppression reason to the wire label the vendor badge renders
     // (null = deliverable). Shared by the list (dict lookup) and the detail (single lookup).

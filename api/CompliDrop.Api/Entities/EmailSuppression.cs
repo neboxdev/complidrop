@@ -4,6 +4,9 @@ namespace CompliDrop.Api.Entities;
 /// Why a reminder recipient address was suppressed. Ordered so a stronger signal can upgrade a weaker one
 /// but never downgrade: a <see cref="Complained"/> address (an affirmative opt-out) must stay suppressed
 /// even if a later bounce arrives for it. See ADR 0031.
+/// The integer value IS the precedence rank — the webhook upsert compares with <c>reason &gt; existing.Reason</c>
+/// — so this enum is APPEND-ONLY: never reorder or renumber existing members; a future stronger reason
+/// (e.g. a manual block) must take a HIGHER value than <see cref="Complained"/>.
 /// </summary>
 public enum EmailSuppressionReason
 {

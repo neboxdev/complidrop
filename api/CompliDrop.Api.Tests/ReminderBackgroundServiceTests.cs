@@ -202,6 +202,21 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
     }
 
     [Fact]
+    public async Task Suppression_skip_is_case_insensitive_against_the_as_typed_vendor_email()
+    {
+        // Vendor ContactEmail is stored as-typed (mixed case); the suppression key is lowercased. The
+        // worker's recipient match must be case-insensitive (OrdinalIgnoreCase) — a regression to an ordinal
+        // set would let a dead address whose casing differs keep getting reminders. Pins the HashSet comparer.
+        var seed = await SeedReminderAsync(NyEightAm, notifyInternal: false, notifyVendor: true, vendorEmail: "Dead@Vendor.test");
+        await SuppressAsync(seed.OrgId, "dead@vendor.test", EmailSuppressionReason.Bounced, NyEightAm);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().BeEmpty("a suppressed address must be skipped regardless of letter-casing");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(0);
+    }
+
+    [Fact]
     public async Task Suppression_skips_only_the_dead_address_other_recipients_still_get_the_reminder()
     {
         // The skip is per-address: a complained vendor is dropped while the org's (deliverable) internal

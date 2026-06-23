@@ -56,6 +56,9 @@ public class DisplayLabelsTests
     [InlineData("vendorPortalLink.upload_processed", "Vendor sent a document")]
     [InlineData("vendorPortalLink.emailed", "Upload link emailed")]
     [InlineData("document.processed", "Document read")]
+    // #340 suppression feed event — pin the EXACT curated copy (the coverage guard below only proves it
+    // isn't the raw fallback, not that the wording is right).
+    [InlineData("reminder.recipient_suppressed", "Reminders paused — bad email")]
     public void Action_humanizes_known_actions(string action, string expected)
         => DisplayLabels.Action(action).Should().Be(expected);
 

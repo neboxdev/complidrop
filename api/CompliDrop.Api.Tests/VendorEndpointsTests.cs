@@ -675,4 +675,54 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         var detail = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/vendors/{vendorId}");
         detail.GetProperty("data").GetProperty("contactEmailStatus").ValueKind.Should().Be(JsonValueKind.Null);
     }
+
+    [Fact]
+    public async Task A_suppression_in_one_org_does_not_surface_on_another_orgs_vendor_with_the_same_email()
+    {
+        // The SAME address can be dead for org A but deliverable for org B. The vendor badge read scopes
+        // EmailSuppression ONLY via the AppDbContext tenant query filter (the detail query has no explicit
+        // OrganizationId), so this pins that org B never sees org A's suppression — a dropped query filter
+        // or a stray IgnoreQueryFilters would falsely light B's badge (a cross-tenant leak).
+        const string shared = "shared@vendor.test";
+        var orgA = await RegisterAndLoginAsync();
+        var vendorA = await CreateVendorAsync(orgA.Client, "Acme A", shared);
+        await using (var db = CreateSystemDb())
+        {
+            db.EmailSuppressions.Add(new EmailSuppression
+            {
+                Id = Guid.NewGuid(), OrganizationId = orgA.OrgId, Email = shared,
+                Reason = EmailSuppressionReason.Bounced, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var orgB = await RegisterAndLoginAsync();
+        var vendorB = await CreateVendorAsync(orgB.Client, "Acme B", shared);
+
+        // Org A sees its own suppression…
+        var detailA = await orgA.Client.GetFromJsonAsync<JsonElement>($"/api/vendors/{vendorA}");
+        detailA.GetProperty("data").GetProperty("contactEmailStatus").GetString().Should().Be("bounced");
+
+        // …Org B, with the SAME contact email, sees nothing — neither on detail nor list.
+        var detailB = await orgB.Client.GetFromJsonAsync<JsonElement>($"/api/vendors/{vendorB}");
+        detailB.GetProperty("data").GetProperty("contactEmailStatus").ValueKind.Should().Be(JsonValueKind.Null);
+
+        var listB = await orgB.Client.GetFromJsonAsync<JsonElement>("/api/vendors");
+        var rowB = listB.GetProperty("data").EnumerateArray().Single(v => v.GetProperty("id").GetGuid() == vendorB);
+        rowB.GetProperty("contactEmailStatus").ValueKind.Should().Be(JsonValueKind.Null);
+    }
+
+    [Fact]
+    public async Task Vendor_contact_email_is_trimmed_on_write_so_it_round_trips_against_the_suppression_key()
+    {
+        // #340 regression: ContactEmail must be trimmed on write (like Name) so a padded address matches the
+        // Trim()'d suppression key. Without it the worker's recipient match misses and a bounced/complained
+        // vendor keeps getting reminders (and the badge never shows).
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Acme", "  ops@acme.test  ");
+
+        await using var db = CreateSystemDb();
+        var vendor = await db.Vendors.IgnoreQueryFilters().SingleAsync(v => v.Id == vendorId);
+        vendor.ContactEmail.Should().Be("ops@acme.test");
+    }
 }
