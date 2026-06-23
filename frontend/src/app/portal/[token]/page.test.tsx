@@ -1192,4 +1192,25 @@ describe("PortalPage — idempotency key (#333)", () => {
     expect(keys[0]).toBeTruthy();
     expect(keys[1]).toBe(keys[0]);
   });
+
+  it("uses a DISTINCT key per file in a multi-file drop (no accidental dedupe)", async () => {
+    const keys: (string | null)[] = [];
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), async ({ request }) => {
+        keys.push(request.headers.get("Idempotency-Key"));
+        return jsonOk({ uploadId: `u_${keys.length}`, extractionStatus: "Pending", message: "Received" });
+      }),
+    );
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+    dropFiles([makeFile("a.pdf"), makeFile("b.pdf")]);
+    await waitFor(() => expect(keys).toHaveLength(2));
+
+    expect(keys[0]).toBeTruthy();
+    expect(keys[1]).toBeTruthy();
+    expect(keys[1]).not.toBe(keys[0]);
+  });
 });

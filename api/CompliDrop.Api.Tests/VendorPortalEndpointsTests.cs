@@ -850,6 +850,49 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     }
 
     [Fact]
+    public async Task A_repeat_replays_even_when_it_would_otherwise_be_the_last_permit()
+    {
+        // Pins that the idempotency replay sits BEFORE the MaxUploads cap check: a retry of the upload
+        // that took the LAST permit must replay the winner, not 429 (the burned-permit-on-retry bug, at
+        // the boundary). maxUploads:1 — the first upload spends the only permit.
+        var seeded = await SeedLinkAsync(maxUploads: 1);
+        var client = CreateClient();
+        var key = Guid.NewGuid().ToString("N");
+
+        var first = await UploadWithKeyAsync(client, seeded.Token, key);
+        var second = await UploadWithKeyAsync(client, seeded.Token, key);
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        second.StatusCode.Should().Be(HttpStatusCode.OK, "the repeat replays the winner, it does not tip over the cap");
+        (await UploadIdOf(second)).Should().Be(await UploadIdOf(first));
+
+        await using var db = CreateSystemDb();
+        (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId)).Should().Be(1);
+        (await db.VendorPortalLinks.IgnoreQueryFilters().Where(l => l.Id == seeded.LinkId)
+            .Select(l => l.UploadCount).FirstAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task An_oversize_client_key_degrades_to_no_dedupe_never_a_500()
+    {
+        // The untrusted-route guard: a client key longer than the honored bound is ignored (the upload
+        // proceeds without dedupe), never overflowing IdempotencyRecord.Key (varchar 200) into a 500.
+        var seeded = await SeedLinkAsync(maxUploads: 5);
+        var client = CreateClient();
+        var oversize = new string('a', 200);
+
+        var first = await UploadWithKeyAsync(client, seeded.Token, oversize);
+        var second = await UploadWithKeyAsync(client, seeded.Token, oversize);
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        second.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId))
+            .Should().Be(2, "an oversize key is ignored — both uploads proceed (no dedupe), neither 500s");
+    }
+
+    [Fact]
     public async Task Distinct_idempotency_keys_create_two_documents_and_burn_two_permits()
     {
         // Sanity: idempotency never OVER-dedupes — two genuinely distinct uploads still both land.
