@@ -369,6 +369,9 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
                 OriginalFileName = "old-coi.pdf", BlobStorageUrl = "memory://o", FileSizeBytes = 1,
                 ContentType = "application/pdf", DocumentType = "coi",
                 ExtractionStatus = ExtractionStatus.Completed, ComplianceStatus = ComplianceStatus.Compliant,
+                // The expired old cert: a later-uploaded, later-expiry renewal supersedes it (ADR 0033
+                // Amendment 1 — the superseder must actually extend coverage).
+                ExpirationDate = now.AddDays(-2),
                 CreatedAt = now.AddDays(-30), UpdatedAt = now.AddDays(-30),
             });
             db.Documents.Add(new Document
@@ -377,6 +380,7 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
                 OriginalFileName = "new-coi.pdf", BlobStorageUrl = "memory://n", FileSizeBytes = 1,
                 ContentType = "application/pdf", DocumentType = "coi",
                 ExtractionStatus = ExtractionStatus.Completed, ComplianceStatus = ComplianceStatus.Compliant,
+                ExpirationDate = now.AddDays(300), // the renewal — extends coverage, so it supersedes the old cert
                 CreatedAt = now, UpdatedAt = now,
             });
             await db.SaveChangesAsync();

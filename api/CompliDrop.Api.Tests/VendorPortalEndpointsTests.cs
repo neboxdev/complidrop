@@ -890,6 +890,9 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         await using var db = CreateSystemDb();
         (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId))
             .Should().Be(2, "an oversize key is ignored — both uploads proceed (no dedupe), neither 500s");
+        (await db.VendorPortalLinks.IgnoreQueryFilters().Where(l => l.Id == seeded.LinkId)
+            .Select(l => l.UploadCount).FirstAsync())
+            .Should().Be(2, "no dedupe means each upload burns its own permit");
     }
 
     [Fact]
@@ -906,5 +909,46 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
         (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId)).Should().Be(2);
         (await db.VendorPortalLinks.IgnoreQueryFilters().Where(l => l.Id == seeded.LinkId)
             .Select(l => l.UploadCount).FirstAsync()).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task The_same_client_key_on_two_links_in_one_org_does_not_collide()
+    {
+        // ADR 0032 namespaces the stored key as "portal:{token}:{clientKey}" so two DIFFERENT links in the
+        // SAME org can't dedupe against each other — the (OrganizationId, Key) index alone wouldn't keep
+        // them apart, the token segment does. A regression that dropped {token} would make link B's upload
+        // replay link A's document (a cross-link lost upload). Every other #333 test mints a fresh org per
+        // link via SeedLinkAsync, so this is the only one that exercises the namespacing within one org.
+        var orgId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        var (vA, linkA, tokenA) = (Guid.NewGuid(), Guid.NewGuid(), $"tok-{Guid.NewGuid():N}");
+        var (vB, linkB, tokenB) = (Guid.NewGuid(), Guid.NewGuid(), $"tok-{Guid.NewGuid():N}");
+        await using (var db = CreateSystemDb())
+        {
+            db.Organizations.Add(new Organization { Id = orgId, Name = $"Org-{orgId:N}", CreatedAt = now, UpdatedAt = now });
+            db.Subscriptions.Add(new Subscription
+            {
+                Id = Guid.NewGuid(), OrganizationId = orgId, Plan = "pro", Status = "active",
+                HasVendorPortal = true, CreatedAt = now, UpdatedAt = now,
+            });
+            db.Vendors.Add(new Vendor { Id = vA, OrganizationId = orgId, Name = "Vendor A", CreatedAt = now, UpdatedAt = now });
+            db.Vendors.Add(new Vendor { Id = vB, OrganizationId = orgId, Name = "Vendor B", CreatedAt = now, UpdatedAt = now });
+            db.VendorPortalLinks.Add(new VendorPortalLink { Id = linkA, VendorId = vA, Token = tokenA, IsActive = true, MaxUploads = 5, UploadCount = 0, CreatedAt = now });
+            db.VendorPortalLinks.Add(new VendorPortalLink { Id = linkB, VendorId = vB, Token = tokenB, IsActive = true, MaxUploads = 5, UploadCount = 0, CreatedAt = now });
+            await db.SaveChangesAsync();
+        }
+
+        var key = Guid.NewGuid().ToString("N"); // the SAME client key sent to both links
+        var respA = await UploadWithKeyAsync(CreateClient(), tokenA, key);
+        var respB = await UploadWithKeyAsync(CreateClient(), tokenB, key);
+
+        respA.StatusCode.Should().Be(HttpStatusCode.OK);
+        respB.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await UploadIdOf(respB)).Should().NotBe(await UploadIdOf(respA),
+            "the token-namespaced key keeps two links from deduping against each other within one org");
+
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == vA)).Should().Be(1);
+        (await verify.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == vB)).Should().Be(1);
     }
 }
