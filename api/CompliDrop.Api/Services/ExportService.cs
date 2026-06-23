@@ -68,13 +68,8 @@ public class ExportService(SystemDbContext db) : IExportService
             .OrderBy(d => d.ExpirationDate)
             .ToListAsync(ct);
         // #327: annotate superseded (renewed) old certs in the audit report so a reader sees the old cert
-        // AND knows it was replaced — same (vendor, type, later CreatedAt) rule as DocumentSupersession,
-        // computed in memory over the loaded org set.
-        var supersededIds = docs
-            .Where(d => d.VendorId != null
-                && docs.Any(o => o.VendorId == d.VendorId && o.DocumentType == d.DocumentType && o.CreatedAt > d.CreatedAt))
-            .Select(d => d.Id)
-            .ToHashSet();
+        // AND knows it was replaced — same O(n) latest-per-(vendor, type) rule as the CSV.
+        var supersededIds = SupersededIds(docs);
         var (audit, auditTruncated) = await QueryAuditSliceAsync(organizationId, fromUtc, toUtcExclusive, ct);
 
         // Resolve UserIds to human names so the report shows WHO acted, not a raw
@@ -244,13 +239,11 @@ public class ExportService(SystemDbContext db) : IExportService
 
         // #327: the audit export keeps EVERY document (it must not hide history — an auditor wants to see
         // the expired old cert AND its renewal), but ANNOTATES the superseded ones so a reader knows the
-        // old cert was replaced and isn't a current gap. Computed in memory over the already-loaded org set
-        // (no extra query) with the same (vendor, type, later CreatedAt) rule as DocumentSupersession.
-        var supersededIds = docs
-            .Where(d => d.VendorId != null
-                && docs.Any(o => o.VendorId == d.VendorId && o.DocumentType == d.DocumentType && o.CreatedAt > d.CreatedAt))
-            .Select(d => d.Id)
-            .ToHashSet();
+        // old cert was replaced and isn't a current gap. Same (vendor, type, later CreatedAt) rule as
+        // DocumentSupersession, computed in memory over the already-loaded org set (no extra query) in one
+        // O(n) pass: the latest CreatedAt per (vendor, type) group, then a doc is superseded if it predates
+        // its group's latest.
+        var supersededIds = SupersededIds(docs);
 
         await using var ms = new MemoryStream();
         await using var writer = new StreamWriter(ms, leaveOpen: true);
@@ -309,6 +302,21 @@ public class ExportService(SystemDbContext db) : IExportService
         return ms.ToArray();
     }
 
+    // #327: the ids of documents superseded by a newer same-(vendor, type) cert, in one O(n) pass over the
+    // already-loaded org document set — the in-memory mirror of DocumentSupersession.IsSuperseded (latest
+    // CreatedAt per (vendor, type); a doc is superseded if it predates its group's latest).
+    private static HashSet<Guid> SupersededIds(IReadOnlyList<Entities.Document> docs)
+    {
+        var latestPerGroup = docs
+            .Where(d => d.VendorId != null)
+            .GroupBy(d => (d.VendorId, d.DocumentType))
+            .ToDictionary(g => g.Key, g => g.Max(x => x.CreatedAt));
+        return docs
+            .Where(d => d.VendorId != null && d.CreatedAt < latestPerGroup[(d.VendorId, d.DocumentType)])
+            .Select(d => d.Id)
+            .ToHashSet();
+    }
+
     public async Task<byte[]> BuildVendorReportAsync(Guid organizationId, Guid vendorId, CancellationToken ct)
     {
         var vendor = await db.Vendors
@@ -317,6 +325,9 @@ public class ExportService(SystemDbContext db) : IExportService
             ?? throw new InvalidOperationException("Vendor not found.");
 
         var today = DateTime.UtcNow.Date; // date-overlay the verdict at generation time (#257)
+        // Reuse the one shared supersession helper (all these docs share one vendor) so the annotation
+        // matches the CSV / audit-report exactly. (#327)
+        var supersededIds = SupersededIds([.. vendor.Documents]);
         return QuestPDF.Fluent.Document.Create(container =>
         {
             container.Page(page =>
@@ -333,11 +344,10 @@ public class ExportService(SystemDbContext db) : IExportService
                 {
                     col.Item().Text($"Documents: {vendor.Documents.Count}");
                     // #327: mark a superseded (renewed) old cert so the package shows the old doc AND that
-                    // a newer one for the same type replaced it. Within this single vendor's loaded docs.
-                    var vendorDocs = vendor.Documents;
-                    foreach (var d in vendorDocs.OrderBy(d => d.ExpirationDate))
+                    // a newer one for the same type replaced it.
+                    foreach (var d in vendor.Documents.OrderBy(d => d.ExpirationDate))
                     {
-                        var superseded = vendorDocs.Any(o => o.DocumentType == d.DocumentType && o.CreatedAt > d.CreatedAt);
+                        var superseded = supersededIds.Contains(d.Id);
                         col.Item().PaddingTop(6).Text($"• {d.OriginalFileName} — {DisplayLabels.DocumentType(d.DocumentType)} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {DisplayLabels.Compliance(ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today))}{(superseded ? " (superseded)" : "")}");
                     }
                 });

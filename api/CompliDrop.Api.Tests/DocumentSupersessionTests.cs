@@ -29,7 +29,7 @@ public sealed class DocumentSupersessionTests(IntegrationTestFixture fixture) : 
     }
 
     private async Task<Guid> SeedDocAsync(
-        Guid orgId, Guid? vendorId, string docType, DateTime expiration, DateTime createdAt)
+        Guid orgId, Guid? vendorId, string docType, DateTime expiration, DateTime createdAt, DateTime? deletedAt = null)
     {
         var docId = Guid.NewGuid();
         await using var db = CreateSystemDb();
@@ -40,7 +40,7 @@ public sealed class DocumentSupersessionTests(IntegrationTestFixture fixture) : 
             ContentType = "application/pdf", DocumentType = docType,
             ComplianceStatus = ComplianceStatus.Compliant, ExpirationDate = expiration,
             ExtractionStatus = ExtractionStatus.Completed,
-            CreatedAt = createdAt, UpdatedAt = createdAt,
+            CreatedAt = createdAt, UpdatedAt = createdAt, DeletedAt = deletedAt,
         });
         await db.SaveChangesAsync();
         return docId;
@@ -102,6 +102,55 @@ public sealed class DocumentSupersessionTests(IntegrationTestFixture fixture) : 
         await SeedDocAsync(auth.OrgId, vendorId: null, "coi", expiration: past, createdAt: t0.AddDays(10));
 
         (await ExpiredStat(auth.Client)).Should().Be(2, "no vendor means no requirement group — neither is superseded");
+    }
+
+    [Fact]
+    public async Task A_doc_superseded_only_by_a_soft_deleted_newer_doc_is_current_again()
+    {
+        // Load-bearing correctness: supersession runs over the SOFT-DELETE-filtered document set, so a
+        // newer cert that was deleted must NOT keep de-counting the old one. (ADR 0033: "a deleted doc
+        // never counts as the superseder.")
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId);
+        var past = DateTime.UtcNow.Date.AddDays(-2);
+        var t0 = DateTime.UtcNow.AddDays(-100);
+        var old = await SeedDocAsync(auth.OrgId, vendorId, "coi", expiration: past, createdAt: t0);
+        await SeedDocAsync(auth.OrgId, vendorId, "coi", expiration: past, createdAt: t0.AddDays(10),
+            deletedAt: DateTime.UtcNow); // the only would-be superseder is deleted
+
+        (await ExpiredStat(auth.Client)).Should().Be(1, "its only superseder is soft-deleted — the old cert is current again");
+        (await ExpiredListIds(auth.Client)).Should().BeEquivalentTo(new[] { old });
+    }
+
+    [Fact]
+    public async Task A_tie_on_created_at_supersedes_neither_both_count()
+    {
+        // Strict `CreatedAt >` — two certs uploaded at the SAME instant don't supersede each other, so
+        // both count. Pins the strict-greater semantic (a future switch to >= would silently drop one).
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId);
+        var past = DateTime.UtcNow.Date.AddDays(-2);
+        var t = DateTime.UtcNow.AddDays(-50);
+        await SeedDocAsync(auth.OrgId, vendorId, "coi", expiration: past, createdAt: t);
+        await SeedDocAsync(auth.OrgId, vendorId, "coi", expiration: past, createdAt: t);
+
+        (await ExpiredStat(auth.Client)).Should().Be(2, "an exact CreatedAt tie supersedes neither");
+    }
+
+    [Fact]
+    public async Task With_three_certs_in_a_group_only_the_newest_is_current()
+    {
+        // Not just the immediately-prior cert — EVERY older cert in the group is superseded by the newest.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId);
+        var past = DateTime.UtcNow.Date.AddDays(-2);
+        var t0 = DateTime.UtcNow.AddDays(-100);
+        await SeedDocAsync(auth.OrgId, vendorId, "coi", expiration: past, createdAt: t0);
+        await SeedDocAsync(auth.OrgId, vendorId, "coi", expiration: past, createdAt: t0.AddDays(10));
+        var newest = await SeedDocAsync(auth.OrgId, vendorId, "coi", expiration: past, createdAt: t0.AddDays(20));
+
+        (await ExpiredStat(auth.Client)).Should().Be(1, "only the newest of three certs is a current liability");
+        (await ExpiredListIds(auth.Client)).Should().BeEquivalentTo(new[] { newest });
     }
 
     [Fact]
