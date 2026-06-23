@@ -102,6 +102,7 @@ describe("SettingsPage — billing load gating (#316 FP-111/FP-115)", () => {
           documentsUsed: 3,
           hasVendorPortal: true,
           currentPeriodEnd: "2026-11-01T12:00:00Z",
+          cancelAtPeriodEnd: false,
           extractionSpend: 1.2,
         }),
       ),
@@ -114,6 +115,28 @@ describe("SettingsPage — billing load gating (#316 FP-111/FP-115)", () => {
     expect(screen.queryByRole("button", { name: /upgrade to/i })).toBeNull();
     // FP-115: the renewal date is surfaced for a paid plan.
     expect(screen.getByText(/renews on/i)).toBeInTheDocument();
+    expect(screen.queryByText(/ends on/i)).toBeNull();
+  });
+
+  it("a paid plan set to cancel shows 'Ends on' (won't renew), not 'Renews on' (#323)", async () => {
+    server.use(
+      http.get(url("/api/billing/subscription"), () =>
+        jsonOk({
+          plan: "pro",
+          status: "active", // Stripe stays active until the period end; cancelAtPeriodEnd is the signal
+          documentLimit: null,
+          documentsUsed: 3,
+          hasVendorPortal: true,
+          currentPeriodEnd: "2026-11-01T12:00:00Z",
+          cancelAtPeriodEnd: true,
+          extractionSpend: 1.2,
+        }),
+      ),
+    );
+    renderWithProviders(<SettingsPage />, { auth: authedMe });
+
+    expect(await screen.findByText(/ends on .+ won['’]t renew/i)).toBeInTheDocument();
+    expect(screen.queryByText(/renews on/i)).toBeNull();
   });
 
   it("FP-114: after ?upgraded=true, polls until the plan lands paid — tiles hidden, success toast once", async () => {

@@ -350,6 +350,9 @@ public class StripeService(
         // dates to the Unix epoch, never default(DateTime) — the old `== default` guard was
         // dead code and silently wrote 1970-01-01 for absent fields).
         sub.CurrentPeriodEnd = s.CurrentPeriodEnd > DateTime.UnixEpoch ? s.CurrentPeriodEnd : null;
+        // #323: an active sub set to cancel at period end stays Status="active" until the period end, so
+        // surface the flag for the "Ends on" vs "Renews on" billing copy. Re-enabling the sub clears it.
+        sub.CancelAtPeriodEnd = s.CancelAtPeriodEnd;
         sub.LastStripeEventAt = eventCreated;
         sub.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);

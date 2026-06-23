@@ -10,6 +10,9 @@ export type SubscriptionInfo = {
   documentsUsed: number;
   hasVendorPortal: boolean;
   currentPeriodEnd: string | null;
+  /** True when the active sub is set to cancel at the period end (#323): the card says "Ends on"
+   * instead of "Renews on". */
+  cancelAtPeriodEnd: boolean;
   extractionSpend: number;
 };
 
