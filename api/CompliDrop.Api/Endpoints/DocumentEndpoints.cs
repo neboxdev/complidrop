@@ -78,8 +78,12 @@ public static class DocumentEndpoints
             if (Enum.TryParse<ComplianceStatus>(status, ignoreCase: true, out var cs))
                 query = cs switch
                 {
-                    ComplianceStatus.Expired => query.Where(d =>
-                        d.ExpirationDate != null && d.ExpirationDate < today),
+                    // #327: exclude SUPERSEDED old certs so this deep-linked list matches the dashboard
+                    // Expired count exactly (a renewed COI's old expired copy is historical, not a current
+                    // liability). Shared DocumentSupersession predicate — see ADR 0033.
+                    ComplianceStatus.Expired => query
+                        .Where(d => d.ExpirationDate != null && d.ExpirationDate < today)
+                        .Where(DocumentSupersession.IsCurrent(db.Documents)),
                     ComplianceStatus.ExpiringSoon => query.Where(d =>
                         d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate < expiringSoonUpperExclusive
                         && (d.ComplianceStatus == ComplianceStatus.Compliant

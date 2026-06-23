@@ -129,6 +129,19 @@ internal static class ModelConfiguration
                 .HasFilter("\"DeletedAt\" IS NULL AND \"ExtractionStatus\" IN ('Pending', 'Processing')")
                 .HasDatabaseName("IX_Documents_ExtractionQueue");
 
+            // Serves the document-supersession correlated EXISTS (DocumentSupersession, #327): for a
+            // candidate doc, "does a NEWER doc exist for the same (VendorId, DocumentType)?" The request
+            // paths (AppDbContext) carry an OrganizationId predicate too, but the REMINDER worker runs on
+            // SystemDbContext with NO tenant filter, so the (OrganizationId, VendorId) index can't seek the
+            // inner VendorId lookup (leading column unconstrained) — without a VendorId-leading index it
+            // would seq-scan the whole (cross-org, never-pruned) Documents table per candidate, hourly.
+            // VendorId-leading + DocumentType + CreatedAt serves the seek + range in one index, and FULLY
+            // covers the Vendor FK (so EF drops the now-redundant single-column IX_Documents_VendorId).
+            // NOT partial, deliberately: a partial index would not cover the FK, so EF would wrongly drop
+            // the full FK index and leave it uncovered. (#327 review.)
+            e.HasIndex(d => new { d.VendorId, d.DocumentType, d.CreatedAt })
+                .HasDatabaseName("IX_Documents_Supersession");
+
             e.HasOne(d => d.Organization).WithMany(o => o.Documents)
                 .HasForeignKey(d => d.OrganizationId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne(d => d.Vendor).WithMany(v => v.Documents)

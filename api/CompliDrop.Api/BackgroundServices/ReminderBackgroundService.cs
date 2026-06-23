@@ -254,6 +254,10 @@ public class ReminderBackgroundService(
                                         && d.DeletedAt == null
                                         && d.ExpirationDate >= targetStart
                                         && d.ExpirationDate < targetEnd)
+                            // #327: don't remind on a SUPERSEDED cert — if a newer document exists for the
+                            // same vendor + type the vendor has already renewed, so the old copy's expiry
+                            // must not pester them. Shared DocumentSupersession predicate (ADR 0033).
+                            .Where(DocumentSupersession.IsCurrent(db.Documents))
                             .Include(d => d.Vendor)
                             .ToListAsync(ct);
                         if (docs.Count == 0) continue;
