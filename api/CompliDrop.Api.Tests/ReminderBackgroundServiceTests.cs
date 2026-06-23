@@ -294,6 +294,43 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
     }
 
     [Fact]
+    public async Task A_renewal_also_inside_the_window_is_reminded_while_the_superseded_old_cert_is_skipped()
+    {
+        // The supersession skip is per-DOCUMENT, not per-group: when BOTH the old cert and its
+        // (equal-or-later-expiry) renewal fall in the reminder window, the worker must still remind on the
+        // CURRENT cert and suppress only the superseded one — it must not go silent on a requirement that
+        // is genuinely due. (Guards against over-suppressing the whole vendor+type group.)
+        var seed = await SeedReminderAsync(NyEightAm); // old doc, in the 30-day window
+        Guid renewalId;
+        await using (var db = CreateSystemDb())
+        {
+            var doc = await db.Documents.FirstAsync(d => d.Id == seed.DocumentId);
+            renewalId = Guid.NewGuid();
+            db.Documents.Add(new Document
+            {
+                Id = renewalId,
+                OrganizationId = seed.OrgId,
+                VendorId = seed.VendorId,
+                DocumentType = doc.DocumentType,     // SAME type — the renewal
+                OriginalFileName = "renewal.pdf",
+                BlobStorageUrl = "blob://renewal",
+                FileSizeBytes = 1024,
+                ContentType = "application/pdf",
+                ExpirationDate = doc.ExpirationDate,  // SAME target date — both are due in this window
+                CreatedAt = doc.CreatedAt.AddDays(1), // NEWER + equal expiry → supersedes the old cert
+                UpdatedAt = doc.CreatedAt.AddDays(1),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle().Which.ToEmail.Should().Be("owner@example.com");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(0, "the superseded old cert is skipped");
+        (await LogCountAsync(seed.ReminderId, renewalId)).Should().Be(1, "the current renewal is still due and reminded");
+    }
+
+    [Fact]
     public async Task A_suppressed_internal_user_is_also_skipped()
     {
         // Suppression is per-(org, email) and covers INTERNAL recipients too, not just vendors: a

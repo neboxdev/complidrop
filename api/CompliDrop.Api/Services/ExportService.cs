@@ -68,7 +68,7 @@ public class ExportService(SystemDbContext db) : IExportService
             .OrderBy(d => d.ExpirationDate)
             .ToListAsync(ct);
         // #327: annotate superseded (renewed) old certs in the audit report so a reader sees the old cert
-        // AND knows it was replaced — same O(n) latest-per-(vendor, type) rule as the CSV.
+        // AND knows it was replaced — same coverage-extending-renewal rule as the CSV (DocumentSupersession).
         var supersededIds = SupersededIds(docs);
         var (audit, auditTruncated) = await QueryAuditSliceAsync(organizationId, fromUtc, toUtcExclusive, ct);
 
@@ -239,10 +239,9 @@ public class ExportService(SystemDbContext db) : IExportService
 
         // #327: the audit export keeps EVERY document (it must not hide history — an auditor wants to see
         // the expired old cert AND its renewal), but ANNOTATES the superseded ones so a reader knows the
-        // old cert was replaced and isn't a current gap. Same (vendor, type, later CreatedAt) rule as
-        // DocumentSupersession, computed in memory over the already-loaded org set (no extra query) in one
-        // O(n) pass: the latest CreatedAt per (vendor, type) group, then a doc is superseded if it predates
-        // its group's latest.
+        // old cert was replaced and isn't a current gap. Same coverage-extending-renewal rule as
+        // DocumentSupersession (a later upload whose ExpirationDate is >= this doc's), computed in memory
+        // over the already-loaded org set (no extra query) — see SupersededIds.
         var supersededIds = SupersededIds(docs);
 
         await using var ms = new MemoryStream();
@@ -302,19 +301,31 @@ public class ExportService(SystemDbContext db) : IExportService
         return ms.ToArray();
     }
 
-    // #327: the ids of documents superseded by a newer same-(vendor, type) cert, in one O(n) pass over the
-    // already-loaded org document set — the in-memory mirror of DocumentSupersession.IsSuperseded (latest
-    // CreatedAt per (vendor, type); a doc is superseded if it predates its group's latest).
-    private static HashSet<Guid> SupersededIds(IReadOnlyList<Entities.Document> docs)
+    // #327 / ADR 0033 (as amended by the #327 re-review): the ids of documents superseded by a newer
+    // same-(vendor, type) cert that ALSO extends coverage — the in-memory mirror of
+    // DocumentSupersession.IsSuperseded, computed over the already-loaded org document set (no extra query).
+    // A doc d is superseded when some other doc o in its (vendor, type) group is BOTH a later upload
+    // (o.CreatedAt > d.CreatedAt) AND has a non-null ExpirationDate >= d's. A renewal that doesn't extend
+    // coverage (earlier/absent expiry — e.g. a still-processing upload) does NOT supersede, so it can't hide
+    // an expired liability — exactly the predicate above, so the CSV/PDF annotation matches the dashboard.
+    // Per-group pairwise: groups are tiny (a vendor's certs of one type), so this stays ~O(n) at SMB scale.
+    // internal for a direct unit test pinning it equal to the DB predicate (InternalsVisibleTo).
+    internal static HashSet<Guid> SupersededIds(IReadOnlyList<Entities.Document> docs)
     {
-        var latestPerGroup = docs
-            .Where(d => d.VendorId != null)
-            .GroupBy(d => (d.VendorId, d.DocumentType))
-            .ToDictionary(g => g.Key, g => g.Max(x => x.CreatedAt));
-        return docs
-            .Where(d => d.VendorId != null && d.CreatedAt < latestPerGroup[(d.VendorId, d.DocumentType)])
-            .Select(d => d.Id)
-            .ToHashSet();
+        var superseded = new HashSet<Guid>();
+        foreach (var group in docs.Where(d => d.VendorId != null).GroupBy(d => (d.VendorId, d.DocumentType)))
+        {
+            var items = group.ToList();
+            foreach (var d in items)
+            {
+                if (d.ExpirationDate is null) continue; // null expiry → never superseded (matches the DB predicate)
+                if (items.Any(o => o.CreatedAt > d.CreatedAt
+                        && o.ExpirationDate is not null
+                        && o.ExpirationDate >= d.ExpirationDate))
+                    superseded.Add(d.Id);
+            }
+        }
+        return superseded;
     }
 
     public async Task<byte[]> BuildVendorReportAsync(Guid organizationId, Guid vendorId, CancellationToken ct)

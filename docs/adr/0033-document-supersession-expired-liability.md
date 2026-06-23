@@ -1,6 +1,6 @@
 # 0033. Document supersession — latest cert per (vendor, type) for the Expired liability
 
-- **Status:** accepted
+- **Status:** accepted (amended 2026-06-23 — see [Amendment 1](#amendment-1-2026-06-23--superseder-must-extend-coverage))
 - **Date:** 2026-06-23
 - **Deciders:** Ruben G. (founder), Claude (implementing #327)
 
@@ -53,6 +53,19 @@ Make every requirement contribute at most one document everywhere (compliant, ex
 
 ### Option C — De-count superseded docs from the export too (exclude them)
 **Rejected**: the audit export is a per-document compliance record; dropping a superseded doc would hide that the vendor had an expired cert and renewed it. Annotation preserves the record while applying the rule.
+
+## Amendment 1 (2026-06-23) — superseder must extend coverage
+
+A post-merge re-review of #327 found that the original predicate (`a newer doc by CreatedAt exists`) de-counted an older **expired** cert whenever **any** newer doc existed for the same `(vendor, type)`, **with no check that the newer doc was actually valid coverage**. So a "renewal" that was still processing (`ExpirationDate` null until extraction), had no expiry, or expired *earlier* than the cert it replaced would make a **genuinely-unmet expired liability silently disappear** from the dashboard, the deep-linked list, and the reminder windows. For a compliance product that is the exact failure mode we must not ship: a missed certificate must never be hidden by an invalid renewal.
+
+**Revised rule:** a document `d` is superseded by `o` (same `VendorId` non-null, same `DocumentType`) only when `o.CreatedAt > d.CreatedAt` **AND** `o.ExpirationDate` is non-null and `o.ExpirationDate >= d.ExpirationDate` — i.e. the newer upload must **extend coverage** (expire no earlier than the cert it replaces).
+
+- **Still-processing / no-expiry renewal** (`o.ExpirationDate` null): `NULL >= date` is false in SQL → does **not** supersede → the old expired cert stays counted and keeps reminding until a real covering cert lands. (Closes the unsafe window.)
+- **Future-dated or equal-expiry renewal** (a genuine renewal, or a duplicate re-upload of the same cert): still supersedes → the old copy never double-counts. The original anti-inflation goal and every original test are preserved (they seed same- or later-expiry superseders).
+- **Coverage-extending but non-compliant renewal**: still supersedes the *Expired* liability, but the new cert surfaces under the **NonCompliant** tally — nothing is hidden, only re-classified (accurate: the cert isn't expired, it's deficient).
+- **Earlier-expiry doc uploaded later** (the "stale correction" case the original Neutral note flagged): no longer treated as the current cert — both show as expired, the conservative-safe outcome.
+
+This narrows supersession (it now de-counts strictly fewer docs), so it can only ever **show more** liability, never less — a safe direction for a compliance tool. The `DocumentSupersession` predicate and the export's in-memory `SupersededIds` mirror were updated together and are pinned equal by a test. The `IX_Documents_Supersession (VendorId, DocumentType, CreatedAt)` index still serves the seek; `ExpirationDate` is a cheap residual filter on the already-narrow per-(vendor, type) row set.
 
 ## References
 
