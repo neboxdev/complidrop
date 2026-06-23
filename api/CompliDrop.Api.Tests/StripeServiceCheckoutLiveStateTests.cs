@@ -180,6 +180,26 @@ public sealed class StripeServiceCheckoutLiveStateTests(IntegrationTestFixture f
     }
 
     [Fact]
+    public async Task Terminal_checkout_clears_a_stale_cancel_at_period_end()
+    {
+        // #323 review coverage: the terminal-checkout branch sets CancelAtPeriodEnd=false (a fully-dead
+        // subscription is not a pending end-of-period cancel). SEED a stale true first — otherwise the
+        // row's default false would let a regression that deleted the assignment still pass.
+        var orgId = await SeedFreeOrgAsync();
+        await using (var seed = CreateSystemDb())
+            await seed.Subscriptions.Where(s => s.OrganizationId == orgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.CancelAtPeriodEnd, true));
+
+        var stub = new StubHttpMessageHandler(HttpStatusCode.OK, LiveSubscriptionJson("canceled"));
+        await using var db = CreateSystemDb();
+        await NewService(db, stub).HandleWebhookEventAsync(CheckoutEvent(orgId, DateTime.UtcNow), CancellationToken.None);
+
+        var sub = await ReloadAsync(orgId);
+        sub.Status.Should().Be("canceled");
+        sub.CancelAtPeriodEnd.Should().BeFalse("a terminal subscription is fully gone — not a pending end-of-period cancel");
+    }
+
+    [Fact]
     public async Task Checkout_for_a_subscription_already_terminal_on_stripe_keeps_free_tier_but_records_identity()
     {
         // The #275 reviewer's primary sequence, closed by live truth: the original checkout

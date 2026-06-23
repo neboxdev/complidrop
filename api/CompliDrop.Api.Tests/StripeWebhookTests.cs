@@ -182,6 +182,24 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         sub.DocumentLimit.Should().Be(5);
     }
 
+    [Fact]
+    public async Task Subscription_deleted_clears_a_stale_cancel_at_period_end()
+    {
+        // #323 review coverage: ApplySubscriptionDeletedAsync sets CancelAtPeriodEnd=false (a fully-canceled
+        // sub is not a pending end-of-period cancel). SEED a stale true first — the row default is false, so
+        // without the seed a regression that deleted the assignment would still pass.
+        var subId = await SeedSubscriptionAsync(plan: "pro", status: "active", hasPortal: true);
+        await using (var seed = CreateSystemDb())
+            await seed.Subscriptions.Where(s => s.StripeSubscriptionId == subId)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.CancelAtPeriodEnd, true));
+
+        var payload = DeletedEvent($"evt_{Guid.NewGuid():N}", subId);
+        var resp = await PostWebhook(payload, SignatureFor(payload));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await ReloadAsync(subId)).CancelAtPeriodEnd.Should().BeFalse("a fully-canceled subscription is not a pending end-of-period cancel");
+    }
+
     [Theory]
     [InlineData("customer.subscription.updated")]
     [InlineData("customer.subscription.created")]
@@ -242,6 +260,28 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
             subId, "active", "price_monthly_test", created: t.AddSeconds(2), cancelAtPeriodEnd: false);
         (await PostWebhook(reenable, SignatureFor(reenable))).StatusCode.Should().Be(HttpStatusCode.OK);
         (await ReloadAsync(subId)).CancelAtPeriodEnd.Should().BeFalse("re-enabling the subscription clears the flag");
+    }
+
+    [Fact]
+    public async Task A_stale_subscription_event_does_not_mutate_cancel_at_period_end()
+    {
+        // The flag rides the ApplySubscriptionStateAsync write that the IsStaleEvent fence (ADR 0023)
+        // guards: an out-of-order OLD event must not clobber the persisted flag. Pins that the fence covers
+        // this newest field too — a future hoist of the assignment above the fence would regress here.
+        var subId = await SeedSubscriptionAsync(plan: "pro", status: "active");
+        var fence = DateTimeOffset.UtcNow;
+        await using (var seed = CreateSystemDb())
+            await seed.Subscriptions.Where(s => s.StripeSubscriptionId == subId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(x => x.CancelAtPeriodEnd, false)
+                    .SetProperty(x => x.LastStripeEventAt, fence.UtcDateTime));
+
+        // A stale (pre-fence) event that, if applied, would flip the flag to true.
+        var stale = SubscriptionStateEvent($"evt_{Guid.NewGuid():N}", "customer.subscription.updated",
+            subId, "active", "price_monthly_test", created: fence.AddHours(-1), cancelAtPeriodEnd: true);
+        (await PostWebhook(stale, SignatureFor(stale))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        (await ReloadAsync(subId)).CancelAtPeriodEnd.Should().BeFalse("a stale event is fenced out and must not flip the flag");
     }
 
     [Fact]
