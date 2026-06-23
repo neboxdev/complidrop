@@ -50,7 +50,15 @@ public static class DashboardEndpoints
             && (d.ComplianceStatus == Entities.ComplianceStatus.Compliant
                 || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon
                 || d.ComplianceStatus == Entities.ComplianceStatus.Pending), ct);
-        var expired = await docs.CountAsync(d => d.ExpirationDate != null && d.ExpirationDate < today, ct);
+        // #327: a SUPERSEDED old cert (a newer cert exists for the same vendor + type) is no longer a
+        // current Expired liability — exclude it so this count matches the deep-linked documents list
+        // (?status=Expired) and the vendor's real coverage, instead of inflating on a renewed COI's old
+        // copy. The compliant/nonCompliant/expiringSoon counts above are deliberately NOT de-superseded
+        // (they're verdict/informational tallies, not the Expired liability the ticket scopes) — see ADR 0033.
+        var expired = await docs
+            .Where(d => d.ExpirationDate != null && d.ExpirationDate < today)
+            .Where(DocumentSupersession.IsCurrent(db.Documents))
+            .CountAsync(ct);
         // Denominator for the compliance rate EXCLUDES not-yet-graded documents (#318 FP-042): a fresh
         // upload sits ComplianceStatus.Pending until the worker reads + evaluates it, and counting those
         // as "not compliant" flashed a demoralizing "0%" the instant Pat uploaded her very first document.
@@ -120,8 +128,15 @@ public static class DashboardEndpoints
             d.ExpirationDate != null && d.ExpirationDate >= in61 && d.ExpirationDate < in91, ct);
         var beyond = await db.Documents.CountAsync(d =>
             d.ExpirationDate != null && d.ExpirationDate >= in91, ct);
-        var expired = await db.Documents.CountAsync(d =>
-            d.ExpirationDate != null && d.ExpirationDate < today, ct);
+        // #327: the EXPIRED bucket de-counts superseded (renewed) old certs — consistent with the
+        // dashboard Expired count. The future buckets (30/60/90/beyond) retain every document: a
+        // not-yet-expired cert is informational ("when does each doc expire"), not yet a missed liability,
+        // and a vendor commonly renews early so both the old (soon) and new (far) cert legitimately appear.
+        // See ADR 0033.
+        var expired = await db.Documents
+            .Where(d => d.ExpirationDate != null && d.ExpirationDate < today)
+            .Where(DocumentSupersession.IsCurrent(db.Documents))
+            .CountAsync(ct);
 
         return Results.Ok(new
         {

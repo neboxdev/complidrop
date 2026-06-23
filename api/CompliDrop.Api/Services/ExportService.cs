@@ -67,6 +67,14 @@ public class ExportService(SystemDbContext db) : IExportService
             .Include(d => d.Vendor)
             .OrderBy(d => d.ExpirationDate)
             .ToListAsync(ct);
+        // #327: annotate superseded (renewed) old certs in the audit report so a reader sees the old cert
+        // AND knows it was replaced — same (vendor, type, later CreatedAt) rule as DocumentSupersession,
+        // computed in memory over the loaded org set.
+        var supersededIds = docs
+            .Where(d => d.VendorId != null
+                && docs.Any(o => o.VendorId == d.VendorId && o.DocumentType == d.DocumentType && o.CreatedAt > d.CreatedAt))
+            .Select(d => d.Id)
+            .ToHashSet();
         var (audit, auditTruncated) = await QueryAuditSliceAsync(organizationId, fromUtc, toUtcExclusive, ct);
 
         // Resolve UserIds to human names so the report shows WHO acted, not a raw
@@ -126,7 +134,8 @@ public class ExportService(SystemDbContext db) : IExportService
                                     r.RelativeItem(2).Text(DisplayLabels.DocumentType(d.DocumentType)).FontSize(9);
                                     r.RelativeItem(2).Text(d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "—").FontSize(9);
                                     r.RelativeItem(2).Text(DisplayLabels.Compliance(
-                                        ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today))).FontSize(9);
+                                        ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today))
+                                        + (supersededIds.Contains(d.Id) ? " (superseded)" : "")).FontSize(9);
                                 });
                             }
                         }));
@@ -233,6 +242,16 @@ public class ExportService(SystemDbContext db) : IExportService
             .OrderBy(d => d.ExpirationDate)
             .ToListAsync(ct);
 
+        // #327: the audit export keeps EVERY document (it must not hide history — an auditor wants to see
+        // the expired old cert AND its renewal), but ANNOTATES the superseded ones so a reader knows the
+        // old cert was replaced and isn't a current gap. Computed in memory over the already-loaded org set
+        // (no extra query) with the same (vendor, type, later CreatedAt) rule as DocumentSupersession.
+        var supersededIds = docs
+            .Where(d => d.VendorId != null
+                && docs.Any(o => o.VendorId == d.VendorId && o.DocumentType == d.DocumentType && o.CreatedAt > d.CreatedAt))
+            .Select(d => d.Id)
+            .ToHashSet();
+
         await using var ms = new MemoryStream();
         await using var writer = new StreamWriter(ms, leaveOpen: true);
         var config = new CsvConfiguration(CultureInfo.InvariantCulture)
@@ -257,6 +276,7 @@ public class ExportService(SystemDbContext db) : IExportService
         csv.WriteField("Type");
         csv.WriteField("ProcessingStatus");
         csv.WriteField("Compliance");
+        csv.WriteField("Superseded"); // #327: "Yes" when a newer cert for the same vendor+type exists
         csv.WriteField("EffectiveDate");
         csv.WriteField("ExpirationDate");
         csv.WriteField("GeneralLiabilityLimit");
@@ -274,6 +294,7 @@ public class ExportService(SystemDbContext db) : IExportService
             csv.WriteField(DisplayLabels.Extraction(d.ExtractionStatus));
             csv.WriteField(DisplayLabels.Compliance(
                 ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today)));
+            csv.WriteField(supersededIds.Contains(d.Id) ? "Yes" : "No");
             csv.WriteField(d.EffectiveDate?.ToString("yyyy-MM-dd"));
             csv.WriteField(d.ExpirationDate?.ToString("yyyy-MM-dd"));
             csv.WriteField(d.GeneralLiabilityLimit?.ToString(CultureInfo.InvariantCulture));
@@ -311,9 +332,13 @@ public class ExportService(SystemDbContext db) : IExportService
                 page.Content().PaddingVertical(12).Column(col =>
                 {
                     col.Item().Text($"Documents: {vendor.Documents.Count}");
-                    foreach (var d in vendor.Documents.OrderBy(d => d.ExpirationDate))
+                    // #327: mark a superseded (renewed) old cert so the package shows the old doc AND that
+                    // a newer one for the same type replaced it. Within this single vendor's loaded docs.
+                    var vendorDocs = vendor.Documents;
+                    foreach (var d in vendorDocs.OrderBy(d => d.ExpirationDate))
                     {
-                        col.Item().PaddingTop(6).Text($"• {d.OriginalFileName} — {DisplayLabels.DocumentType(d.DocumentType)} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {DisplayLabels.Compliance(ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today))}");
+                        var superseded = vendorDocs.Any(o => o.DocumentType == d.DocumentType && o.CreatedAt > d.CreatedAt);
+                        col.Item().PaddingTop(6).Text($"• {d.OriginalFileName} — {DisplayLabels.DocumentType(d.DocumentType)} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {DisplayLabels.Compliance(ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today))}{(superseded ? " (superseded)" : "")}");
                     }
                 });
             });

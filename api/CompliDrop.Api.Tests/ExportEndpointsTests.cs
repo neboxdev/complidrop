@@ -131,12 +131,12 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
         var lines = csv.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToArray();
 
         lines[0].Should().Be(
-            "FileName,Vendor,Type,ProcessingStatus,Compliance,EffectiveDate,ExpirationDate,GeneralLiabilityLimit,UploadedBy,CreatedAt,Id");
+            "FileName,Vendor,Type,ProcessingStatus,Compliance,Superseded,EffectiveDate,ExpirationDate,GeneralLiabilityLimit,UploadedBy,CreatedAt,Id");
 
         var fields = lines[1].Split(',');
         fields[0].Should().Be("acme-coi.pdf", "the filename leads, not the GUID");
         fields[^1].Should().Be(docId.ToString(), "the raw GUID is last");
-        fields[9].Should().MatchRegex(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", "CreatedAt is Excel-parseable, no trailing Z");
+        fields[10].Should().MatchRegex(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", "CreatedAt is Excel-parseable, no trailing Z");
     }
 
     [Fact]
@@ -350,5 +350,49 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
         var bytes = await resp.Content.ReadAsByteArrayAsync();
         bytes.Length.Should().BeGreaterThan(0);
         Encoding.ASCII.GetString(bytes, 0, 4).Should().Be("%PDF");
+    }
+
+    [Fact]
+    public async Task Csv_export_annotates_a_superseded_old_cert_and_leaves_the_current_one_unmarked()
+    {
+        // #327: the export keeps BOTH the old expired cert and its renewal (full audit history), but marks
+        // the old one Superseded so a reader knows it was replaced and isn't a current gap.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = Guid.NewGuid();
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = auth.OrgId, Name = "Acme", CreatedAt = now, UpdatedAt = now });
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(), OrganizationId = auth.OrgId, VendorId = vendorId,
+                OriginalFileName = "old-coi.pdf", BlobStorageUrl = "memory://o", FileSizeBytes = 1,
+                ContentType = "application/pdf", DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed, ComplianceStatus = ComplianceStatus.Compliant,
+                CreatedAt = now.AddDays(-30), UpdatedAt = now.AddDays(-30),
+            });
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(), OrganizationId = auth.OrgId, VendorId = vendorId,
+                OriginalFileName = "new-coi.pdf", BlobStorageUrl = "memory://n", FileSizeBytes = 1,
+                ContentType = "application/pdf", DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed, ComplianceStatus = ComplianceStatus.Compliant,
+                CreatedAt = now, UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var csv = await (await auth.Client.GetAsync("/api/export/csv")).Content.ReadAsStringAsync();
+        var lines = csv.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToArray();
+        var header = lines[0].Split(',');
+        var fileIdx = Array.IndexOf(header, "FileName");
+        var supIdx = Array.IndexOf(header, "Superseded");
+        supIdx.Should().BeGreaterThan(-1, "the export has a Superseded column (#327)");
+
+        string SupersededFor(string fileName) =>
+            lines.Skip(1).Select(l => l.Split(',')).First(f => f[fileIdx] == fileName)[supIdx];
+
+        SupersededFor("old-coi.pdf").Should().Be("Yes", "the older cert is superseded by the newer one");
+        SupersededFor("new-coi.pdf").Should().Be("No", "the latest cert is current");
     }
 }

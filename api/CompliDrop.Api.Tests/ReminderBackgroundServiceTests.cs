@@ -247,6 +247,38 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
     }
 
     [Fact]
+    public async Task A_superseded_document_in_the_window_does_not_remind()
+    {
+        // #327: the vendor renewed (a newer cert for the same vendor + type exists), so the old cert's
+        // upcoming expiry must not pester them — even though it's still inside the reminder window.
+        var seed = await SeedReminderAsync(NyEightAm); // one doc, type "other", expiring in 30 days (in window)
+        await using (var db = CreateSystemDb())
+        {
+            var doc = await db.Documents.FirstAsync(d => d.Id == seed.DocumentId);
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = seed.OrgId,
+                VendorId = seed.VendorId,
+                DocumentType = doc.DocumentType, // SAME type — the renewal
+                OriginalFileName = "renewal.pdf",
+                BlobStorageUrl = "blob://renewal",
+                FileSizeBytes = 1024,
+                ContentType = "application/pdf",
+                ExpirationDate = doc.ExpirationDate!.Value.AddYears(1), // future — out of the window itself
+                CreatedAt = doc.CreatedAt.AddDays(1), // NEWER → supersedes the original
+                UpdatedAt = doc.CreatedAt.AddDays(1),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().BeEmpty("the in-window cert is superseded by a renewal — the vendor isn't pestered");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(0);
+    }
+
+    [Fact]
     public async Task A_suppressed_internal_user_is_also_skipped()
     {
         // Suppression is per-(org, email) and covers INTERNAL recipients too, not just vendors: a
