@@ -250,13 +250,15 @@ export default function SettingsPage() {
                 </div>
               </div>
 
-              {/* currentPeriodEnd is a real instant (Stripe billing-cycle end) →
-                  render in the viewer's local zone, not pinned UTC. Whether it
-                  "Renews" vs "Ends" needs cancel_at_period_end, which isn't stored
-                  yet — tracked in the FP-115 follow-up. (#316 FP-115) */}
+              {/* currentPeriodEnd is a real instant (Stripe billing-cycle end) → render in the viewer's
+                  local zone, not pinned UTC. cancelAtPeriodEnd distinguishes "Renews" from "Ends": an
+                  active sub set to cancel stays Status="active" until the period end, so it must read
+                  "Ends on …" (#323 / FP-115). The fully-canceled case is handled by billingStatusNotice. */}
               {isPaid && subscription.data.currentPeriodEnd && (
                 <p className="text-xs text-slate-500">
-                  Renews on {formatRenewalDate(subscription.data.currentPeriodEnd)}.
+                  {subscription.data.cancelAtPeriodEnd
+                    ? `Ends on ${formatRenewalDate(subscription.data.currentPeriodEnd)} — your plan won't renew.`
+                    : `Renews on ${formatRenewalDate(subscription.data.currentPeriodEnd)}.`}
                 </p>
               )}
 

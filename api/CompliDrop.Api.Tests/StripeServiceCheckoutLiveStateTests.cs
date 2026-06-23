@@ -81,7 +81,7 @@ public sealed class StripeServiceCheckoutLiveStateTests(IntegrationTestFixture f
         },
     };
 
-    private static string LiveSubscriptionJson(string status, string priceId = "price_annual_test", long? currentPeriodEnd = null, long? endedAt = null) =>
+    private static string LiveSubscriptionJson(string status, string priceId = "price_annual_test", long? currentPeriodEnd = null, long? endedAt = null, bool? cancelAtPeriodEnd = null) =>
         $$"""
         {
           "id": "{{LiveSubId}}",
@@ -89,6 +89,7 @@ public sealed class StripeServiceCheckoutLiveStateTests(IntegrationTestFixture f
           "status": "{{status}}",
           {{(currentPeriodEnd is { } cpe ? $"\"current_period_end\": {cpe}," : "")}}
           {{(endedAt is { } ea ? $"\"ended_at\": {ea}," : "")}}
+          {{(cancelAtPeriodEnd is { } cape ? $"\"cancel_at_period_end\": {(cape ? "true" : "false")}," : "")}}
           "items": {
             "object": "list",
             "data": [
@@ -147,6 +148,35 @@ public sealed class StripeServiceCheckoutLiveStateTests(IntegrationTestFixture f
         sub.CurrentPeriodEnd.Should().Be(DateTimeOffset.FromUnixTimeSeconds(periodEnd).UtcDateTime,
             "checkout now records the period end so a fence-skipped same-second subscription.created loses nothing");
         sub.LastStripeEventAt.Should().Be(created, "an applied event stamps the fence");
+    }
+
+    [Theory]
+    [InlineData(false, false)] // live truth says "won't cancel" → clears the stale flag (the #323 review bug)
+    [InlineData(true, true)]   // live truth says "cancel scheduled" → records it (derives from live, not hardcoded)
+    public async Task Re_subscribe_checkout_derives_cancel_at_period_end_from_live_truth(bool liveCancel, bool expected)
+    {
+        // #323 review bug: after a cancel-at-period-end then a full cancel, the row can carry a stale
+        // CancelAtPeriodEnd=true. A re-subscribe checkout re-derives every entitlement field from live
+        // truth and must do the same for this flag — otherwise the freshly-renewing customer sees
+        // "Ends on … won't renew". Seed the stale true, then re-subscribe.
+        var orgId = await SeedFreeOrgAsync();
+        await using (var seed = CreateSystemDb())
+            await seed.Subscriptions.Where(s => s.OrganizationId == orgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.CancelAtPeriodEnd, true));
+
+        var created = DateTime.UtcNow.AddSeconds(-1);
+        created = new DateTime(created.Ticks - created.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc);
+        var stub = new StubHttpMessageHandler(HttpStatusCode.OK, LiveSubscriptionJson(
+            "active",
+            currentPeriodEnd: DateTimeOffset.UtcNow.AddMonths(12).ToUnixTimeSeconds(),
+            cancelAtPeriodEnd: liveCancel));
+
+        await using var db = CreateSystemDb();
+        await NewService(db, stub).HandleWebhookEventAsync(CheckoutEvent(orgId, created), CancellationToken.None);
+
+        var sub = await ReloadAsync(orgId);
+        sub.Plan.Should().Be("annual");
+        sub.CancelAtPeriodEnd.Should().Be(expected, "the re-subscribe derives the flag from live truth, not the stale row");
     }
 
     [Fact]

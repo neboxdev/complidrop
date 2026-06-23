@@ -156,6 +156,8 @@ public static class BillingEndpoints
                 documentsUsed = docCount,
                 hasVendorPortal = sub.HasVendorPortal,
                 currentPeriodEnd = sub.CurrentPeriodEnd,
+                // #323: "Ends on {currentPeriodEnd}" (won't renew) vs "Renews on {currentPeriodEnd}".
+                cancelAtPeriodEnd = sub.CancelAtPeriodEnd,
                 // EFFECTIVE spend, not the raw counter: a stale-month row reads as zero (#256),
                 // so the Settings "this month" tile shows the same number the ceiling enforces.
                 extractionSpend = CostTrackingService.EffectiveSpend(

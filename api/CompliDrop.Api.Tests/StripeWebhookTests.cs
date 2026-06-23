@@ -114,17 +114,20 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
     // `currentPeriodEnd` is OMITTED from the payload when null (matching the wire format for
     // an absent field) rather than serialized as JSON null — Stripe.net treats the two
     // differently, and the absent-field path is what the epoch-sentinel guard handles.
-    private static string SubscriptionStateEvent(string eventId, string type, string subId, string status, string priceId, DateTimeOffset? created = null, long? currentPeriodEnd = null)
+    private static string SubscriptionStateEvent(string eventId, string type, string subId, string status, string priceId, DateTimeOffset? created = null, long? currentPeriodEnd = null, bool? cancelAtPeriodEnd = null)
     {
         var items = new
         {
             @object = "list",
             data = new[] { new { id = "si_1", @object = "subscription_item", price = new { id = priceId, @object = "price" } } }
         };
-        object dataObject = currentPeriodEnd is { } cpe
-            ? new { id = subId, @object = "subscription", status, current_period_end = cpe, items }
-            : new { id = subId, @object = "subscription", status, items };
-        return JsonSerializer.Serialize(Envelope(eventId, type, dataObject, created));
+        var data = new Dictionary<string, object?>
+        {
+            ["id"] = subId, ["object"] = "subscription", ["status"] = status, ["items"] = items
+        };
+        if (currentPeriodEnd is { } cpe) data["current_period_end"] = cpe;
+        if (cancelAtPeriodEnd is { } cape) data["cancel_at_period_end"] = cape;
+        return JsonSerializer.Serialize(Envelope(eventId, type, data, created));
     }
 
     private static string SignatureFor(string payload)
@@ -217,6 +220,28 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var sub = await ReloadAsync(subId);
         sub.Plan.Should().Be(expectedPlan);
+    }
+
+    [Theory]
+    [InlineData("customer.subscription.updated")]
+    [InlineData("customer.subscription.created")] // the flag can arrive on either — both route through ApplySubscriptionStateAsync
+    public async Task Subscription_event_persists_cancel_at_period_end_and_clears_it_on_re_enable(string eventType)
+    {
+        // #323: a user who clicks "cancel" in the billing portal flips cancel_at_period_end=true while the
+        // sub stays Status="active" until the period end — the flag must persist so the card reads "Ends
+        // on" not "Renews on". Re-enabling (false) clears it.
+        var subId = await SeedSubscriptionAsync(plan: "pro", status: "active");
+        var t = DateTimeOffset.UtcNow;
+
+        var cancel = SubscriptionStateEvent($"evt_{Guid.NewGuid():N}", eventType,
+            subId, "active", "price_monthly_test", created: t, cancelAtPeriodEnd: true);
+        (await PostWebhook(cancel, SignatureFor(cancel))).StatusCode.Should().Be(HttpStatusCode.OK);
+        (await ReloadAsync(subId)).CancelAtPeriodEnd.Should().BeTrue();
+
+        var reenable = SubscriptionStateEvent($"evt_{Guid.NewGuid():N}", "customer.subscription.updated",
+            subId, "active", "price_monthly_test", created: t.AddSeconds(2), cancelAtPeriodEnd: false);
+        (await PostWebhook(reenable, SignatureFor(reenable))).StatusCode.Should().Be(HttpStatusCode.OK);
+        (await ReloadAsync(subId)).CancelAtPeriodEnd.Should().BeFalse("re-enabling the subscription clears the flag");
     }
 
     [Fact]

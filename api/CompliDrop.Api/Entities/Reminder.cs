@@ -57,6 +57,11 @@ public class Subscription
     // so existing lifetime counters were forgiven on deploy and a fresh row starts at zero.
     public DateOnly SpendMonthStart { get; set; } = DateOnly.MinValue;
     public DateTime? CurrentPeriodEnd { get; set; }
+    // Stripe `cancel_at_period_end` (#323): an ACTIVE subscription set to cancel at the period end —
+    // Stripe only flips Status to "canceled" at the actual period end, so until then the billing card
+    // must say "Ends on {CurrentPeriodEnd}" (won't renew) rather than "Renews on". Persisted from the
+    // customer.subscription.updated/.created webhook; additive, defaults false.
+    public bool CancelAtPeriodEnd { get; set; } = false;
     // Order-resilience fence (#275, ADR 0023): the as-of moment of the newest applied
     // subscription state — the Stripe `created` of the newest applied webhook event, or the
     // live subscription's EndedAt when a checkout applied already-terminal live truth.
