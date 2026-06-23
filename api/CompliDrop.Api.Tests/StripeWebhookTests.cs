@@ -222,8 +222,10 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         sub.Plan.Should().Be(expectedPlan);
     }
 
-    [Fact]
-    public async Task Subscription_updated_persists_cancel_at_period_end_and_clears_it_on_re_enable()
+    [Theory]
+    [InlineData("customer.subscription.updated")]
+    [InlineData("customer.subscription.created")] // the flag can arrive on either — both route through ApplySubscriptionStateAsync
+    public async Task Subscription_event_persists_cancel_at_period_end_and_clears_it_on_re_enable(string eventType)
     {
         // #323: a user who clicks "cancel" in the billing portal flips cancel_at_period_end=true while the
         // sub stays Status="active" until the period end — the flag must persist so the card reads "Ends
@@ -231,7 +233,7 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         var subId = await SeedSubscriptionAsync(plan: "pro", status: "active");
         var t = DateTimeOffset.UtcNow;
 
-        var cancel = SubscriptionStateEvent($"evt_{Guid.NewGuid():N}", "customer.subscription.updated",
+        var cancel = SubscriptionStateEvent($"evt_{Guid.NewGuid():N}", eventType,
             subId, "active", "price_monthly_test", created: t, cancelAtPeriodEnd: true);
         (await PostWebhook(cancel, SignatureFor(cancel))).StatusCode.Should().Be(HttpStatusCode.OK);
         (await ReloadAsync(subId)).CancelAtPeriodEnd.Should().BeTrue();

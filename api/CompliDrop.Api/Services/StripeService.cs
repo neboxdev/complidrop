@@ -290,6 +290,7 @@ public class StripeService(
             sub.Status = "canceled";
             sub.DocumentLimit = 5;
             sub.HasVendorPortal = false;
+            sub.CancelAtPeriodEnd = false; // terminal → not a pending end-of-period cancel (#323)
             // Fence past the Stripe-side death, not at this (possibly days-old) checkout's
             // own `created`: the live truth applied here is as-of the subscription's end, so
             // pending retries of pre-cancel events (subscription.created/updated "active",
@@ -308,6 +309,11 @@ public class StripeService(
             sub.Status = live?.Status ?? "active";
             sub.DocumentLimit = null;
             sub.HasVendorPortal = true;
+            // Re-derive from live truth like every other field above (#323): a re-subscribe after a prior
+            // cancel-at-period-end must NOT inherit the stale `true`, or the freshly-renewing customer
+            // would see "Ends on … won't renew". This handler re-derives everything precisely so it never
+            // depends on a follow-up subscription.created event (which the stale-event fence could skip).
+            sub.CancelAtPeriodEnd = live?.CancelAtPeriodEnd ?? false;
             // Stripe.net deserializes ABSENT date fields to the Unix epoch (the property
             // default), never to default(DateTime) — epoch-or-earlier means "not supplied".
             if (live is not null && live.CurrentPeriodEnd > DateTime.UnixEpoch)
@@ -373,6 +379,7 @@ public class StripeService(
         sub.Status = "canceled";
         sub.DocumentLimit = 5;
         sub.HasVendorPortal = false;
+        sub.CancelAtPeriodEnd = false; // fully canceled → clear the pending-cancel flag (#323)
         sub.LastStripeEventAt = eventCreated;
         sub.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);

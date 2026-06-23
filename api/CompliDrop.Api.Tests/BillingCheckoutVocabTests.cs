@@ -315,4 +315,20 @@ public sealed class BillingCheckoutVocabTests(IntegrationTestFixture fixture) : 
         ErrorCode(replayBody).Should().Be("billing.already_subscribed");
         SessionUrl(replayBody).Should().BeNull("the cached pre-subscription sessionUrl must not be replayed");
     }
+
+    [Fact]
+    public async Task Subscription_endpoint_surfaces_cancel_at_period_end()
+    {
+        // #323: the GET endpoint must actually emit the flag (the frontend reads it through the real
+        // serializer, not a mock). Registration creates a free sub; flip the flag and read it back.
+        var auth = await RegisterAndLoginAsync();
+        await using (var db = CreateSystemDb())
+            await db.Subscriptions.Where(s => s.OrganizationId == auth.OrgId)
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.CancelAtPeriodEnd, true));
+
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>("/api/billing/subscription");
+
+        body.GetProperty("data").GetProperty("cancelAtPeriodEnd").GetBoolean()
+            .Should().BeTrue("the subscription endpoint must surface cancelAtPeriodEnd for the billing card");
+    }
 }
