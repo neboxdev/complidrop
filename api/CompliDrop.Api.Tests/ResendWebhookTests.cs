@@ -218,6 +218,23 @@ public sealed class ResendWebhookTests(IntegrationTestFixture fixture) : Integra
     }
 
     [Fact]
+    public async Task A_bounce_with_no_classification_object_records_the_status_but_does_not_suppress()
+    {
+        // Defensive: an email.bounced can arrive WITHOUT the nested data.bounce.type (EventPayload omits the
+        // bounce object entirely). IsPermanentBounce's ValueKind/TryGetProperty guards must read that as
+        // "not a confirmed Permanent hard bounce" and NOT suppress — only an explicit Permanent does.
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        var payload = EventPayload("email.bounced", messageId);
+
+        (await PostWebhook(payload, Sign(payload))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        (await db.EmailSuppressions.AnyAsync(s => s.Email == "vendor@example.com"))
+            .Should().BeFalse("a bounce with no Permanent classification is not a confirmed hard bounce — don't over-suppress");
+        (await StatusOf(messageId)).Should().Be("bounced", "the ReminderLog still records the bounce status");
+    }
+
+    [Fact]
     public async Task A_bounce_then_a_complaint_upgrades_the_reason_and_never_downgrades()
     {
         var messageId = await SeedReminderLogAsync(status: "sent");

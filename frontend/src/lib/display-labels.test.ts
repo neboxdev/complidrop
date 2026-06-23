@@ -84,6 +84,8 @@ describe("actionLabel (#188)", () => {
     expect(actionLabel("vendorPortalLink.upload_processed")).toBe("Vendor sent a document");
     expect(actionLabel("vendorPortalLink.emailed")).toBe("Upload link emailed");
     expect(actionLabel("document.processed")).toBe("Document read");
+    // #340 suppression feed event — pin the exact curated copy, not just "not the raw fallback".
+    expect(actionLabel("reminder.recipient_suppressed")).toBe("Reminders paused — bad email");
   });
   it("fixes the all-lowercase entity garble the old prettyAction produced", () => {
     // Old prettyAction → "Compliancetemplate · Created"; the map gives English.
