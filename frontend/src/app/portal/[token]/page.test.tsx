@@ -1142,3 +1142,54 @@ describe("PortalPage — FP-130 accessibility", () => {
     expect(region).toHaveAttribute("tabindex", "0");
   });
 });
+
+describe("PortalPage — idempotency key (#333)", () => {
+  it("sends an Idempotency-Key header on the upload POST", async () => {
+    const keys: (string | null)[] = [];
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), async ({ request }) => {
+        keys.push(request.headers.get("Idempotency-Key"));
+        return jsonOk({ uploadId: "u_idem", extractionStatus: "Pending", message: "Received" });
+      }),
+    );
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+    dropFiles([makeFile("coi.pdf")]);
+    await waitFor(() => expect(screen.getByText(/^received$/i)).toBeInTheDocument());
+
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toBeTruthy();
+  });
+
+  it("reuses the SAME key when a failed upload is retried", async () => {
+    // So a succeeded-but-response-lost upload replays the winner server-side instead of duplicating.
+    const keys: (string | null)[] = [];
+    let call = 0;
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), async ({ request }) => {
+        keys.push(request.headers.get("Idempotency-Key"));
+        call += 1;
+        return call === 1
+          ? jsonError("rate_limit.exceeded", "Too many requests. Please try again later.", { status: 429 })
+          : jsonOk({ uploadId: "u_idem", extractionStatus: "Pending", message: "Received" });
+      }),
+    );
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+    dropFiles([makeFile("coi.pdf")]);
+
+    const retry = await screen.findByRole("button", { name: /retry upload/i });
+    fireEvent.click(retry);
+    await waitFor(() => expect(screen.getByText(/^received$/i)).toBeInTheDocument());
+
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBeTruthy();
+    expect(keys[1]).toBe(keys[0]);
+  });
+});
