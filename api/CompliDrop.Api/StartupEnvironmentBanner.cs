@@ -1,3 +1,4 @@
+using CompliDrop.Api.Configuration;
 using Npgsql;
 
 namespace CompliDrop.Api;
@@ -54,7 +55,7 @@ public static class StartupEnvironmentBanner
     public static TargetSummary Describe(IConfiguration config) => new(
         Database: DescribeDatabase(config.GetConnectionString("Database")),
         BlobStorage: DescribeBlob(config["AzureStorage:ConnectionString"]),
-        Email: DescribeEmail(config["Resend:ApiKey"]),
+        Email: DescribeEmail(BindResend(config)),
         Stripe: DescribeStripe(config["Stripe:SecretKey"]));
 
     /// <summary>
@@ -72,14 +73,16 @@ public static class StartupEnvironmentBanner
                 "Stripe:SecretKey is a LIVE key — a local checkout/billing test writes real "
                 + "subscription state. Use an sk_test_ key in Development.");
 
-        // Email is "live" the moment a Resend API key is present — IEmailService.SendAsync delivers
-        // for real (the dev DB is a clone of prod data with real vendor/user addresses, so the hourly
-        // reminder worker would mail them). #271 deliberately REMOVED Resend:ApiKey from the dev
+        // Email is "live" when Resend would actually send — both an API key AND a from-address present
+        // (ResendSettings.WouldSend, the same gate IEmailService.IsEnabled uses, so the two can't
+        // drift). The hourly reminder worker mails for real then, and the dev DB is a clone of prod
+        // data with real vendor/user addresses. #271 deliberately REMOVED Resend:ApiKey from the dev
         // secrets to stay email-silent; this warns loudly if it ever reappears.
-        if (!string.IsNullOrWhiteSpace(config["Resend:ApiKey"]))
+        if (BindResend(config).WouldSend)
             warnings.Add(
-                "Resend:ApiKey is set — the local reminder/transactional senders will deliver REAL "
-                + "email. Remove Resend:ApiKey in Development to stay email-silent.");
+                "Resend is configured to send real email (Resend:ApiKey + Resend:FromEmail present) — "
+                + "the local reminder/transactional senders will deliver REAL email. Remove Resend:ApiKey "
+                + "in Development to stay email-silent.");
 
         if (RealBlobAccountName(config["AzureStorage:ConnectionString"]) is { } account)
             warnings.Add(
@@ -144,10 +147,24 @@ public static class StartupEnvironmentBanner
             : $"account '{account}'";
     }
 
-    private static string DescribeEmail(string? resendApiKey) =>
-        string.IsNullOrWhiteSpace(resendApiKey)
-            ? "silent (no Resend API key — sends are skipped)"
-            : "LIVE (Resend will send real email)";
+    private static string DescribeEmail(ResendSettings resend) =>
+        resend.WouldSend
+            ? "LIVE (Resend will send real email)"
+            : "silent (Resend not configured to send — sends are skipped)";
+
+    /// <summary>
+    /// Binds the <c>Resend</c> section onto a fresh <see cref="ResendSettings"/> so the email mode is
+    /// decided by the SAME <see cref="ResendSettings.WouldSend"/> gate the runtime
+    /// <see cref="Services.ResendEmailService.IsEnabled"/> uses — the two can't drift. Binding (not a
+    /// raw key read) applies <c>FromEmail</c>'s non-empty default, so the banner models the real send
+    /// gate exactly, including in unit tests that only set the API key.
+    /// </summary>
+    private static ResendSettings BindResend(IConfiguration config)
+    {
+        var resend = new ResendSettings();
+        config.GetSection("Resend").Bind(resend);
+        return resend;
+    }
 
     private static string DescribeStripe(string? secretKey)
     {
@@ -180,26 +197,33 @@ public static class StartupEnvironmentBanner
 
     private static bool IsAzurite(string connectionString)
     {
-        var trimmed = connectionString.Trim();
-        // The shorthand the dev secrets use…
-        if (trimmed.Equals("UseDevelopmentStorage=true", StringComparison.OrdinalIgnoreCase))
+        // Match the shorthand as a SEGMENT, not by whole-string equality: a trailing ';' or an
+        // appended "BlobEndpoint=…" (the documented form for retargeting the emulator host) is still
+        // Azurite, e.g. "UseDevelopmentStorage=true;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1".
+        if (string.Equals(SegmentValue(connectionString, "UseDevelopmentStorage"), "true", StringComparison.OrdinalIgnoreCase))
             return true;
         // …and the expanded form (devstoreaccount1 is Azurite's well-known account name).
         return string.Equals(AccountName(connectionString), "devstoreaccount1", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>The <c>AccountName</c> segment, or null when absent. See <see cref="SegmentValue"/>.</summary>
+    private static string? AccountName(string connectionString) => SegmentValue(connectionString, "AccountName");
+
     /// <summary>
-    /// Reads ONLY the <c>AccountName</c> segment from an Azure storage connection string. A
-    /// hand-rolled segment scan (not a generic parser) so it can never return the <c>AccountKey</c> /
-    /// SAS token — the security invariant. Returns null when absent.
+    /// Reads ONLY the value of the named <c>key=value</c> segment from a <c>;</c>-delimited connection
+    /// string. A hand-rolled segment scan (not a generic parser) keyed on an explicit key name, so it
+    /// can never return the <c>AccountKey</c> / SAS token when asked for <c>AccountName</c> — the
+    /// security invariant. Splits on the FIRST <c>=</c>, so a value containing <c>=</c> (e.g. a base64
+    /// account key's <c>==</c> padding) stays bound to its own key and is never mis-attributed. Returns
+    /// null when the key is absent.
     /// </summary>
-    private static string? AccountName(string connectionString)
+    private static string? SegmentValue(string connectionString, string key)
     {
         foreach (var part in connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             var idx = part.IndexOf('=');
             if (idx <= 0) continue;
-            if (part[..idx].Trim().Equals("AccountName", StringComparison.OrdinalIgnoreCase))
+            if (part[..idx].Trim().Equals(key, StringComparison.OrdinalIgnoreCase))
                 return part[(idx + 1)..].Trim();
         }
         return null;

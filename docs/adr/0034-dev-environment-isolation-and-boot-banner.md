@@ -58,7 +58,9 @@ Three properties define it:
    only — never the DB password, storage account key, or any API key. The DB host is read via
    `NpgsqlConnectionStringBuilder` (host + database properties only); the blob account name via a
    hand-rolled segment scan that can only ever return `AccountName` (never `AccountKey`/SAS); Stripe
-   and email by key *prefix*/presence. Same invariant as the
+   by key *prefix*; email mode via the shared `ResendSettings.WouldSend` predicate (the same gate
+   `IEmailService.IsEnabled` uses, so the banner's "LIVE/silent" label can never drift from the actual
+   send behaviour). Same invariant as the
    [ADR 0026](0026-environment-aware-required-config-validation.md) validator family, pinned by
    `StartupEnvironmentBannerTests`.
 

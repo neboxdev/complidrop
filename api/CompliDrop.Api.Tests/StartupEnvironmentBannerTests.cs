@@ -22,7 +22,10 @@ public sealed class StartupEnvironmentBannerTests
     // A connection string whose password / account key / api keys are distinctive sentinels, so a
     // single not-contains assertion proves redaction regardless of how the field is rendered.
     private const string DbSecret = "SUPER_SECRET_DB_PASSWORD_42";
-    private const string BlobKey = "AAAABBBBCCCCDDDDEEEEFFFF_ACCOUNT_KEY";
+    // A realistic base64 account-key shape: contains '/', '+' and trailing '==' padding. The '=' chars
+    // are the load-bearing case for the segment scan (it splits on the FIRST '='), so a real-account
+    // connection string proves the key value can't leak even with internal/padding '='.
+    private const string BlobKey = "AAAABBBBccccDDDD/eeee+FFFF_ACCOUNT_KEY==";
     private const string DbConnString =
         "Host=ep-sparkling-shape-a4inp0of.us-east-1.aws.neon.tech;Database=complidrop;Username=app;"
         + "Password=" + DbSecret + ";SSL Mode=Require";
@@ -112,6 +115,8 @@ public sealed class StartupEnvironmentBannerTests
     [Theory]
     [InlineData("UseDevelopmentStorage=true")]
     [InlineData("usedevelopmentstorage=true")]
+    [InlineData("UseDevelopmentStorage=true;")] // trailing ';' — idiomatic, must still classify as Azurite (#271 review)
+    [InlineData("UseDevelopmentStorage=true;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1")] // retargeted-host form
     [InlineData("DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqF==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1")]
     public void Describe_blob_recognizes_azurite(string connectionString)
     {
@@ -143,8 +148,21 @@ public sealed class StartupEnvironmentBannerTests
     [Fact]
     public void Describe_email_is_live_with_a_key()
     {
+        // Only ApiKey set: binding applies FromEmail's non-empty default, so this models the real send
+        // gate (WouldSend = ApiKey && FromEmail) the same way the runtime IOptions<ResendSettings> does.
         StartupEnvironmentBanner.Describe(Config(("Resend:ApiKey", "re_anything")))
             .Email.Should().Contain("LIVE");
+    }
+
+    [Fact]
+    public void Describe_email_is_silent_when_from_email_is_blanked()
+    {
+        // The banner's email mode mirrors IEmailService.IsEnabled exactly (ResendSettings.WouldSend):
+        // a key present but FromEmail explicitly emptied means the service would NOT send, so the banner
+        // must say "silent" and NOT warn — not over-claim LIVE. Pins the no-drift contract (#271 review).
+        var config = Config(("Resend:ApiKey", "re_anything"), ("Resend:FromEmail", ""));
+        StartupEnvironmentBanner.Describe(config).Email.Should().Contain("silent");
+        StartupEnvironmentBanner.LiveResourceWarnings(config).Should().BeEmpty();
     }
 
     // ---- stripe describer -----------------------------------------------------------------------
@@ -156,9 +174,27 @@ public sealed class StartupEnvironmentBannerTests
     [InlineData("rk_live_abc", "LIVE mode")]
     [InlineData("", "not configured")]
     [InlineData("pk_wrongprefix", "configured (unrecognized key prefix)")]
+    // Real Stripe keys are ALWAYS lowercase-prefixed, so case-sensitive (Ordinal) matching is
+    // intended: a wrong-case "SK_LIVE_" is not a usable Stripe key and is reported as unrecognized
+    // (and so triggers no live warning). Pinned so a future case-insensitive change is deliberate.
+    [InlineData("SK_LIVE_abc", "configured (unrecognized key prefix)")]
     public void Describe_stripe_classifies_by_key_prefix(string key, string expected)
     {
         StartupEnvironmentBanner.Describe(Config(("Stripe:SecretKey", key))).Stripe.Should().Be(expected);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Describe_treats_blank_db_and_blob_as_not_configured(string blank)
+    {
+        // The IsNullOrWhiteSpace guards on the DB + blob describers must short-circuit a whitespace-only
+        // value before NpgsqlConnectionStringBuilder / the segment scan ever sees it.
+        var summary = StartupEnvironmentBanner.Describe(Config(
+            ("ConnectionStrings:Database", blank),
+            ("AzureStorage:ConnectionString", blank)));
+        summary.Database.Should().Be("not configured");
+        summary.BlobStorage.Should().Be("not configured");
     }
 
     // ---- live-resource warnings (env-agnostic predicate set) ------------------------------------
