@@ -28,8 +28,9 @@ public class ResendEmailService(
 {
     private readonly ResendSettings _cfg = settings.Value;
 
-    public bool IsEnabled =>
-        !string.IsNullOrWhiteSpace(_cfg.ApiKey) && !string.IsNullOrWhiteSpace(_cfg.FromEmail);
+    // The single send gate, shared with #271's StartupEnvironmentBanner (ResendSettings.WouldSend) so
+    // the boot-time email-mode label can never drift from the runtime behaviour.
+    public bool IsEnabled => _cfg.WouldSend;
 
     public async Task<string?> SendAsync(string toEmail, string subject, string htmlBody, CancellationToken ct, string? idempotencyKey = null)
     {

@@ -427,6 +427,13 @@ using (var scope = app.Services.CreateScope())
 {
     var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
 
+    // Name the resolved targets BEFORE anything touches them. The DB host lands immediately above the
+    // "Applying N migrations" line, so a local boot accidentally pointed at prod is visible before the
+    // first DDL runs — the durable guard #271 needed. In Development this also warns loudly for any
+    // target that looks live (live Stripe key / present Resend key / real Azure account). Redacted:
+    // never echoes a password or key.
+    StartupEnvironmentBanner.Log(app.Configuration, app.Environment, logger);
+
     // Schema first: bring the database to the assembly's migration set (or fail-fast on drift)
     // BEFORE anything queries it. Migrations belong to AppDbContext (generated with
     // --context AppDbContext). This is deliberately NOT wrapped in a swallowing try/catch — a
