@@ -6,6 +6,8 @@ on:
     paths:
       - "frontend/**"
       - ".github/workflows/frontend-ci.yml"
+      # Root .editorconfig also carries the frontend's TS/TSX indent rules.
+      - ".editorconfig"
       # The requirement-catalog ⊆ extraction-prompt contract test (#272,
       # src/lib/requirements-extraction-contract.test.ts) reads this backend file, so a
       # prompt-side edit (e.g. removing a field the catalog offers) must run frontend tests.
@@ -14,6 +16,8 @@ on:
     paths:
       - "frontend/**"
       - ".github/workflows/frontend-ci.yml"
+      # Root .editorconfig also carries the frontend's TS/TSX indent rules.
+      - ".editorconfig"
       - "api/CompliDrop.Api/Services/Extraction/ExtractionPrompts.cs"
 
 jobs:
@@ -36,6 +40,13 @@ jobs:
 
       - name: Lint
         run: npm run lint --if-present
+
+      # Standing dead-code / unused-dependency gate (#42 / epic #41). knip is the single
+      # authoritative tool for dead files / unused deps / unlisted imports; its version is
+      # pinned in package-lock.json so a local `npm run knip` pass guarantees a CI pass.
+      # Config + scope rationale: frontend/knip.jsonc.
+      - name: Knip (dead code / unused deps)
+        run: npm run knip
 
       - name: Type check
         run: npx tsc --noEmit

@@ -18,7 +18,7 @@
 import type { CSSProperties } from "react";
 import { BRAND_COLORS, CHECK_PATH, DROPLET_PATH } from "@/lib/brand";
 
-export type LogoVariant = "primary" | "twotone" | "reverse" | "mark";
+type LogoVariant = "primary" | "twotone" | "reverse" | "mark";
 
 export interface LogoProps {
   /** Lockup variant. Defaults to `"primary"`. */
@@ -159,5 +159,3 @@ export function Logo({
     </span>
   );
 }
-
-export default Logo;

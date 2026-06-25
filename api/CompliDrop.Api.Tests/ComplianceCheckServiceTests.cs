@@ -1,4 +1,3 @@
-using CompliDrop.Api.Auth;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;

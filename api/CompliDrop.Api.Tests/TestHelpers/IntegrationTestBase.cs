@@ -1,4 +1,4 @@
-﻿using System.Net.Http.Json;
+using System.Net.Http.Json;
 using System.Text.Json;
 using CompliDrop.Api.Auth;
 using CompliDrop.Api.Data;

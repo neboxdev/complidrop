@@ -1,7 +1,6 @@
 using CompliDrop.Api.Data;
 using CompliDrop.Api.DTOs.Waitlist;
 using CompliDrop.Api.Entities;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace CompliDrop.Api.Endpoints;

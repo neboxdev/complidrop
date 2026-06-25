@@ -14,7 +14,7 @@
  * keyword-friendly. Keep it that way.
  */
 
-export interface GlossarySection {
+interface GlossarySection {
   heading: string;
   /** One or more plain-text paragraphs. */
   paragraphs: string[];

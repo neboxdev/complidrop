@@ -8,7 +8,7 @@ import { useDashboardStats } from "@/hooks/useDashboard";
 import { useSubscription } from "@/hooks/useSubscription";
 import { TrySampleButton } from "@/components/onboarding/SampleData";
 
-export type ChecklistStep = {
+type ChecklistStep = {
   key: string;
   label: string;
   hint: string;

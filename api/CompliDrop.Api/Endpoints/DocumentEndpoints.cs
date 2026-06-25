@@ -1,4 +1,3 @@
-using System.Security.Claims;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CompliDrop.Api.Auth;
@@ -7,7 +6,6 @@ using CompliDrop.Api.DTOs.Compliance;
 using CompliDrop.Api.DTOs.Documents;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
-using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 

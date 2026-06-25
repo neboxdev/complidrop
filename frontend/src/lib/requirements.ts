@@ -23,7 +23,7 @@
 import { fieldLabel, operatorLabel } from "@/lib/display-labels";
 
 export type RequirementGroup = "Insurance" | "Dates" | "Licenses & permits" | "Certifications";
-export type RequirementValueKind = "money" | "text" | "none";
+type RequirementValueKind = "money" | "text" | "none";
 
 export type RequirementType = {
   key: string;
@@ -91,7 +91,7 @@ export function parseMoneyInput(raw: string): number | null {
  * non-blocking "did you mean…?" nudge in the requirement form. 0 / null are not
  * flagged (the form already blocks an empty amount).
  */
-export const SUSPICIOUSLY_LOW_MONEY = 10_000;
+const SUSPICIOUSLY_LOW_MONEY = 10_000;
 export function isSuspiciouslyLowMoney(amount: number | null): boolean {
   return amount != null && amount > 0 && amount < SUSPICIOUSLY_LOW_MONEY;
 }

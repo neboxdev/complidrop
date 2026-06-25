@@ -4,9 +4,7 @@ using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
-using Microsoft.IdentityModel.Tokens;
 
 namespace CompliDrop.Api.Auth;
 

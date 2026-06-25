@@ -1,0 +1,51 @@
+root = true
+
+# CompliDrop repo-wide editor + analyzer config (epic #41 / ticket #42; policy: ADR 0035).
+#
+# The backend half drives `dotnet format`, the standing CI gate that keeps mechanical
+# bloat (unnecessary usings, stray trailing whitespace, missing final newlines) from
+# re-accumulating in AI-generated code. The gate is `dotnet format --verify-no-changes`.
+#
+# Line endings are deliberately NOT pinned here. The repo uses git autocrlf=true, so the
+# Windows working tree is CRLF while the index/CI checkout is LF. An `end_of_line` rule
+# would make the local format-verify try to rewrite the CRLF tree and fail, while CI (LF)
+# passed — breaking "a local pass guarantees a CI pass". With NO end_of_line rule, dotnet
+# format leaves each file's existing endings untouched, so the gate is line-ending-neutral
+# on both the CRLF working tree (local) and the LF checkout (CI) — autocrlf round-trips the
+# rest. (.gitattributes only normalizes *.mjs, not *.cs, so it does not cover this.)
+
+[*]
+charset = utf-8
+indent_style = space
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Markdown uses trailing double-space for hard line breaks.
+[*.md]
+trim_trailing_whitespace = false
+
+[*.cs]
+indent_size = 4
+# --- Mechanical cleanup the gate enforces (behaviour-neutral only) ---
+# IDE0005: remove unnecessary using directives.
+dotnet_diagnostic.IDE0005.severity = warning
+# Preserve the author's line-breaking for initializers. `dotnet format` defaults to
+# expanding every object/anonymous-initializer member onto its own line; the codebase
+# deliberately packs them compactly, and reflowing them ADDS lines and churn rather than
+# removing bloat (epic #41: "No line-count golfing"). Keep the gate to true mechanical
+# wins (unused usings, trailing whitespace, final newline, indentation), not restyling.
+csharp_new_line_before_members_in_object_initializers = false
+csharp_new_line_before_members_in_anonymous_types = false
+
+[*.{json,jsonc,yml,yaml,js,jsx,mjs,cjs,ts,tsx,css}]
+indent_size = 2
+
+[*.{csproj,props,targets,slnx}]
+indent_size = 2
+
+# EF Core migrations are generated code — keep the formatter and analyzers off them
+# (epic #41 Non-goals: "No touching generated code (EF migrations, obj/, generated globals)").
+# Anchored to the API project's Migrations folder only: the test project has its OWN
+# Migrations/ holding hand-written migration *tests*, which the gate SHOULD cover.
+[api/CompliDrop.Api/Migrations/*.cs]
+generated_code = true

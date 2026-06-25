@@ -6,7 +6,6 @@ using CsvHelper.Configuration;
 using Microsoft.EntityFrameworkCore;
 using QuestPDF.Fluent;
 using QuestPDF.Helpers;
-using QuestPDF.Infrastructure;
 
 namespace CompliDrop.Api.Services;
 

@@ -6,7 +6,6 @@ using CompliDrop.Api.Services;
 using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Services.Ocr;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Options;
 
 namespace CompliDrop.Api.BackgroundServices;

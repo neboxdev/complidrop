@@ -1,6 +1,5 @@
 using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
-using CompliDrop.Api.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Stripe;

@@ -6,10 +6,18 @@ on:
     paths:
       - "api/**"
       - ".github/workflows/api-ci.yml"
+      # Root config that drives this job's format gate / SDK band but lives outside api/,
+      # so a config-only change still re-validates the standing gate (#42 review).
+      - "global.json"
+      - ".editorconfig"
   pull_request:
     paths:
       - "api/**"
       - ".github/workflows/api-ci.yml"
+      # Root config that drives this job's format gate / SDK band but lives outside api/,
+      # so a config-only change still re-validates the standing gate (#42 review).
+      - "global.json"
+      - ".editorconfig"
 
 jobs:
   build-test:
@@ -29,6 +37,13 @@ jobs:
 
       - name: Build
         run: dotnet build CompliDrop.slnx --configuration Release --no-restore
+
+      # Standing format gate (#42 / epic #41). `dotnet format --verify-no-changes` fails the
+      # build if any file drifts from .editorconfig (unused usings, trailing whitespace, final
+      # newline) — keeping mechanical bloat from re-accumulating. Config-driven, so a local
+      # `dotnet format` pass guarantees a CI pass; global.json pins the SDK band for parity.
+      - name: Format check
+        run: dotnet format CompliDrop.slnx --verify-no-changes --no-restore
 
       # DB strategy: integration tests provision a throwaway postgres:17-alpine database via
       # Testcontainers (see api/CompliDrop.Api.Tests/TestHelpers/IntegrationTestFixture.cs).

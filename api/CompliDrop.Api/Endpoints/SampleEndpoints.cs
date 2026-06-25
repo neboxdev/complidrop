@@ -1,4 +1,3 @@
-using System.Text.Json;
 using CompliDrop.Api.Auth;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Data.Seed;

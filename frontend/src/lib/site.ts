@@ -57,9 +57,6 @@ export const LEGAL_ADDRESS = "407 Lincoln Road, Suite 708, Miami Beach, FL 33139
 export const SITE_DESCRIPTION =
   "COI tracking software for small businesses. Upload a certificate of insurance, license, or permit — CompliDrop reads the dates and coverage, flags what's non-compliant, and reminds you before anything expires.";
 
-/** Short brand tagline (sentence-cased; the hero renders its own styled split). */
-export const SITE_TAGLINE = "Stop chasing paper. Start dropping docs.";
-
 /** schema.org `applicationCategory` for the SoftwareApplication entity. */
 export const SITE_CATEGORY = "BusinessApplication";
 

@@ -6,9 +6,7 @@ using CompliDrop.Api.Data;
 using CompliDrop.Api.DTOs.Auth;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace CompliDrop.Api.Endpoints;

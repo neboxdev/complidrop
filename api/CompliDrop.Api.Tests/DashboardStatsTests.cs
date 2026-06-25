@@ -3,7 +3,6 @@ using System.Text.Json;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
-using Xunit;
 
 namespace CompliDrop.Api.Tests;
 
