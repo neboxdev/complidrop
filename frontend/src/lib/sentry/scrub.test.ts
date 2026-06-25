@@ -38,6 +38,23 @@ describe("redactString (free-text net)", () => {
     expect(redactString(`key ${LONG_TOKEN} end`)).toBe("key [redacted-token] end");
   });
 
+  it("redacts US SSNs", () => {
+    expect(redactString("ssn 123-45-6789 on file")).toBe("ssn [redacted-ssn] on file");
+  });
+
+  it("caps very long strings so the regex pass stays bounded (ReDoS guard)", () => {
+    // A 200k @-less run would backtrack quadratically against an unbounded email
+    // regex; the length cap + bounded quantifiers keep it fast, and the overflow
+    // tail is dropped (not transmitted).
+    const huge = "a".repeat(200_000);
+    const start = performance.now();
+    const out = redactString(huge);
+    const elapsedMs = performance.now() - start;
+    expect(out.length).toBeLessThan(9000);
+    expect(out).toContain("[truncated]");
+    expect(elapsedMs).toBeLessThan(1000);
+  });
+
   it("leaves ordinary text and dashed GUIDs intact", () => {
     expect(redactString("upload failed at step 3")).toBe("upload failed at step 3");
     // A document id (dashed GUID) is split by word boundaries into sub-32 chunks
@@ -255,6 +272,99 @@ describe("scrubEvent — full event payload", () => {
     cyclic.self = cyclic;
     const e = { extra: { cyclic } } as unknown as Event;
     expect(() => scrubEvent(e)).not.toThrow();
+  });
+});
+
+describe("scrubEvent — review-hardening vectors (#356)", () => {
+  it("scrubs captured stack-frame local vars + source context (Node localVariables/contextLines)", () => {
+    const e = {
+      exception: {
+        values: [
+          {
+            type: "Error",
+            value: "boom",
+            stacktrace: {
+              frames: [
+                {
+                  function: "loadDoc",
+                  filename: "/app/route.ts",
+                  vars: { token: "abc", contactEmail: "owner@acme.com", count: 3 },
+                  context_line: "  const session = 'owner@acme.com';",
+                  pre_context: ["before owner@acme.com"],
+                  post_context: ["after 123-45-6789"],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    } as unknown as Event;
+    const frame = (scrubEvent(e).exception?.values?.[0] as Record<string, unknown>)
+      .stacktrace as { frames: Array<Record<string, unknown>> };
+    const f = frame.frames[0];
+    expect(f.function).toBe("loadDoc"); // symbolication data preserved
+    const vars = f.vars as Record<string, unknown>;
+    expect(vars.token).toBe(REDACTED); // sensitive-named key dropped
+    expect(String(vars.contactEmail)).toBe(REDACTED); // "email" key dropped
+    expect(vars.count).toBe(3);
+    expect(String(f.context_line)).not.toContain("owner@acme.com");
+    expect((f.pre_context as string[])[0]).not.toContain("owner@acme.com");
+    expect((f.post_context as string[])[0]).toContain("[redacted-ssn]");
+  });
+
+  it("scrubs logentry message + interpolated params (parameterized captureMessage)", () => {
+    const e = {
+      logentry: {
+        message: "User %s failed",
+        params: ["owner@acme.com", "ssn 123-45-6789"],
+      },
+    } as unknown as Event;
+    const out = scrubEvent(e);
+    expect(out.logentry?.message).toBe("User %s failed");
+    expect(out.logentry?.params?.[0]).toBe("[redacted-email]");
+    expect(out.logentry?.params?.[1]).toBe("ssn [redacted-ssn]");
+  });
+
+  it("sanitizes navigation breadcrumb from/to URL paths (portal token leak)", () => {
+    const e = {
+      breadcrumbs: [
+        {
+          category: "navigation",
+          data: { from: "/dashboard", to: "/portal/SECRETPORTALTOKEN123" },
+        },
+      ],
+    } as unknown as Event;
+    const data = scrubEvent(e).breadcrumbs?.[0]?.data ?? {};
+    expect(String(data.to)).toContain("/portal/[redacted]");
+    expect(String(data.to)).not.toContain("SECRETPORTALTOKEN123");
+    expect(data.from).toBe("/dashboard");
+  });
+
+  it("value-redacts a credential in a benign-named request header", () => {
+    const e = {
+      request: {
+        headers: {
+          "x-custom-trace": `jwt ${SAMPLE_JWT}`,
+          "x-contact": "owner@acme.com",
+          "content-type": "application/json",
+        },
+      },
+    } as unknown as Event;
+    const headers = scrubEvent(e).request?.headers ?? {};
+    expect(headers["x-custom-trace"]).toBe("jwt [redacted-jwt]");
+    expect(headers["x-contact"]).toBe("[redacted-email]");
+    expect(headers["content-type"]).toBe("application/json");
+  });
+
+  it("recurses nested objects under non-sensitive user keys", () => {
+    const e = {
+      user: { id: "org_1", segment: { contactEmail: "owner@acme.com", tier: "pro" } },
+    } as unknown as Event;
+    const user = scrubEvent(e).user as Record<string, unknown>;
+    expect(user.id).toBe("org_1");
+    const segment = user.segment as Record<string, unknown>;
+    expect(segment.contactEmail).toBe(REDACTED);
+    expect(segment.tier).toBe("pro");
   });
 });
 

@@ -76,6 +76,10 @@ export function commonInitOptions(env: Env = process.env) {
     // Never let the SDK attach IP addresses, cookies, or request bodies; the
     // beforeSend scrubber is the second line of defence on top of this.
     sendDefaultPii: false as const,
+    // SDK-level cap on long string fields (the SDK sets no default). Bounds
+    // payload size and is a second line of defence behind the scrubber's own
+    // per-string cap for the beforeSend regex passes (ADR 0036).
+    maxValueLength: 8192,
     tracesSampleRate: sampleRate(env.NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE, 0),
     beforeSend,
     beforeSendTransaction,

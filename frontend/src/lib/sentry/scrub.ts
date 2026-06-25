@@ -61,10 +61,17 @@ const BODY_KEYS: readonly string[] = [
   "arguments",
 ];
 
-const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+// Bounded quantifiers (RFC-ish caps) keep this LINEAR. An unbounded local-part
+// `+` backtracks quadratically over a long @-less run of class chars (e.g. a big
+// JSON blob embedded in an error message), freezing the main thread inside
+// beforeSend — a self-inflicted ReDoS. Bounding every segment removes that shape.
+const EMAIL_RE = /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]{1,255}\.[a-zA-Z]{2,24}/g;
 // JWTs (the cd_session / cd_refresh cookies are JWTs): three base64url segments.
 const JWT_RE = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
+// US SSN — COIs and HR-adjacent uploads can carry one. Anchored + fixed-width,
+// so it's linear and applied even in the mild metadata net (it's unambiguous PII).
+const SSN_RE = /\b\d{3}-\d{2}-\d{4}\b/g;
 // Opaque high-entropy strings (Stripe keys, base64 tokens, hex secrets): 32+
 // contiguous alphanumerics/underscore. `-` is deliberately EXCLUDED from the
 // class so a dashed GUID (a document / vendor / org id — an identifier, not a
@@ -74,6 +81,13 @@ const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
 const LONG_TOKEN_RE = /\b[A-Za-z0-9_]{32,}\b/g;
 
 const MAX_DEPTH = 12;
+
+// Hard cap on the string length the regexes scan. Emails / JWTs / Bearer tokens /
+// SSNs are all short; nothing legitimate needs more. The SDK applies no default
+// `maxValueLength` before beforeSend, so an arbitrarily large `error.message` /
+// `extra` value can reach the scrubber — this bounds the worst case AND drops
+// (rather than transmits) the unscanned overflow tail.
+const MAX_SCRUB_STRING = 8192;
 
 function keyIsSensitive(key: string): boolean {
   const k = key.toLowerCase();
@@ -91,10 +105,15 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  * `trace_id`, `span_id`) live and must NOT be shredded.
  */
 export function redactPiiText(value: string): string {
-  return value
+  const capped =
+    value.length > MAX_SCRUB_STRING
+      ? `${value.slice(0, MAX_SCRUB_STRING)}...[truncated]`
+      : value;
+  return capped
     .replace(JWT_RE, "[redacted-jwt]")
     .replace(BEARER_RE, "Bearer [redacted]")
-    .replace(EMAIL_RE, "[redacted-email]");
+    .replace(EMAIL_RE, "[redacted-email]")
+    .replace(SSN_RE, "[redacted-ssn]");
 }
 
 /**
@@ -151,7 +170,17 @@ function redactDeep(
 }
 
 function isUrlKey(lowerKey: string): boolean {
-  return lowerKey === "url" || lowerKey.endsWith("url") || lowerKey === "href";
+  // `from` / `to` are the navigation-breadcrumb path fields the browser SDK emits
+  // ({ category: "navigation", data: { from, to } }); a SPA route to
+  // /portal/{token} would otherwise leak the token there. Running a non-URL value
+  // (e.g. an email "from") through sanitizeUrl is harmless — it just redacts it.
+  return (
+    lowerKey === "url" ||
+    lowerKey.endsWith("url") ||
+    lowerKey === "href" ||
+    lowerKey === "from" ||
+    lowerKey === "to"
+  );
 }
 
 /**
@@ -196,7 +225,14 @@ export function scrubEvent<T extends Event>(event: T): T {
     delete req.query_string; // can carry tokens/emails; low diagnostic value
     if (req.headers) {
       for (const name of Object.keys(req.headers)) {
-        if (keyIsSensitive(name)) delete req.headers[name];
+        // Drop sensitive-named headers (cookie, authorization, x-portal-token);
+        // value-redact the survivors so a credential in a benign-named header
+        // (e.g. a custom header echoing a JWT) can't slip through.
+        if (keyIsSensitive(name)) {
+          delete req.headers[name];
+        } else if (typeof req.headers[name] === "string") {
+          req.headers[name] = redactPiiText(req.headers[name]);
+        }
       }
     }
     if (typeof req.url === "string") req.url = sanitizeUrl(req.url);
@@ -208,24 +244,51 @@ export function scrubEvent<T extends Event>(event: T): T {
     delete event.user.username;
     delete event.user.ip_address;
     delete event.user.geo;
-    for (const [key, val] of Object.entries(event.user)) {
-      if (keyIsSensitive(key)) {
-        (event.user as Record<string, unknown>)[key] = REDACTED;
-      } else if (typeof val === "string") {
-        (event.user as Record<string, unknown>)[key] = redactPiiText(val);
-      }
-    }
+    // Deep-redact the rest (sensitive-named keys + nested objects + string PII)
+    // so a nested custom user object can't carry an email/token past the scrubber.
+    event.user = redactDeep(event.user, redactPiiText, 0, new WeakSet()) as typeof event.user;
   }
 
   // --- free-text surfaces --------------------------------------------------
   if (typeof event.message === "string") {
     event.message = redactString(event.message);
   }
+  // logentry: populated by a parameterized captureMessage — its interpolated
+  // params are exactly the dynamic data most likely to carry an email / id.
+  if (event.logentry) {
+    if (typeof event.logentry.message === "string") {
+      event.logentry.message = redactString(event.logentry.message);
+    }
+    if (Array.isArray(event.logentry.params)) {
+      event.logentry.params = event.logentry.params.map((p) =>
+        redactDeep(p, redactString, 1, new WeakSet()),
+      );
+    }
+  }
   if (event.exception?.values) {
     for (const ex of event.exception.values) {
       if (typeof ex.value === "string") ex.value = redactString(ex.value);
-      // Stack frames (file paths / function names) are intentionally left
-      // intact — they carry no user PII and are required for symbolication.
+      // Scrub captured local variables and source context. On the Node runtime
+      // the default localVariablesIntegration + contextLinesIntegration populate
+      // frame.vars / context_line / pre_context / post_context, which CAN hold a
+      // decoded JWT, an email, a portal token, or a document field value — the
+      // onRequestError server path routes straight into these. Function names /
+      // file paths (the frame itself) stay intact for symbolication.
+      for (const frame of ex.stacktrace?.frames ?? []) {
+        const f = frame as Record<string, unknown>;
+        if (isPlainRecord(f.vars)) {
+          f.vars = redactDeep(f.vars, redactString, 1, new WeakSet());
+        }
+        if (typeof f.context_line === "string") {
+          f.context_line = redactString(f.context_line);
+        }
+        for (const ctxKey of ["pre_context", "post_context"] as const) {
+          const lines = f[ctxKey];
+          if (Array.isArray(lines)) {
+            f[ctxKey] = lines.map((l) => (typeof l === "string" ? redactString(l) : l));
+          }
+        }
+      }
     }
   }
 

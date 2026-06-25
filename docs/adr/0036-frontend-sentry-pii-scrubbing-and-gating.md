@@ -46,18 +46,30 @@ conventions, with a privacy-first, cost-conscious, dev-isolated configuration.
   …); direct user PII (`email`, `ip_address`, `username`, `geo`); breadcrumb / span request &
   response **bodies** (the primary document-field-text vector); and any object value under a
   sensitive-named key (`*token*`, `*secret*`, `*password*`, `*email*`, `*portal*`, …) at any depth.
-- **Redacted by pattern:** emails, JWTs (the auth cookies are JWTs), `Bearer …` credentials, and
-  opaque high-entropy tokens (Stripe keys, base64 secrets) in free text.
+- **Redacted by pattern:** emails, JWTs (the auth cookies are JWTs), `Bearer …` credentials, US
+  SSNs, and opaque high-entropy tokens (Stripe keys, base64 secrets) in free text.
+- **Surviving request-header values** are pattern-redacted (a credential in a benign-named custom
+  header can't slip through), and the **user bag is deep-redacted** (a nested custom user object
+  can't carry an email/token past the scrubber).
+- **Server stack frames + `logentry`:** the Node runtime's default `localVariablesIntegration` /
+  `contextLinesIntegration` populate `frame.vars` / `context_line` / `pre_context` / `post_context`
+  (which can hold a decoded JWT, email, portal token, or document value — the `onRequestError` path
+  routes straight into these), and a parameterized `captureMessage` populates `logentry.message` /
+  `logentry.params`. Both are scrubbed; function names / file paths stay intact for symbolication.
 - **URLs** are path-sanitized: the vendor-portal capability token always appears as
   `/portal/{token}` / `/api/portal/{token}` (a 24-byte base64url token, `PortalLink.GenerateToken`),
   so a deterministic path replacement removes it regardless of charset — not reliant on the
-  entropy regex. Token/email/`sig`-named query params are redacted too (covers reset/verify links
-  and Azure blob SAS `sig=`).
-- **Two-net design:** a free-text net (emails + JWTs + Bearer + opaque-token) for messages, error
-  values, the app-controlled `extra` bag, and URLs; a milder net (emails + JWTs + Bearer only) for
-  SDK metadata (`contexts`, `tags`, span data) so load-bearing identifiers — Sentry `event_id`,
-  `trace_id`, `span_id` — and dashed GUIDs (document / vendor / org ids) survive and errors stay
-  triageable.
+  entropy regex. This also covers navigation-breadcrumb `from` / `to` path fields. Token/email/`sig`-named
+  query params are redacted too (covers reset/verify links and Azure blob SAS `sig=`).
+- **Two-net design:** a free-text net (emails + JWTs + Bearer + SSN + opaque-token) for messages,
+  error values, the app-controlled `extra` bag, and URLs; a milder net (emails + JWTs + Bearer +
+  SSN, **entropy-blind by design**) for SDK metadata (`contexts`, `tags`, span data) so load-bearing
+  identifiers — Sentry `event_id`, `trace_id`, `span_id` — and dashed GUIDs (document / vendor / org
+  ids) survive and errors stay triageable.
+- **ReDoS / cost guard:** every regex uses bounded quantifiers (no quadratic backtracking on a long
+  `@`-less blob), each string is length-capped before the regex passes, and `maxValueLength: 8192`
+  is set at the SDK level — so an arbitrarily large `error.message` / `extra` value can't freeze the
+  main thread inside `beforeSend`.
 
 ### Session Replay — OFF
 
@@ -85,7 +97,9 @@ PostHog, which gates on key presence only; Sentry additionally requires producti
 (`sourcemaps.disable: !SENTRY_AUTH_TOKEN`, `silent` likewise). Local builds and any CI job without
 the secret (frontend-ci's build step sets only `NEXT_PUBLIC_API_URL`) skip upload and still succeed
 — a missing token never fails the build. `telemetry: false` (no build telemetry from a compliance
-product); `disableLogger: true` (tree-shake the SDK logger from the client bundle).
+product). (The deprecated `disableLogger` / webpack `treeshake.*` options are omitted: Next 16
+builds with Turbopack, which doesn't support them, and the SDK debug logger is inert unless
+`debug: true`, which we never set.)
 
 ### Backend cross-reference via `correlationId`
 
@@ -120,11 +134,22 @@ Sentry holds the technical detail; the UI stays human.
 - A second client-side processor now receives (scrubbed) error data — disclosed by the existing
   privacy-policy Sentry line; no new processor beyond what the policy already names.
 
+- **The mild metadata net is entropy-blind by design.** A bare high-entropy secret with no
+  recognisable shape (e.g. a 32-hex token) sitting under a *non-sensitive* key in `contexts` /
+  `tags` survives — that's the deliberate trade to keep `trace_id` / `event_id` intact. Acceptable
+  because the same "we never attach raw secrets" rule applies; if it ever stops holding, move
+  metadata to the aggressive net.
+
 ### Neutral
 - Bundle grows by the Sentry browser SDK (Replay excluded, logger tree-shaken). Acceptable for the
   observability gained; revisit only if bundle budgets tighten.
 - `tracesSampleRate: 0` means `beforeSendTransaction` rarely fires by default; it is wired and
-  tested so raising the env knob is safe.
+  tested so raising the env knob is safe. `browserTracingIntegration` is still bundled and
+  instantiated at rate 0 (it just sends no transactions) — kept rather than tree-shaken so flipping
+  the env knob stays an env change, not a code change.
+- **Data region is chosen at provisioning, not in code.** The Sentry project should be created in
+  the **US region** (DSN-selected) to match the backend Sentry and the privacy policy's "we process
+  and store data primarily in the United States". An ops checklist item, not enforceable here.
 
 ## Alternatives considered
 
@@ -155,7 +180,11 @@ Rejected: a leaked DSN in a non-prod build would start sending. Requiring `NODE_
   [#271](https://github.com/neboxdev/complidrop/issues/271) (dev isolation posture this mirrors).
 - **Error-copy policy:** [#77](https://github.com/neboxdev/complidrop/issues/77),
   [#254](https://github.com/neboxdev/complidrop/issues/254).
-- **Code:** `frontend/src/lib/sentry/{scrub,options}.ts`, `frontend/src/instrumentation*.ts`,
+- **Code:** `frontend/src/lib/sentry/{scrub,options,build}.ts`,
+  `frontend/src/instrumentation.ts`, `frontend/src/instrumentation-client.ts`,
   `frontend/src/app/global-error.tsx`, `frontend/next.config.ts`.
-- **Secrets:** `NEXT_PUBLIC_SENTRY_DSN`, `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT`
-  (config/env only — never committed).
+- **Env:** `NEXT_PUBLIC_SENTRY_DSN` (public DSN; absence ⇒ no-op), optional
+  `NEXT_PUBLIC_SENTRY_ENVIRONMENT` (tag; defaults to `NODE_ENV`) and
+  `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` (default `0`), plus the build-time
+  source-map trio `SENTRY_AUTH_TOKEN` / `SENTRY_ORG` / `SENTRY_PROJECT` (server-only, never
+  committed; absent ⇒ upload skipped, build still succeeds).
