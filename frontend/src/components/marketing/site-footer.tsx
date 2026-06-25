@@ -103,5 +103,3 @@ export function MarketingFooter() {
     </footer>
   );
 }
-
-export default MarketingFooter;

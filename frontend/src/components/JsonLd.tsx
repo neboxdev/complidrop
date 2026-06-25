@@ -34,5 +34,3 @@ export function JsonLd({ data }: { data: JsonLdData | readonly JsonLdData[] }) {
     </>
   );
 }
-
-export default JsonLd;

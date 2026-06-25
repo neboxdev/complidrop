@@ -1,0 +1,50 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+
+  // Frontend dead-code / unused-dependency gate (epic #41 / ticket #42).
+  //
+  // knip is the SINGLE authoritative tool for the "dead files / unused deps / unlisted"
+  // finding classes. ts-prune (in maintenance mode — its own README points to knip) and
+  // depcheck (whose dependency check overlaps knip's) are deliberately NOT added: one gate
+  // per finding class, per the ticket. Run `npm run knip` locally; CI runs the same.
+  //
+  // Entry points are auto-registered by knip's framework plugins (active because their
+  // packages/configs are present): the Next.js plugin registers App Router entries
+  // (app/**/{page,layout,route,template,error,loading,not-found}.tsx, middleware, etc.),
+  // and the Vitest / ESLint / PostCSS / Playwright plugins register from their configs and
+  // the package.json `scripts`. So those are never mis-reported as dead.
+
+  "ignoreDependencies": [
+    // Installed but not yet wired into the frontend (no sentry.*.config / instrumentation,
+    // no import anywhere). The privacy policy advertises "Sentry — error monitoring", which
+    // is satisfied today by the BACKEND SDK (Sentry.AspNetCore). Whether to wire frontend
+    // error monitoring or drop this SDK is a product/legal decision, not mechanical cleanup
+    // — left out of this pass and flagged in the PR. Ignored so the gate stays green
+    // without pre-empting that call.
+    "@sentry/nextjs",
+    // Next.js-provided guard package (the `client-only` / `server-only` pair) imported by
+    // src/lib/api.ts. Resolved transitively via next; never a direct dependency.
+    "client-only"
+  ],
+
+  "ignoreBinaries": [
+    // GitHub CLI — a system tool invoked by the e2e quarantine-drift CI script
+    // (e2e/scripts/check-quarantine-registry.mjs), not an npm package.
+    "gh"
+  ],
+
+  // Standing-gate scope. Everything defaults to "error"; we enforce the HIGH-SIGNAL classes
+  // (files, dependencies, devDependencies, unlisted, binaries, unresolved, duplicates) and
+  // turn OFF the nominal unused-export/-type classes below. In this codebase those are
+  // dominated by the vendored shadcn `ui/` kit and the shared test toolkit (src/test/**,
+  // e2e/support/**) — intentional public surface whose pruning is human judgment, handled in
+  // the #44 frontend-cleanup pass (`npx knip --include exports,types,nsExports,nsTypes`),
+  // not a mechanical CI gate.
+  "rules": {
+    "exports": "off",
+    "nsExports": "off",
+    "types": "off",
+    "nsTypes": "off",
+    "enumMembers": "off"
+  }
+}

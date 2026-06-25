@@ -37,6 +37,13 @@ jobs:
       - name: Lint
         run: npm run lint --if-present
 
+      # Standing dead-code / unused-dependency gate (#42 / epic #41). knip is the single
+      # authoritative tool for dead files / unused deps / unlisted imports; its version is
+      # pinned in package-lock.json so a local `npm run knip` pass guarantees a CI pass.
+      # Config + scope rationale: frontend/knip.jsonc.
+      - name: Knip (dead code / unused deps)
+        run: npm run knip
+
       - name: Type check
         run: npx tsc --noEmit
 
