@@ -1,4 +1,3 @@
-using CompliDrop.Api.Auth;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Services;
 using Microsoft.EntityFrameworkCore;

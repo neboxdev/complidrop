@@ -1,4 +1,3 @@
-using CompliDrop.Api;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
