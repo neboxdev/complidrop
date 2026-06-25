@@ -29,7 +29,7 @@ export type VendorSummary = {
   contactEmailStatus: "bounced" | "complained" | null;
 };
 
-export type PortalLink = {
+type PortalLink = {
   id: string;
   token: string;
   fullUrl: string;

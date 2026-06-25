@@ -3,16 +3,18 @@
 
   // Frontend dead-code / unused-dependency gate (epic #41 / ticket #42).
   //
-  // knip is the SINGLE authoritative tool for the "dead files / unused deps / unlisted"
-  // finding classes. ts-prune (in maintenance mode — its own README points to knip) and
-  // depcheck (whose dependency check overlaps knip's) are deliberately NOT added: one gate
-  // per finding class, per the ticket. Run `npm run knip` locally; CI runs the same.
+  // knip is the SINGLE authoritative tool for the "dead files / unused deps / unlisted /
+  // dead exports" finding classes. ts-prune (in maintenance mode — its own README points to
+  // knip) and depcheck (whose dependency check overlaps knip's) are deliberately NOT added:
+  // one gate per finding class, per the ticket. Run `npm run knip` locally; CI runs the same
+  // (version pinned via package-lock.json, so a local pass guarantees a CI pass).
   //
   // Entry points are auto-registered by knip's framework plugins (active because their
   // packages/configs are present): the Next.js plugin registers App Router entries
-  // (app/**/{page,layout,route,template,error,loading,not-found}.tsx, middleware, etc.),
-  // and the Vitest / ESLint / PostCSS / Playwright plugins register from their configs and
-  // the package.json `scripts`. So those are never mis-reported as dead.
+  // (app/**/{page,layout,route,template,error,loading,not-found}.tsx, middleware, and the
+  // route-segment config exports like generateStaticParams / metadata), and the Vitest /
+  // ESLint / PostCSS / Playwright plugins register from their configs and package.json
+  // `scripts`. So those are never mis-reported as dead.
 
   "ignoreDependencies": [
     // Installed but not yet wired into the frontend (no sentry.*.config / instrumentation,
@@ -33,18 +35,20 @@
     "gh"
   ],
 
-  // Standing-gate scope. Everything defaults to "error"; we enforce the HIGH-SIGNAL classes
-  // (files, dependencies, devDependencies, unlisted, binaries, unresolved, duplicates) and
-  // turn OFF the nominal unused-export/-type classes below. In this codebase those are
-  // dominated by the vendored shadcn `ui/` kit and the shared test toolkit (src/test/**,
-  // e2e/support/**) — intentional public surface whose pruning is human judgment, handled in
-  // the #44 frontend-cleanup pass (`npx knip --include exports,types,nsExports,nsTypes`),
-  // not a mechanical CI gate.
-  "rules": {
-    "exports": "off",
-    "nsExports": "off",
-    "types": "off",
-    "nsTypes": "off",
-    "enumMembers": "off"
-  }
+  // Dead-export detection stays LIVE across the whole source tree (so a newly-orphaned
+  // export anywhere in app/lib/hooks/components trips the gate) EXCEPT these three
+  // intentional-public-surface directories, where exporting the full API kit is deliberate
+  // and "unused" is the normal, expected state:
+  //   - src/components/ui/**  — the vendored shadcn/ui component kit (exports the whole
+  //     Card/Sheet/Badge/... surface whether or not every part is consumed yet).
+  //   - src/test/**           — the shared test toolkit / fixtures (helpers kept for tests
+  //     to reach for; not every one is wired up at all times).
+  //   - e2e/support/**        — the Playwright support harness (fixtures/mocks).
+  // Scoping these out (rather than turning the export rule off globally) keeps knip's
+  // re-accumulation guard effective everywhere that matters.
+  "ignore": [
+    "src/components/ui/**",
+    "src/test/**",
+    "e2e/support/**"
+  ]
 }

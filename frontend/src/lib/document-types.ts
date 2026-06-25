@@ -22,8 +22,6 @@ export const DOCUMENT_TYPES = [
   { value: "other", label: "Other" },
 ] as const;
 
-export type DocumentTypeValue = (typeof DOCUMENT_TYPES)[number]["value"];
-
 const LABELS: Readonly<Record<string, string>> = Object.fromEntries(
   DOCUMENT_TYPES.map((t) => [t.value, t.label]),
 );
