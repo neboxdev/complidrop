@@ -50,8 +50,15 @@ describe("knip.jsonc gate config (#42)", () => {
 
   it("keeps the documented dependency/binary ignores", () => {
     expect(config.ignoreDependencies).toEqual(
-      expect.arrayContaining(["@sentry/nextjs", "client-only"]),
+      expect.arrayContaining(["client-only"]),
     );
     expect(config.ignoreBinaries).toEqual(expect.arrayContaining(["gh"]));
+  });
+
+  it("no longer ignores @sentry/nextjs (wired into the frontend in #356 / ADR 0036)", () => {
+    // The SDK is now genuinely imported (instrumentation + scrubber), so knip
+    // must see it as a USED dependency, not an ignored one. A regression that
+    // re-added the ignore would mask a future un-wiring (dead dependency).
+    expect(config.ignoreDependencies ?? []).not.toContain("@sentry/nextjs");
   });
 });

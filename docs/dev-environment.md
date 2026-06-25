@@ -57,6 +57,14 @@ hourly `ReminderBackgroundService` would mail them the moment a cloned document 
 window. Leaving `Resend:ApiKey` unset makes `ResendEmailService.IsEnabled` false, so every send is
 skipped with a warning instead of delivered. **Do not add a Resend key to dev secrets.**
 
+### Frontend telemetry is silent in dev too
+
+The frontend's Sentry error monitoring ([ADR 0036](adr/0036-frontend-sentry-pii-scrubbing-and-gating.md))
+follows the same isolated-by-default posture: it is a no-op unless `NEXT_PUBLIC_SENTRY_DSN` is set
+**and** `NODE_ENV=production`. Leave `NEXT_PUBLIC_SENTRY_DSN` unset in dev (the `next dev` server is
+`development` anyway, so even a stray DSN captures nothing). PostHog is likewise gated on
+`NEXT_PUBLIC_POSTHOG_KEY` being present. **Do not add a Sentry DSN or PostHog key to your dev env.**
+
 ## The boot banner (how you know which environment you're in)
 
 On startup, `StartupEnvironmentBanner` logs one INFO line naming the resolved targets — the durable
