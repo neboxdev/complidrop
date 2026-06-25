@@ -301,6 +301,12 @@ export function findRequirementType(rule: {
 }
 
 /**
+ * The engine operators that get an English phrasing in {@link requirementSentence}; any
+ * other (future) operator degrades to a neutral sentence rather than leaking the raw token.
+ */
+const PHRASED_OPERATORS: readonly string[] = ["equals", "contains", "min_value"];
+
+/**
  * The read-view sentence for a stored rule. A catalog match produces the curated
  * sentence; an unknown/legacy rule falls back to a readable generic sentence built
  * from the display-label maps — never a raw snake_case token or operator.
@@ -316,10 +322,8 @@ export function requirementSentence(rule: {
 
   const field = fieldLabel(rule.fieldName) || "This document";
   if (rule.operator === "required") return `${field} must be present`;
-  // Only the engine's known operators get an English phrasing; anything else
-  // (a future operator) degrades to a neutral sentence rather than leaking the
-  // raw token — keeping this function's "never a raw operator" promise true.
-  if (!["equals", "contains", "min_value"].includes(rule.operator)) {
+  // An unknown operator degrades to a neutral sentence — keeps the "never a raw operator" promise.
+  if (!PHRASED_OPERATORS.includes(rule.operator)) {
     return `${field} must meet a custom rule`;
   }
   const op = operatorLabel(rule.operator).toLowerCase();
