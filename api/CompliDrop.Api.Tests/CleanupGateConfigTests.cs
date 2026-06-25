@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using FluentAssertions;
 
 namespace CompliDrop.Api.Tests;
@@ -49,11 +50,16 @@ public class CleanupGateConfigTests
     {
         var text = ReadRepoEditorConfig();
 
-        // The generated-code skip must target ONLY the API project's generated migrations…
-        text.Should().Contain("[api/CompliDrop.Api/Migrations/*.cs]");
+        // Every editorconfig section header ([...]) that scopes a Migrations folder must be
+        // EXACTLY the API project's generated-migrations glob — never a broader shape (e.g.
+        // [**/Migrations/*.cs], [api/**/Migrations/*.cs], [**/Migrations/**/*.cs]) that would
+        // also re-swallow the test project's hand-written
+        // api/CompliDrop.Api.Tests/Migrations/*Tests.cs out of the format gate.
+        var migrationSections = Regex
+            .Matches(text, @"^\[[^\]]*Migrations[^\]]*\]", RegexOptions.Multiline)
+            .Select(m => m.Value)
+            .ToList();
 
-        // …never the broad glob, which would also exclude the test project's hand-written
-        // api/CompliDrop.Api.Tests/Migrations/*Tests.cs from the format gate.
-        text.Should().NotContain("[**/Migrations/*.cs]");
+        migrationSections.Should().Equal("[api/CompliDrop.Api/Migrations/*.cs]");
     }
 }

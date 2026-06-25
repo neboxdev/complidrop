@@ -14,20 +14,14 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import JSON5 from "json5";
 
-// knip.jsonc is JSONC (comments). Vite's JSON loader can't import it, so read the raw
-// text and strip the full-line `//` comments — the only inline `//` lives inside the
-// `$schema` URL string, whose line does NOT start with `//`, so it survives — then
-// JSON.parse. (The config uses no block comments and no trailing commas.) Vitest runs
-// with cwd = the frontend project root, where knip.jsonc lives.
+// knip.jsonc is JSONC (comments + trailing commas allowed). Parse with json5 — which accepts
+// exactly what knip itself tolerates — so this meta-test never false-fails on a benign config
+// edit (a block comment, an inline trailing comment, a trailing comma). Vitest runs with
+// cwd = the frontend project root, where knip.jsonc lives.
 const CONFIG_PATH = resolve(process.cwd(), "knip.jsonc");
-const raw = readFileSync(CONFIG_PATH, "utf8");
-const config = JSON.parse(
-  raw
-    .split("\n")
-    .filter((line) => !line.trimStart().startsWith("//"))
-    .join("\n"),
-) as {
+const config = JSON5.parse(readFileSync(CONFIG_PATH, "utf8")) as {
   ignore?: string[];
   ignoreDependencies?: string[];
   ignoreBinaries?: string[];
@@ -35,13 +29,12 @@ const config = JSON.parse(
 };
 
 describe("knip.jsonc gate config (#42)", () => {
-  it("scopes out the intentional-public-surface dirs so export detection stays live elsewhere", () => {
-    expect(config.ignore).toEqual(
-      expect.arrayContaining([
-        "src/components/ui/**",
-        "src/test/**",
-        "e2e/support/**",
-      ]),
+  it("scopes out EXACTLY the intentional-public-surface dirs (no tree-swallowing ignore)", () => {
+    // Exact equality, not arrayContaining: a future ignore like "src/**" or "**" would gut the
+    // live dead-export gate while a superset check stayed green. Any change to this set must
+    // therefore be a deliberate edit here.
+    expect([...(config.ignore ?? [])].sort()).toEqual(
+      ["e2e/support/**", "src/components/ui/**", "src/test/**"].sort(),
     );
   });
 

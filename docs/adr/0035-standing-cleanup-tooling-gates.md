@@ -82,3 +82,15 @@ config-only change still re-validates the gate.
 - **Adopt the formatter's initializer reflow** — rejected: large behaviour-neutral churn that obscures
   history and adds lines, contradicting the epic's "no line-count golfing".
 - **Parallel `dotnet format` CI job** — rejected for now (duplicated build; see Consequences).
+
+## References
+
+- **Tickets:** [#41](https://github.com/neboxdev/complidrop/issues/41) (codebase simplification epic),
+  [#42](https://github.com/neboxdev/complidrop/issues/42) (this tooling pass).
+- **Related ADRs:** [0009](0009-no-at-time-zone-on-timestamptz-in-raw-sql.md) (the
+  config/scanner meta-test pattern these guard tests mirror),
+  [0016](0016-apply-ef-migrations-on-startup.md) (auto-migrate — context for the
+  generated-migrations exclusion and the `global.json` SDK pin).
+- **Config + code:** `.editorconfig`, `global.json`, `frontend/knip.jsonc`, the two CI workflows
+  (`.github/workflows/api-ci.yml`, `frontend-ci.yml`), and the guard tests
+  `frontend/src/test/knip-config.test.ts` + `api/CompliDrop.Api.Tests/CleanupGateConfigTests.cs`.
