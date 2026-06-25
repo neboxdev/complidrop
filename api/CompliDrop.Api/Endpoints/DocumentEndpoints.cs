@@ -181,9 +181,7 @@ public static class DocumentEndpoints
             ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today).ToString(),
             d.EffectiveDate,
             d.ExpirationDate,
-            d.ExpirationDate != null
-                ? (int?)(d.ExpirationDate.Value.Date - today).TotalDays
-                : null,
+            DaysUntilExpiry(d.ExpirationDate, today),
             d.IsSample,
             d.CreatedAt)).ToList();
 
@@ -234,9 +232,7 @@ public static class DocumentEndpoints
             ComplianceStatusDeriver.Effective(doc.ComplianceStatus, doc.ExpirationDate, today).ToString(),
             doc.EffectiveDate,
             doc.ExpirationDate,
-            doc.ExpirationDate != null
-                ? (int?)(doc.ExpirationDate.Value.Date - today).TotalDays
-                : null,
+            DaysUntilExpiry(doc.ExpirationDate, today),
             doc.IsManuallyVerified,
             doc.UploadedBy,
             doc.IsSample,
@@ -715,6 +711,12 @@ public static class DocumentEndpoints
         var cleaned = new string(name.Select(c => char.IsLetterOrDigit(c) || c is '.' or '-' or '_' ? c : '-').ToArray());
         return cleaned.Length > 120 ? cleaned[..120] : cleaned;
     }
+
+    /// <summary>Whole days from <paramref name="today"/> until a document's expiry (null when it has none).
+    /// Truncates toward zero, matching the prior inline cast. Computed in memory at both call sites (the
+    /// materialized list rows and the loaded detail entity), so it carries no EF-translation concern.</summary>
+    private static int? DaysUntilExpiry(DateTime? expirationDate, DateTime today) =>
+        expirationDate is { } expiry ? (int)(expiry.Date - today).TotalDays : null;
 
     private static IResult Unauthorized() =>
         Results.Json(new { data = (object?)null, error = new { code = "auth.unauthorized", message = "Not authenticated." } }, statusCode: 401);

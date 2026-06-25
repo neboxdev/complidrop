@@ -353,6 +353,44 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
     }
 
     [Fact]
+    public async Task Vendor_package_generates_a_pdf()
+    {
+        // Happy-path smoke for BuildVendorReportAsync + the shared ApplyPageDefaults page chrome (#43).
+        // The audit report covers the other PDF builder; the vendor builder's only prior test was the
+        // cross-tenant negative, which never renders the PDF. A valid %PDF proves it ran end-to-end.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = Guid.NewGuid();
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = auth.OrgId, Name = "Acme", CreatedAt = now, UpdatedAt = now });
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                VendorId = vendorId,
+                OriginalFileName = "coi.pdf",
+                BlobStorageUrl = "memory://v",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed,
+                ComplianceStatus = ComplianceStatus.Compliant,
+                ExpirationDate = now.AddDays(120),
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var resp = await auth.Client.GetAsync($"/api/export/vendor/{vendorId}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var bytes = await resp.Content.ReadAsByteArrayAsync();
+        Encoding.ASCII.GetString(bytes, 0, 4).Should().Be("%PDF");
+    }
+
+    [Fact]
     public async Task Csv_export_annotates_a_superseded_old_cert_and_leaves_the_current_one_unmarked()
     {
         // #327: the export keeps BOTH the old expired cert and its renewal (full audit history), but marks

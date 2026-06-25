@@ -35,6 +35,64 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
+    public async Task Documents_list_and_detail_expose_days_until_expiry()
+    {
+        // Pins the DaysUntilExpiry helper (#43) at BOTH call sites — the list rows and the detail
+        // DTO — plus the null path for a document with no expiry date.
+        var auth = await RegisterAndLoginAsync();
+        var dated = Guid.NewGuid();
+        var undated = Guid.NewGuid();
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            db.Documents.Add(new Document
+            {
+                Id = dated,
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "dated.pdf",
+                BlobStorageUrl = "memory://d",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed,
+                ComplianceStatus = ComplianceStatus.Compliant,
+                // Noon, 10 days out: ExpirationDate.Date - today == 10 regardless of the seed time-of-day.
+                ExpirationDate = now.Date.AddDays(10).AddHours(12),
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            db.Documents.Add(new Document
+            {
+                Id = undated,
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "undated.pdf",
+                BlobStorageUrl = "memory://u",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Pending,
+                ComplianceStatus = ComplianceStatus.Pending,
+                ExpirationDate = null,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        // Detail: exact whole-day count for the dated doc; null for the undated one.
+        var datedDetail = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{dated}");
+        datedDetail.GetProperty("data").GetProperty("daysUntilExpiry").GetInt32().Should().Be(10);
+        var undatedDetail = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{undated}");
+        undatedDetail.GetProperty("data").GetProperty("daysUntilExpiry").ValueKind.Should().Be(JsonValueKind.Null);
+
+        // List: the same field on the dated row.
+        var list = await auth.Client.GetFromJsonAsync<JsonElement>("/api/documents/");
+        var datedRow = list.GetProperty("data").GetProperty("items").EnumerateArray()
+            .First(i => i.GetProperty("id").GetGuid() == dated);
+        datedRow.GetProperty("daysUntilExpiry").GetInt32().Should().Be(10);
+    }
+
+    [Fact]
     public async Task View_file_streams_the_original_bytes_inline_with_the_stored_content_type()
     {
         // #254: the detail page's "View file" used to link the raw PRIVATE blob URI (no SAS,
