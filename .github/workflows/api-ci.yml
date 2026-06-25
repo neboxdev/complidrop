@@ -6,10 +6,18 @@ on:
     paths:
       - "api/**"
       - ".github/workflows/api-ci.yml"
+      # Root config that drives this job's format gate / SDK band but lives outside api/,
+      # so a config-only change still re-validates the standing gate (#42 review).
+      - "global.json"
+      - ".editorconfig"
   pull_request:
     paths:
       - "api/**"
       - ".github/workflows/api-ci.yml"
+      # Root config that drives this job's format gate / SDK band but lives outside api/,
+      # so a config-only change still re-validates the standing gate (#42 review).
+      - "global.json"
+      - ".editorconfig"
 
 jobs:
   build-test:

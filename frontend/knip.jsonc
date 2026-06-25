@@ -1,7 +1,7 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
 
-  // Frontend dead-code / unused-dependency gate (epic #41 / ticket #42).
+  // Frontend dead-code / unused-dependency gate (epic #41 / ticket #42; policy: ADR 0035).
   //
   // knip is the SINGLE authoritative tool for the "dead files / unused deps / unlisted /
   // dead exports" finding classes. ts-prune (in maintenance mode — its own README points to

@@ -1,6 +1,6 @@
 root = true
 
-# CompliDrop repo-wide editor + analyzer config (epic #41 / ticket #42).
+# CompliDrop repo-wide editor + analyzer config (epic #41 / ticket #42; policy: ADR 0035).
 #
 # The backend half drives `dotnet format`, the standing CI gate that keeps mechanical
 # bloat (unnecessary usings, stray trailing whitespace, missing final newlines) from
@@ -9,7 +9,10 @@ root = true
 # Line endings are deliberately NOT pinned here. The repo uses git autocrlf=true, so the
 # Windows working tree is CRLF while the index/CI checkout is LF. An `end_of_line` rule
 # would make the local format-verify try to rewrite the CRLF tree and fail, while CI (LF)
-# passed — breaking "a local pass guarantees a CI pass". Git's normalization owns endings.
+# passed — breaking "a local pass guarantees a CI pass". With NO end_of_line rule, dotnet
+# format leaves each file's existing endings untouched, so the gate is line-ending-neutral
+# on both the CRLF working tree (local) and the LF checkout (CI) — autocrlf round-trips the
+# rest. (.gitattributes only normalizes *.mjs, not *.cs, so it does not cover this.)
 
 [*]
 charset = utf-8

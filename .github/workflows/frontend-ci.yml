@@ -6,6 +6,8 @@ on:
     paths:
       - "frontend/**"
       - ".github/workflows/frontend-ci.yml"
+      # Root .editorconfig also carries the frontend's TS/TSX indent rules.
+      - ".editorconfig"
       # The requirement-catalog ⊆ extraction-prompt contract test (#272,
       # src/lib/requirements-extraction-contract.test.ts) reads this backend file, so a
       # prompt-side edit (e.g. removing a field the catalog offers) must run frontend tests.
@@ -14,6 +16,8 @@ on:
     paths:
       - "frontend/**"
       - ".github/workflows/frontend-ci.yml"
+      # Root .editorconfig also carries the frontend's TS/TSX indent rules.
+      - ".editorconfig"
       - "api/CompliDrop.Api/Services/Extraction/ExtractionPrompts.cs"
 
 jobs:
