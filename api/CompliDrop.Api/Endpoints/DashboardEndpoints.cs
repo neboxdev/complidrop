@@ -49,15 +49,10 @@ public static class DashboardEndpoints
             && (d.ComplianceStatus == Entities.ComplianceStatus.Compliant
                 || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon
                 || d.ComplianceStatus == Entities.ComplianceStatus.Pending), ct);
-        // #327: a SUPERSEDED old cert (a newer cert exists for the same vendor + type) is no longer a
-        // current Expired liability — exclude it so this count matches the deep-linked documents list
-        // (?status=Expired) and the vendor's real coverage, instead of inflating on a renewed COI's old
-        // copy. The compliant/nonCompliant/expiringSoon counts above are deliberately NOT de-superseded
+        // #327: the Expired liability de-counts superseded (renewed) old certs (CurrentExpiredCountAsync
+        // below). The compliant/nonCompliant/expiringSoon counts above are deliberately NOT de-superseded
         // (they're verdict/informational tallies, not the Expired liability the ticket scopes) — see ADR 0033.
-        var expired = await docs
-            .Where(d => d.ExpirationDate != null && d.ExpirationDate < today)
-            .Where(DocumentSupersession.IsCurrent(db.Documents))
-            .CountAsync(ct);
+        var expired = await CurrentExpiredCountAsync(db, today, ct);
         // Denominator for the compliance rate EXCLUDES not-yet-graded documents (#318 FP-042): a fresh
         // upload sits ComplianceStatus.Pending until the worker reads + evaluates it, and counting those
         // as "not compliant" flashed a demoralizing "0%" the instant Pat uploaded her very first document.
@@ -127,15 +122,11 @@ public static class DashboardEndpoints
             d.ExpirationDate != null && d.ExpirationDate >= in61 && d.ExpirationDate < in91, ct);
         var beyond = await db.Documents.CountAsync(d =>
             d.ExpirationDate != null && d.ExpirationDate >= in91, ct);
-        // #327: the EXPIRED bucket de-counts superseded (renewed) old certs — consistent with the
-        // dashboard Expired count. The future buckets (30/60/90/beyond) retain every document: a
-        // not-yet-expired cert is informational ("when does each doc expire"), not yet a missed liability,
-        // and a vendor commonly renews early so both the old (soon) and new (far) cert legitimately appear.
-        // See ADR 0033.
-        var expired = await db.Documents
-            .Where(d => d.ExpirationDate != null && d.ExpirationDate < today)
-            .Where(DocumentSupersession.IsCurrent(db.Documents))
-            .CountAsync(ct);
+        // #327: the EXPIRED bucket de-counts superseded (renewed) certs (CurrentExpiredCountAsync),
+        // consistent with the dashboard Expired count. The future buckets (30/60/90/beyond) deliberately
+        // retain every document: a not-yet-expired cert is informational, not yet a missed liability, and a
+        // vendor commonly renews early so both the old (soon) and new (far) cert legitimately appear. ADR 0033.
+        var expired = await CurrentExpiredCountAsync(db, today, ct);
 
         return Results.Ok(new
         {
@@ -143,6 +134,19 @@ public static class DashboardEndpoints
             error = (object?)null
         });
     }
+
+    /// <summary>
+    /// The current Expired-liability count (#327 / ADR 0033): documents past their expiry that are NOT
+    /// superseded by a newer cert for the same (vendor, type). Shared by the dashboard <c>expired</c> stat
+    /// and the expiry pipeline's expired bucket so the two can never drift, and both match the deep-linked
+    /// documents list (<c>?status=Expired</c>). Deliberately NOT applied to the compliant/nonCompliant/
+    /// expiringSoon stats or the future pipeline buckets.
+    /// </summary>
+    private static Task<int> CurrentExpiredCountAsync(AppDbContext db, DateTime today, CancellationToken ct) =>
+        db.Documents
+            .Where(d => d.ExpirationDate != null && d.ExpirationDate < today)
+            .Where(DocumentSupersession.IsCurrent(db.Documents))
+            .CountAsync(ct);
 
     /// <summary>How many rows to over-fetch before collapsing twins down to the 20 shown.</summary>
     private const int RecentActivityBuffer = 60;

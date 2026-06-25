@@ -94,9 +94,7 @@ public class ExportService(SystemDbContext db) : IExportService
         {
             container.Page(page =>
             {
-                page.Size(PageSizes.Letter);
-                page.Margin(40);
-                page.DefaultTextStyle(t => t.FontFamily("Helvetica").FontSize(10).FontColor("#0c4a6e"));
+                ApplyPageDefaults(page);
 
                 page.Header().Column(col =>
                 {
@@ -327,6 +325,14 @@ public class ExportService(SystemDbContext db) : IExportService
         return superseded;
     }
 
+    /// <summary>Shared QuestPDF page chrome for the PDF reports (Letter size, 40pt margin, default text style).</summary>
+    private static void ApplyPageDefaults(PageDescriptor page)
+    {
+        page.Size(PageSizes.Letter);
+        page.Margin(40);
+        page.DefaultTextStyle(t => t.FontFamily("Helvetica").FontSize(10).FontColor("#0c4a6e"));
+    }
+
     public async Task<byte[]> BuildVendorReportAsync(Guid organizationId, Guid vendorId, CancellationToken ct)
     {
         var vendor = await db.Vendors
@@ -342,9 +348,7 @@ public class ExportService(SystemDbContext db) : IExportService
         {
             container.Page(page =>
             {
-                page.Size(PageSizes.Letter);
-                page.Margin(40);
-                page.DefaultTextStyle(t => t.FontFamily("Helvetica").FontSize(10).FontColor("#0c4a6e"));
+                ApplyPageDefaults(page);
                 page.Header().Column(col =>
                 {
                     col.Item().Text("Vendor Compliance Package").FontSize(18).SemiBold().FontColor("#0284c7");
