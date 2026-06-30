@@ -363,9 +363,10 @@ function NotCheckedExplainer({ doc }: { doc: DocDetail }) {
         ) : (
           <>
             <p className="text-sm text-sky-900">
-              {doc.vendorName ?? "This vendor"} doesn&apos;t have a requirements checklist
-              yet, so there&apos;s nothing to check against. Set up what they need to prove
-              and we&apos;ll check it automatically.
+              {doc.vendorName ?? "This vendor"}{" "}
+              doesn&apos;t have a requirements checklist yet, so there&apos;s nothing to
+              check against. Set up what they need to prove and we&apos;ll check it
+              automatically.
             </p>
             <Link
               href={`/vendors/${doc.vendorId}`}
