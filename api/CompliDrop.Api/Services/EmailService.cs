@@ -23,6 +23,7 @@ public interface IEmailService
 public class ResendEmailService(
     IHttpClientFactory httpFactory,
     IOptions<ResendSettings> settings,
+    IHostEnvironment env,
     ILogger<ResendEmailService> logger) : IEmailService
 {
     private readonly ResendSettings _cfg = settings.Value;
@@ -36,6 +37,16 @@ public class ResendEmailService(
         if (!IsEnabled)
         {
             logger.LogWarning("Resend not configured — skipping email to {To}", toEmail);
+            // Dev-only QA aid (#359): in Development email is silent (no Resend key, #271) and
+            // verify/reset tokens are stored hashed, so surfacing the would-be message here is the
+            // only way to drive the email flows by hand. Strictly Development-gated — in
+            // Staging/Production the send path above runs instead, so a body is never logged.
+            if (env.IsDevelopment())
+            {
+                logger.LogInformation(
+                    "DEV email suppressed — would send to {To}\n  Subject: {Subject}\n  Body:\n{HtmlBody}",
+                    toEmail, subject, htmlBody);
+            }
             return null;
         }
 
