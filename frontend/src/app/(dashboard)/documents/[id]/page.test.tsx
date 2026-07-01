@@ -83,7 +83,10 @@ describe("DocumentDetailPage — not-checked explainer (#316 FP-063)", () => {
 
     renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_nochk" } });
 
-    expect(await screen.findByText(/doesn't have a requirements checklist yet/i)).toBeInTheDocument();
+    // Pin the vendor-name + space boundary so the JSX whitespace regression (#358) can't return.
+    expect(
+      await screen.findByText(/Bob's Flowers doesn't have a requirements checklist yet/i),
+    ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /set up bob's flowers requirements/i })).toHaveAttribute(
       "href",
       "/vendors/v9",
