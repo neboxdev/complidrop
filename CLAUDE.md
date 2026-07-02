@@ -88,7 +88,7 @@ Features begin with `/plan`, run through PM review (6 reviewers including a Comp
 
 Tests are mandatory after implementation — unit tests for pure logic (xUnit), integration tests using `WebApplicationFactory` for boundaries (Postgres, Azure Blob, Document AI, Gemini, Stripe webhook, Resend). Frontend tests use Jest/Vitest.
 
-Multi-agent code review runs on every ticket before PR (`/start <n>` Phase 4). **Every bug the reviewers find gets fixed regardless of severity.** Reviewer **suggestions** are triaged three ways before the PR opens — but the first option is the **overwhelming default, target ≥99%**:
+Multi-agent code review runs on every ticket before PR (`/start <n>` Phase 4): 5 reviewer personas + adversarial verification — 2 independent verifiers try to refute every bug finding, and reviewer agents are pinned to Opus (never the premium session model). **Every CONFIRMED bug gets fixed regardless of severity**; verifier-refuted findings are reported in the PR body with their refutation (never silently dropped), and split verdicts get a personal read before deciding. Reviewer **suggestions** are triaged three ways before the PR opens — but the first option is the **overwhelming default, target ≥99%**:
 
 1. **Implement in the same PR** — the strong default. Polish, missing test edges, small refactors, ADRs, mid-sized cleanups all land here. Even non-trivial changes are absorbed unless an exception in (2) applies.
 2. **Defer to a follow-up ticket** — **rare**. Permitted only when **(a)** the suggestion strictly requires its own ADR / spec conversation (data-semantics or public-API contract change, or the reviewer explicitly flagged it as deferred-to-later), or **(b)** the 5-hour Claude session budget is approaching its cap with bugs and core suggestions still pending — in which case never defer a `bug`-kind finding. "Bigger refactor" alone is NOT sufficient. The new ticket gets the reviewer's reasoning copied in; the PR body lists the spawned ticket id(s) AND the deferral reason (necessity vs. budget).
@@ -123,7 +123,7 @@ Other epics today:
 | `/pm-review` | Re-run PM reviewers on an existing spec |
 | `/breakdown` | Approved spec → epic + 5–12 ordered child tickets |
 | `/start <n>` | Pick up ticket → implement → tests → 5-agent review → fix bugs → PR |
-| `/review` | Diagnostic 5-agent review on the current branch (no auto-fix) |
+| `/review` | Diagnostic 5-agent review + adversarial verification on the current branch (no auto-fix) |
 | `/epic-review <n>` | Consolidated review across an epic after merge |
 | `/ticket <description>` | Single ticket creator outside `/breakdown` |
 | `/tickets` | List/triage open work |

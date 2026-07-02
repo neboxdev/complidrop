@@ -10,7 +10,7 @@ Run a codebase-wide review after all tickets in epic #$ARGUMENTS have been merge
 1. Fetch the epic: `gh issue view $ARGUMENTS --json body,state` (or read from `docs/tickets/done/`). Parse the checklist of child tickets.
 2. Verify all children are closed/merged. List any still open and stop if so.
 3. Compute the combined diff: `git diff <epic-start-sha>...HEAD`. The epic-start-sha is the commit immediately before the first merged child ticket — find via `git log` if not provided.
-4. Spawn 5 code-reviewer subagents with **epic-scope prompts**:
+4. Spawn 5 review subagents with **epic-scope prompts** (ad-hoc epic-level lenses, not the per-ticket reviewer personas):
    - **Integration issues** across tickets (do they compose correctly? do the new endpoints play nicely with the new background worker?)
    - **Regressions** in adjacent code (did anything outside the epic break?)
    - **Feature coherence** (does the sum deliver the epic's goal?)
