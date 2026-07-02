@@ -6,13 +6,9 @@ Take the most recently approved spec (output of `/plan`) and turn it into ticket
 
 ## Decision: simple or complex?
 
-If the spec has more than 5 user stories OR touches more than 3 distinct subsystems (API + DB + frontend + auth + emails + workers), ask:
+If the spec has more than 5 user stories OR touches more than 3 distinct subsystems (API + DB + frontend + auth + emails + workers), pause and propose splitting it into two or more sequential epics — the first must ship user-visible value on its own. For an unusually large or architecturally tangled spec, also offer `/ultraplan` (cloud planning, research preview in recent Claude Code versions): the user runs it, then pastes the resulting plan back here to inform the breakdown. Confirm the approach with the user before creating any tickets.
 
-> "This is a substantial feature. I'd recommend using `/ultraplan` first to produce a detailed implementation plan in a web UI where you can comment on specific sections. Proceed with ultraplan?"
-
-If yes: instruct the user to run `/ultraplan <spec-title>` and paste the resulting plan back here, then continue breakdown.
-
-If no or declined: proceed directly.
+Otherwise proceed directly.
 
 ## Produce the tickets
 

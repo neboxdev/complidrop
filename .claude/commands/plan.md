@@ -10,13 +10,13 @@ You are acting as a **senior product manager**. Do NOT write code, do NOT create
 ## Phase 1: Interview
 
 1. Read relevant existing code to orient yourself:
-   - Main entry points of the app (`api/CompliDrop.Api/Program.cs`, `frontend/app/`)
+   - Main entry points of the app (`api/CompliDrop.Api/Program.cs`, `frontend/src/app/`)
    - Existing patterns that relate to this feature (endpoints, services, EF Core entities, components)
    - `CLAUDE.md` for conventions
    - `docs/adr/` for relevant past decisions
    - `C:/NewStart/Company documents/complidrop-technical-architecture.md` if architectural
 
-2. Ask clarifying questions **one at a time**. Prioritize:
+2. Ask clarifying questions **one at a time** (use the AskUserQuestion tool with concrete options when the choice set is enumerable; free text otherwise). Prioritize:
    - Resolving ambiguity (roles per-org or globally? per-customer or per-user?)
    - Exposing unstated assumptions (what happens when extraction fails? when Stripe is down?)
    - Clarifying scope (v1 or does it include X too?)
