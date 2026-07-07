@@ -36,6 +36,10 @@ complidrop-technical-architecture.md
 .claude/*.md
 .claude/*.json
 .claude/ux-tickets/
+.claude/tmp/
 !.claude/settings.json
+# The project review addendum (rosters, do-not-flag, sensitive areas) IS tracked —
+# it must ship with the code whose facts it states.
+!.claude/reviewers.md
 # Local dev scripts — may contain secret values
 api/CompliDrop.Api/dev-run.ps1

@@ -4,8 +4,25 @@
 // dirties the working tree. Fails silently.
 
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
+
+// Keep the gitignored log bounded: over MAX bytes, keep the newest KEEP bytes,
+// trimmed to the next session-marker boundary. Fails silently like everything here.
+const MAX_BYTES = 512 * 1024;
+const KEEP_BYTES = 256 * 1024;
+const truncateIfHuge = (path) => {
+  try {
+    if (!existsSync(path) || statSync(path).size <= MAX_BYTES) return;
+    const content = readFileSync(path, "utf8");
+    let tail = content.slice(-KEEP_BYTES);
+    const marker = tail.indexOf("### Session ended");
+    if (marker > 0) tail = tail.slice(marker);
+    writeFileSync(path, "<!-- older entries truncated -->\n\n" + tail);
+  } catch {
+    // fail silently
+  }
+};
 
 const safeRun = (cmd) => {
   try {
@@ -44,6 +61,7 @@ const safeRun = (cmd) => {
     const entry = `\n---\n\n### Session ended ${ts}\n\n- Branch: \`${branch}\`\n- Reason: ${reason}\n- Tool calls (this session): ${activityCount}\n- Changed files:\n\`\`\`\n${changed || "(none)"}\n\`\`\`\n`;
 
     await appendFile(".claude/session-log.md", entry);
+    truncateIfHuge(".claude/session-log.md");
   } catch {
     // fail silently
   }
