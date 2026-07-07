@@ -1,63 +1,32 @@
-# Agent personas
+# CompliDrop reviewer personas (project overlay)
 
-Each `.md` file in this directory defines a reviewer persona that Claude Code can spawn as a subagent — via the Task tool, or via the `/review` Workflow script (which resolves personas through `agentType`).
+This directory holds ONLY CompliDrop-specific personas. The generic roster (5 code +
+5 PM reviewers) lives in the machine-level claude-kit at `~/.claude/agents/` — see its
+README for conventions (read-only rule, opus pinning, findings contract, evidence
+requirements). Do not copy generic personas back into this repo.
 
-## Existing personas
+## Personas here
 
-### Code reviewers (used by `/start`, `/review`, `/epic-review`)
-- `security-reviewer` — security bugs (multi-tenant leakage, injection, secrets, auth, file uploads)
-- `correctness-reviewer` — logic bugs, edge cases, async/await pitfalls, EF Core gotchas
-- `performance-reviewer` — N+1, indexes, blocking I/O, paid AI-call caching
-- `test-quality-reviewer` — test coverage and quality, mocking correctness
-- `architecture-reviewer` — fits existing patterns, ADR adherence, layer responsibilities
+- `compliance-claims-reviewer` — **code roster.** Hunts divergence between what the
+  product claims (verdict labels, deletion promises, privacy copy, exported PDFs,
+  marketing JSON-LD) and what the code does. Exists because issues #396–#405 proved
+  this class is structurally invisible to the generic five.
+- `legal-compliance-reviewer` — **PM roster.** Challenges specs on privacy, US
+  regulatory exposure (HIPAA, state privacy laws, retention rules), third-party AI
+  processing paths, and liability from compliance claims.
 
-### PM reviewers (used by `/plan`, `/pm-review`)
-- `pm-scope-reviewer` — scope and MVP framing
-- `pm-user-empathy-reviewer` — UX / discoverability for non-technical SMB users
-- `pm-business-reviewer` — business reasoning at $49/mo SMB scale
-- `pm-risk-reviewer` — operational/market/technical risk
-- `pm-simplicity-reviewer` — build vs buy vs skip
-- `legal-compliance-reviewer` — privacy, US regulatory (HIPAA/SOC 2/state laws), AI-processing concerns (CompliDrop-specific)
+## Wiring
 
-## Adding a new persona
+Rosters are declared in [.claude/reviewers.md](../reviewers.md) ("Extra personas").
+/review and /start pass the **Code roster** names to the review engine (Workflow
+`agentType`); /plan and /pm-review spawn the **PM roster** personas directly via the
+Agent tool (the engine reviews code diffs — it is never used for spec review). Adding
+a persona here without listing it there means it never runs.
 
-Create a new `.md` file with frontmatter:
+## Project facts
 
-```markdown
----
-name: my-new-reviewer
-description: What this reviewer focuses on
-tools: Read, Grep, Glob, Bash
-model: opus
----
-
-You are a <role>. Your job is <focus>.
-
-Focus on:
-- <specific concerns>
-
-<inline JSON findings schema — the agent must be self-contained>
-```
-
-Then reference it in the relevant slash command (edit `.claude/commands/*.md` to include the new reviewer name in its subagent list).
-
-## Conventions (all personas)
-
-- **Self-contained prompts.** Subagents do NOT see `CLAUDE.md`, the slash command that spawned them, or the other agent files. Never write "per the schema in X" — embed the schema and every needed definition inline, and instruct the agent to read `CLAUDE.md` / `docs/adr/` itself when it needs project invariants.
-- **Read-only.** Reviewers report findings; they never edit files or run builds/tests. The `tools:` line (code reviewers: `Read, Grep, Glob, Bash`; PM reviewers: `Read, Grep, Glob, WebSearch, WebFetch`) removes Edit/Write; since Bash could still mutate, the prompt states the rule explicitly too. This exists because parallel reviewers editing the tree produced false "regression" findings in the past.
-- **`model: opus`** — every persona is pinned to Opus (founder decision 2026-07-02): routine reviews must not burn premium-tier (Fable) session tokens; Fable-level review happens only as an explicit one-off request. The `/review` workflow also passes `model: 'opus'` on every agent call, including the ad-hoc adversarial verifiers.
-- **Volatile facts go stale.** Rate limits, index shapes, and TTL semantics drift as the product evolves (three of them had drifted in these prompts by 2026-07). Hardcode a number only when it earns its keep for fast pattern-matching, and expect to update it when the pattern changes; otherwise point at `CLAUDE.md` § Core patterns as the source of truth.
-
-## When to add a new persona
-
-When you realize a whole class of issue keeps getting missed by existing reviewers. Examples you might add later:
-- `accessibility-reviewer` — WCAG/a11y compliance for the customer dashboard and vendor portal
-- `api-contract-reviewer` — breaking change detection for any public API
-- `observability-reviewer` — logging, metrics, tracing coverage (Sentry, PostHog)
-- `cost-reviewer` — paid-API call accounting (Document AI, Gemini, Resend, Stripe events)
-
-Don't proliferate — 5–7 per review pass is the sweet spot. Beyond that, you get noise and duplicate findings. Rotate or retire personas instead of accumulating.
-
-## Tuning
-
-Edit any `.md` here directly. Reviewer prompts are project-specific and should evolve as CompliDrop's risk surface and architectural patterns evolve.
+Volatile facts (rate limits, scale, deliberate patterns) belong in
+[.claude/reviewers.md](../reviewers.md), NOT in persona prompts — that file is updated
+in the same PR as the code that changes a fact. These two personas may reference
+stable product context (what CompliDrop is, who uses it) but must point at
+reviewers.md/CLAUDE.md/ADRs for anything that can drift.
