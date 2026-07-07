@@ -2,23 +2,31 @@
 // PostToolUse hook: append one JSON line per tool call to .claude/logs/activity.jsonl.
 // Async, non-blocking. Fails silently.
 
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
 const LOG = ".claude/logs/activity.jsonl";
 
 // Keep the log bounded: over MAX bytes, keep the newest KEEP bytes aligned to a
-// line boundary. Fails silently like everything here.
+// line boundary. Byte-accurate fd tail-read (never loads a huge legacy file whole;
+// a partial multibyte char at the buffer start is discarded with the first line).
+// This hook runs async per tool call, so a concurrent append can race the
+// truncation rewrite and lose a line — accepted: this is a best-effort local log.
+// Fails silently like everything here.
 const MAX_BYTES = 5 * 1024 * 1024;
 const KEEP_BYTES = 2 * 1024 * 1024;
 const truncateIfHuge = () => {
   try {
-    if (statSync(LOG).size <= MAX_BYTES) return;
-    const content = readFileSync(LOG, "utf8");
-    let tail = content.slice(-KEEP_BYTES);
+    const size = statSync(LOG).size;
+    if (size <= MAX_BYTES) return;
+    const fd = openSync(LOG, "r");
+    const buf = Buffer.alloc(KEEP_BYTES);
+    const read = readSync(fd, buf, 0, KEEP_BYTES, size - KEEP_BYTES);
+    closeSync(fd);
+    let tail = buf.subarray(0, read).toString("utf8");
     const nl = tail.indexOf("\n");
-    if (nl > -1) tail = tail.slice(nl + 1);
+    if (nl >= 0) tail = tail.slice(nl + 1);
     writeFileSync(LOG, tail);
   } catch {
     // fail silently

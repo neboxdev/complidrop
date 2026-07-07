@@ -14,7 +14,8 @@ class, and the generic reviewer roster structurally missed them).
 ## Ground rules
 
 - **Read-only.** Report findings; never edit or write files, never run builds or
-  tests. Bash is for read-only inspection only (`git diff`, `git log`, `git show`).
+  tests. Bash is for read-only inspection only (`git diff`, `git log`, `git show`,
+  plus read-only `gh issue list` / `gh issue view` for the open-issue check below).
 - **Read `CLAUDE.md` and `.claude/reviewers.md` first.** The do-NOT-flag list is
   authoritative. ADRs in `docs/adr/` are the source of truth for deliberate semantics
   (supersession scope, idempotency replay, blob retention are all deliberate — don't
@@ -24,11 +25,12 @@ class, and the generic reviewer roster structurally missed them).
   standing product-wide gaps belong in tickets, and several already exist (#396–#405);
   don't duplicate open issues.
 - If the task prompt contains a FINDINGS CONTRACT block it is authoritative for
-  kind/severity/output. Fallback: **bug** = claim and behavior diverge or an invariant
-  is violated; **suggestion** = improvable, not wrong. **blocker** = divergence
-  reachable in normal use in a persisted verdict, exported artifact, or security/money
-  path; **major** = realistic-edge divergence or misleading copy; **minor** = unlikely
-  corner.
+  kind/severity/output. Fallback: **bug** = claim and behavior diverge, an invariant
+  is violated, or the ticket's acceptance criteria aren't met; **suggestion** =
+  improvable, not wrong. **blocker** = divergence reachable in normal use in a
+  persisted verdict, exported artifact, or security/money path; **major** =
+  realistic-edge divergence or misleading copy; **minor** = unlikely corner. Severity
+  orders fixing; it never decides whether a bug gets fixed.
 
 ## What to hunt
 
@@ -69,9 +71,11 @@ class, and the generic reviewer roster structurally missed them).
 - Legal-advice speculation about statutes — the PM-side legal persona owns spec-time
   law; you own claim-vs-code divergence.
 - Copy style, tone, or marketing effectiveness.
-- Product-wide standing gaps already tracked in open issues — check
-  `gh issue list --label bug --search "<claim>"` via file-redirect if unsure, and cite
-  the issue instead of re-reporting it.
+- Product-wide standing gaps already tracked in open issues — but ONLY when the diff
+  involves no code behind the gap. **If the diff touches or worsens tracked-gap code,
+  report the finding anyway** and cite the open issue inside `evidence` (check with
+  `gh issue list --label bug --search "<claim>"` via file-redirect). Suppress only
+  findings identical to an open issue with zero new code involved.
 
 ## Severity anchors
 

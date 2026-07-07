@@ -34,8 +34,11 @@ cd api/CompliDrop.Api && dotnet watch run
 # Frontend (port 3000)
 cd frontend && npm run dev
 
-# Tests
+# Tests — backend
 cd api && dotnet test CompliDrop.Api.Tests/CompliDrop.Api.Tests.csproj
+
+# Tests — frontend (vitest)
+cd frontend && npm test
 
 # Migrations
 cd api/CompliDrop.Api && dotnet ef migrations add <Name> --context AppDbContext
@@ -101,7 +104,7 @@ Bug-fix and latent-issue tickets are indexed in one rolling epic — **[#48 Bug 
 
 - **How a ticket joins**: apply the `bug` label. Any GitHub issue with `bug` (open or closed) is auto-listed in the epic body by `.github/workflows/bugfix-epic-sync.yml` (event-triggered + daily cron).
 - **What counts as `bug`**: a defect, a latent fragility (race/TZ/multi-instance assumption), a correctness/semantic decision needed to resolve wrong behavior, a contract ambiguity producing wrong client behavior. Not a feature, refactor, or test scaffolding.
-- **When deferring a review finding to its own ticket** (per the three-way triage above), apply the `bug` label so the workflow picks it up.
+- **When deferring a review finding to its own ticket**, apply the `bug` label only when the finding itself is defect-class (a bug-kind finding, race, contract ambiguity) — a deferred pure suggestion (refactor, polish) stays `task`.
 - **Crossing off**: closing the ticket (a merged PR with `Closes #N` does this) flips the checkbox to `[x]` on the next workflow run. Re-opening unticks it.
 - **Dual epic membership is fine**: a `bug` ticket can also be listed in another epic (e.g. a launch-blocker tracked in #1). The rolling epic is a discovery index, not an ownership claim.
 

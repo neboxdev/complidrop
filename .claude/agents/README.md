@@ -17,10 +17,11 @@ requirements). Do not copy generic personas back into this repo.
 
 ## Wiring
 
-Rosters are declared in [.claude/reviewers.md](../reviewers.md) ("Extra personas") —
-the /review, /start, /plan and /pm-review skills read that file and pass these names
-to the review engine. Adding a persona here without listing it there means it never
-runs.
+Rosters are declared in [.claude/reviewers.md](../reviewers.md) ("Extra personas").
+/review and /start pass the **Code roster** names to the review engine (Workflow
+`agentType`); /plan and /pm-review spawn the **PM roster** personas directly via the
+Agent tool (the engine reviews code diffs — it is never used for spec review). Adding
+a persona here without listing it there means it never runs.
 
 ## Project facts
 

@@ -4,20 +4,34 @@
 // dirties the working tree. Fails silently.
 
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 
 // Keep the gitignored log bounded: over MAX bytes, keep the newest KEEP bytes,
-// trimmed to the next session-marker boundary. Fails silently like everything here.
+// trimmed to the next session-marker boundary. Byte-accurate: reads only the tail
+// via fd (a legacy multi-MB file is never fully loaded), and a partial multibyte
+// char at the buffer start is discarded by the marker/newline alignment.
+// Fails silently like everything here.
 const MAX_BYTES = 512 * 1024;
 const KEEP_BYTES = 256 * 1024;
 const truncateIfHuge = (path) => {
   try {
-    if (!existsSync(path) || statSync(path).size <= MAX_BYTES) return;
-    const content = readFileSync(path, "utf8");
-    let tail = content.slice(-KEEP_BYTES);
+    if (!existsSync(path)) return;
+    const size = statSync(path).size;
+    if (size <= MAX_BYTES) return;
+    const fd = openSync(path, "r");
+    const buf = Buffer.alloc(KEEP_BYTES);
+    const read = readSync(fd, buf, 0, KEEP_BYTES, size - KEEP_BYTES);
+    closeSync(fd);
+    let tail = buf.subarray(0, read).toString("utf8");
     const marker = tail.indexOf("### Session ended");
-    if (marker > 0) tail = tail.slice(marker);
+    if (marker >= 0) {
+      tail = tail.slice(marker);
+    } else {
+      // No marker in the tail: align to the next line and keep it (deliberate).
+      const nl = tail.indexOf("\n");
+      if (nl >= 0) tail = tail.slice(nl + 1);
+    }
     writeFileSync(path, "<!-- older entries truncated -->\n\n" + tail);
   } catch {
     // fail silently

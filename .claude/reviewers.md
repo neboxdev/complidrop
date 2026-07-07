@@ -58,6 +58,39 @@ Both are defined in this repo's `.claude/agents/`.
 - **Compliance-verdict semantics**: `ComplianceStatus`, `IComplianceCheckService`,
   the supersession predicate, checklist/template requirements
 
+## Deployment model
+
+Railway auto-deploys `main`; **merge = prod deploy**, and EF migrations auto-apply on
+startup (additive ones included — ADR 0016). Overlapping instances during deploys are
+possible: **multi-instance races are REAL findings**, never hypothetical.
+
+## Sensitive globs (machine-readable — merge-gate `--careful` matching)
+
+Any touched path matching one of these ⇒ pass `--careful` to the merge gate:
+
+```
+api/**/Endpoints/Auth*
+api/**/Migrations/**
+api/**/*Stripe*
+api/**/*Billing*
+api/**/AppDbContext.cs
+api/**/AuditSaveChangesInterceptor.cs
+api/**/*Portal*
+frontend/src/app/(auth)/**
+frontend/src/lib/api.ts
+.github/workflows/**
+Dockerfile*
+**/package.json
+api/**/*.csproj
+```
+
+(The last four are the deploy surface: merge auto-deploys, so CI definitions, the
+container image, and dependency manifests are an unreviewed-path-to-prod risk.)
+
+## Labels
+
+No project labels beyond `task`, `bug`, `epic`, `careful-review`, `in-progress`.
+
 ## Commit scopes
 
 `extraction`, `reminders`, `portal`, `auth`, `billing`, `audit`, `frontend`, `api`,
