@@ -1,0 +1,320 @@
+// Federal regulatory obligations — TRANSPORTATION / SHUTTLE (for-hire passenger carriers). Encoded from
+// docs/rules-research/federal/transportation.md (verified 2026-07-07). The CRITICAL interstate branch:
+// FMCSA operating authority, MCS-150, UCR and the Clearinghouse query attach only in interstate commerce;
+// the $5M/$1.5M financial-responsibility floors are interstate + capacity tiers; the CDL and DOT medical
+// certificate are the federal floor for any 16+-passenger CMV (interstate OR intrastate).
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "fed-transportation-fmcsa-operating-authority",
+      "obligationRef": "OBL-FED-TRANSPORTATION-001",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["transportation"],
+      "category": "license",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "operatesInterstate", "op": "eq", "value": true }
+            ]
+          },
+          "obligation": {
+            "name": "FMCSA operating authority (motor carrier registration)",
+            "documentType": "license",
+            "documentSubType": "fmcsa-operating-authority",
+            "authority": "Federal Motor Carrier Safety Administration (FMCSA)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "one-time", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "citation": {
+            "section": "49 CFR 392.9a; 49 U.S.C. 13901-13902; 49 CFR part 365",
+            "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title49-vol5/xml/CFR-2024-title49-vol5-sec392-9a.xml",
+            "effectiveDateOfText": "current as displayed (2024 GPO edition / live eCFR)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal law requires a for-hire motor carrier of passengers operating in interstate commerce to obtain FMCSA operating authority before operating; the authority is not activated until the required insurance is on file (49 CFR 392.9a; 49 U.S.C. 13901-13902). A purely intrastate Texas carrier is instead governed by TxDMV motor carrier registration.",
+          "userAction": "If this carrier operates across state lines, ask for its active FMCSA operating authority / motor carrier registration record."
+        }
+      ]
+    },
+    {
+      "id": "fed-transportation-usdot-mcs150-update",
+      "obligationRef": "OBL-FED-TRANSPORTATION-002",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["transportation"],
+      "category": "filing",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "operatesInterstate", "op": "eq", "value": true }
+            ]
+          },
+          "obligation": {
+            "name": "USDOT number registration + biennial MCS-150 update",
+            "documentType": "other",
+            "documentSubType": "fmcsa-mcs-150",
+            "authority": "Federal Motor Carrier Safety Administration (FMCSA)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "49 CFR 390.19T(b)",
+            "url": "https://www.ecfr.gov/api/renderer/v1/content/enhanced/current/title-49?section=390.19T",
+            "effectiveDateOfText": "current as displayed (live eCFR)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal law requires a motor carrier operating in interstate commerce to obtain a USDOT number and update its registration (Form MCS-150) at least every 24 months, even when nothing has changed; a missed biennial update can deactivate the USDOT number (49 CFR 390.19T).",
+          "userAction": "If this carrier operates interstate, confirm its USDOT number is active and its MCS-150 biennial update is current (every 24 months)."
+        }
+      ]
+    },
+    {
+      "id": "fed-transportation-financial-responsibility-16plus",
+      "obligationRef": "OBL-FED-TRANSPORTATION-003",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["transportation"],
+      "category": "insurance",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "operatesInterstate", "op": "eq", "value": true },
+              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 }
+            ]
+          },
+          "obligation": {
+            "name": "Federal passenger financial responsibility - $5,000,000 (16+ seats)",
+            "documentType": "coi",
+            "documentSubType": "fed-passenger-bipd",
+            "authority": "Federal Motor Carrier Safety Administration (FMCSA)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "insuranceMinimums": { "perOccurrence": 5000000, "aggregate": 5000000, "currency": "USD" },
+          "citation": {
+            "section": "49 CFR 387.33T(a)(1); 387.31",
+            "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title49-vol5/xml/CFR-2024-title49-vol5-sec387-31.xml",
+            "effectiveDateOfText": "[80 FR 63709, Oct. 21, 2015, as amended at 83 FR 22876, May 17, 2018]",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal law requires a for-hire carrier of passengers in interstate commerce whose highest-capacity vehicle seats 16 or more (including the driver) to maintain at least $5,000,000 of public-liability (bodily injury and property damage) insurance on file with FMCSA (49 CFR 387.33T). This federal floor is separate from - and higher than - the Texas intrastate minimum for the same vehicle; a Texas intrastate certificate does not satisfy it.",
+          "userAction": "For an interstate shuttle seating 16 or more (including the driver), ask for a certificate of insurance showing at least $5,000,000 of public-liability coverage."
+        }
+      ]
+    },
+    {
+      "id": "fed-transportation-financial-responsibility-15orless",
+      "obligationRef": "OBL-FED-TRANSPORTATION-003",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["transportation"],
+      "category": "insurance",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "operatesInterstate", "op": "eq", "value": true },
+              { "fact": "maxPassengerSeatingCapacity", "op": "lte", "value": 15 }
+            ]
+          },
+          "obligation": {
+            "name": "Federal passenger financial responsibility - $1,500,000 (15 or fewer seats)",
+            "documentType": "coi",
+            "documentSubType": "fed-passenger-bipd",
+            "authority": "Federal Motor Carrier Safety Administration (FMCSA)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "insuranceMinimums": { "perOccurrence": 1500000, "aggregate": 1500000, "currency": "USD" },
+          "citation": {
+            "section": "49 CFR 387.33T(a)(2); 387.31",
+            "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title49-vol5/xml/CFR-2024-title49-vol5-sec387-31.xml",
+            "effectiveDateOfText": "[80 FR 63709, Oct. 21, 2015, as amended at 83 FR 22876, May 17, 2018]",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal law requires a for-hire carrier of passengers in interstate commerce whose highest-capacity vehicle seats 15 or fewer (including the driver) to maintain at least $1,500,000 of public-liability insurance on file with FMCSA (49 CFR 387.33T).",
+          "userAction": "For an interstate for-hire vehicle seating 15 or fewer (including the driver), ask for a certificate of insurance showing at least $1,500,000 of public-liability coverage."
+        }
+      ]
+    },
+    {
+      "id": "fed-transportation-cdl-passenger-endorsement",
+      "obligationRef": "OBL-FED-TRANSPORTATION-004",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["transportation"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 }
+            ]
+          },
+          "obligation": {
+            "name": "Commercial Driver's License with Passenger (P) endorsement",
+            "documentType": "certification",
+            "documentSubType": "cdl-passenger",
+            "authority": "FMCSA floor; issued by the driver's state of domicile",
+            "perWorker": true
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 96, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "49 CFR 383.23, 383.5, 383.93",
+            "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title49-vol5/xml/CFR-2024-title49-vol5-sec383-23.xml",
+            "effectiveDateOfText": "current as displayed (2024 GPO edition)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal law requires the driver of a vehicle designed to transport 16 or more passengers, including the driver, to hold a Commercial Driver's License with a Passenger (P) endorsement (49 CFR 383.5, 383.23, 383.93). The CDL is issued by the driver's state of domicile; in Texas the term is about eight years.",
+          "userAction": "For any vehicle seating 16 or more (including the driver), ask each driver for a CDL showing the Passenger (P) endorsement."
+        }
+      ]
+    },
+    {
+      "id": "fed-transportation-medical-examiner-certificate",
+      "obligationRef": "OBL-FED-TRANSPORTATION-005",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["transportation"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 }
+            ]
+          },
+          "obligation": {
+            "name": "DOT medical examiner's certificate",
+            "documentType": "certification",
+            "documentSubType": "dot-medical-certificate",
+            "authority": "FMCSA (National Registry of Certified Medical Examiners)",
+            "perWorker": true
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "49 CFR 391.41(a), 391.45(b)",
+            "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title49-vol5/xml/CFR-2024-title49-vol5-sec391-45.xml",
+            "effectiveDateOfText": "current as displayed (2024 GPO edition)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal law requires a driver of a commercial motor vehicle (including a 16+-passenger shuttle) to be medically certified as physically qualified by an FMCSA-registered examiner, evidenced by a medical examiner's certificate valid for a maximum of 24 months (49 CFR 391.41, 391.45(b)). Texas applies the same standard to intrastate CMV drivers.",
+          "userAction": "For drivers of 16+-passenger vehicles, ask for each driver's current DOT medical examiner's certificate (valid up to 24 months)."
+        }
+      ]
+    },
+    {
+      "id": "fed-transportation-clearinghouse-annual-query",
+      "obligationRef": "OBL-FED-TRANSPORTATION-006",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["transportation"],
+      "category": "filing",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "operatesInterstate", "op": "eq", "value": true }
+            ]
+          },
+          "obligation": {
+            "name": "FMCSA Drug & Alcohol Clearinghouse annual query",
+            "documentType": "other",
+            "documentSubType": "fmcsa-clearinghouse-query",
+            "authority": "Federal Motor Carrier Safety Administration (FMCSA)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 12, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "49 CFR 382.701(a),(b)",
+            "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title49-vol5/xml/CFR-2024-title49-vol5-sec382-701.xml",
+            "effectiveDateOfText": "current as displayed (2024 GPO edition)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal law requires an employer of CDL drivers to run an FMCSA Drug & Alcohol Clearinghouse query on each driver before use and at least once every 12 months (49 CFR 382.701).",
+          "userAction": "If this carrier employs CDL drivers, confirm it runs the FMCSA Clearinghouse annual query for each driver.",
+          "notes": "The Clearinghouse applies to employers of CDL drivers (vehicles seating 16+); gated here on interstate for-hire per the encoding brief."
+        }
+      ]
+    },
+    {
+      "id": "fed-transportation-ucr-registration",
+      "obligationRef": "OBL-FED-TRANSPORTATION-007",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["transportation"],
+      "category": "filing",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "operatesInterstate", "op": "eq", "value": true }
+            ]
+          },
+          "obligation": {
+            "name": "Unified Carrier Registration (UCR) - annual",
+            "documentType": "other",
+            "documentSubType": "ucr-registration",
+            "authority": "Unified Carrier Registration Plan / base-State (49 U.S.C. 14504a)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "fixed-annual", "anchor": "fixedDate", "fixedDate": { "month": 12, "day": 31 }, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "49 U.S.C. 14504a (passenger threshold via 49 U.S.C. 31101(1)(B))",
+            "url": "https://www.law.cornell.edu/uscode/text/49/14504a",
+            "effectiveDateOfText": "current as displayed; TxDMV Motor Carrier Handbook (May 2025)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal law requires a motor carrier operating in interstate commerce to complete an annual Unified Carrier Registration and pay the fee, which expires December 31 each year (49 U.S.C. 14504a). For passenger carriers the threshold is a vehicle designed for more than 10 people, including the driver.",
+          "userAction": "If this carrier operates interstate, ask for its current-year UCR registration receipt (annual, due by December 31).",
+          "notes": "The UCR passenger threshold is >10 including the driver; gated here on interstate for-hire per the encoding brief."
+        }
+      ]
+    }
+  ]
+}

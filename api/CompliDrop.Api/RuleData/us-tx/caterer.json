@@ -1,0 +1,174 @@
+// Texas regulatory obligations — CATERER. Encoded from docs/rules-research/texas/caterer.md
+// (verified 2026-07-07). Skipped: TABC seller-server training (voluntary safe-harbor, not encoded),
+// caterer liability-insurance (sourced absence). Local city/county food permits are noted-not-encoded.
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "tx-caterer-food-establishment-permit",
+      "obligationRef": "OBL-TX-CATERER-001",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["caterer"],
+      "category": "permit",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "preparesOrServesFood", "op": "eq", "value": true },
+          "obligation": {
+            "name": "Texas food establishment permit",
+            "documentType": "license",
+            "documentSubType": "tx-food-establishment",
+            "authority": "Texas DSHS (or the local county / public health district)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Health & Safety Code 437.0055; 25 TAC 228.2(14)",
+            "url": "https://statutes.capitol.texas.gov/Docs/HS/htm/HS.437.htm",
+            "effectiveDateOfText": "current as displayed (fetched 2026-07-07)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires a person who prepares or serves food (including a catering operation) to hold a food establishment permit. The state DSHS permit under Tex. Health & Safety Code 437.0055 is the residual permit that applies where no county or public health district issues one, renewed every two years; in most cities and counties the operative permit is the LOCAL city/county/public-health-district food permit. Check your local health department.",
+          "userAction": "Ask this caterer for its current food establishment permit (from the local health department where one exists, otherwise the Texas DSHS permit)."
+        }
+      ]
+    },
+    {
+      "id": "tx-caterer-certified-food-manager",
+      "obligationRef": "OBL-TX-CATERER-002",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["caterer"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "preparesOrServesFood", "op": "eq", "value": true },
+          "obligation": {
+            "name": "Certified Food Protection Manager",
+            "documentType": "certification",
+            "documentSubType": "tx-food-manager",
+            "authority": "Texas DSHS + local regulatory authority",
+            "perWorker": true
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Health & Safety Code 438.101-438.103; 25 TAC 228.31",
+            "url": "https://statutes.capitol.texas.gov/Docs/HS/htm/HS.438.htm",
+            "effectiveDateOfText": "current as displayed (TFER Aug 2021; statute fetched 2026-07-07)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires a food establishment that handles unpackaged food needing temperature control to have at least one Certified Food Protection Manager present during all hours of operation, with the certificate posted for consumers (25 TAC 228.31; Tex. Health & Safety Code ch. 438). The certificate is earned by passing an accredited exam and renewed by re-examination; the validity period is set by the accrediting program.",
+          "userAction": "Ask this caterer for a current Certified Food Protection Manager certificate covering its operation.",
+          "notes": "Certificate validity period (commonly cited as ~5 years) is set by the CFP standard, not statute; the requirement to hold a certified manager is the verified obligation, so no fixed periodMonths is encoded."
+        }
+      ]
+    },
+    {
+      "id": "tx-caterer-food-handler-training",
+      "obligationRef": "OBL-TX-CATERER-003",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["caterer"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "preparesOrServesFood", "op": "eq", "value": true },
+          "obligation": {
+            "name": "Food handler training certificate",
+            "documentType": "certification",
+            "documentSubType": "tx-food-handler",
+            "authority": "Texas DSHS-accredited food handler program",
+            "perWorker": true
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "25 TAC 228.31(d),(e); 25 TAC 229.178(d)(1); Tex. Health & Safety Code 438.046",
+            "url": "https://www.law.cornell.edu/regulations/texas/25-Tex-Admin-Code-SS-229-178",
+            "effectiveDateOfText": "current as displayed (TFER Aug 2021)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires each food employee (other than the certified food protection manager) to complete an accredited food handler training course within 30 days of hire, and the establishment to keep a certificate of completion on premises for each; the food handler certificate is valid for two years (25 TAC 228.31(d)-(e); 229.178(d)(1)).",
+          "userAction": "Ask this caterer for current food handler training certificates for its food employees (each card is valid two years)."
+        }
+      ]
+    },
+    {
+      "id": "tx-caterer-tabc-mixed-beverage",
+      "obligationRef": "OBL-TX-CATERER-004",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["caterer"],
+      "category": "permit",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "servesOrSellsAlcohol", "op": "eq", "value": true },
+          "obligation": {
+            "name": "TABC Mixed Beverage Permit",
+            "documentType": "license",
+            "documentSubType": "tabc-mixed-beverage",
+            "authority": "Texas Alcoholic Beverage Commission (TABC)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Alcoholic Beverage Code 11.01, 28.01, 28.19, 11.09, 11.11",
+            "url": "https://statutes.capitol.texas.gov/Docs/AL/htm/AL.28.htm",
+            "effectiveDateOfText": "current as displayed (fetched 2026-07-07); reflects HB 1545 (2019) consolidation",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires a caterer that itself sells or serves alcoholic beverages to hold the appropriate TABC retail permit; for distilled-spirit service that is a Mixed Beverage Permit, exercised at off-site events through its temporary-location authority (Tex. Alcoholic Beverage Code 28.19). The permit expires on its second anniversary (11.09), and a Chapter 28 permit requires a conduct surety bond ($5,000; $10,000 within 1,000 ft of a school). Many caterers do not hold their own permit where the venue or a licensed bar service provides the alcohol.",
+          "userAction": "If this caterer provides the alcohol at events, ask for its current TABC permit (renewed every two years)."
+        }
+      ]
+    },
+    {
+      "id": "tx-caterer-mobile-food-vendor-license",
+      "obligationRef": "OBL-TX-CATERER-007",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["caterer"],
+      "category": "license",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2026-07-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "operatesFoodVendingVehicle", "op": "eq", "value": true },
+          "obligation": {
+            "name": "DSHS Mobile Food Vendor license",
+            "documentType": "license",
+            "documentSubType": "dshs-mobile-food-vendor",
+            "authority": "Texas DSHS",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 12, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Health & Safety Code ch. 437B, 437B.051, 437B.055",
+            "url": "https://statutes.capitol.texas.gov/Docs/HS/htm/HS.437B.htm",
+            "effectiveDateOfText": "added by Acts 2025, 89th Leg., H.B. 2844, eff. July 1, 2026",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "As of July 1, 2026, Texas requires a mobile food vendor - a caterer that dispenses food or beverages from a food vending vehicle (food truck, concession trailer, mobile cart) for immediate service - to hold a statewide DSHS Mobile Food Vendor license, with a separate license for each vehicle, renewed annually (Tex. Health & Safety Code ch. 437B). A caterer that merely transports and plates prepared food at a venue is not a mobile food vendor.",
+          "userAction": "If this caterer serves food from a food truck, trailer, or cart, ask for its current DSHS Mobile Food Vendor license (one per vehicle)."
+        }
+      ]
+    }
+  ]
+}

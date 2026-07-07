@@ -1,0 +1,178 @@
+// Texas regulatory obligations — SECURITY SERVICE (contract guard companies). Encoded from
+// docs/rules-research/texas/security-service.md (verified 2026-07-07). Governing law: Tex. Occ. Code ch.
+// 1702 (Private Security), administered by DPS. Skipped: the 2-year term rule (folded as the 24-month
+// cadence on each credential), Level II/III/IV training (evidenced by holding the credential), and the
+// criminal-penalty section (stated in rationale as statutory-general, not a document obligation).
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "tx-security-company-license",
+      "obligationRef": "OBL-TX-SECURITY-001",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["security-service"],
+      "category": "license",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "all": [] },
+          "obligation": {
+            "name": "Texas security services contractor (guard company) license",
+            "documentType": "license",
+            "documentSubType": "tx-dps-security-contractor",
+            "authority": "Texas Department of Public Safety (DPS) — Private Security Program",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Occ. Code 1702.102, 1702.108, 1702.301",
+            "url": "https://statutes.capitol.texas.gov/Docs/OC/htm/OC.1702.htm",
+            "effectiveDateOfText": "current as displayed",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires a company that provides guard or security-officer services on a contractual basis to hold a security services contractor (guard company) license from the Texas DPS Private Security Program before operating (Tex. Occ. Code 1702.102, 1702.108). The license term is set by DPS but may not exceed two years (1702.301). Operating without the required license is an offense under 1702.388.",
+          "userAction": "Ask this security company for its Texas DPS security services contractor (guard company) license, and track its expiration (up to two years)."
+        }
+      ]
+    },
+    {
+      "id": "tx-security-general-liability-insurance",
+      "obligationRef": "OBL-TX-SECURITY-003",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["security-service"],
+      "category": "insurance",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "all": [] },
+          "obligation": {
+            "name": "Security company general liability insurance on file with DPS",
+            "documentType": "coi",
+            "documentSubType": "tx-security-gl",
+            "authority": "Texas Department of Public Safety (DPS)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "insuranceMinimums": { "perOccurrence": 100000, "aggregate": 200000, "currency": "USD" },
+          "citation": {
+            "section": "Tex. Occ. Code 1702.124(c)",
+            "url": "https://codes.findlaw.com/tx/occupations-code/occ-sect-1702-124/",
+            "effectiveDateOfText": "current as displayed",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law makes a general liability insurance policy a precondition of a security company license: the policy must carry minimum limits of $100,000 per occurrence for bodily injury and property damage, $50,000 per occurrence for personal injury, and a $200,000 total aggregate, kept on file with DPS (Tex. Occ. Code 1702.124(c)). This statutory floor is separate from - and typically lower than - any coverage a venue requires by contract.",
+          "userAction": "Ask this security company for a certificate of its general liability policy meeting the DPS statutory minimums ($100,000/occurrence bodily-injury and property-damage, $50,000/occurrence personal injury, $200,000 aggregate).",
+          "notes": "Statute sets three limits ($100k/occ BI+PD, $50k/occ personal injury, $200k aggregate); insuranceMinimums holds the per-occurrence and aggregate figures, with the $50k personal-injury sub-limit stated in the rationale because the schema has a single perOccurrence field."
+        }
+      ]
+    },
+    {
+      "id": "tx-security-noncommissioned-officer-license",
+      "obligationRef": "OBL-TX-SECURITY-004",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["security-service"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "all": [] },
+          "obligation": {
+            "name": "Noncommissioned (unarmed) security officer individual license",
+            "documentType": "certification",
+            "documentSubType": "tx-security-noncommissioned-officer",
+            "authority": "Texas Department of Public Safety (DPS)",
+            "perWorker": true
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Occ. Code 1702.221, 1702.301",
+            "url": "https://texas.public.law/statutes/tex._occ._code_section_1702.221",
+            "effectiveDateOfText": "current as displayed (reflects SB 616, 86th Leg. 2019)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires each individual who works as an unarmed (noncommissioned) security officer for a guard company to hold an individual license from DPS and be employed by a licensed company (Tex. Occ. Code 1702.221). Completion of DPS Level II training is a prerequisite; the credential term is up to two years (1702.301).",
+          "userAction": "Ask this security company for the DPS individual (noncommissioned officer) licenses of the unarmed guards it will assign."
+        }
+      ]
+    },
+    {
+      "id": "tx-security-officer-commission",
+      "obligationRef": "OBL-TX-SECURITY-005",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["security-service"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "providesArmedGuards", "op": "eq", "value": true },
+          "obligation": {
+            "name": "Armed security officer commission",
+            "documentType": "certification",
+            "documentSubType": "tx-security-commission",
+            "authority": "Texas Department of Public Safety (DPS)",
+            "perWorker": true
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Occ. Code 1702.161, 1702.301",
+            "url": "https://texas.public.law/statutes/tex._occ._code_section_1702.161",
+            "effectiveDateOfText": "current as displayed",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires each security officer who carries a firearm on duty to hold a security officer commission from DPS, and prohibits a company from employing an armed officer who lacks one (Tex. Occ. Code 1702.161). The commission requires Level III handgun training and has a term of up to two years (1702.301).",
+          "userAction": "If this security company supplies armed guards, ask for each armed officer's DPS security officer commission."
+        }
+      ]
+    },
+    {
+      "id": "tx-security-personal-protection-officer-license",
+      "obligationRef": "OBL-TX-SECURITY-006",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["security-service"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "providesArmedGuards", "op": "eq", "value": true },
+          "obligation": {
+            "name": "Personal protection officer (PPO) license",
+            "documentType": "certification",
+            "documentSubType": "tx-security-ppo",
+            "authority": "Texas Department of Public Safety (DPS)",
+            "perWorker": true
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Occ. Code 1702.201, 1702.202, 1702.301",
+            "url": "https://texas.public.law/statutes/tex._occ._code_section_1702.201",
+            "effectiveDateOfText": "current as displayed",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires an individual who, while carrying a firearm, provides personal protection (close protection / bodyguard services) to hold a personal protection officer license, layered on top of a security officer commission and Level IV training (Tex. Occ. Code 1702.201-1702.202). The PPO license expires no later than the underlying commission (1702.301(c)).",
+          "userAction": "If this security company provides armed personal-protection (bodyguard) services, ask each such officer for a DPS personal protection officer license.",
+          "notes": "The frozen fact set has no personal-protection/bodyguard trigger, so this is gated on providesArmedGuards (a superset); the user-facing copy states the narrower close-protection condition."
+        }
+      ]
+    }
+  ]
+}

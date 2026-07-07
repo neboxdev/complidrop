@@ -1,9 +1,16 @@
-# Rule schema design — DRAFT (pending Phase 1 dossier)
+# Rule schema design — FROZEN v1 (2026-07-07)
 
-Status: **DRAFT**, authored 2026-07-07 during Phase 1 research. [FABLE]-tier
-design decisions. The condition vocabulary (§4) will be finalized against the
-completed research dossier before the schema freezes. Opus: implement against
-this file only after it says FROZEN.
+Status: **FROZEN** as of 2026-07-07, after the Phase-1 dossier + review gauntlet
+completed and the founder said "go" to Phase 2. The applicability-fact registry
+(§4) is locked against the dossier's actual triggers; the three open design
+questions are resolved (§ Resolved decisions). The engine is built against THIS
+file. Changing a frozen fact name / rule shape = a schema-version bump + a note
+here, not a silent edit.
+
+Note on gates: FREEZE authorizes BUILDING the engine (nothing deploys; ships
+feature-flag OFF). It does NOT clear G1 (counsel on user-facing framing) or G2
+(founder browser spot-confirm of TX statutory figures) — those still gate
+customer exposure, per RULES-REVIEW.md.
 
 ## 1. Storage & versioning model
 
@@ -102,11 +109,35 @@ A small closed condition language over a typed **entity profile**:
   `status: needs-profile-info` listing the missing facts — the engine NEVER
   silently drops an obligation because a question wasn't answered, and never
   asserts compliance from ignorance.
-- Draft fact vocabulary (to finalize from dossier): `state`, `entityType`,
-  `hasEmployees`, `employeeCount`, `servesOrSellsAlcohol`, `preparesFood`,
-  `operatesDronesCommercially`, `providesArmedGuards`, `operatesForklifts`,
-  `rentsInflatableAmusementDevices`, `operatesVehiclesForHire`,
-  `maxVehicleSeatingCapacity`, `operatesInterstate`, `carriesWorkersComp`.
+### FROZEN fact registry (v1)
+
+Locked against the dossier's actual triggers. Each fact has a type; an unset fact
+is `unknown` (Kleene), never `false`. `applies to` narrows which entity types
+even surface the profile question.
+
+| fact | type | applies to | drives (obligations) |
+|---|---|---|---|
+| `state` | enum `US-TX` (only value v1) | all | jurisdiction selection; non-TX ⇒ "jurisdiction not covered" |
+| `entityType` | enum (the 6 types) | all | which rule files apply |
+| `employeeCount` | int (≥0) | all | OSHA 300 log (≥11); "has employees" for WC/food-handler |
+| `carriesWorkersComp` | bool | all w/ employees | WC-elective: `false` ⇒ DWC-005 non-subscriber notice obligation |
+| `servesOrSellsAlcohol` | bool | caterer, venue-org | TABC permit(s); TTB alcohol-dealer registration |
+| `preparesOrServesFood` | bool | caterer, venue-org | food-establishment permit; certified food manager; food-handler training |
+| `operatesFoodVendingVehicle` | bool | caterer | DSHS Mobile Food Vendor license (HB 2844, ch. 437B) |
+| `rentsInflatableAmusementDevices` | bool | event-rental | amusement-ride insurance (§2151.1012) + inspection/sticker + injury report |
+| `operatesForklifts` | bool | event-rental | OSHA powered-industrial-truck operator certification |
+| `providesArmedGuards` | bool | security-service | security officer commission; PPO license; Level III/IV training |
+| `operatesVehiclesForHire` | bool | transportation | base gate for all transport obligations |
+| `operatesInterstate` | bool | transportation | **the critical branch**: FMCSA authority/UCR/§387 federal floor (true) vs TxDMV reg + §218.16 TX floor (false). Unknown ⇒ `needs-profile-info` |
+| `maxPassengerSeatingCapacity` | int (**including the driver**) | transportation | capacity thresholds: CDL/fed-$5M ≥16; fed-$1.5M ≤15; TX-reg >15; TX-$5M ≥27; TX-$500k 16–26; UCR >10. ALL normalized to seats-incl-driver. |
+| `operatesDronesCommercially` | bool | photographer-videographer | FAA Part 107 cert + 24-mo recency + drone registration |
+| `sellsTaxableGoodsOrServices` | bool | all | Texas sales & use tax permit |
+| `isFranchiseTaxableEntity` | bool | venue-org (+ any registered entity) | Texas franchise-tax annual report |
+
+**Capacity convention (locked):** `maxPassengerSeatingCapacity` is the vehicle's
+designed seating capacity **including the driver**. The dossier's "27 or more not
+including the driver" was normalized at D-3 to "27 or more including the driver";
+every threshold in the rules is expressed incl-driver so one fact serves all.
 
 ## 5. Cadence & deadline logic
 
@@ -205,13 +236,66 @@ its UI must satisfy them; they are correctness requirements, not preferences.
   counsel must review the disclaimer + user-facing framing before ANY customer
   exposure. Feature-flag OFF until then.
 
-## Open design questions (resolve before FREEZE)
+## Resolved design decisions (at FREEZE, 2026-07-07)
 
-1. Whether `filing`-category obligations (workers'-comp non-subscriber notice,
-   franchise tax report) fit v1's document-centric UX or ship as
-   reminders-only — decide after dossier shows their real shapes.
-2. Per-worker credentials (guard registration, food handler): v1 likely tracks
-   at vendor level ("evidence that workers hold X"), not a per-employee roster
-   — confirm framing with founder at dossier checkpoint.
-3. Exact `DocumentType`/`DocumentSubType` mapping to the extraction pipeline's
-   existing vocabulary.
+**RD-a — `filing`-category obligations are tracked as cadence-driven obligations
+with optional proof, not forced through document extraction.** WC DWC-005,
+franchise-tax report, TTB registration, MCS-150 update, Clearinghouse query, and
+amusement injury reports don't fit "upload → extract → grade." The engine emits
+them as obligations whose status comes from (a) an optional tracked document /
+manual "filed on <date>" attestation and (b) the cadence's next-due date, surfaced
+via reminders. No extraction dependency. Status vocabulary is the same
+(`satisfied|expiring|expired|missing|needs-profile-info|not-applicable`);
+`missing` for a filing means "no proof/attestation on record," never a legal
+verdict.
+
+**RD-b — per-worker credentials are tracked at VENDOR level in v1, not a
+per-employee roster.** Guard registration, food-handler cards, CDLs, and Part 107
+certs set `perWorker: true` (drives UI copy: "each worker performing X must hold
+…"), but v1 tracks a single obligation/evidence item per credential type per
+vendor. Per-employee rosters are deferred (Phase 2+). Rationale: matches how the
+product tracks vendors today; avoids building an employee-management surface for
+v1. Flagged for founder awareness.
+
+**RD-c — `documentType` maps onto the EXISTING `Document.DocumentType` vocabulary**
+(`coi`, `license`, `certification`, `other`) so tracked documents reconcile with
+the extraction pipeline; specificity lives in `documentSubType`:
+| rule category | Document.DocumentType | example documentSubType |
+|---|---|---|
+| insurance | `coi` | `tx-security-gl`, `tx-amusement-ride-liability`, `fed-passenger-mcs90` |
+| license / permit | `license` | `tx-dps-security-contractor`, `tabc-mixed-beverage`, `dshs-mobile-food-vendor` |
+| worker-certification | `certification` | `tx-food-handler`, `faa-part107`, `tx-cdl-passenger` |
+| filing | `other` | `dwc-005`, `tx-franchise-report`, `ttb-5630-5d` |
+The engine matches a tracked `Document` to an obligation by
+`(DocumentType, documentSubType)` where set, else `DocumentType` + the vendor's
+entity context. Unmapped/legacy `other` documents never auto-satisfy a specific
+obligation.
+
+### Mechanical interpretations resolved in the engine build (2026-07-07, verified)
+
+Engine core built + 96 synthetic-fixture tests green. Non-rule-content decisions:
+- **`validTo` is inclusive** (last valid day); on version overlap, latest
+  `validFrom` wins.
+- **Cadence anchors**: `documentExpiration | issueDate | calendarDate | fixedDate`;
+  `calendarDate`/`fixedDate` both mean "next annual occurrence of `{month,day}`".
+- **`satisfiesFederal` suppression fires only on a Kleene-TRUE state match** — an
+  Unknown/unresolved state rule can NEVER suppress a federal floor. (Safety.)
+- **Unset `state`** ⇒ evaluate federal rules only, skip state rules, surface
+  `state` in `OutstandingProfileFacts`; never assume TX.
+- **`IDocumentLike.IssueDate`** exists for the `issueDate` anchor; the EF
+  `Document` has no issue-date column yet — unset until the persistence step.
+
+## Build plan (Phase 2 — order)
+
+1. **Engine core** (this drop): `RuleData` types, JSON loader + boot validation,
+   Kleene applicability evaluator, cadence date-math (pure, `TimeProvider`),
+   `ObligationReport` DTOs, the interstate/intrastate + no-completeness-illusion +
+   penalty-framing gates. Unit + property tests on SYNTHETIC fixtures (no real
+   rule content) so mechanics are proven independently.
+2. **Rule data**: encode the verified dossier rules into
+   `RuleData/{us-fed,us-tx}/<entity>.json`; golden-file tests with realistic
+   entity fixtures. Only `verified` ships; `probable` behind the review flag.
+3. **Entity-profile persistence**: migration adding the §4 facts
+   (Organization.state, Vendor entity-type + fact columns/JSON); feature-flag
+   wiring (per rule-set file).
+4. **Pass 3 (adversarial) + Pass 4 (code review)**; fix all findings.

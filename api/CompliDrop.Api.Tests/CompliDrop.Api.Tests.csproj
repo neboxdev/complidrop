@@ -36,6 +36,9 @@
     <!-- Binary upload fixtures (e.g. the real HEIC photo for the #220 transcode tests), copied next
          to the test assembly so they're discoverable via AppContext.BaseDirectory. -->
     <None Update="TestFixtures\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- SYNTHETIC rule-engine JSON fixtures, copied next to the test assembly so RuleSetLoader
+         directory/file loading is discoverable via AppContext.BaseDirectory. -->
+    <None Update="RuleEngineFixtures\**\*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

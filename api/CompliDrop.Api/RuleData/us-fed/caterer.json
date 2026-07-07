@@ -1,0 +1,40 @@
+// Federal regulatory obligations — CATERER. Encoded from docs/rules-research/federal/caterer.md
+// (verified 2026-07-07). Absence findings (FDA exemption, no federal license/insurance) are NOT rules.
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "fed-caterer-ttb-alcohol-dealer",
+      "obligationRef": "OBL-FED-CATERER-002",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["caterer"],
+      "category": "filing",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "servesOrSellsAlcohol", "op": "eq", "value": true },
+          "obligation": {
+            "name": "Federal TTB alcohol dealer registration (Form 5630.5d)",
+            "documentType": "other",
+            "documentSubType": "ttb-5630-5d",
+            "authority": "U.S. Alcohol and Tobacco Tax and Trade Bureau (TTB)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "one-time", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "citation": {
+            "section": "27 CFR 31.31, 31.42, 31.111",
+            "url": "https://www.ecfr.gov/current/title-27/chapter-I/subchapter-A/part-31/subpart-G/section-31.111",
+            "effectiveDateOfText": "current as displayed (eCFR current edition, fetched 2026-07-07)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal law requires a caterer that sells or serves distilled spirits, wine, or beer to register with the U.S. Alcohol and Tobacco Tax and Trade Bureau (TTB) as an alcohol dealer by filing TTB Form 5630.5d before engaging in business (27 CFR 31.31, 31.42, 31.111). The registration carries no fee (the special occupational tax was repealed in 2008) but is mandatory, and is separate from any state TABC permit. A caterer that never handles alcohol has no TTB obligation.",
+          "userAction": "If this caterer serves or sells alcohol, ask for evidence of its TTB alcohol dealer registration (Form 5630.5d)."
+        }
+      ]
+    }
+  ]
+}

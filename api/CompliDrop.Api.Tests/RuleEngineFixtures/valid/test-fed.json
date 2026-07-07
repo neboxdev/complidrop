@@ -1,0 +1,68 @@
+// SYNTHETIC rule fixture — proves engine MECHANICS only. Fake entity type "test-widget", fake
+// citations/subtypes. NOT real compliance content. jsonc comments here also exercise the loader's
+// comment tolerance.
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "test-fed-passenger-insurance",
+      "obligationRef": "OBL-TEST-FED-INSURANCE",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["test-widget"],
+      "category": "insurance",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "operatesInterstate", "op": "eq", "value": true },
+          "obligation": {
+            "name": "Synthetic federal test-widget insurance floor",
+            "documentType": "coi",
+            "documentSubType": "test-fed-insurance",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "insuranceMinimums": { "perOccurrence": 5000000, "aggregate": 5000000, "currency": "USD" },
+          "citation": { "section": "Synthetic Test Fed Code §1", "verifiedDate": "2026-07-07" },
+          "rationale": "Synthetic test rule: an interstate test-widget carries the higher federal insurance floor.",
+          "userAction": "Ask the vendor for a certificate showing the federal test-widget insurance floor."
+        }
+      ]
+    },
+    {
+      "id": "test-fed-operator-cert",
+      "obligationRef": "OBL-TEST-FED-CERT",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["test-widget"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesInterstate", "op": "eq", "value": true },
+              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 }
+            ]
+          },
+          "obligation": {
+            "name": "Synthetic federal operator certification",
+            "documentType": "certification",
+            "documentSubType": "test-fed-cert",
+            "perWorker": true
+          },
+          "cadence": { "kind": "one-time", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "citation": { "section": "Synthetic Test Fed Code §2" },
+          "rationale": "Synthetic test rule: large interstate test-widgets need a federal operator certification.",
+          "userAction": "Ask each operator for the federal test certification."
+        }
+      ]
+    }
+  ]
+}

@@ -168,8 +168,22 @@ errors) · HB 2844 caterer refresh COMPLETE ✅ (L-1 fixed) · 5 pass-2 correcti
 APPLIED ✅ (D-1 inflatable §2151.1012; D-3 §218.16 wording + header; D-2 §387.33T;
 D-4 UCR §31101; D-5 §391.45(b)) · **RULES-REVIEW.md COMPLETE ✅**.
 
-**→ AT FOUNDER CHECKPOINT (2026-07-07). Presented [RULES-REVIEW.md](../RULES-REVIEW.md).
-Awaiting per-jurisdiction sign-off. This BLOCKS Phase 2 (engine). STOP for human.**
+**→ FOUNDER SAID "GO" (2026-07-07).** Interpreted as: commit deliverable + proceed
+into Phase 2. Deliverable committed to branch **`feat/compliance-rule-engine`**
+(6931d35, 17 files, no push/PR). **G1 (counsel on user-facing framing) + G2
+(founder browser spot-confirm of TX statutory figures) REMAIN OPEN** — they gate
+CUSTOMER EXPOSURE, not building; engine ships feature-flag OFF regardless.
+
+### Phase 2 progress (2026-07-07)
+- ✅ **SCHEMA.md FROZEN** — fact registry locked (§4); design questions resolved
+  (RD-a filings as cadence-tracked; RD-b worker creds vendor-level v1; RD-c
+  documentType → existing extraction vocab); build plan recorded.
+- ⏳ **Engine core building** (agent ac6fd44): RuleData types, JSON loader+validate,
+  Kleene evaluator, cadence date-math, ObligationReport DTOs, the 3 legal gates,
+  SYNTHETIC-fixture unit+property tests. Must compile + tests green.
+- ⬜ Next: encode verified dossier → RuleData/{us-fed,us-tx}/*.json + golden tests;
+  entity-profile migration + per-rule-set feature flag; pass 3 adversarial + pass 4
+  code review.
 
 Provenance status: load-bearing numbers/terms upgraded to `official` (re-derived
 via Playwright); single-reproduction existence facts held

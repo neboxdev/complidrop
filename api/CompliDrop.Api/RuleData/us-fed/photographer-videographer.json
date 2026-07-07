@@ -1,0 +1,107 @@
+// Federal regulatory obligations — PHOTOGRAPHER / VIDEOGRAPHER. Encoded from
+// docs/rules-research/federal/photographer-videographer.md (verified 2026-07-07). The absence finding
+// (no federal photographer license) is NOT a rule; every obligation below is gated on commercial drone use.
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "fed-photographer-faa-part107-certificate",
+      "obligationRef": "OBL-FED-PHOTOGRAPHER-001",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["photographer-videographer"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "operatesDronesCommercially", "op": "eq", "value": true },
+          "obligation": {
+            "name": "FAA Part 107 remote pilot certificate",
+            "documentType": "certification",
+            "documentSubType": "faa-part107",
+            "authority": "Federal Aviation Administration (FAA)",
+            "perWorker": true
+          },
+          "cadence": { "kind": "one-time", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "citation": {
+            "section": "14 CFR 107.12; 107.61",
+            "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title14-vol2/xml/CFR-2024-title14-vol2-sec107-12.xml",
+            "effectiveDateOfText": "current as displayed (2024 CFR annual edition)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal law requires the person flying a drone commercially (for a paid event shoot) to hold an FAA Part 107 remote pilot certificate, or to fly under the direct supervision of a certificate holder (14 CFR 107.12). The certificate itself does not expire, but its privileges depend on a 24-month knowledge-recency requirement.",
+          "userAction": "If this vendor flies a drone commercially, ask for the pilot's FAA Part 107 remote pilot certificate."
+        }
+      ]
+    },
+    {
+      "id": "fed-photographer-faa-part107-recency",
+      "obligationRef": "OBL-FED-PHOTOGRAPHER-002",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["photographer-videographer"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "operatesDronesCommercially", "op": "eq", "value": true },
+          "obligation": {
+            "name": "FAA Part 107 aeronautical knowledge recency (24 months)",
+            "documentType": "certification",
+            "documentSubType": "faa-part107-recency",
+            "authority": "Federal Aviation Administration (FAA)",
+            "perWorker": true
+          },
+          "cadence": { "kind": "renewal", "anchor": "issueDate", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "14 CFR 107.65",
+            "url": "https://www.law.cornell.edu/cfr/text/14/107.65",
+            "effectiveDateOfText": "Amdt. 107-8, 86 FR 4382, Jan. 15, 2021 (eff. Apr 6, 2021)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal law requires a Part 107 remote pilot to complete recurrent training (or an initial/recurrent knowledge test) within the previous 24 calendar months to keep exercising remote-pilot privileges (14 CFR 107.65). This 24-month recency, measured from the completion date, is the recurring obligation to track - not a certificate expiry.",
+          "userAction": "For a drone-flying vendor, confirm the pilot's Part 107 recurrent training was completed within the last 24 calendar months."
+        }
+      ]
+    },
+    {
+      "id": "fed-photographer-drone-registration",
+      "obligationRef": "OBL-FED-PHOTOGRAPHER-003",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["photographer-videographer"],
+      "category": "permit",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "operatesDronesCommercially", "op": "eq", "value": true },
+          "obligation": {
+            "name": "FAA small-UAS (drone) registration",
+            "documentType": "license",
+            "documentSubType": "faa-drone-registration",
+            "authority": "Federal Aviation Administration (FAA)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 36, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "14 CFR 48.15, 48.100, 48.30",
+            "url": "https://www.law.cornell.edu/cfr/text/14/48.100",
+            "effectiveDateOfText": "current as displayed (Cornell LII reproduction of the current CFR)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal law requires each drone flown commercially to be registered with the FAA on a per-aircraft basis; the certificate of aircraft registration expires three years after issue unless renewed, at a $5 fee per aircraft (14 CFR 48.15, 48.100, 48.30).",
+          "userAction": "If this vendor flies drones commercially, ask for the FAA certificate of aircraft registration for each drone (renewed every three years)."
+        }
+      ]
+    }
+  ]
+}

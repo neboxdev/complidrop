@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "test-tx-widget-license",
+      "obligationRef": "OBL-TEST-TX-LICENSE",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["test-widget"],
+      "category": "license",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2026-01-01",
+          "validTo": "2026-06-30",
+          "confidence": "verified",
+          "applicability": { "all": [] },
+          "obligation": {
+            "name": "Synthetic Texas widget license (v1)",
+            "documentType": "license",
+            "documentSubType": "test-tx-widget-license",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": { "section": "Synthetic Test Occ. Code §100 (v1)" },
+          "rationale": "Synthetic test rule (version 1): every test-widget needs a Texas widget license.",
+          "userAction": "Ask the vendor for their Texas test-widget license."
+        },
+        {
+          "version": 2,
+          "validFrom": "2026-07-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "all": [] },
+          "obligation": {
+            "name": "Synthetic Texas widget license (v2)",
+            "documentType": "license",
+            "documentSubType": "test-tx-widget-license",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": { "section": "Synthetic Test Occ. Code §100 (v2, amended)" },
+          "rationale": "Synthetic test rule (version 2): every test-widget needs a Texas widget license (amended text).",
+          "userAction": "Ask the vendor for their Texas test-widget license."
+        }
+      ]
+    },
+    {
+      "id": "test-tx-intrastate-insurance",
+      "obligationRef": "OBL-TEST-TX-INSURANCE",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["test-widget"],
+      "category": "insurance",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "operatesInterstate", "op": "eq", "value": false },
+          "obligation": {
+            "name": "Synthetic Texas intrastate test-widget insurance floor",
+            "documentType": "coi",
+            "documentSubType": "test-tx-insurance",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "insuranceMinimums": { "perOccurrence": 500000, "aggregate": 500000, "currency": "USD" },
+          "citation": { "section": "Synthetic Test Tx Code §201" },
+          "rationale": "Synthetic test rule: an intrastate-only test-widget carries the lower Texas insurance floor.",
+          "userAction": "Ask the vendor for a certificate showing the Texas test-widget insurance floor."
+        }
+      ]
+    },
+    {
+      "id": "test-tx-operator-cert-implements-fed",
+      "obligationRef": "OBL-TEST-TX-CERT",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["test-widget"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesInterstate", "op": "eq", "value": true },
+              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 }
+            ]
+          },
+          "obligation": {
+            "name": "Synthetic Texas operator certification (implements federal)",
+            "documentType": "certification",
+            "documentSubType": "test-tx-cert",
+            "perWorker": true
+          },
+          "cadence": { "kind": "one-time", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "citation": { "section": "Synthetic Test Tx Code §202" },
+          "rationale": "Synthetic test rule: the Texas operator certification implements the federal floor, so the federal obligation is not emitted twice.",
+          "userAction": "Ask each operator for the Texas test certification.",
+          "satisfiesFederal": ["test-fed-operator-cert"]
+        }
+      ]
+    },
+    {
+      "id": "test-tx-alcohol-permit",
+      "obligationRef": "OBL-TEST-TX-ALCOHOL",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["test-widget"],
+      "category": "permit",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "servesOrSellsAlcohol", "op": "eq", "value": true },
+          "obligation": {
+            "name": "Synthetic Texas alcohol permit",
+            "documentType": "license",
+            "documentSubType": "test-tx-alcohol",
+            "perWorker": false
+          },
+          "cadence": { "kind": "fixed-annual", "anchor": "fixedDate", "fixedDate": { "month": 5, "day": 15 }, "gracePeriodDays": 0 },
+          "citation": { "section": "Synthetic Test Tx Code §300" },
+          "rationale": "Synthetic test rule: a test-widget that serves alcohol needs a Texas alcohol permit.",
+          "userAction": "Ask the vendor for their Texas alcohol permit."
+        }
+      ]
+    },
+    {
+      "id": "test-tx-probable-only",
+      "obligationRef": "OBL-TEST-TX-PROBABLE",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["test-widget"],
+      "category": "filing",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "probable",
+          "applicability": { "all": [] },
+          "obligation": {
+            "name": "Synthetic probable-only test filing",
+            "documentType": "other",
+            "documentSubType": "test-tx-probable",
+            "perWorker": false
+          },
+          "cadence": { "kind": "one-time", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "citation": { "section": "Synthetic Test Tx Code §400" },
+          "rationale": "Synthetic test rule held at 'probable' confidence to exercise the verified-only production filter.",
+          "userAction": "Ask the vendor about the probable-only test filing."
+        }
+      ]
+    }
+  ]
+}
