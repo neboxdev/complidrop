@@ -30,15 +30,16 @@ feature-flag OFF.** Two human gates remain open (see `04-LIMITATIONS-AND-GATES.m
 
 | Metric | Value | Where to check |
 |---|---|---|
-| Encoded rules | **39** | `api/CompliDrop.Api/RuleData/**/*.json` |
-| …`verified` confidence | 36 | field `versions[].confidence` |
+| Encoded rules | **40** | `api/CompliDrop.Api/RuleData/**/*.json` (Pass 5 added `tx-venue-wc-coverage-notice`) |
+| …`verified` confidence | 37 | field `versions[].confidence` |
 | …`probable` (do NOT ship) | 3 | filtered by `RuleLoadOptions.VerifiedOnly` (default `true`) |
 | …review-gated (TX security) | 5 | field `reviewGate` on `us-tx/security-service.json` |
-| **Rules that load in prod posture** | **31** | test `The_full_and_production_sets_have_the_expected_rule_counts` |
-| Rule-data files | 10 | `RuleData/us-fed/` (5), `RuleData/us-tx/` (5) |
+| **Rules that load in prod posture** | **32** | test `The_full_and_production_sets_have_the_expected_rule_counts` |
+| Rule-data files | 11 | `RuleData/us-fed/` (5), `RuleData/us-tx/` (6, incl. `cross-cutting.json`) |
 | Research dossier files | 12 | `docs/rules-research/{federal,texas}/*.md` |
-| Engine tests | **154 pass / 0 fail** | `dotnet test --filter RuleEngine` |
-| Load-bearing facts independently re-derived | **19 / 19 matched** | `docs/rule-engine/REVIEW-LOG.md` § Pass 2 |
+| Engine tests | **225 pass / 0 fail** | `dotnet test --filter RuleEngine` |
+| Load-bearing facts independently re-derived (Pass 2) | **19 / 19 matched** | `docs/rule-engine/REVIEW-LOG.md` § Pass 2 (18 components on official hosts; the UCR statutory chain via Cornell — see D-4) |
+| Highest-stakes facts re-verified live by Fable (Pass 5) | **12 / 12 matched** | `docs/rule-engine/REVIEW-LOG.md` § Pass 5 |
 
 Every `verified` rule carries a **verbatim quote of the controlling statutory
 text** in its dossier entry (`Operative text:` field). No quote ⇒ not `verified`.
@@ -91,6 +92,8 @@ Each rule carries `obligationRef` (→ dossier entry), `citation.section`,
 | `6931d35` | Research dossier + methodology + schema draft + review log + RULES-REVIEW |
 | `087c6e1` | Engine core + encoded rule data + 110 tests |
 | `c53a975` | Every review finding fixed; 110 → 154 tests |
+| `096fa7c` | This audit trail (index, process log, provenance map, verification guide, gates) |
+| *(Pass 5)* | Fable re-review: every finding fixed, insurance amount gate (v1.2), entity-profile persistence + feature flags; 154 → 225 tests — see REVIEW-LOG § Pass 5 |
 
 ---
 
@@ -114,8 +117,10 @@ dotnet test api/CompliDrop.Api.Tests/CompliDrop.Api.Tests.csproj --filter "Fully
 grep -rniE "spain|spanish|españa|european union|\bGDPR\b" docs/rules-research/ api/CompliDrop.Api/RuleData/
 ```
 
-Evidence base size: **59 verbatim `Operative text:` statutory quotes** across the 12
-dossier files (`grep -rc "Operative text:" docs/rules-research/`).
+Evidence base size: **58 verbatim `Operative text:` statutory quotes** across the 12
+dossier files (`grep -rc "Operative text:" docs/rules-research/federal docs/rules-research/texas`;
+a repo-wide grep returns 59 — the extra hit is METHODOLOGY.md's entry-format template line,
+not a statutory quote).
 
 ---
 
@@ -133,11 +138,14 @@ per-occurrence liability insurance"*):
    (`Tex. Occ. Code 1702.124(c)`) and compare against the quoted `Operative text`.
 4. **Check the provenance tier.** See [`02-PROVENANCE-MAP.md`](02-PROVENANCE-MAP.md) —
    `official` (read on a .gov/GPO host) vs `reproduction-validated` (verbatim text from a
-   faithful reproduction; the official Texas statute site blocks automation).
+   faithful reproduction; the official Texas statute site blocks flat fetching — though the
+   Pass-5 review re-read the load-bearing sections on the official host via a real browser).
 5. **Check it's actually enforced the way it reads.** See
    [`03-VERIFICATION-GUIDE.md`](03-VERIFICATION-GUIDE.md) for the test that pins it, and
-   [`04-LIMITATIONS-AND-GATES.md`](04-LIMITATIONS-AND-GATES.md) — **insurance dollar amounts
-   are carried and displayed but NOT compared against the document in v1.**
+   [`04-LIMITATIONS-AND-GATES.md`](04-LIMITATIONS-AND-GATES.md) — since v1.2, GENERAL-liability
+   floors ARE compared against the extracted amount (below ⇒ `below-stated-minimum`; unreadable
+   ⇒ `needs-document-info`); AUTO-liability floors (the transport rules) are deliberately NOT
+   compared against the general-liability figure (wrong policy line) and keep presence+expiry.
 
 ---
 
@@ -149,7 +157,7 @@ not by convention. An auditor should confirm each:
 | # | Requirement | How it's enforced | Test |
 |---|---|---|---|
 | 1 | Interstate vs intrastate must be resolved before any transport insurance floor is selected; unknown ⇒ `needs-profile-info`, never a pass | Applicability is resolved before satisfaction is computed; a present document cannot launder an Unknown | `Unknown_interstate_yields_needs_profile_info_never_satisfied_even_with_a_document` |
-| 2 | No bare "compliant" that implies the tracked set is exhaustive | `ObligationReport` has **no** `IsCompliant` boolean; `CompletenessNotice` is mandatory and its constructor throws on empty text | `Report_type_exposes_no_overall_compliant_boolean`, `A_report_cannot_be_built_with_an_empty_completeness_notice` |
+| 2 | No bare "compliant" that implies the tracked set is exhaustive | `ObligationReport` has **no** `IsCompliant` boolean; the notice is mandatory — the **ObligationReport constructor** rejects an empty notice text, so a report cannot be built without one | `Report_type_exposes_no_overall_compliant_boolean`, `A_report_cannot_be_built_with_an_empty_completeness_notice` |
 | 3 | Penalties are stated as what the statute provides — never an adjudication of *this* user | `ObligationStatus` has no "violation"/"illegal" value; rationale copy reviewed rule-by-rule | `Every_report_carries_the_completeness_notice_and_verbatim_rule_framing` |
 
 ---
@@ -157,7 +165,8 @@ not by convention. An auditor should confirm each:
 ## 7. What this engine deliberately does NOT claim
 
 Read [`04-LIMITATIONS-AND-GATES.md`](04-LIMITATIONS-AND-GATES.md) before relying on any output.
-Summary: it does not verify insurance **amounts**; it does not cover
+Summary: it verifies insurance **amounts** only for general-liability floors (auto-liability
+floors keep presence+expiry until extraction reads that policy line); it does not cover
 municipal/county obligations; it covers **only** Texas among the states; and 8 of
-the 39 rules (3 `probable` + 5 review-gated) do **not** load in the production
+the 40 rules (3 `probable` + 5 review-gated) do **not** load in the production
 posture.

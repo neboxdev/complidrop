@@ -107,17 +107,27 @@ public static class ApplicabilityEvaluator
 /// Type-aware comparison of a set <see cref="FactValue"/> against a leaf's operator and JSON literal.
 /// The loader validates operator/type compatibility up front, so at evaluation time this can assume the
 /// value shapes line up; anything genuinely mismatched (e.g. a hand-built tree) fails closed to <c>false</c>
-/// rather than throwing. String equality is ordinal-case-insensitive, matching the rest of the codebase.
+/// rather than throwing — including <c>neq</c>, which only negates a COMPARABLE pair (a naive
+/// <c>!ScalarEquals</c> would fail OPEN to true on a type mismatch). String equality is
+/// ordinal-case-insensitive, matching the rest of the codebase.
 /// </summary>
 internal static class LeafComparer
 {
     public static bool Compare(FactValue fact, ConditionOp op, JsonElement value) => op switch
     {
         ConditionOp.Eq => ScalarEquals(fact, value),
-        ConditionOp.Neq => !ScalarEquals(fact, value),
+        ConditionOp.Neq => ScalarComparable(fact, value) && !ScalarEquals(fact, value),
         ConditionOp.Gte => TryNumeric(fact, value, out var f, out var v) && f >= v,
         ConditionOp.Lte => TryNumeric(fact, value, out var f, out var v) && f <= v,
         ConditionOp.In => InArray(fact, value),
+        _ => false,
+    };
+
+    private static bool ScalarComparable(FactValue fact, JsonElement value) => fact.Kind switch
+    {
+        FactKind.Bool => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
+        FactKind.Int => value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out _),
+        FactKind.String => value.ValueKind == JsonValueKind.String,
         _ => false,
     };
 

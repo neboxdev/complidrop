@@ -53,6 +53,14 @@ public static class CadenceCalculator
     }
 
     /// <summary>
+    /// Rounds a period-computed due date to the last day of its month when the cadence says so (v1.2,
+    /// <see cref="Cadence.RoundToMonthEnd"/>): "N calendar months" recency language (14 CFR 107.65) runs
+    /// to the END of the Nth month, not the same-day anniversary.
+    /// </summary>
+    private static DateOnly RoundIfMonthEnd(DateOnly date, bool roundToMonthEnd) =>
+        roundToMonthEnd ? new DateOnly(date.Year, date.Month, DateTime.DaysInMonth(date.Year, date.Month)) : date;
+
+    /// <summary>
     /// Computes the next-due date for a cadence given the tracked document's expiry / issue date and the
     /// evaluation date. Returns null when no deadline is determinable (a one-time obligation, or a
     /// renewal/filing whose anchor data isn't present). SCHEMA §5: v1 leans on the document's own printed
@@ -71,12 +79,12 @@ public static class CadenceCalculator
                 // document carries no printed expiry (SCHEMA §5's "documents without printed expiry" case).
                 if (documentExpiration is { } printed) return printed;
                 if (issueDate is { } issuedA && cadence.PeriodMonths is { } monthsA)
-                    return AddMonthsClamped(issuedA, monthsA);
+                    return RoundIfMonthEnd(AddMonthsClamped(issuedA, monthsA), cadence.RoundToMonthEnd);
                 return null;
 
             case CadenceAnchor.IssueDate:
                 if (issueDate is { } issuedB && cadence.PeriodMonths is { } monthsB)
-                    return AddMonthsClamped(issuedB, monthsB);
+                    return RoundIfMonthEnd(AddMonthsClamped(issuedB, monthsB), cadence.RoundToMonthEnd);
                 return null;
 
             case CadenceAnchor.CalendarDate:

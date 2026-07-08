@@ -1,5 +1,61 @@
 # HANDOFF — Compliance rule engine session (started 2026-07-07)
 
+## PASS 5 — Fable re-review + remaining work (2026-07-08, COMPLETE)
+
+Fable access returned; the founder ordered a thorough re-review of the
+Opus-built pipeline plus completion of the remaining work. All done this
+session (full record: [REVIEW-LOG § Pass 5](rule-engine/REVIEW-LOG.md)):
+
+- **Re-review:** headline claims verified mechanically; **12/12 highest-stakes
+  figures re-verified LIVE** (third derivation, mostly official hosts — incl.
+  §1702.124(c)/§1702.301 on statutes.capitol.texas.gov, the G2 priority);
+  16-finder review workflow → 75 findings → 3-lens adversarial verification
+  (session limit killed ~125 verifiers mid-pass; the orchestrator personally
+  ruled on every split/unverified finding per the review contract).
+  **43 real findings + 29 confirmed = every one FIXED; 1 refutation upheld.**
+- **Standout rule-content fixes:** UCR capacity gate removed (CC-6 reversed —
+  fee definition ≠ registration trigger); `operatesIntrastate` fact (mixed
+  carriers owe BOTH layers, §643.002 "exclusively"); security commission fires
+  for close-protection too; `providesUnarmedGuards` gates the noncommissioned
+  license; caterer TABC → neutral MB-or-W&MB permit; inspection fixedDate →
+  Jun 30 ("before July 1"); OSHA/TTB obligationRef swap; EIN full trigger;
+  NEW RULE `tx-venue-wc-coverage-notice` (§406.005 reaches every employer);
+  CFM/food-handler scoped to venue-org; sales-tax → `us-tx/cross-cutting.json`
+  (venue+event-rental+caterer); real effective dates (TABC 2021-09-01,
+  franchise 2024-01-01); Part-107 recency `roundToMonthEnd` ("calendar months").
+- **A-2/CC-4 insurance-amount hole CLOSED (v1.2)** for general-liability floors:
+  reshaped `insuranceMinimums` (kind/coverageLine/nullable components — no
+  fabricated figures), new `below-stated-minimum` status, amount gate in the
+  evaluator. Auto-liability floors deliberately NOT compared against the
+  extracted GL figure (wrong policy line; needs an extraction field — follow-up
+  with #397).
+- **Engine hardening:** omitted `confidence` can no longer default to Verified;
+  `UnmappedMemberHandling.Disallow` (typo'd keys fail fast); validFrom/citation/
+  minimums/subtype required; empty-`any` and impossible fixedDates rejected;
+  grace unified (and rejected on fixed-date anchors until honored); document
+  selection by effective deadline; conditional-filing proof reads Satisfied;
+  fixed-annual undated proof never guesses Satisfied; federal-only-load state
+  coverage; Neq fails closed; builder aliasing fixed.
+- **Remaining work items DONE:** entity-profile persistence
+  (`AddRegulatoryEntityProfileFields` — additive: Organization.State +
+  RegulatoryFactsJson, Vendor.EntityType + RegulatoryFactsJson),
+  `RegulatoryProfileMapper` (EF→engine adapters; Document.EffectiveDate →
+  IssueDate; GeneralLiabilityLimit → the amount gate), and the per-rule-set
+  feature flags (`RuleEngine:Enabled=false` default + `EnabledRuleSets`;
+  `RegulatoryRuleCatalog` resolves fail-fast at boot; safe posture hard-coded,
+  NOT configurable). No endpoint/UI — deliberately, pending G1.
+- **Counts now:** 40 rules (37 verified + 3 probable; 5 review-gated) → **32 in
+  the production posture**; 11 rule-data files; **225 rule-engine tests; full
+  backend 1323/1323 green**.
+- **Still open (founder):** **G1** (counsel on framing — blocks any customer
+  exposure), **G2** (browser spot-confirm of TX figures — now the FOURTH pass
+  over those numbers; blocks lifting the TX security reviewGate), G3 eyeball
+  (§387.33T — orchestrator re-read it live this session), G4 (DPS facts stay
+  probable). Merge decision is the founder's (`careful-review`: migration +
+  Program.cs touched).
+
+
+
 > **AUDIT TRAIL:** [docs/rule-engine/audit/](rule-engine/audit/README.md) — index,
 > process log, provenance map (rule → primary source), verification guide
 > (guarantee → test), and the limitations/gates register. Written 2026-07-08 for

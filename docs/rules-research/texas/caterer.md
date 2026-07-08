@@ -232,7 +232,10 @@ at an event venue is therefore squarely within the Texas retail-food regime.
   the date it is issued, except as provided by Subsections (d) and (e) or another
   provision of this code."
 - **Effective date of cited text:** Current as displayed (fetched 2026-07-07);
-  reflects the HB 1545 (87th Leg., 2021) license/permit consolidation.
+  reflects the HB 1545 (86th Leg., R.S., 2019; most provisions eff. Sept 1, 2021)
+  license/permit consolidation. *(Session attribution corrected 2026-07-08 in the
+  Pass-5 review — the original entry said "87th Leg., 2021", contradicting the
+  cross-agent F-10 correction that pinned HB 1545 = 2019.)*
 - **Verified:** 2026-07-07 | **Confidence:** verified
   (MB permit, §28.19 temporary-location catering authority, two-year term and
   conduct surety bond are verified from official statute text; the exact current

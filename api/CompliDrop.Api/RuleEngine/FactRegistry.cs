@@ -25,8 +25,10 @@ public static class FactNames
     public const string OperatesForklifts = "operatesForklifts";
     public const string ProvidesArmedGuards = "providesArmedGuards";
     public const string ProvidesArmedCloseProtection = "providesArmedCloseProtection";
+    public const string ProvidesUnarmedGuards = "providesUnarmedGuards";
     public const string OperatesVehiclesForHire = "operatesVehiclesForHire";
     public const string OperatesInterstate = "operatesInterstate";
+    public const string OperatesIntrastate = "operatesIntrastate";
     public const string MaxPassengerSeatingCapacity = "maxPassengerSeatingCapacity";
     public const string OperatesDronesCommercially = "operatesDronesCommercially";
     public const string SellsTaxableGoodsOrServices = "sellsTaxableGoodsOrServices";
@@ -80,8 +82,10 @@ public static class FactRegistry
         new(FactNames.OperatesForklifts, FactKind.Bool, "Does this entity operate forklifts or powered industrial trucks?"),
         new(FactNames.ProvidesArmedGuards, FactKind.Bool, "Does this entity provide armed security guards?"),
         new(FactNames.ProvidesArmedCloseProtection, FactKind.Bool, "Does this entity provide armed close-protection (bodyguard) services?"),
+        new(FactNames.ProvidesUnarmedGuards, FactKind.Bool, "Does this entity provide unarmed (noncommissioned) security guards?"),
         new(FactNames.OperatesVehiclesForHire, FactKind.Bool, "Does this entity operate vehicles for hire?"),
-        new(FactNames.OperatesInterstate, FactKind.Bool, "Does this entity operate across state lines (interstate)?"),
+        new(FactNames.OperatesInterstate, FactKind.Bool, "Does this entity operate for-hire trips that cross state lines (interstate)?"),
+        new(FactNames.OperatesIntrastate, FactKind.Bool, "Does this entity operate for-hire trips entirely within its state (intrastate)?"),
         new(FactNames.MaxPassengerSeatingCapacity, FactKind.Int, "What is the largest vehicle's seating capacity, including the driver?"),
         new(FactNames.OperatesDronesCommercially, FactKind.Bool, "Does this entity operate drones commercially?"),
         new(FactNames.SellsTaxableGoodsOrServices, FactKind.Bool, "Does this entity sell taxable goods or services?"),

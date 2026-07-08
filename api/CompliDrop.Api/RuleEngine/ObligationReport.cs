@@ -19,12 +19,23 @@ public enum ObligationStatus
     Missing,
 
     /// <summary>
-    /// A matching document IS on record but its currency can't be confirmed — no readable expiry and the
-    /// cadence yields no determinable due date — on a renewing/filing obligation (SCHEMA §6 v1 limitation,
-    /// A-1). Never a false <see cref="Satisfied"/> from an undeterminable expiry on a renewing obligation.
-    /// A held ONE-TIME credential with no expiry stays <see cref="Satisfied"/> (nothing to renew).
+    /// A matching document IS on record but the engine can't confirm what <see cref="Satisfied"/> would
+    /// assert — its currency (no readable expiry / no determinable due date on a renewing or fixed-annual
+    /// obligation, A-1 / the fixed-annual cycle ambiguity) or, for an insurance obligation with a
+    /// general-liability statutory floor, its coverage amount (unreadable, or a split-limit floor whose
+    /// sub-limits one extracted figure cannot verify — v1.2, A-2/CC-4). Never a false
+    /// <see cref="Satisfied"/> from an undeterminable fact. A held ONE-TIME credential with no expiry
+    /// stays <see cref="Satisfied"/> (nothing to renew).
     /// </summary>
     NeedsDocumentInfo,
+
+    /// <summary>
+    /// The matched insurance document's extracted per-occurrence general-liability limit is LOWER than the
+    /// statutory floor the rule carries (v1.2, A-2/CC-4). This is a numeric comparison of the certificate
+    /// against the cited statute's stated minimum — a tracked-obligation status, not an adjudication of the
+    /// entity's conduct. Only emitted for a general-liability floor (never graded across policy lines).
+    /// </summary>
+    BelowStatedMinimum,
 
     /// <summary>Applicability is Unknown — a profile question must be answered first (SCHEMA §4). See <see cref="ObligationResult.MissingFacts"/>.</summary>
     NeedsProfileInfo,
@@ -73,6 +84,10 @@ public sealed record ObligationResult
 
     /// <summary>The tracked document that satisfies/expires this obligation, when one matched.</summary>
     public string? MatchedDocumentId { get; init; }
+
+    /// <summary>The statutory insurance floor the rule carries (insurance rules only), copied verbatim so
+    /// the UI can display the stated minimums next to the status without re-loading the rule.</summary>
+    public InsuranceMinimums? InsuranceMinimums { get; init; }
 }
 
 /// <summary>

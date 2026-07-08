@@ -67,16 +67,16 @@
             "perWorker": false
           },
           "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
-          "insuranceMinimums": { "perOccurrence": 100000, "aggregate": 200000, "currency": "USD" },
+          "insuranceMinimums": { "kind": "split-limits", "coverageLine": "general-liability", "perOccurrenceBodilyInjuryAndPropertyDamage": 100000, "perOccurrencePersonalInjury": 50000, "aggregate": 200000, "currency": "USD" },
           "citation": {
-            "section": "Tex. Occ. Code 1702.124(c)",
-            "url": "https://codes.findlaw.com/tx/occupations-code/occ-sect-1702-124/",
+            "section": "Tex. Occ. Code 1702.124(a), (c)",
+            "url": "https://statutes.capitol.texas.gov/Docs/OC/htm/OC.1702.htm",
             "effectiveDateOfText": "current as displayed",
-            "verifiedDate": "2026-07-07"
+            "verifiedDate": "2026-07-08"
           },
-          "rationale": "Texas law makes a general liability insurance policy a precondition of a security company license: the policy must carry minimum limits of $100,000 per occurrence for bodily injury and property damage, $50,000 per occurrence for personal injury, and a $200,000 total aggregate, kept on file with DPS (Tex. Occ. Code 1702.124(c)). This statutory floor is separate from - and typically lower than - any coverage a venue requires by contract.",
+          "rationale": "Texas law makes a general liability insurance policy a precondition of a security company license: a certificate of insurance is provided with the application (Tex. Occ. Code 1702.124(a)) and the policy must carry minimum limits of $100,000 per occurrence for bodily injury and property damage, $50,000 per occurrence for personal injury, and a $200,000 total aggregate (1702.124(c)). This statutory floor is separate from - and typically lower than - any coverage a venue requires by contract.",
           "userAction": "Ask this security company for a certificate of its general liability policy meeting the DPS statutory minimums ($100,000/occurrence bodily-injury and property-damage, $50,000/occurrence personal injury, $200,000 aggregate).",
-          "notes": "Statute sets three limits ($100k/occ BI+PD, $50k/occ personal injury, $200k aggregate); insuranceMinimums holds the per-occurrence and aggregate figures, with the $50k personal-injury sub-limit stated in the rationale because the schema has a single perOccurrence field."
+          "notes": "v1.2 split-limits shape carries all three statutory limits (CONF-20 fixed the (c)-only pinpoint: the filing precondition is (a), the limits are (c)). The engine compares the extracted general-liability limit against the $100k BI+PD component only - the $50k personal-injury sub-limit and $200k aggregate are not readable from one extracted figure, so an at-or-above amount reads NeedsDocumentInfo (verify sub-limits), never a certified Satisfied. Citation re-read on the OFFICIAL statutes.capitol.texas.gov host 2026-07-08 (upgraded from the FindLaw reproduction)."
         }
       ]
     },
@@ -93,7 +93,7 @@
           "validFrom": "2020-01-01",
           "validTo": null,
           "confidence": "verified",
-          "applicability": { "all": [] },
+          "applicability": { "fact": "providesUnarmedGuards", "op": "eq", "value": true },
           "obligation": {
             "name": "Noncommissioned (unarmed) security officer individual license",
             "documentType": "certification",
@@ -103,13 +103,14 @@
           },
           "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
           "citation": {
-            "section": "Tex. Occ. Code 1702.221, 1702.301",
+            "section": "Tex. Occ. Code 1702.221, 1702.301; 37 TAC 35.141 (Level II training)",
             "url": "https://texas.public.law/statutes/tex._occ._code_section_1702.221",
             "effectiveDateOfText": "current as displayed (reflects SB 616, 86th Leg. 2019)",
             "verifiedDate": "2026-07-07"
           },
-          "rationale": "Texas law requires each individual who works as an unarmed (noncommissioned) security officer for a guard company to hold an individual license from DPS and be employed by a licensed company (Tex. Occ. Code 1702.221). Completion of DPS Level II training is a prerequisite; the credential term is up to two years (1702.301).",
-          "userAction": "Ask this security company for the DPS individual (noncommissioned officer) licenses of the unarmed guards it will assign."
+          "rationale": "Texas law requires each individual who works as an unarmed (noncommissioned) security officer for a guard company to hold an individual license from DPS and be employed by a licensed company (Tex. Occ. Code 1702.221). Completion of DPS Level II training is a prerequisite (37 TAC 35.141); the credential term is up to two years (1702.301).",
+          "userAction": "Ask this security company for the DPS individual (noncommissioned officer) licenses of the unarmed guards it will assign.",
+          "notes": "Gated on providesUnarmedGuards (v1.2 additive fact, CONF-19): the noncommissioned license reaches individuals working as UNARMED officers - commissioned (armed) officers hold the commission instead, so an armed-only company owes nobody this credential. Training authority 37 TAC 35.141 added to the citation (CONF-21)."
         }
       ]
     },
@@ -126,7 +127,12 @@
           "validFrom": "2020-01-01",
           "validTo": null,
           "confidence": "verified",
-          "applicability": { "fact": "providesArmedGuards", "op": "eq", "value": true },
+          "applicability": {
+            "any": [
+              { "fact": "providesArmedGuards", "op": "eq", "value": true },
+              { "fact": "providesArmedCloseProtection", "op": "eq", "value": true }
+            ]
+          },
           "obligation": {
             "name": "Armed security officer commission",
             "documentType": "certification",
@@ -136,13 +142,14 @@
           },
           "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
           "citation": {
-            "section": "Tex. Occ. Code 1702.161, 1702.301",
+            "section": "Tex. Occ. Code 1702.161, 1702.301; 37 TAC 35.141 (Level III training)",
             "url": "https://texas.public.law/statutes/tex._occ._code_section_1702.161",
             "effectiveDateOfText": "current as displayed",
             "verifiedDate": "2026-07-07"
           },
-          "rationale": "Texas law requires each security officer who carries a firearm on duty to hold a security officer commission from DPS, and prohibits a company from employing an armed officer who lacks one (Tex. Occ. Code 1702.161). The commission requires Level III handgun training and has a term of up to two years (1702.301).",
-          "userAction": "If this security company supplies armed guards, ask for each armed officer's DPS security officer commission."
+          "rationale": "Texas law requires each security officer who carries a firearm on duty to hold a security officer commission from DPS, and prohibits a company from employing an armed officer who lacks one (Tex. Occ. Code 1702.161). The commission requires Level III handgun training (37 TAC 35.141) and has a term of up to two years (1702.301).",
+          "userAction": "If this security company supplies armed guards or armed personal protection, ask for each armed officer's DPS security officer commission.",
+          "notes": "Gated on providesArmedGuards OR providesArmedCloseProtection (CONF-18): a PPO is an armed credential issued UNDER a security officer commission (1702.301(c) pins the PPO's expiry to it), so a close-protection-only company still owes the commission. Training authority 37 TAC 35.141 added to the citation (CONF-21)."
         }
       ]
     },
@@ -169,14 +176,14 @@
           },
           "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
           "citation": {
-            "section": "Tex. Occ. Code 1702.201, 1702.202, 1702.301",
+            "section": "Tex. Occ. Code 1702.201, 1702.202, 1702.301; 37 TAC 35.141 (Level IV training)",
             "url": "https://texas.public.law/statutes/tex._occ._code_section_1702.201",
             "effectiveDateOfText": "current as displayed",
             "verifiedDate": "2026-07-07"
           },
-          "rationale": "Texas law requires an individual who, while carrying a firearm, provides personal protection (close protection / bodyguard services) to hold a personal protection officer license, layered on top of a security officer commission and Level IV training (Tex. Occ. Code 1702.201-1702.202). The PPO license expires no later than the underlying commission (1702.301(c)).",
+          "rationale": "Texas law requires an individual who, while carrying a firearm, provides personal protection (close protection / bodyguard services) to hold a personal protection officer license (Tex. Occ. Code 1702.201-1702.202), layered on top of a security officer commission - the PPO license expires no later than the underlying commission (1702.301(c)) - with Level IV training as its prerequisite (37 TAC 35.141).",
           "userAction": "If this security company provides armed personal-protection (bodyguard) services, ask each such officer for a DPS personal protection officer license.",
-          "notes": "Gated on providesArmedCloseProtection (the close-protection / bodyguard trigger added in schema v1.1), matching the narrow statutory condition; a company that provides armed guards but not close protection does not owe the PPO license."
+          "notes": "Gated on providesArmedCloseProtection (the close-protection / bodyguard trigger added in schema v1.1), matching the narrow statutory condition; a company that provides armed guards but not close protection does not owe the PPO license. The commission rule also fires on this fact (CONF-18) since the PPO presupposes a commission. Each legal assertion now cites its actual authority - the layering to 1702.301(c), the training to 37 TAC 35.141 (CONF-21)."
         }
       ]
     }

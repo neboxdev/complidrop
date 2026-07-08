@@ -8,7 +8,7 @@ a named test.
 ## 1. Commands
 
 ```bash
-# Full engine suite — expect: Passed! Failed: 0, Passed: 154
+# Full engine suite — expect: Passed! Failed: 0, Passed: 225 (154 at c53a975; +71 in the Pass-5 review)
 dotnet test api/CompliDrop.Api.Tests/CompliDrop.Api.Tests.csproj --filter "FullyQualifiedName~RuleEngine"
 
 # Production code compiles clean
@@ -22,7 +22,8 @@ dotnet build api/CompliDrop.Api/CompliDrop.Api.csproj
 #   ZERO hits under api/CompliDrop.Api/RuleData/. No non-US regulation is cited anywhere.
 grep -rniE "spain|spanish|españa|european union|\bGDPR\b" docs/rules-research/ api/CompliDrop.Api/RuleData/
 
-# Every verified rule carries a verbatim statutory quote (expect 59 across 12 files)
+# Every verified rule carries a verbatim statutory quote (expect 58 across the 12 dossier files;
+# a repo-wide grep returns 59 — the extra hit is METHODOLOGY.md's entry-format template line)
 grep -rc "Operative text:" docs/rules-research/federal docs/rules-research/texas
 ```
 
@@ -89,7 +90,7 @@ should walk.**
 | Every `satisfiesFederal` reference resolves | `Satisfies_federal_references_resolve_against_loaded_federal_rules` |
 | Only the TX security set is review-gated | `Only_the_tx_security_rule_set_is_review_gated` |
 | The modeled entity types match the canonical constant | `The_modeled_entity_types_match_the_canonical_constant` |
-| Each result carries a unique rule id (so a same-ref decoy can't shadow it) | `Each_result_carries_its_unique_rule_id` |
+| Each result carries a unique rule id (so a same-ref decoy can't shadow it) | `Each_result_carries_its_unique_rule_id` (asserts uniqueness directly since Pass 5, UNVER-27) + the golden `A_matched_but_stale_document_reads_expired_via_rule_id_not_a_shadowing_sibling` |
 | Actionable statuses sort before non-actionable | `Obligations_are_ordered_actionable_first_then_by_ref` |
 
 ### Date / cadence math (pure, `DateOnly`, injected evaluation date)

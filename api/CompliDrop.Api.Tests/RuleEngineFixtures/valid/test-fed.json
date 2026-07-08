@@ -25,7 +25,7 @@
             "perWorker": false
           },
           "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
-          "insuranceMinimums": { "perOccurrence": 5000000, "aggregate": 5000000, "currency": "USD" },
+          "insuranceMinimums": { "kind": "combined-single-limit", "coverageLine": "auto-liability", "perOccurrence": 5000000, "currency": "USD" },
           "citation": { "section": "Synthetic Test Fed Code §1", "verifiedDate": "2026-07-07" },
           "rationale": "Synthetic test rule: an interstate test-widget carries the higher federal insurance floor.",
           "userAction": "Ask the vendor for a certificate showing the federal test-widget insurance floor."

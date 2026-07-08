@@ -66,7 +66,7 @@
             "perWorker": false
           },
           "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
-          "insuranceMinimums": { "perOccurrence": 500000, "aggregate": 500000, "currency": "USD" },
+          "insuranceMinimums": { "kind": "combined-single-limit", "coverageLine": "auto-liability", "perOccurrence": 500000, "currency": "USD" },
           "citation": { "section": "Synthetic Test Tx Code §201" },
           "rationale": "Synthetic test rule: an intrastate-only test-widget carries the lower Texas insurance floor.",
           "userAction": "Ask the vendor for a certificate showing the Texas test-widget insurance floor."

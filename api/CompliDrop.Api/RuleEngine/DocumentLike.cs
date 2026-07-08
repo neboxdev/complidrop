@@ -22,6 +22,14 @@ public interface IDocumentLike
 
     /// <summary>Issue date, for cadences anchored on <see cref="CadenceAnchor.IssueDate"/>. Often unset in v1.</summary>
     DateOnly? IssueDate { get; }
+
+    /// <summary>
+    /// The extracted per-occurrence GENERAL-liability limit (maps to <c>Document.GeneralLiabilityLimit</c>).
+    /// Compared against a rule's <see cref="InsuranceMinimums.ComparableFloor"/> ONLY when the floor's
+    /// <see cref="InsuranceMinimums.CoverageLine"/> is general-liability — an auto-liability floor must
+    /// never be graded against this figure (wrong policy line). Null = amount not readable (v1.2, A-2/CC-4).
+    /// </summary>
+    decimal? GeneralLiabilityLimit { get; }
 }
 
 /// <summary>A plain record implementation of <see cref="IDocumentLike"/> for callers and tests.</summary>
@@ -30,4 +38,5 @@ public sealed record DocumentLike(
     string DocumentType,
     string? DocumentSubType = null,
     DateOnly? ExpirationDate = null,
-    DateOnly? IssueDate = null) : IDocumentLike;
+    DateOnly? IssueDate = null,
+    decimal? GeneralLiabilityLimit = null) : IDocumentLike;

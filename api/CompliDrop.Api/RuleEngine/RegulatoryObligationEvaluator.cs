@@ -46,10 +46,11 @@ public static class RegulatoryObligationEvaluator
             ? NormalizeStateSlug(stateFact.AsString)
             : null;
 
-        if (stateSlug is not null && coveredStates.Count > 0 && !coveredStates.Contains(stateSlug))
-            return ObligationReport.NotCovered(
-                $"CompliDrop does not yet cover \"{stateFact.AsString}\". Regulatory obligations are currently available for Texas (US-TX) only.",
-                notice);
+        // A KNOWN state whose rules aren't in the loaded set ⇒ NotCovered, even when the set carries no
+        // state rules at all (a federal-only load must not silently produce a partial federal-only report
+        // for an entity whose state layer was never evaluated — SCHEMA §3, UNVER-7).
+        if (stateSlug is not null && !coveredStates.Contains(stateSlug))
+            return ObligationReport.NotCovered(NotCoveredMessage(stateFact.AsString, coveredStates), notice);
 
         string? entityType = profile.TryGet(FactNames.EntityType, out var entityTypeFact) && entityTypeFact.Kind == FactKind.String
             ? entityTypeFact.AsString
@@ -181,6 +182,7 @@ public static class RegulatoryObligationEvaluator
             Citation = version.Citation,
             Rationale = version.Rationale,
             UserAction = version.UserAction,
+            InsuranceMinimums = version.InsuranceMinimums,
         };
 
         switch (applicability.Value)
@@ -196,7 +198,7 @@ public static class RegulatoryObligationEvaluator
                 };
 
             case Kleene.True:
-                return ComputeSatisfaction(baseResult, obligation, version.Cadence, documents, evaluationDate);
+                return ComputeSatisfaction(baseResult, obligation, version.Cadence, version.InsuranceMinimums, documents, evaluationDate);
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(candidate));
@@ -209,18 +211,24 @@ public static class RegulatoryObligationEvaluator
     /// contractual grader's date rules and reusing its 30-day window); a document without a printed expiry
     /// falls back to the cadence's computed due date. Applicability-Unknown never reaches here, so a present
     /// document can never launder an unresolved interstate/intrastate branch into a "satisfied" (legal-req #1).
+    /// A general-liability insurance floor additionally gates a would-be Satisfied on the extracted coverage
+    /// amount (v1.2, A-2/CC-4) — see <see cref="ApplyInsuranceFloor"/>.
     /// </summary>
     private static ObligationResult ComputeSatisfaction(
         ObligationResult baseResult,
         Obligation obligation,
         Cadence? cadence,
+        InsuranceMinimums? insuranceMinimums,
         IReadOnlyList<IDocumentLike> documents,
         DateOnly evaluationDate)
     {
         var match = documents
             .Where(d => Matches(d, obligation))
-            // Prefer the document that extends coverage furthest — the latest printed expiry, then any.
-            .OrderByDescending(d => d.ExpirationDate ?? DateOnly.MinValue)
+            // Prefer the document whose EFFECTIVE deadline extends furthest — printed expiry, else the
+            // cadence-computed due date from its issue date — so a fresh issue-dated renewal outranks a
+            // stale or already-expired sibling (UNVER-4); latest issue date breaks remaining ties.
+            .OrderByDescending(d => EffectiveDueDate(d, cadence, evaluationDate) ?? DateOnly.MinValue)
+            .ThenByDescending(d => d.IssueDate ?? DateOnly.MinValue)
             .FirstOrDefault();
 
         if (match is null)
@@ -237,13 +245,32 @@ public static class RegulatoryObligationEvaluator
             return baseResult with { Status = ObligationStatus.Missing, NextDueDate = due };
         }
 
+        var grace = cadence?.GracePeriodDays ?? 0;
         DateOnly? nextDue;
         ObligationStatus status;
 
-        if (match.ExpirationDate is { } expiry)
+        if (cadence is { Kind: CadenceKind.ConditionalFiling } && match.ExpirationDate is null)
+        {
+            // Proof of a one-off conditional filing (a filed AR-800) on record: there is no currency concept
+            // to confirm and no trigger fact to re-check — treat like a held one-time credential. Uploading
+            // proof must never read WORSE than having no document (UNVER-5).
+            nextDue = null;
+            status = ObligationStatus.Satisfied;
+        }
+        else if (match.ExpirationDate is { } expiry)
         {
             nextDue = expiry;
-            status = StatusFromExpiry(expiry, evaluationDate);
+            // The same grace/window classification as the cadence-fallback path (UNVER-6/15) — identical to
+            // the previous strict-expiry behavior for the shipped grace-0 rules.
+            status = StatusFromTiming(CadenceCalculator.ClassifyTiming(expiry, evaluationDate, grace, ExpiringWindowDays));
+        }
+        else if (cadence is { Kind: CadenceKind.FixedAnnual })
+        {
+            // Which annual cycle an undated proof covers is NOT generically inferable (a late filing for
+            // this cycle and an early one for the next look identical), so the engine never guesses
+            // Satisfied here (UNVER-13). The next occurrence still surfaces for reminder scheduling.
+            nextDue = CadenceCalculator.ComputeNextDueDate(cadence, null, match.IssueDate, evaluationDate);
+            status = ObligationStatus.NeedsDocumentInfo;
         }
         else if (cadence is not null)
         {
@@ -252,14 +279,14 @@ public static class RegulatoryObligationEvaluator
             {
                 // A determinable due date from the cadence (e.g. an issueDate-anchored Part-107 recency whose
                 // 24-month clock runs from the document's issue date): classify the timing normally.
-                status = StatusFromTiming(CadenceCalculator.ClassifyTiming(nextDue, evaluationDate, cadence.GracePeriodDays, ExpiringWindowDays));
+                status = StatusFromTiming(CadenceCalculator.ClassifyTiming(nextDue, evaluationDate, grace, ExpiringWindowDays));
             }
             else
             {
                 // No printed expiry AND the cadence yields no due date. A held ONE-TIME credential needs no
-                // renewal (Satisfied); any renewing / fixed-annual / conditional-filing obligation can't be
-                // confirmed current from a document with no readable expiry ⇒ NeedsDocumentInfo. NEVER a
-                // false Satisfied from an undeterminable expiry on a renewing obligation (A-1).
+                // renewal (Satisfied); a renewing obligation can't be confirmed current from a document with
+                // no readable expiry ⇒ NeedsDocumentInfo. NEVER a false Satisfied from an undeterminable
+                // expiry on a renewing obligation (A-1).
                 status = cadence.Kind == CadenceKind.OneTime ? ObligationStatus.Satisfied : ObligationStatus.NeedsDocumentInfo;
             }
         }
@@ -270,7 +297,45 @@ public static class RegulatoryObligationEvaluator
             status = ObligationStatus.Satisfied;
         }
 
+        status = ApplyInsuranceFloor(status, insuranceMinimums, match);
+
         return baseResult with { Status = status, NextDueDate = nextDue, MatchedDocumentId = match.Id };
+    }
+
+    /// <summary>The deadline a document effectively carries: its printed expiry, else the cadence-computed due date.</summary>
+    private static DateOnly? EffectiveDueDate(IDocumentLike doc, Cadence? cadence, DateOnly evaluationDate) =>
+        doc.ExpirationDate
+        ?? (cadence is null ? null : CadenceCalculator.ComputeNextDueDate(cadence, null, doc.IssueDate, evaluationDate));
+
+    /// <summary>
+    /// v1.2 amount gate (A-2/CC-4): for an insurance obligation whose statutory floor is a GENERAL-liability
+    /// floor, a would-be Satisfied must also clear the coverage amount:
+    /// unreadable amount ⇒ <see cref="ObligationStatus.NeedsDocumentInfo"/>; amount below the comparable
+    /// floor ⇒ <see cref="ObligationStatus.BelowStatedMinimum"/> (this also demotes Expiring — the shortfall
+    /// exists now, not at renewal); amount at/above a floor that one extracted figure cannot FULLY verify
+    /// (split limits / statutory aggregate) ⇒ NeedsDocumentInfo, never a certified Satisfied.
+    /// An AUTO-liability floor is never compared against the extracted general-liability limit (wrong policy
+    /// line — SCHEMA v1.2 known limitation); Expired always stays Expired (the stronger defect).
+    /// </summary>
+    private static ObligationStatus ApplyInsuranceFloor(ObligationStatus status, InsuranceMinimums? minimums, IDocumentLike match)
+    {
+        if (minimums is null || minimums.CoverageLine != InsuranceCoverageLine.GeneralLiability)
+            return status;
+        if (status is not (ObligationStatus.Satisfied or ObligationStatus.Expiring))
+            return status;
+
+        if (match.GeneralLiabilityLimit is not { } amount)
+            // Keep an Expiring deadline signal (the renewal upload gets re-checked); a bare Satisfied would
+            // certify an amount nobody read.
+            return status == ObligationStatus.Expiring ? ObligationStatus.Expiring : ObligationStatus.NeedsDocumentInfo;
+
+        if (amount < minimums.ComparableFloor)
+            return ObligationStatus.BelowStatedMinimum;
+
+        if (!minimums.FullyVerifiableFromSingleLimit)
+            return status == ObligationStatus.Expiring ? ObligationStatus.Expiring : ObligationStatus.NeedsDocumentInfo;
+
+        return status;
     }
 
     /// <summary>
@@ -283,13 +348,6 @@ public static class RegulatoryObligationEvaluator
         if (!Eq(doc.DocumentType, obligation.DocumentType)) return false;
         if (string.IsNullOrEmpty(obligation.DocumentSubType)) return true;
         return doc.DocumentSubType is { } sub && Eq(sub, obligation.DocumentSubType);
-    }
-
-    private static ObligationStatus StatusFromExpiry(DateOnly expiry, DateOnly evaluationDate)
-    {
-        if (expiry < evaluationDate) return ObligationStatus.Expired;                 // strict: expires-today isn't yet expired
-        if (expiry <= evaluationDate.AddDays(ExpiringWindowDays)) return ObligationStatus.Expiring;
-        return ObligationStatus.Satisfied;
     }
 
     private static ObligationStatus StatusFromTiming(CadenceTiming timing) => timing switch
@@ -309,6 +367,7 @@ public static class RegulatoryObligationEvaluator
         ObligationStatus.Missing => 0,
         ObligationStatus.Expired => 0,
         ObligationStatus.Expiring => 0,
+        ObligationStatus.BelowStatedMinimum => 0,
         ObligationStatus.NeedsDocumentInfo => 0,
         ObligationStatus.NeedsProfileInfo => 0,
         _ => 1, // Satisfied, NotApplicable
@@ -327,6 +386,15 @@ public static class RegulatoryObligationEvaluator
     {
         var s = state.Trim().ToLowerInvariant();
         return s is "tx" or "texas" or "us-tx" ? "us-tx" : s;
+    }
+
+    /// <summary>Derived from the loaded set (never hardcoded to a state) so coverage changes can't strand a stale message (UNVER-7).</summary>
+    private static string NotCoveredMessage(string stateAsGiven, IReadOnlySet<string> coveredStates)
+    {
+        if (coveredStates.Count == 0)
+            return $"No state rule sets are enabled, so regulatory obligations for \"{stateAsGiven}\" cannot be evaluated.";
+        var covered = string.Join(", ", coveredStates.Select(s => s.ToUpperInvariant()).OrderBy(s => s, StringComparer.Ordinal));
+        return $"CompliDrop does not yet cover \"{stateAsGiven}\". Regulatory obligations are currently available for {covered} only.";
     }
 
     private readonly record struct Candidate(Rule Rule, RuleVersion Version, ApplicabilityResult Applicability);

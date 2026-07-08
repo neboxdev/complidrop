@@ -163,7 +163,7 @@ public class RegulatoryObligationEvaluatorTests
         var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, Rules());
 
         report.Coverage.Should().Be(JurisdictionCoverage.NotCovered);
-        report.CoverageMessage.Should().Contain("Texas");
+        report.CoverageMessage.Should().Contain("US-TX", "the message derives the covered set from the loaded rules, never a hardcoded state (UNVER-7)");
         report.Obligations.Should().BeEmpty();
         report.Completeness.Text.Should().NotBeNullOrWhiteSpace("the non-exhaustiveness notice is present even when not covered");
     }
@@ -373,6 +373,8 @@ public class RegulatoryObligationEvaluatorTests
         var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, Rules());
 
         report.Obligations.Should().OnlyContain(o => !string.IsNullOrEmpty(o.RuleId));
+        report.Obligations.Select(o => o.RuleId).Should().OnlyHaveUniqueItems(
+            "RuleId is one-to-one with the emitted obligation (UNVER-27: the audit guide maps the uniqueness guarantee here)");
         Find(report, "OBL-TEST-TX-LICENSE")!.RuleId.Should().Be("test-tx-widget-license");
     }
 

@@ -11,6 +11,21 @@ public class Vendor
     public Guid? ComplianceTemplateId { get; set; }
 
     /// <summary>
+    /// The vendor's regulatory entity type (SCHEMA §4 <c>entityType</c> value space: caterer,
+    /// event-rental, security-service, transportation, photographer-videographer). Null = unknown —
+    /// the rule engine emits needs-profile-info for type-scoped rules, never a wrong verdict. Distinct
+    /// from <see cref="Category"/> (a free-text display label predating the rule engine).
+    /// </summary>
+    public string? EntityType { get; set; }
+
+    /// <summary>
+    /// The vendor's regulatory entity-profile facts (SCHEMA §4 registry), as a flat JSON map of
+    /// factName → bool|int|string. An absent key is UNKNOWN (Kleene) — never false. Read via
+    /// <c>RegulatoryProfileMapper</c>.
+    /// </summary>
+    public System.Text.Json.JsonDocument? RegulatoryFactsJson { get; set; }
+
+    /// <summary>
     /// True only for the sample vendor created by the one-click demo (#238). The demo seeds this
     /// vendor, assigns it the "Caterer" system checklist, and attaches the generated sample COI so a
     /// fresh org reaches a real verdict with no file on hand. "Clear sample data" removes it.

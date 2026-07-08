@@ -1,13 +1,19 @@
 // Texas regulatory obligations — TRANSPORTATION / SHUTTLE (intrastate for-hire). Encoded from
 // docs/rules-research/texas/transportation.md (verified 2026-07-07). The Texas intrastate track: TxDMV
-// registration and the $500k/$5M intrastate insurance tiers attach only when operatesInterstate = false;
-// the Texas CDL implements the federal CDL floor (satisfiesFederal), so the federal CDL is not double-
+// registration and the $500k/$5M intrastate insurance tiers attach when operatesIntrastate = true —
+// NOT when "operatesInterstate = false": the 643.002 exemption excuses only carriers operating
+// EXCLUSIVELY in interstate commerce, so a MIXED carrier (both true) owes BOTH layers (CONF-23, v1.2).
+// The Texas CDL implements the federal CDL floor (satisfiesFederal), so the federal CDL is not double-
 // emitted. The intrastate medical certificate is 'probable' (DPS primary sources were down) and defers to
 // the verified federal medical-examiner-certificate in production.
+// KNOWN SCOPE PROXY (recorded, CONF-24): applicability encodes only the passenger-capacity prong of the
+// 548.001 CMV definition; the weight (>26,000 lb), hazmat, school-bus and household-goods prongs have no
+// frozen fact and are out of v1 scope — a heavy (>26,000 lb) vehicle seating 15 or fewer is NOT covered
+// by these gates. Documented in SCHEMA v1 KNOWN LIMITATIONS.
 {
   "schemaVersion": 1,
   "localObligations": [
-    "Municipal for-hire / limousine / shuttle & airport ground-transportation permits (vehicles at or below 15 passengers)",
+    "Municipal for-hire / limousine / shuttle & airport ground-transportation permits (vehicles at or below 15 passengers AND under 26,000 lb)",
     "State vehicle inspection / registration, IFTA fuel tax, IRP apportioned plates"
   ],
   "rules": [
@@ -27,7 +33,7 @@
           "applicability": {
             "all": [
               { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
-              { "fact": "operatesInterstate", "op": "eq", "value": false },
+              { "fact": "operatesIntrastate", "op": "eq", "value": true },
               { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 }
             ]
           },
@@ -46,7 +52,8 @@
             "verifiedDate": "2026-07-07"
           },
           "rationale": "Texas law requires an intrastate for-hire motor carrier operating a vehicle designed to transport more than 15 passengers, including the driver (16+), to hold a TxDMV certificate of registration and carry an insurance cab card (Tex. Transp. Code 643.051; 548.001). Some charter operators qualify for a non-expiring certificate; scheduled operators renew annually or biennially.",
-          "userAction": "For an intrastate Texas shuttle seating 16 or more (including the driver), ask for its TxDMV certificate of registration / cab card."
+          "userAction": "For an intrastate Texas shuttle seating 16 or more (including the driver), ask for its TxDMV certificate of registration / cab card.",
+          "notes": "KNOWN CADENCE LIMITATION (recorded, CONF-25): charter-bus operators may lawfully hold a NON-EXPIRING certificate, but the charter/scheduled split is a service-type determination with no frozen fact, so the cadence is encoded as renewal - a lawful non-expiring certificate with no printed expiry reads NeedsDocumentInfo (never a wrong verdict, but never Satisfied) pending the charter-definition confirm (dossier Open question 4). Documented in SCHEMA v1 KNOWN LIMITATIONS. Gate is operatesIntrastate=true (v1.2): 643.002 exempts only EXCLUSIVELY-interstate carriers, so a mixed carrier owes this registration too (CONF-23)."
         }
       ]
     },
@@ -66,7 +73,7 @@
           "applicability": {
             "all": [
               { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
-              { "fact": "operatesInterstate", "op": "eq", "value": false },
+              { "fact": "operatesIntrastate", "op": "eq", "value": true },
               { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 27 }
             ]
           },
@@ -78,7 +85,7 @@
             "perWorker": false
           },
           "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
-          "insuranceMinimums": { "perOccurrence": 5000000, "aggregate": 5000000, "currency": "USD" },
+          "insuranceMinimums": { "kind": "combined-single-limit", "coverageLine": "auto-liability", "perOccurrence": 5000000, "currency": "USD" },
           "citation": {
             "section": "43 TAC 218.16(a); Tex. Transp. Code 643.101",
             "url": "https://www.txdmv.gov/sites/default/files/body-files/Chapter-218-Adopt-2024.pdf",
@@ -106,7 +113,7 @@
           "applicability": {
             "all": [
               { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
-              { "fact": "operatesInterstate", "op": "eq", "value": false },
+              { "fact": "operatesIntrastate", "op": "eq", "value": true },
               { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 },
               { "fact": "maxPassengerSeatingCapacity", "op": "lte", "value": 26 }
             ]
@@ -119,7 +126,7 @@
             "perWorker": false
           },
           "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
-          "insuranceMinimums": { "perOccurrence": 500000, "aggregate": 500000, "currency": "USD" },
+          "insuranceMinimums": { "kind": "combined-single-limit", "coverageLine": "auto-liability", "perOccurrence": 500000, "currency": "USD" },
           "citation": {
             "section": "43 TAC 218.16(a); Tex. Transp. Code 643.101",
             "url": "https://www.txdmv.gov/sites/default/files/body-files/Chapter-218-Adopt-2024.pdf",
@@ -186,7 +193,7 @@
           "applicability": {
             "all": [
               { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
-              { "fact": "operatesInterstate", "op": "eq", "value": false },
+              { "fact": "operatesIntrastate", "op": "eq", "value": true },
               { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 }
             ]
           },
@@ -200,8 +207,8 @@
           "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
           "citation": {
             "section": "Tex. Transp. Code ch. 644; 37 TAC ch. 4; 49 CFR 391.45(b)",
-            "url": "https://statutes.capitol.texas.gov/Docs/TN/htm/TN.644.htm",
-            "effectiveDateOfText": "federal text current (2024 GPO edition); TX adoption current",
+            "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title49-vol5/xml/CFR-2024-title49-vol5-sec391-45.xml",
+            "effectiveDateOfText": "federal text current (2024 GPO edition); TX-adoption sections NOT read live (DPS/SPA unreachable) - why this rule is 'probable'",
             "verifiedDate": "2026-07-07"
           },
           "rationale": "Texas adopts the federal physical-qualification standard for intrastate commercial motor vehicle drivers, requiring a current medical examiner's certificate (maximum 24 months), with limited Texas intrastate variances (Tex. Transp. Code ch. 644; 37 TAC ch. 4; 49 CFR 391.45(b)).",

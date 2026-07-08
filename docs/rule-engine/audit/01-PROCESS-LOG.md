@@ -57,7 +57,10 @@ contract to satisfy rather than being judged after the fact. It fixed:
 - **Confidence is first-class:** `verified | probable | uncertain`. Only
   `verified` ships.
 - **Absence is a finding.** "No state license exists for X" is a sourced entry, so
-  the engine can distinguish *no obligation* from *not researched*.
+  the AUDIT TRAIL can distinguish *no obligation* from *not researched*. (Precision
+  note, Pass 5 / UNVER-30: absences are dossier-only — nothing absence-shaped loads
+  into the ENGINE, whose report stays silent about unresearched areas beyond the
+  mandatory completeness notice. The distinction is documentation-level in v1.)
 - **Regulatory vs contractual** must be marked on every insurance item.
 - Municipal/county obligations are **noted, not encoded** (they later became the
   engine's `localObligations` → completeness notice).
@@ -321,7 +324,7 @@ failed**; data gates re-read directly (Clearinghouse now capacity-only; UCR gain
 
 ## Step 14 — What was deliberately NOT done
 
-- **Not merged, not pushed, not deployed.** Three commits sit on
+- **Not merged, not pushed, not deployed.** The work described here sits in commits 6931d35 / 087c6e1 / c53a975 (plus the audit-trail commit carrying this document, and the Pass-5 commit) on
   `feat/compliance-rule-engine`.
 - **Not wired into the app.** The engine is inert: no DI/boot registration, no
   endpoint, no UI. Zero runtime behaviour change.

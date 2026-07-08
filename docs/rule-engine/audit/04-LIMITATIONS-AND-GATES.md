@@ -40,9 +40,13 @@ requirement* facts therefore came from faithful reproductions (`texas.public.law
 Cornell LII, FindLaw), not from the official host.
 
 Mitigation already in place: 19 of 19 load-bearing Texas + federal facts were
-independently re-derived from **official** hosts (via a real browser) and **all
-matched**. And the entire Texas security rule-set is **held out of the production
-load** by `reviewGate: "founder-confirm-tx-security"` until this gate closes.
+independently re-derived and **all matched** (18 components on official hosts via
+a real browser; the UCR statutory chain via Cornell — REVIEW-LOG D-4). The Pass-5
+Fable review then re-read 12/12 highest-stakes facts live — including
+§1702.124(c) and §1702.301 directly on `statutes.capitol.texas.gov` — with zero
+value errors. And the entire Texas security rule-set is **held out of the
+production load** by `reviewGate: "founder-confirm-tx-security"` until this gate
+closes.
 
 **Still confirm by eye, in a browser:** the security insurance floor
 (`$100,000 / $50,000 / $200,000`, Tex. Occ. Code §1702.124(c)), the TABC two-year
@@ -63,30 +67,32 @@ encoded**. Do not add them without a live source.
 
 ---
 
-## 3. The most important limitation: insurance **amounts are not checked**
+## 3. Insurance amounts: **CLOSED for general-liability floors (Pass 5, v1.2) — open for auto-liability floors**
 
-> For an `insurance` obligation, `Satisfied` means **"a certificate of the right
-> type is on file and unexpired."** It does **not** mean the coverage amount meets
-> the statutory floor.
+The A-2/CC-4 hole is closed where the extracted `Document.GeneralLiabilityLimit`
+is a valid comparison input:
 
-- The floor is carried (`insuranceMinimums`) and stated in the user-facing
-  `userAction` ("verify the amount meets $X"), but **the engine never compares it**.
-- `IDocumentLike` has no coverage-amount field; per `SCHEMA.md` §6, v1 satisfaction
-  is presence + expiry. Numeric limit comparison is the *contractual* grader's
-  existing job.
-- **Concretely:** a security company that uploads a valid, unexpired COI with
-  `$50,000` limits will show `Satisfied` against an obligation whose own text
-  asserts a `$100,000` floor.
-
-This was found by two independent reviewers (adversarial A-2, compliance-claims
-CC-4) and is documented in `SCHEMA.md` § "v1 KNOWN LIMITATIONS". It is **the top
-follow-up** and must be closed before any insurance verdict is customer-facing.
-Closing it requires (a) a coverage-amount field sourced from extraction, and (b) a
-richer `insuranceMinimums` shape — the current single `perOccurrence` field cannot
-even represent the security rule's three statutory limits.
-
-Related open product bug: **#397** (liability limits not pinned to a specific ACORD
-cell).
+- **General-liability floors** (§2151.1012 inflatables; §1702.124(c) security,
+  review-gated) now gate a would-be `Satisfied` on the amount: unreadable ⇒
+  `needs-document-info` (never a Satisfied that certifies an amount nobody read);
+  below the comparable floor ⇒ **`below-stated-minimum`** (a numeric comparison
+  against the cited statute, phrased as a tracked-obligation status); at/above a
+  split-limits floor ⇒ `needs-document-info` — the $50k personal-injury sub-limit
+  and $200k aggregate cannot be verified from one extracted figure, so full
+  adequacy is never certified. The v1.2 `insuranceMinimums` shape carries every
+  statutory component machine-readably (and no fabricated figures — the old
+  non-nullable aggregate had forced an invented $1M aggregate onto §2151.1012).
+- **STILL OPEN — auto-liability floors** (49 CFR 387.33T $5M/$1.5M; 43 TAC
+  218.16 $500k/$5M): the extracted figure is the GENERAL-liability limit;
+  comparing it against an auto-liability floor would grade the wrong policy
+  line, so these keep presence+expiry semantics (`coverageLine:
+  "auto-liability"` structurally prevents the comparison) until extraction
+  reads an auto-liability limit. The `userAction` still tells the user which
+  amount to verify.
+- The comparison inherits extraction's cell-pinning accuracy — product bug
+  **#397** (limits not pinned to a specific ACORD cell) stays open and tracks
+  separately; the engine is exactly as good as the number extraction hands it,
+  which is the same number the contractual grader already uses.
 
 ---
 
@@ -94,9 +100,14 @@ cell).
 
 | Held back | Count | Mechanism |
 |---|---|---|
-| `confidence: probable` rules | 3 | `RuleLoadOptions.VerifiedOnly = true` (default) |
-| Review-gated (all TX security) | 5 | `reviewGate` + `IncludeReviewGated = false` (default) |
-| **Total withheld** | **8 of 39** | prod posture loads **31** |
+| `confidence: probable` rules | 3 | `RuleLoadOptions.VerifiedOnly = true` (default; NOT configurable in the app wiring) |
+| Review-gated (all TX security) | 5 | `reviewGate` + `IncludeReviewGated = false` (default; NOT configurable in the app wiring) |
+| **Total withheld** | **8 of 40** | prod posture loads **32** |
+
+Since Pass 5 the whole engine additionally sits behind `RuleEngine:Enabled`
+(default **false**) + per-rule-set `RuleEngine:EnabledRuleSets` flags resolved
+once at boot (`RegulatoryRuleCatalog`, fail-fast) — and the app wiring hard-codes
+the safe posture, so neither probable nor gated rules can ship via config.
 
 The three `probable` rules: `fed-venue-ttb-alcohol-dealer` (ttb.gov timed out),
 `tx-transportation-intrastate-medical-certificate` (DPS down),
@@ -123,7 +134,7 @@ Ranked by what would hurt most if it were wrong.
 
 | # | Risk | Current mitigation | What would still catch it |
 |---|---|---|---|
-| 1 | **An underinsured COI reads `Satisfied`** | Documented; `userAction` tells the user to verify the amount | Nothing in code. **This is the open hole.** Close it before customer exposure |
+| 1 | **An underinsured COI reads `Satisfied`** | **CLOSED for GL floors (Pass 5, v1.2):** below-floor ⇒ `below-stated-minimum`, unreadable ⇒ `needs-document-info`, split sub-limits never certified. Residual: AUTO-liability floors keep presence+expiry (wrong-line comparison structurally prevented) and the comparison inherits extraction accuracy (#397) | Tests `An_unreadable_coverage_amount…`, `A_coverage_amount_below…`, `The_security_gl_floor_grades…`; the auto-liability half needs an extraction field |
 | 2 | A Texas statutory figure is wrong because the official host was never machine-read | 19/19 independent re-derivation matched; security set gated | Gate **G2** (human, in a browser) |
 | 3 | A rule's applicability over- or under-emits because a needed fact doesn't exist in the frozen registry | Each compromise is recorded in the rule's `notes` (UCR GVWR; TABC MB-vs-BG; PPO before the narrowing fact was added) | Read `02-PROVENANCE-MAP.md` §7; each is a bounded, stated trade-off |
 | 4 | A law changed after 2026-07-07 | Every rule carries `citation.verifiedDate` | Re-verify on a cadence. HB 2844 proved this is real — it took effect **6 days** before the research and was initially missed |
@@ -146,14 +157,19 @@ reasoning is auditable, and the known gaps are written down rather than hidden.
 
 ---
 
-## 8. Recommended order of next work
+## 8. Recommended order of next work (updated after Pass 5, 2026-07-08)
 
 1. **Close G1** — counsel reviews the disclaimer + UI framing. Blocking.
-2. **Close the insurance-amount hole** (§3) — coverage-amount extraction field +
-   `insuranceMinimums` comparison, before any insurance verdict is shown.
+2. ~~Close the insurance-amount hole~~ **DONE (Pass 5, v1.2)** for
+   general-liability floors (§3); the auto-liability half needs an
+   auto-liability extraction field (follow-up, alongside #397).
 3. **Close G2** — founder confirms the Texas figures in a browser; then the TX
-   security `reviewGate` may be lifted.
-4. Entity-profile persistence migration + per-rule-set feature flag (DB-schema
-   change; `careful-review` area). The flags must default **OFF**.
+   security `reviewGate` may be lifted (by removing the marker in a PR — it is
+   deliberately not a config switch).
+4. ~~Entity-profile persistence migration + per-rule-set feature flag~~ **DONE
+   (Pass 5)**: `AddRegulatoryEntityProfileFields` migration (additive, 4 nullable
+   columns), `RegulatoryProfileMapper`, `RuleEngine:*` flags defaulting OFF.
+   `careful-review` area — human merges the PR.
 5. Re-verification cadence for `citation.verifiedDate` (see risk #4).
-6. Only then: expose anything to a customer, per rule-set, flag by flag.
+6. An evaluation endpoint/UI (deliberately not built yet), then customer
+   exposure per rule-set, flag by flag — after G1.

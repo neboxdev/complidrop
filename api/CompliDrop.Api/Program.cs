@@ -47,6 +47,14 @@ builder.Services.AddOptions<FrontendSettings>()
     .ValidateOnStart();
 builder.Services.AddSingleton<IValidateOptions<FrontendSettings>, FrontendSettingsValidator>();
 
+// Regulatory rule engine (SCHEMA §6): per-rule-set feature flags, default fully OFF. The catalog resolves
+// once at boot — Disabled (nothing loaded) unless RuleEngine:Enabled is set, in which case the selected
+// rule-set files load fail-fast in the hard safe posture (verified-only, review-gated excluded). Rollout
+// stays per-rule-set and gated on RULES-REVIEW.md G1/G2; there is deliberately no endpoint or UI yet.
+builder.Services.AddOptions<RuleEngineSettings>().Bind(builder.Configuration.GetSection(RuleEngineSettings.SectionName));
+builder.Services.AddSingleton(sp =>
+    CompliDrop.Api.RuleEngine.RegulatoryRuleCatalog.Create(sp.GetRequiredService<IOptions<RuleEngineSettings>>().Value));
+
 // ============================================================
 // Logging — Serilog JSON sink
 // ============================================================
@@ -445,6 +453,16 @@ using (var scope = app.Services.CreateScope())
         appDb.Database,
         DatabaseMigrator.ShouldAutoMigrate(app.Configuration),
         logger);
+
+    // Rule-engine catalog: resolve at boot so an enabled-but-invalid configuration (unknown rule-set key,
+    // malformed rule data, incoherent selection) aborts the deploy like the migration guard — never a
+    // silently mis-evaluating engine. With RuleEngine:Enabled=false this is the inert Disabled catalog.
+    var ruleCatalog = app.Services.GetRequiredService<CompliDrop.Api.RuleEngine.RegulatoryRuleCatalog>();
+    logger.LogInformation(
+        "Regulatory rule engine: {State} ({RuleCount} rules from [{RuleSets}]).",
+        ruleCatalog.Enabled ? "ENABLED" : "disabled",
+        ruleCatalog.RuleSet.Rules.Count,
+        string.Join(", ", ruleCatalog.EnabledRuleSets));
 
     // Seed: best-effort system compliance templates, after the schema is guaranteed current.
     var sysDb = scope.ServiceProvider.GetRequiredService<SystemDbContext>();

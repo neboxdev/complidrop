@@ -1,10 +1,17 @@
 // Federal regulatory obligations — TRANSPORTATION / SHUTTLE (for-hire passenger carriers). Encoded from
 // docs/rules-research/federal/transportation.md (verified 2026-07-07). The CRITICAL interstate branch:
-// FMCSA operating authority, MCS-150, UCR and the Clearinghouse query attach only in interstate commerce;
-// the $5M/$1.5M financial-responsibility floors are interstate + capacity tiers; the CDL and DOT medical
-// certificate are the federal floor for any 16+-passenger CMV (interstate OR intrastate).
+// FMCSA operating authority, MCS-150 and UCR attach only in interstate commerce; the $5M/$1.5M
+// financial-responsibility floors are interstate + capacity tiers; the CDL and the Clearinghouse query are
+// the federal floor for any 16+-passenger CMV (interstate OR intrastate, via Texas's adoption of the
+// FMCSRs). The DOT medical certificate reaches intrastate drivers ONLY via state adoption (49 CFR part 391
+// is interstate-only by federal force; Texas applies it through Transp. Code ch. 644) — it is kept
+// capacity-only here as a deliberate coverage-preserving decision while the TX medical rule is
+// probable/withheld (see that rule's notes).
 {
   "schemaVersion": 1,
+  "localObligations": [
+    "Airport / municipal ground-transportation permit or decal (many airports and cities require one for shuttle or limo pickups - check the specific airport or city)"
+  ],
   "rules": [
     {
       "id": "fed-transportation-fmcsa-operating-authority",
@@ -110,12 +117,12 @@
             "perWorker": false
           },
           "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
-          "insuranceMinimums": { "perOccurrence": 5000000, "aggregate": 5000000, "currency": "USD" },
+          "insuranceMinimums": { "kind": "combined-single-limit", "coverageLine": "auto-liability", "perOccurrence": 5000000, "currency": "USD" },
           "citation": {
-            "section": "49 CFR 387.33T(a)(1); 387.31",
-            "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title49-vol5/xml/CFR-2024-title49-vol5-sec387-31.xml",
-            "effectiveDateOfText": "[80 FR 63709, Oct. 21, 2015, as amended at 83 FR 22876, May 17, 2018]",
-            "verifiedDate": "2026-07-07"
+            "section": "49 CFR 387.33T Schedule of Limits, row (a); 387.31",
+            "url": "https://www.ecfr.gov/current/title-49/subtitle-B/chapter-III/subchapter-B/part-387/subpart-B/section-387.33T",
+            "effectiveDateOfText": "[83 FR 22877, May 17, 2018]",
+            "verifiedDate": "2026-07-08"
           },
           "rationale": "Federal law requires a for-hire carrier of passengers in interstate commerce whose highest-capacity vehicle seats 16 or more (including the driver) to maintain at least $5,000,000 of public-liability (bodily injury and property damage) insurance on file with FMCSA (49 CFR 387.33T). This federal floor is separate from - and higher than - the Texas intrastate minimum for the same vehicle; a Texas intrastate certificate does not satisfy it.",
           "userAction": "For an interstate shuttle seating 16 or more (including the driver), ask for a certificate of insurance showing at least $5,000,000 of public-liability coverage."
@@ -150,12 +157,12 @@
             "perWorker": false
           },
           "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
-          "insuranceMinimums": { "perOccurrence": 1500000, "aggregate": 1500000, "currency": "USD" },
+          "insuranceMinimums": { "kind": "combined-single-limit", "coverageLine": "auto-liability", "perOccurrence": 1500000, "currency": "USD" },
           "citation": {
-            "section": "49 CFR 387.33T(a)(2); 387.31",
-            "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title49-vol5/xml/CFR-2024-title49-vol5-sec387-31.xml",
-            "effectiveDateOfText": "[80 FR 63709, Oct. 21, 2015, as amended at 83 FR 22876, May 17, 2018]",
-            "verifiedDate": "2026-07-07"
+            "section": "49 CFR 387.33T Schedule of Limits, row (b); 387.31",
+            "url": "https://www.ecfr.gov/current/title-49/subtitle-B/chapter-III/subchapter-B/part-387/subpart-B/section-387.33T",
+            "effectiveDateOfText": "[83 FR 22877, May 17, 2018]",
+            "verifiedDate": "2026-07-08"
           },
           "rationale": "Federal law requires a for-hire carrier of passengers in interstate commerce whose highest-capacity vehicle seats 15 or fewer (including the driver) to maintain at least $1,500,000 of public-liability insurance on file with FMCSA (49 CFR 387.33T).",
           "userAction": "For an interstate for-hire vehicle seating 15 or fewer (including the driver), ask for a certificate of insurance showing at least $1,500,000 of public-liability coverage."
@@ -188,15 +195,16 @@
             "authority": "FMCSA floor; issued by the driver's state of domicile",
             "perWorker": true
           },
-          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 96, "gracePeriodDays": 0 },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
           "citation": {
             "section": "49 CFR 383.23, 383.5, 383.93",
             "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title49-vol5/xml/CFR-2024-title49-vol5-sec383-23.xml",
             "effectiveDateOfText": "current as displayed (2024 GPO edition)",
             "verifiedDate": "2026-07-07"
           },
-          "rationale": "Federal law requires the driver of a vehicle designed to transport 16 or more passengers, including the driver, to hold a Commercial Driver's License with a Passenger (P) endorsement (49 CFR 383.5, 383.23, 383.93). The CDL is issued by the driver's state of domicile; in Texas the term is about eight years.",
-          "userAction": "For any vehicle seating 16 or more (including the driver), ask each driver for a CDL showing the Passenger (P) endorsement."
+          "rationale": "Federal law requires the driver of a vehicle designed to transport 16 or more passengers, including the driver, to hold a Commercial Driver's License with a Passenger (P) endorsement (49 CFR 383.5, 383.23, 383.93). The CDL is issued by the driver's state of domicile, which also sets its renewal term; in Texas the term is about eight years.",
+          "userAction": "For any vehicle seating 16 or more (including the driver), ask each driver for a CDL showing the Passenger (P) endorsement.",
+          "notes": "No periodMonths: the renewal term is set by the issuing STATE - no federal number exists (the dossier's federal entry defers to the state file). The Texas 8-year term is encoded on tx-transportation-cdl-passenger-endorsement, which suppresses this rule for Texas entities via satisfiesFederal; the printed expiry governs here."
         }
       ]
     },
@@ -233,8 +241,9 @@
             "effectiveDateOfText": "current as displayed (2024 GPO edition)",
             "verifiedDate": "2026-07-07"
           },
-          "rationale": "Federal law requires a driver of a commercial motor vehicle (including a 16+-passenger shuttle) to be medically certified as physically qualified by an FMCSA-registered examiner, evidenced by a medical examiner's certificate valid for a maximum of 24 months (49 CFR 391.41, 391.45(b)). Texas applies the same standard to intrastate CMV drivers.",
-          "userAction": "For drivers of 16+-passenger vehicles, ask for each driver's current DOT medical examiner's certificate (valid up to 24 months)."
+          "rationale": "Federal law requires a driver of a commercial motor vehicle operated in interstate commerce (including a 16+-passenger shuttle) to be medically certified as physically qualified by an FMCSA-registered examiner, evidenced by a medical examiner's certificate valid for a maximum of 24 months (49 CFR 391.41, 391.45(b)). States apply the same standard to intrastate CMV drivers - Texas through its adoption of the federal rules (Transp. Code ch. 644, with limited state variances).",
+          "userAction": "For drivers of 16+-passenger vehicles, ask for each driver's current DOT medical examiner's certificate (valid up to 24 months).",
+          "notes": "Deliberately gated capacity-only (no interstate leaf): 49 CFR part 391 reaches interstate drivers by federal force, and Texas's ch. 644 adoption reaches intrastate drivers - but that Texas rule (OBL-TX-TRANSPORTATION-004) is probable/withheld, so the capacity-only gate here keeps intrastate drivers tracked rather than silently dropped. The rationale attributes each reach to its actual legal source. Recorded in REVIEW-LOG Pass 5 (SPLIT-0)."
         }
       ]
     },
@@ -293,8 +302,7 @@
           "applicability": {
             "all": [
               { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
-              { "fact": "operatesInterstate", "op": "eq", "value": true },
-              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 11 }
+              { "fact": "operatesInterstate", "op": "eq", "value": true }
             ]
           },
           "obligation": {
@@ -306,14 +314,14 @@
           },
           "cadence": { "kind": "fixed-annual", "anchor": "fixedDate", "fixedDate": { "month": 12, "day": 31 }, "gracePeriodDays": 0 },
           "citation": {
-            "section": "49 U.S.C. 14504a (passenger threshold via 49 U.S.C. 31101(1)(B))",
+            "section": "49 U.S.C. 14504a (fee-bracket CMV definition via 49 U.S.C. 31101(1)(B))",
             "url": "https://www.law.cornell.edu/uscode/text/49/14504a",
             "effectiveDateOfText": "current as displayed; TxDMV Motor Carrier Handbook (May 2025)",
             "verifiedDate": "2026-07-07"
           },
-          "rationale": "Federal law requires a motor carrier operating in interstate commerce to complete an annual Unified Carrier Registration and pay the fee, which expires December 31 each year (49 U.S.C. 14504a). For passenger carriers the threshold is a vehicle designed for more than 10 people, including the driver.",
+          "rationale": "Federal law requires a motor carrier operating in interstate commerce to complete an annual Unified Carrier Registration and pay the fee; the registration covers a calendar year ending December 31 (49 U.S.C. 14504a). Fees are bracketed by the number of qualifying commercial motor vehicles (for passengers: designed for more than 10 people including the driver, 49 U.S.C. 31101(1)(B)); a carrier with no qualifying vehicle still registers, at the lowest fleet bracket.",
           "userAction": "If this carrier operates interstate, ask for its current-year UCR registration receipt (annual, due by December 31).",
-          "notes": "The UCR passenger threshold is more than 10 people, including the driver (49 U.S.C. 31101(1)(B)), encoded as maxPassengerSeatingCapacity gte 11; gated on interstate for-hire."
+          "notes": "NO capacity gate: the >10-passenger figure is the UCR fee CMV definition, not the registration trigger - the dossier records that an interstate carrier with no qualifying CMV still registers at the lowest fleet bracket. This reverses review fix CC-6, which mistook the fee definition for an applicability threshold (REVIEW-LOG Pass 5, CONF-2)."
         }
       ]
     }

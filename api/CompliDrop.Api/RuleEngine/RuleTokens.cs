@@ -43,10 +43,24 @@ public static class RuleTokens
         ["uncertain"] = RuleConfidence.Uncertain,
     };
 
+    private static readonly Dictionary<string, InsuranceFloorKind> FloorKinds = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["combined-single-limit"] = InsuranceFloorKind.CombinedSingleLimit,
+        ["split-limits"] = InsuranceFloorKind.SplitLimits,
+    };
+
+    private static readonly Dictionary<string, InsuranceCoverageLine> CoverageLines = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["general-liability"] = InsuranceCoverageLine.GeneralLiability,
+        ["auto-liability"] = InsuranceCoverageLine.AutoLiability,
+    };
+
     public static bool TryParseOp(string? token, out ConditionOp value) => TryParse(Ops, token, out value);
     public static bool TryParseKind(string? token, out CadenceKind value) => TryParse(Kinds, token, out value);
     public static bool TryParseAnchor(string? token, out CadenceAnchor value) => TryParse(Anchors, token, out value);
     public static bool TryParseConfidence(string? token, out RuleConfidence value) => TryParse(Confidences, token, out value);
+    public static bool TryParseFloorKind(string? token, out InsuranceFloorKind value) => TryParse(FloorKinds, token, out value);
+    public static bool TryParseCoverageLine(string? token, out InsuranceCoverageLine value) => TryParse(CoverageLines, token, out value);
 
     public static string ToToken(ConditionOp op) => op switch
     {
@@ -82,6 +96,20 @@ public static class RuleTokens
         RuleConfidence.Probable => "probable",
         RuleConfidence.Uncertain => "uncertain",
         _ => throw new ArgumentOutOfRangeException(nameof(confidence)),
+    };
+
+    public static string ToToken(InsuranceFloorKind kind) => kind switch
+    {
+        InsuranceFloorKind.CombinedSingleLimit => "combined-single-limit",
+        InsuranceFloorKind.SplitLimits => "split-limits",
+        _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+    };
+
+    public static string ToToken(InsuranceCoverageLine line) => line switch
+    {
+        InsuranceCoverageLine.GeneralLiability => "general-liability",
+        InsuranceCoverageLine.AutoLiability => "auto-liability",
+        _ => throw new ArgumentOutOfRangeException(nameof(line)),
     };
 
     private static bool TryParse<T>(Dictionary<string, T> map, string? token, out T value)
@@ -135,5 +163,33 @@ internal sealed class RuleConfidenceJsonConverter : JsonConverter<RuleConfidence
     }
 
     public override void Write(Utf8JsonWriter writer, RuleConfidence value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(RuleTokens.ToToken(value));
+}
+
+internal sealed class InsuranceFloorKindJsonConverter : JsonConverter<InsuranceFloorKind>
+{
+    public override InsuranceFloorKind Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        var s = reader.GetString();
+        if (!RuleTokens.TryParseFloorKind(s, out var v))
+            throw new JsonException($"Unknown insurance floor kind '{s}'. Expected one of: combined-single-limit, split-limits.");
+        return v;
+    }
+
+    public override void Write(Utf8JsonWriter writer, InsuranceFloorKind value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(RuleTokens.ToToken(value));
+}
+
+internal sealed class InsuranceCoverageLineJsonConverter : JsonConverter<InsuranceCoverageLine>
+{
+    public override InsuranceCoverageLine Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        var s = reader.GetString();
+        if (!RuleTokens.TryParseCoverageLine(s, out var v))
+            throw new JsonException($"Unknown insurance coverage line '{s}'. Expected one of: general-liability, auto-liability.");
+        return v;
+    }
+
+    public override void Write(Utf8JsonWriter writer, InsuranceCoverageLine value, JsonSerializerOptions options) =>
         writer.WriteStringValue(RuleTokens.ToToken(value));
 }

@@ -13,11 +13,11 @@ The `citation` is what to open at the regulator. See §5 for the exact commands.
 
 | | Count |
 |---|---|
-| Rules encoded | **39** |
-| `confidence: verified` | 36 |
+| Rules encoded | **40** (Pass 5 added `tx-venue-wc-coverage-notice`, SPLIT-3) |
+| `confidence: verified` | 37 |
 | `confidence: probable` (never ships) | 3 |
 | Review-gated (TX security; held back regardless of confidence) | 5 |
-| **Load in the production posture** | **31** |
+| **Load in the production posture** | **32** |
 
 Pinned by test `The_full_and_production_sets_have_the_expected_rule_counts`
 (`api/CompliDrop.Api.Tests/RuleEngine/RealRuleDataLoadTests.cs`).
@@ -40,15 +40,19 @@ Dossier: `docs/rules-research/federal/<entity>.md`
 | `fed-photographer-drone-registration` | OBL-FED-PHOTOGRAPHER-003 | permit | verified | ✅ | 14 CFR 48.15, 48.100, 48.30 |
 | `fed-transportation-fmcsa-operating-authority` | OBL-FED-TRANSPORTATION-001 | license | verified | ✅ | 49 CFR 392.9a; 49 U.S.C. 13901-13902; 49 CFR part 365 |
 | `fed-transportation-usdot-mcs150-update` | OBL-FED-TRANSPORTATION-002 | filing | verified | ✅ | 49 CFR 390.19T(b) |
-| `fed-transportation-financial-responsibility-16plus` | OBL-FED-TRANSPORTATION-003 | insurance | verified | ✅ | 49 CFR 387.33T(a)(1); 387.31 |
-| `fed-transportation-financial-responsibility-15orless` | OBL-FED-TRANSPORTATION-003 | insurance | verified | ✅ | 49 CFR 387.33T(a)(2); 387.31 |
+| `fed-transportation-financial-responsibility-16plus` | OBL-FED-TRANSPORTATION-003 | insurance | verified | ✅ | 49 CFR 387.33T Schedule of Limits row (a); 387.31 |
+| `fed-transportation-financial-responsibility-15orless` | OBL-FED-TRANSPORTATION-003 | insurance | verified | ✅ | 49 CFR 387.33T Schedule of Limits row (b); 387.31 |
 | `fed-transportation-cdl-passenger-endorsement` | OBL-FED-TRANSPORTATION-004 | worker-certification | verified | ✅ | 49 CFR 383.23, 383.5, 383.93 |
 | `fed-transportation-medical-examiner-certificate` | OBL-FED-TRANSPORTATION-005 | worker-certification | verified | ✅ | 49 CFR 391.41(a), 391.45(b) |
 | `fed-transportation-clearinghouse-annual-query` | OBL-FED-TRANSPORTATION-006 | filing | verified | ✅ | 49 CFR 382.701(a),(b) |
-| `fed-transportation-ucr-registration` | OBL-FED-TRANSPORTATION-007 | filing | verified | ✅ | 49 U.S.C. 14504a (passenger threshold via 49 U.S.C. 31101(1)(B)) |
+| `fed-transportation-ucr-registration` | OBL-FED-TRANSPORTATION-007 | filing | verified | ✅ | 49 U.S.C. 14504a (fee-bracket CMV definition via 49 U.S.C. 31101(1)(B); no capacity gate — CONF-2 reversed CC-6) |
 | `fed-venue-employer-identification-number` | OBL-FED-VENUE-001 | filing | verified | ✅ | IRC 6109; IRS EIN guidance |
-| `fed-venue-osha-injury-log` | OBL-FED-VENUE-003 | filing | verified | ✅ | 29 CFR 1904.1, 1904.2, 1904.32 |
-| `fed-venue-ttb-alcohol-dealer` | OBL-FED-VENUE-004 | filing | **probable** | ❌ held | 27 CFR 31.111 |
+| `fed-venue-osha-injury-log` | OBL-FED-VENUE-004 | filing | verified | ✅ | 29 CFR 1904.1, 1904.2, 1904.32 |
+| `fed-venue-ttb-alcohol-dealer` | OBL-FED-VENUE-003 | filing | **probable** | ❌ held | 27 CFR 31.111 |
+
+> The OSHA/TTB `obligationRef`s above were SWAPPED relative to the dossier until the Pass-5
+> review (CONF-4): the dossier's OBL-FED-VENUE-003 is the TTB registration and -004 is the
+> OSHA log. Fixed in the rule data and here — the trace now lands on the right entry.
 
 > There is **no** `us-fed/security-service.json`. Every federal finding for guard
 > companies is a sourced **absence** (no federal license/cert/insurance exists) and
@@ -65,13 +69,13 @@ Dossier: `docs/rules-research/texas/<entity>.md`
 | `tx-caterer-food-establishment-permit` | OBL-TX-CATERER-001 | permit | verified | ✅ | Tex. Health & Safety Code 437.0055; 25 TAC 228.2(14) |
 | `tx-caterer-certified-food-manager` | OBL-TX-CATERER-002 | worker-certification | verified | ✅ | Tex. H&S Code 438.101-438.103; 25 TAC 228.31 |
 | `tx-caterer-food-handler-training` | OBL-TX-CATERER-003 | worker-certification | verified | ✅ | 25 TAC 228.31(d),(e); 25 TAC 229.178(d)(1); Tex. H&S Code 438.046 |
-| `tx-caterer-tabc-mixed-beverage` | OBL-TX-CATERER-004 | permit | verified | ✅ | Tex. Alco. Bev. Code 11.01, 28.01, 28.19, 11.09, 11.11 |
+| `tx-caterer-tabc-mixed-beverage` | OBL-TX-CATERER-004 | permit | verified | ✅ | Tex. Alco. Bev. Code 11.01, 28.01, 28.19, 25.01, 11.09, 11.11 (re-encoded Pass 5 as the neutral MB-or-W&MB retail permit, CONF-8) |
 | `tx-caterer-mobile-food-vendor-license` | OBL-TX-CATERER-007 | license | verified | ✅ | Tex. H&S Code ch. 437B, 437B.051, 437B.055 |
 | `tx-event-rental-amusement-ride-insurance` | OBL-TX-EVENT-001 | insurance | verified | ✅ | **Tex. Occ. Code 2151.1012** (general Class B: 2151.101(a)(3)) |
 | `tx-event-rental-amusement-ride-inspection` | OBL-TX-EVENT-002 | permit | verified | ✅ | Tex. Occ. Code 2151.101; 28 TAC 5.9004 |
 | `tx-event-rental-amusement-ride-injury-report` | OBL-TX-EVENT-003 | filing | verified | ✅ | Tex. Occ. Code 2151.103 |
 | `tx-security-company-license` | OBL-TX-SECURITY-001 | license | verified | ❌ **gated** | Tex. Occ. Code 1702.102, 1702.108, 1702.301 |
-| `tx-security-general-liability-insurance` | OBL-TX-SECURITY-003 | insurance | verified | ❌ **gated** | Tex. Occ. Code 1702.124(c) |
+| `tx-security-general-liability-insurance` | OBL-TX-SECURITY-003 | insurance | verified | ❌ **gated** | Tex. Occ. Code 1702.124(a), (c) — re-read on the OFFICIAL host 2026-07-08 (Pass 5) |
 | `tx-security-noncommissioned-officer-license` | OBL-TX-SECURITY-004 | worker-certification | verified | ❌ **gated** | Tex. Occ. Code 1702.221, 1702.301 |
 | `tx-security-officer-commission` | OBL-TX-SECURITY-005 | worker-certification | verified | ❌ **gated** | Tex. Occ. Code 1702.161, 1702.301 |
 | `tx-security-personal-protection-officer-license` | OBL-TX-SECURITY-006 | worker-certification | verified | ❌ **gated** | Tex. Occ. Code 1702.201, 1702.202, 1702.301 |
@@ -81,7 +85,8 @@ Dossier: `docs/rules-research/texas/<entity>.md`
 | `tx-transportation-cdl-passenger-endorsement` | OBL-TX-TRANSPORTATION-003 | worker-certification | verified | ✅ | Tex. Transp. Code 522.011, 522.003, 522.051 (49 CFR 383.5 floor) |
 | `tx-transportation-intrastate-medical-certificate` | OBL-TX-TRANSPORTATION-004 | worker-certification | **probable** | ❌ held | Tex. Transp. Code ch. 644; 37 TAC ch. 4; 49 CFR 391.45(b) |
 | `tx-venue-dwc005-nonsubscriber-notice` | OBL-TX-VENUE-002 | filing | verified | ✅ | Tex. Labor Code 406.004; 28 TAC 110.101; DWC Form-005 |
-| `tx-venue-sales-use-tax-permit` | OBL-TX-VENUE-004 | permit | verified | ✅ | Tex. Tax Code 151.201-151.203 |
+| `tx-venue-wc-coverage-notice` | OBL-TX-VENUE-003 | filing | verified | ✅ | Tex. Labor Code 406.005 (added Pass 5, SPLIT-3 — reaches EVERY employer with employees) |
+| `tx-venue-sales-use-tax-permit` | OBL-TX-VENUE-004 | permit | verified | ✅ | Tex. Tax Code 151.201-151.203 (lives in `us-tx/cross-cutting.json`; scoped to venue-org + event-rental + caterer, CONF-17) |
 | `tx-venue-franchise-tax-report` | OBL-TX-VENUE-005 | filing | verified | ✅ | Tex. Tax Code ch. 171 |
 | `tx-venue-tabc-retail-permit` | OBL-TX-VENUE-006 | permit | verified | ✅ | Tex. Alco. Bev. Code chs. 25, 28; 11.09 |
 | `tx-venue-food-establishment-permit` | OBL-TX-VENUE-008 | permit | **probable** | ❌ held | Tex. H&S Code ch. 437; 25 TAC ch. 228 |
@@ -98,14 +103,19 @@ Dossier: `docs/rules-research/texas/<entity>.md`
 
 | Tier | Meaning | Where it applies |
 |---|---|---|
-| `official` | Operative text read on a `.gov` / GPO primary host | All **federal** rules (govinfo GPO XML, eCFR API, agency `.gov`). Plus the Texas facts independently re-derived via the Playwright browser on `statutes.capitol.texas.gov`, `comptroller.texas.gov`, `txdmv.gov`, `tdi.texas.gov`, `dshs.texas.gov`. |
+| `official` | Operative text read on a `.gov` / GPO primary host | All **federal** rules EXCEPT the UCR statutory chain (see `secondary`, below): govinfo GPO XML, eCFR API, agency `.gov`. Plus the Texas facts independently re-derived via the Playwright browser on `statutes.capitol.texas.gov`, `comptroller.texas.gov`, `txdmv.gov`, `tdi.texas.gov`, `dshs.texas.gov`. |
+| `official-agency` | An official `.gov` AGENCY page/document citing or restating the rule (used where the raw TAC is unreachable) | e.g. the food-handler cadence (official DSHS TFER PDF / FAQ) — the tier RULES-REVIEW's legend calls `official-agency` |
 | `reproduction-validated` | Verbatim statutory text taken from a faithful full-text reproduction (`texas.public.law`, Cornell LII, FindLaw) — **because the official Texas statute site serves only a JS shell to automated fetchers** | Texas statutory *existence-of-requirement* facts not covered by the 19 re-derived items |
-| `secondary` | Single reproduction / interpretive source | The UCR statutory chain (49 U.S.C. 14504a → 31101) — govinfo's US-Code granule failed |
+| `secondary` | Single reproduction / interpretive source | The UCR statutory chain (49 U.S.C. 14504a → 31101) — govinfo's US-Code granule failed; a federal rule that SHIPS despite reproduction provenance because its threshold value was Pass-2 confirmed and its citation is a statute pointer, not a figure |
 
 **Why `reproduction-validated` is not hand-waving:** the 19 load-bearing facts that
-*were* independently re-derived from official hosts **all matched** the
-reproduction-sourced dossier (19/19, zero value errors). That is direct evidence the
-reproductions are faithful for this corpus. It is **not** a substitute for gate G2.
+*were* independently re-derived (18 components on official hosts; the UCR chain via
+Cornell — REVIEW-LOG D-4) **all matched** the reproduction-sourced dossier (19/19,
+zero value errors). The Pass-5 Fable review added a THIRD independent pass: 12/12
+highest-stakes facts re-read live, mostly on official hosts, zero value errors —
+including §1702.124(c) and §1702.301 on `statutes.capitol.texas.gov` itself. That is
+direct evidence the reproductions are faithful for this corpus. It is **not** a
+substitute for gate G2.
 
 ### The 19 facts independently re-derived from official sources (Pass 2)
 
@@ -171,8 +181,10 @@ An auditor should confirm each absence is *sourced*, not an oversight.
 
 | Rule | Compromise | Recorded in |
 |---|---|---|
-| `tx-security-general-liability-insurance` | Statute sets **three** limits ($100k BI+PD / $50k personal-injury / $200k aggregate). The schema's `insuranceMinimums` has one `perOccurrence` field, so the `$50k` personal-injury sub-limit lives in `rationale` prose | rule `notes`; `SCHEMA.md` v1 limitations |
-| `tx-event-rental-amusement-ride-injury-report` | Event-conditional (owed only after a reportable injury). No "injury occurred" fact exists, so it is `conditional-filing` and surfaces as `NotApplicable`, never `Missing` | rule `notes`; test `…conditional…` in `RuleDataGoldenTests` |
-| `tx-venue-tabc-retail-permit` | A venue holds **either** an MB or a BG permit; no fact distinguishes them, so one obligation represents both alternatives rather than emitting both | rule `notes` |
-| `fed-transportation-ucr-registration` | UCR also attaches via a ≥10,001 lb GVWR threshold (an untracked fact); only the >10-passenger threshold is gated | rule `notes` |
-| Cross-cutting venue obligations (sales tax, franchise, EIN, OSHA, DWC-005) | Scoped to `entityTypes: [venue-org]` — the customer's own obligations — matching the dossier's "canonical owner" convention | `us-tx/venue-org.json`, `us-fed/venue-org.json` |
+| `tx-security-general-liability-insurance` | ~~Single `perOccurrence` field; the $50k sub-limit lived in prose~~ **RESOLVED Pass 5:** the v1.2 split-limits shape carries all three statutory limits machine-readably | rule `notes`; `SCHEMA.md` v1.2 |
+| `tx-event-rental-amusement-ride-inspection` + `-injury-report` | Gated on `rentsInflatableAmusementDevices` although §2151.101/.103 reach amusement-ride operators GENERALLY — a non-inflatable ride renter (mechanical bull, trackless train) is out of v1 scope, because encoding its inspection duty without the matching §2151.101(a)(3) insurance floor would half-cover it (UNVER-29) | rule `notes`; RULES-REVIEW TX-002 row |
+| `tx-event-rental-amusement-ride-injury-report` | Event-conditional (owed only after a reportable injury). No "injury occurred" fact exists, so it is `conditional-filing` and surfaces as `NotApplicable`, never `Missing` (proof on record reads `Satisfied` since v1.2, UNVER-5) | rule `notes`; test `…conditional…` in `RuleDataGoldenTests` |
+| `tx-venue-tabc-retail-permit` / `tx-caterer-tabc-mixed-beverage` | The entity holds **either** an MB or a W&MB (BG) permit; no fact distinguishes spirits from beer/wine-only service, so one neutral obligation represents both alternatives (the caterer rule was MB-specific until Pass 5, CONF-8) | rule `notes` |
+| `fed-transportation-ucr-registration` | UCR also attaches via a ≥10,001 lb GVWR threshold (an untracked fact). ~~Only the >10-passenger threshold is gated~~ **CORRECTED Pass 5 (CONF-2):** the passenger figure is the FEE CMV definition, not the registration trigger — no capacity gate at all now | rule `notes`; REVIEW-LOG Pass 5 |
+| `tx-caterer-food-establishment-permit` | Fires for every food-preparing caterer although §437.0055's statutory trigger is the no-local-authority residual case — deliberate broadening: SOME food permit (local-first, DSHS residual) is required either way (UNVER-37) | rule `notes`; RULES-REVIEW TX-001 row |
+| Cross-cutting venue obligations (franchise, EIN, OSHA, DWC-005, WC notice) | Scoped to `entityTypes: [venue-org]` — the customer's own obligations — matching the dossier's "canonical owner" convention. The sales-tax permit moved to `us-tx/cross-cutting.json` (venue-org + event-rental + caterer, CONF-17) | `us-tx/venue-org.json`, `us-fed/venue-org.json`, `us-tx/cross-cutting.json` |

@@ -118,7 +118,7 @@ shows NO non-US (Spain/EU) content and no unsourced number. Clean.
 
 ---
 
-## Pass 2 — Independent re-derivation + discrepancy log  (IN PROGRESS)
+## Pass 2 — Independent re-derivation + discrepancy log  (COMPLETE 2026-07-07)
 
 Two blind re-derivation agents (money; cadences/terms/thresholds) are
 independently re-reading OFFICIAL sources via Playwright, WITHOUT seeing the
@@ -507,3 +507,112 @@ Fix-pass design notes (orchestrator-approved):
 **Pass 3 + Pass 4 CLOSED.** Remaining Phase-2 work: entity-profile migration +
 per-rule-set feature-flag wiring (DB-schema, careful-review), then founder gates
 G1 (counsel) / G2 (browser spot-confirm) before any customer exposure.
+
+---
+
+## Pass 5 — Fable re-review of the Opus-built pipeline  (COMPLETE 2026-07-08)
+
+The whole pipeline (derivation, confidence judgments, passes 1–4) ran on Opus
+under the compensating controls after the 2026-07-07 model downgrade. When Fable
+access returned, the founder ordered a full Fable-tier re-review of exactly the
+surfaces Opus judgment touched. Method:
+
+1. **Mechanical verification** of every headline claim (tests, counts, gates,
+   scope-hygiene greps) — all held.
+2. **Live primary-source spot-check by the orchestrator (Fable): 12/12
+   highest-stakes facts confirmed, zero value errors** — a THIRD independent
+   derivation, mostly from OFFICIAL hosts: §1702.124(c) $100k/$50k/$200k and
+   §1702.301 ≤2-yr terms (statutes.capitol.texas.gov — the G2 priority items),
+   §2151.1012 $1M/occ CSL (and §2151.101(a)(3)'s own "except as provided by
+   §2151.1012" deferral), TABC §11.09(a)/§11.11, ch. 437B (per-vehicle, 1-yr,
+   eff. 2026-07-01), 49 CFR 387.33T $5M/$1.5M (G3 artifact resolves as
+   documented), 14 CFR 107.65, 29 CFR 1904.1 + Appendix A NAICS claims
+   (7221/7222 exempt; 5311/7139/7223 absent — the venue reasoning holds),
+   43 TAC §218.16(a) tiers (from the cited TxDMV adoption PDF), franchise
+   $2.65M/May 15, 25 TAC §228.31(d) 30 days (official DSHS TFER PDF).
+3. **16-finder review workflow** (10 per-file rule-data↔dossier fidelity
+   auditors + 4 engine-code reviewers + test-quality + audit-doc accuracy),
+   75 raw findings, 3-lens adversarial verification per finding. The session
+   limit killed ~125 verifier agents mid-pass: 29 findings fully CONFIRMED
+   (3-lens), 4 split, 41 left UNVERIFIED (zero votes — NOT refuted), 1 refuted
+   3-0. Per the review contract, the orchestrator personally ruled on every
+   split and unverified finding against its own line-level read of all engine
+   files and docs: **43 ruled real, 1 refutation upheld** (the DWC-005 form
+   itself IS non-subscriber-only per 406.004; the separate 406.005 posting duty
+   was the real issue — SPLIT-3).
+
+**Every real finding fixed in-session. 154 → 225 rule-engine tests; full backend
+suite 1323/1323 green.** Highlights (rule-content class):
+
+- **CONF-2 (reverses CC-6).** The UCR `gte 11` capacity gate was an unsourced
+  narrowing: the >10-passenger figure is the UCR FEE CMV definition
+  (49 U.S.C. 31101(1)(B)), not the registration trigger — the dossier records
+  that a carrier with no qualifying CMV still registers at the lowest bracket.
+  Gate removed; rationale carries the fee-bracket nuance.
+- **CONF-23 (new fact `operatesIntrastate`, v1.2).** §643.002 exempts only
+  EXCLUSIVELY-interstate carriers; the old `operatesInterstate == false` gate
+  silently dropped the whole TX layer for mixed carriers. TX transport rules now
+  gate on `operatesIntrastate = true`; a mixed carrier owes BOTH layers (pinned
+  by a golden test).
+- **CONF-18/19 (security gates).** The commission now fires on armed-guards OR
+  close-protection (a PPO presupposes a commission, §1702.301(c)); the
+  noncommissioned license is gated on the new `providesUnarmedGuards` fact
+  instead of firing for every guard company.
+- **CONF-4.** The OSHA/TTB obligationRefs in us-fed/venue-org.json were SWAPPED
+  vs the dossier (traceability only; content was right). Fixed here and in the
+  provenance map.
+- **CONF-8.** The caterer TABC rule demanded specifically a Mixed Beverage
+  Permit for any alcohol service; a beer/wine-only caterer holds the W&MB (BG)
+  permit instead. Re-encoded as the neutral retail permit, mirroring venue-org.
+- **CONF-15.** The amusement inspection fixedDate was July 1; the statute says
+  "before July 1", and engine semantics treat the fixedDate as the last timely
+  day — moved to June 30 (the DWC-005 April-30 convention). F-3's rolling-sticker
+  tension stands as a founder-gate item, now recorded here.
+- **CONF-16 + the v1.2 `insuranceMinimums` reshape.** The non-nullable aggregate
+  had forced a FABRICATED $1M aggregate onto the §2151.1012 floor. The new shape
+  (kind / coverageLine / nullable components) carries exactly what each statute
+  states; a `coverageLine` dimension prevents ever comparing an auto-liability
+  floor against the extracted general-liability limit.
+- **CONF-0 (`roundToMonthEnd`, v1.2).** 14 CFR 107.65's "24 CALENDAR months"
+  runs to month-end; the day-precision anniversary reported a legally-current
+  pilot Expired up to 30 days early.
+- **SPLIT-3 (new rule `tx-venue-wc-coverage-notice`).** Tex. Labor Code 406.005
+  reaches EVERY employer with employees; it was folded behind the DWC-005 rule's
+  `carriesWorkersComp=false` gate with a note that misstated the statute. Encoded
+  from the dossier's verified OBL-TX-VENUE-003 (40 rules total now; 32 in prod).
+- **UNVER-0.** The TFER CFM/food-handler rules now also scope to `venue-org`
+  (registry + both dossiers say every food establishment).
+- **CONF-17.** The sales-tax permit moved to `us-tx/cross-cutting.json`, scoped
+  to venue-org + event-rental + caterer per the dossier's cross-references
+  (its own file so it can't leak venue-only local pointers).
+- **UNVER-3.** Real effective dates on the versions describing post-2020 law:
+  ch. 437B → 2026-07-01 (already), TABC 2-yr terms → 2021-09-01, franchise
+  2024+ regime → 2024-01-01.
+
+Engine/loader class (all fixed + regression-tested): UNVER-17 (omitted
+`confidence` silently defaulted to Verified — the worst-direction default),
+UNVER-18 (typo'd JSON keys silently ignored → `UnmappedMemberHandling.Disallow`),
+UNVER-19/20/21/22 (validFrom/citation-for-verified/minimums/subtype
+requirements), UNVER-9 (empty `any` = constant-False trap), UNVER-16
+(calendar-impossible fixedDates), UNVER-14/15 + UNVER-6 (grace unified on the
+printed-expiry path; rejected on fixed-date anchors until honored), UNVER-4
+(document selection by EFFECTIVE deadline so a stale sibling can't shadow a
+fresh issue-dated renewal), UNVER-5 (conditional-filing proof reads Satisfied,
+never a permanent NeedsDocumentInfo), UNVER-13 (fixed-annual undated proof never
+guesses Satisfied), UNVER-7 (state coverage check no longer skipped for a
+federal-only load; NotCovered message derived from the loaded set), UNVER-8
+(Neq fails closed on type mismatch), UNVER-10 (profile builder aliasing).
+
+Also closed this session (was the top follow-up): **the A-2/CC-4 insurance
+amount gate** (SCHEMA §6, v1.2) with the new `below-stated-minimum` status —
+plus the entity-profile persistence migration
+(`AddRegulatoryEntityProfileFields`: Organization.State/RegulatoryFactsJson,
+Vendor.EntityType/RegulatoryFactsJson), the `RegulatoryProfileMapper` EF→engine
+adapters, and the per-rule-set feature flags (`RuleEngine:Enabled` +
+`EnabledRuleSets`, default OFF, hard safe posture, fail-fast at boot).
+
+Doc-claim fixes are recorded in the audit docs themselves (counts 40/37/32,
+58 operative-text quotes, provenance-map ref swap, tier-table precision, the
+19/19 qualifier, RULES-REVIEW postscript). The refuted finding and every ruling
+above are traceable to the workflow transcript (session 908f7937, run
+wf_6847a4cd-e9a).

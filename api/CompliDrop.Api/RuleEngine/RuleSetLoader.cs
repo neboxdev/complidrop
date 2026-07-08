@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace CompliDrop.Api.RuleEngine;
@@ -44,6 +45,9 @@ public static class RuleSetLoader
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         ReadCommentHandling = JsonCommentHandling.Skip,
         AllowTrailingCommas = true,
+        // The schema is FROZEN and closed: an unknown key is always an authoring error (a typo'd
+        // "documentSubTye" would otherwise silently null the field and broaden document matching).
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
     };
 
     private static readonly Regex StateJurisdiction = new("^us-[a-z]{2}$", RegexOptions.Compiled);
@@ -132,6 +136,7 @@ public static class RuleSetLoader
         var kept = new List<Rule>();
         foreach (var rule in rules)
         {
+            // Confidence is validated non-null before filtering runs, so == Verified is safe here.
             var verified = rule.Versions.Where(v => v.Confidence == RuleConfidence.Verified).ToList();
             if (verified.Count > 0)
                 kept.Add(rule with { Versions = verified });
@@ -198,6 +203,15 @@ public static class RuleSetLoader
         if (version.Version < 1)
             throw new RuleSchemaException($"{where}: 'version' must be >= 1.");
 
+        // An omitted confidence must never default into the shipping posture (fail-safe direction).
+        if (version.Confidence is null)
+            throw new RuleSchemaException($"{where}: 'confidence' is required (verified|probable|uncertain) — an omitted confidence must not silently ship.");
+
+        // An omitted validFrom deserializes to DateOnly.MinValue, which would both pass the window check
+        // and INVERT the latest-validFrom-wins version precedence. Require an explicit, plausible date.
+        if (version.ValidFrom == default || version.ValidFrom < new DateOnly(2000, 1, 1))
+            throw new RuleSchemaException($"{where}: 'validFrom' is required and must be a plausible date (got {version.ValidFrom:O}).");
+
         if (version.ValidTo is { } to && to < version.ValidFrom)
             throw new RuleSchemaException($"{where}: validTo ({to:O}) is before validFrom ({version.ValidFrom:O}).");
 
@@ -212,18 +226,21 @@ public static class RuleSetLoader
         if (version.Cadence is not null)
             ValidateCadence(version.Cadence, where);
 
-        if (version.InsuranceMinimums is not null)
-        {
-            if (!string.Equals(rule.Category, "insurance", StringComparison.OrdinalIgnoreCase))
-                throw new RuleSchemaException($"{where}: insuranceMinimums is only valid on a category='insurance' rule.");
-            if (version.InsuranceMinimums.PerOccurrence < 0 || version.InsuranceMinimums.Aggregate < 0)
-                throw new RuleSchemaException($"{where}: insuranceMinimums amounts must be non-negative.");
-            if (string.IsNullOrWhiteSpace(version.InsuranceMinimums.Currency))
-                throw new RuleSchemaException($"{where}: insuranceMinimums.currency is required.");
-        }
+        var isInsurance = string.Equals(rule.Category, "insurance", StringComparison.OrdinalIgnoreCase);
+        if (version.InsuranceMinimums is not null && !isInsurance)
+            throw new RuleSchemaException($"{where}: insuranceMinimums is only valid on a category='insurance' rule.");
+        if (isInsurance && version.InsuranceMinimums is null)
+            throw new RuleSchemaException($"{where}: a category='insurance' rule must carry insuranceMinimums (the statutory floor is the point of the rule).");
+        if (version.InsuranceMinimums is { } mins)
+            ValidateInsuranceMinimums(mins, where);
 
         if (version.Citation is not null && string.IsNullOrWhiteSpace(version.Citation.Section))
             throw new RuleSchemaException($"{where}: citation.section is required when a citation is present.");
+
+        // A verified rule's whole claim to shipping is its primary-source citation — require it structurally.
+        if (version.Confidence == RuleConfidence.Verified
+            && (version.Citation is null || string.IsNullOrWhiteSpace(version.Citation.Section)))
+            throw new RuleSchemaException($"{where}: a confidence='verified' version must carry a citation with a non-empty section.");
 
         if (string.IsNullOrWhiteSpace(version.Rationale))
             throw new RuleSchemaException($"{where}: 'rationale' (user-facing) is required.");
@@ -235,6 +252,51 @@ public static class RuleSetLoader
                 throw new RuleSchemaException($"{where}: satisfiesFederal references '{fedRef}', which is not a loaded federal (us-fed) rule id.");
     }
 
+    /// <summary>
+    /// The floor must represent EXACTLY what the statute states (v1.2): a combined-single-limit floor
+    /// carries only perOccurrence; split limits carry the BI+PD component (and optionally personal-injury /
+    /// aggregate). No field may carry a figure the cited section does not contain.
+    /// </summary>
+    private static void ValidateInsuranceMinimums(InsuranceMinimums mins, string where)
+    {
+        if (mins.Kind is null)
+            throw new RuleSchemaException($"{where}: insuranceMinimums.kind is required (combined-single-limit | split-limits).");
+        if (mins.CoverageLine is null)
+            throw new RuleSchemaException($"{where}: insuranceMinimums.coverageLine is required (general-liability | auto-liability) — it decides whether the extracted general-liability limit may be compared.");
+        if (string.IsNullOrWhiteSpace(mins.Currency))
+            throw new RuleSchemaException($"{where}: insuranceMinimums.currency is required.");
+
+        foreach (var (name, amount) in new (string, decimal?)[]
+        {
+            ("perOccurrence", mins.PerOccurrence),
+            ("perOccurrenceBodilyInjuryAndPropertyDamage", mins.PerOccurrenceBodilyInjuryAndPropertyDamage),
+            ("perOccurrencePersonalInjury", mins.PerOccurrencePersonalInjury),
+            ("aggregate", mins.Aggregate),
+        })
+            if (amount is <= 0)
+                throw new RuleSchemaException($"{where}: insuranceMinimums.{name} must be positive when present.");
+
+        switch (mins.Kind)
+        {
+            case InsuranceFloorKind.CombinedSingleLimit:
+                if (mins.PerOccurrence is null)
+                    throw new RuleSchemaException($"{where}: a combined-single-limit floor requires perOccurrence.");
+                if (mins.PerOccurrenceBodilyInjuryAndPropertyDamage is not null || mins.PerOccurrencePersonalInjury is not null)
+                    throw new RuleSchemaException($"{where}: a combined-single-limit floor must not carry split-limit fields.");
+                break;
+
+            case InsuranceFloorKind.SplitLimits:
+                if (mins.PerOccurrenceBodilyInjuryAndPropertyDamage is null)
+                    throw new RuleSchemaException($"{where}: a split-limits floor requires perOccurrenceBodilyInjuryAndPropertyDamage.");
+                if (mins.PerOccurrence is not null)
+                    throw new RuleSchemaException($"{where}: a split-limits floor must not carry the combined-single-limit perOccurrence field.");
+                break;
+
+            default:
+                throw new RuleSchemaException($"{where}: unknown insuranceMinimums.kind.");
+        }
+    }
+
     private static void ValidateApplicability(Applicability node, string where)
     {
         switch (node)
@@ -243,6 +305,11 @@ public static class RuleSetLoader
                 foreach (var c in all.Conditions) ValidateApplicability(c, where);
                 break;
             case AnyCondition any:
+                // Empty `all` is the deliberate "always applies" idiom; empty `any` is constant-False —
+                // an authoring slip that would silently drop the obligation for everyone. Reject it,
+                // mirroring the empty-`in` rejection.
+                if (any.Conditions.Count == 0)
+                    throw new RuleSchemaException($"{where}: an 'any' combinator with zero children is constant-False; use an explicit condition (or an empty 'all' for always-applies).");
                 foreach (var c in any.Conditions) ValidateApplicability(c, where);
                 break;
             case NotCondition not:
@@ -313,6 +380,10 @@ public static class RuleSetLoader
             throw new RuleSchemaException($"{where}: obligation.name is required.");
         if (!DocumentTypes.Contains(obligation.DocumentType))
             throw new RuleSchemaException($"{where}: obligation.documentType '{obligation.DocumentType}' is not one of coi|license|certification|other (RD-c).");
+        // An explicit "" subtype silently behaves as no-subtype (matching broadens to DocumentType alone).
+        // Null is the one way to say "no subtype"; anything present must be a real token.
+        if (obligation.DocumentSubType is { } sub && string.IsNullOrWhiteSpace(sub))
+            throw new RuleSchemaException($"{where}: obligation.documentSubType must be a non-empty token when present (use null for no subtype).");
     }
 
     private static void ValidateCadence(Cadence cadence, string where)
@@ -326,18 +397,29 @@ public static class RuleSetLoader
         if (cadence.Anchor == CadenceAnchor.IssueDate && cadence.PeriodMonths is not > 0)
             throw new RuleSchemaException($"{where}: a cadence anchored on issueDate needs a positive periodMonths.");
 
+        if (cadence.RoundToMonthEnd && cadence.PeriodMonths is not > 0)
+            throw new RuleSchemaException($"{where}: roundToMonthEnd only applies to a period-based cadence (needs a positive periodMonths).");
+
         if (cadence.Anchor is CadenceAnchor.FixedDate or CadenceAnchor.CalendarDate)
         {
             if (cadence.FixedDate is null)
                 throw new RuleSchemaException($"{where}: a {RuleTokens.ToToken(cadence.Anchor)} cadence needs a fixedDate {{month, day}}.");
+
+            // The evaluator does not honor grace on fixed-date anchors (the next-occurrence computation
+            // re-anchors on the evaluation date, making Overdue unreachable). Reject rather than let the
+            // first grace-bearing fixed-date rule silently misclassify — lift this when grace is honored.
+            if (cadence.GracePeriodDays > 0)
+                throw new RuleSchemaException($"{where}: gracePeriodDays is not honored on a {RuleTokens.ToToken(cadence.Anchor)} anchor in v1; encode the grace into the fixedDate or leave it 0.");
         }
 
         if (cadence.FixedDate is { } md)
         {
             if (md.Month is < 1 or > 12)
                 throw new RuleSchemaException($"{where}: cadence.fixedDate.month {md.Month} is out of range 1–12.");
-            if (md.Day is < 1 or > 31)
-                throw new RuleSchemaException($"{where}: cadence.fixedDate.day {md.Day} is out of range 1–31.");
+            // Validate against a LEAP year so Feb 29 stays legal as the deliberate clamp target,
+            // while calendar-impossible dates (Feb 30, Apr 31, …) fail fast instead of silently shifting.
+            if (md.Day < 1 || md.Day > DateTime.DaysInMonth(2024, md.Month))
+                throw new RuleSchemaException($"{where}: cadence.fixedDate {{month: {md.Month}, day: {md.Day}}} is not a real calendar date.");
         }
     }
 }

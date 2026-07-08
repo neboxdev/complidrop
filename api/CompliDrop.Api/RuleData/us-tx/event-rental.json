@@ -32,16 +32,16 @@
             "perWorker": false
           },
           "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
-          "insuranceMinimums": { "perOccurrence": 1000000, "aggregate": 1000000, "currency": "USD" },
+          "insuranceMinimums": { "kind": "combined-single-limit", "coverageLine": "general-liability", "perOccurrence": 1000000, "currency": "USD" },
           "citation": {
             "section": "Tex. Occ. Code 2151.1012 (general Class B minimums 2151.101(a)(3))",
             "url": "https://statutes.capitol.texas.gov/Docs/OC/htm/OC.2151.htm",
             "effectiveDateOfText": "current as displayed (28 TAC 5.9004 last amended Nov 3, 2024)",
-            "verifiedDate": "2026-07-07"
+            "verifiedDate": "2026-07-08"
           },
           "rationale": "Texas law requires a person who operates a continuous-airflow inflatable amusement ride (bounce house, inflatable slide) to carry a combined single limit liability policy of not less than $1,000,000 per occurrence, written by a Texas-authorized insurer (Tex. Occ. Code 2151.1012). This inflatable-specific minimum controls over the general Class B floor; a certified copy of the policy is filed with the Texas Department of Insurance.",
           "userAction": "If this vendor rents inflatables or bounce houses, ask for a certificate of the amusement-ride liability policy ($1,000,000 per-occurrence combined single limit).",
-          "notes": "2151.1012 states a $1M per-occurrence combined single limit with no separate statutory aggregate; the aggregate field mirrors the per-occurrence value because the schema's aggregate is non-nullable."
+          "notes": "2151.1012 states a $1M per-occurrence combined single limit and NO statutory aggregate - the floor carries no aggregate field (CONF-16; the v1 shape mirrored $1M into a non-nullable aggregate, which was a fabricated figure). Statute re-read on the official host 2026-07-08."
         }
       ]
     },
@@ -66,16 +66,16 @@
             "authority": "Texas Department of Insurance (TDI) — Amusement Ride Program",
             "perWorker": false
           },
-          "cadence": { "kind": "fixed-annual", "anchor": "fixedDate", "fixedDate": { "month": 7, "day": 1 }, "gracePeriodDays": 0 },
+          "cadence": { "kind": "fixed-annual", "anchor": "fixedDate", "fixedDate": { "month": 6, "day": 30 }, "gracePeriodDays": 0 },
           "citation": {
             "section": "Tex. Occ. Code 2151.101; 28 TAC 5.9004",
-            "url": "https://texas.public.law/statutes/tex._occ._code_section_2151.101",
+            "url": "https://statutes.capitol.texas.gov/Docs/OC/htm/OC.2151.htm",
             "effectiveDateOfText": "current as displayed; sticker rule (AR-101) effective May 2000",
-            "verifiedDate": "2026-07-07"
+            "verifiedDate": "2026-07-08"
           },
           "rationale": "Texas law requires each amusement ride (including a rented inflatable) to be inspected at least once a year, with the inspection certificate and insurance policy filed with the Texas Department of Insurance before July 1 each year and a TDI Form AR-101 compliance sticker affixed to the ride (Tex. Occ. Code 2151.101; 28 TAC 5.9004). TDI charges a $40 filing fee per ride.",
           "userAction": "If this vendor rents inflatables, ask for the current TDI amusement-ride compliance sticker and inspection certificate (filed before July 1 each year).",
-          "notes": "Statute sets a before-July-1 annual filing; TDI operational practice also describes a rolling one-year-from-inspection sticker validity."
+          "notes": "fixedDate is June 30 - the LAST TIMELY day for the statutory 'before July 1' filing under the engine's deadline-day-inclusive semantics (CONF-15; mirrors the DWC-005 April-30 convention). F-3 tension stands: TDI practice also describes a rolling one-year-from-inspection sticker validity; the statutory cycle is encoded pending TDI/founder confirmation (founder-gate item). KNOWN SCOPE COMPROMISE (recorded): gated on rentsInflatableAmusementDevices although 2151.101 reaches amusement-ride operators generally - a non-inflatable ride renter (mechanical bull, trackless train) is out of v1 scope because encoding its inspection duty without the matching 2151.101(a)(3) insurance floor would half-cover it; documented in 02-PROVENANCE-MAP §7 (UNVER-29). 2151.101/2151.103 re-read on the official host 2026-07-08."
         }
       ]
     },
@@ -103,13 +103,13 @@
           "cadence": { "kind": "conditional-filing", "anchor": "documentExpiration", "gracePeriodDays": 0 },
           "citation": {
             "section": "Tex. Occ. Code 2151.103",
-            "url": "https://texas.public.law/statutes/tex._occ._code_section_2151.103",
+            "url": "https://statutes.capitol.texas.gov/Docs/OC/htm/OC.2151.htm",
             "effectiveDateOfText": "current as displayed (eff. 1999, amended 2001)",
-            "verifiedDate": "2026-07-07"
+            "verifiedDate": "2026-07-08"
           },
           "rationale": "Texas law requires an amusement-ride operator (including an inflatable-rental operator) to file a Quarterly Injury Report (TDI Form AR-800) for any injury caused by a ride that results in death or requires medical treatment (Tex. Occ. Code 2151.103). This is a conditional filing: a quarter with no reportable injury requires no report.",
           "userAction": "If a rented ride causes an injury that results in death or requires medical treatment, the vendor must file a quarterly TDI injury report (Form AR-800).",
-          "notes": "Event-conditional; the frozen fact set has no 'reportable injury occurred' trigger, so this surfaces for all inflatable renters. Encoded as conditional-filing to signal it is not a periodic license."
+          "notes": "Event-conditional; the frozen fact set has no 'reportable injury occurred' trigger, so this surfaces for all inflatable renters. Encoded as conditional-filing to signal it is not a periodic license. Same inflatables-only scope compromise as the inspection rule (UNVER-29, recorded in 02-PROVENANCE-MAP §7). Statute re-read on the official host 2026-07-08."
         }
       ]
     }

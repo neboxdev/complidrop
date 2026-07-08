@@ -1,4 +1,4 @@
-# Rule schema design — FROZEN v1 (2026-07-07)
+# Rule schema design — FROZEN v1 (2026-07-07; additive v1.2 revision 2026-07-08)
 
 Status: **FROZEN** as of 2026-07-07, after the Phase-1 dossier + review gauntlet
 completed and the founder said "go" to Phase 2. The applicability-fact registry
@@ -6,6 +6,18 @@ completed and the founder said "go" to Phase 2. The applicability-fact registry
 questions are resolved (§ Resolved decisions). The engine is built against THIS
 file. Changing a frozen fact name / rule shape = a schema-version bump + a note
 here, not a silent edit.
+
+**v1.2 (2026-07-08, additive — the Pass-5 Fable re-review):** two new facts
+(`providesUnarmedGuards`, CONF-19; `operatesIntrastate`, CONF-23 — see §4);
+`insuranceMinimums` reshaped to represent EXACTLY what each statute states
+(`kind`: combined-single-limit | split-limits; `coverageLine`: general-liability |
+auto-liability; nullable `aggregate` — no field may carry a figure the cited
+section does not contain, CONF-16); the insurance AMOUNT GATE closing A-2/CC-4
+for general-liability floors (§6); a new status `below-stated-minimum`; cadence
+`roundToMonthEnd` for "calendar months" recency language (CONF-0); and hardened
+loader requirements (confidence/validFrom/citation-for-verified/minimums-shape
+all mandatory — an omitted field can never silently default into the shipping
+posture). See REVIEW-LOG § Pass 5.
 
 Note on gates: FREEZE authorizes BUILDING the engine (nothing deploys; ships
 feature-flag OFF). It does NOT clear G1 (counsel on user-facing framing) or G2
@@ -97,7 +109,7 @@ A small closed condition language over a typed **entity profile**:
 ```jsonc
 { "all": [
     { "fact": "operatesInterstate", "op": "eq", "value": true },
-    { "fact": "maxVehicleSeatingCapacity", "op": "gte", "value": 16 }
+    { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 }
 ] }
 ```
 
@@ -126,18 +138,23 @@ even surface the profile question.
 | `operatesFoodVendingVehicle` | bool | caterer | DSHS Mobile Food Vendor license (HB 2844, ch. 437B) |
 | `rentsInflatableAmusementDevices` | bool | event-rental | amusement-ride insurance (§2151.1012) + inspection/sticker + injury report |
 | `operatesForklifts` | bool | event-rental | OSHA powered-industrial-truck operator certification |
-| `providesArmedGuards` | bool | security-service | security officer commission; PPO license; Level III/IV training |
+| `providesArmedGuards` | bool | security-service | security officer commission (any-of with close-protection, CONF-18); Level III training |
+| `providesArmedCloseProtection` | bool (v1.1 additive, CC-3) | security-service | PPO license; also the commission (a PPO presupposes one, CONF-18) |
+| `providesUnarmedGuards` | bool (v1.2 additive, CONF-19) | security-service | noncommissioned (unarmed) officer individual license — commissioned officers hold the commission instead |
 | `operatesVehiclesForHire` | bool | transportation | base gate for all transport obligations |
-| `operatesInterstate` | bool | transportation | **the critical branch**: FMCSA authority/UCR/§387 federal floor (true) vs TxDMV reg + §218.16 TX floor (false). Unknown ⇒ `needs-profile-info` |
-| `maxPassengerSeatingCapacity` | int (**including the driver**) | transportation | capacity thresholds: CDL/fed-$5M ≥16; fed-$1.5M ≤15; TX-reg >15; TX-$5M ≥27; TX-$500k 16–26; UCR >10. ALL normalized to seats-incl-driver. |
+| `operatesInterstate` | bool | transportation | the federal branch: FMCSA authority / MCS-150 / UCR / §387 federal floor attach at `true`. Unknown ⇒ `needs-profile-info` |
+| `operatesIntrastate` | bool (v1.2 additive, CONF-23) | transportation | the Texas branch: TxDMV reg + §218.16 TX floor attach at `true`. TWO facts because §643.002 exempts only EXCLUSIVELY-interstate carriers — a MIXED carrier (both true) owes BOTH layers; the old `operatesInterstate == false` gate silently dropped the TX layer for mixed carriers |
+| `maxPassengerSeatingCapacity` | int (**including the driver**) | transportation | capacity thresholds: CDL/fed-$5M ≥16; fed-$1.5M ≤15; TX-reg >15; TX-$5M ≥27; TX-$500k 16–26. ALL normalized to seats-incl-driver. (UCR is deliberately NOT capacity-gated — the >10 figure is its FEE CMV definition, not the registration trigger; CONF-2 reversed CC-6.) |
 | `operatesDronesCommercially` | bool | photographer-videographer | FAA Part 107 cert + 24-mo recency + drone registration |
 | `sellsTaxableGoodsOrServices` | bool | all | Texas sales & use tax permit |
 | `isFranchiseTaxableEntity` | bool | venue-org (+ any registered entity) | Texas franchise-tax annual report |
 
 **Capacity convention (locked):** `maxPassengerSeatingCapacity` is the vehicle's
-designed seating capacity **including the driver**. The dossier's "27 or more not
-including the driver" was normalized at D-3 to "27 or more including the driver";
-every threshold in the rules is expressed incl-driver so one fact serves all.
+designed seating capacity **including the driver**. The dossier's superseded
+pre-2024 phrasing "26 or more, not including the driver" was corrected at D-3 to
+the current 43 TAC §218.16(a) wording, "27 or more people, including the driver"
+(numerically the same population); every threshold in the rules is expressed
+incl-driver so one fact serves all.
 
 ## 5. Cadence & deadline logic
 
@@ -164,17 +181,58 @@ every threshold in the rules is expressed incl-driver so one fact serves all.
 
 - Pure C#: `(EntityProfile, IReadOnlyList<Document>, LocalDate evaluationDate, RuleSet)`
   → `ObligationReport` with per-obligation status:
-  `satisfied | expiring | expired | missing | needs-profile-info |
-  needs-document-info | not-applicable`.
+  `satisfied | expiring | expired | missing | below-stated-minimum |
+  needs-profile-info | needs-document-info | not-applicable`.
   (`needs-document-info` added v1.1 — a matched document whose currency cannot be
   determined, e.g. no readable expiry on a renewing obligation. It must never read
-  `satisfied`.)
+  `satisfied`. `below-stated-minimum` added v1.2 — see the amount gate below.)
   No LLM calls, no clock reads (evaluation date injected), no DB access inside
   the evaluator.
+- **Insurance amount gate (v1.2 — closes A-2/CC-4 for general-liability floors).**
+  For an `insurance` obligation whose `insuranceMinimums.coverageLine` is
+  `general-liability`, a would-be `satisfied` must also clear the amount check
+  against the document's extracted `GeneralLiabilityLimit`:
+  - amount unreadable (null) ⇒ `needs-document-info` — never a Satisfied that
+    certifies an amount nobody read;
+  - amount **below** the comparable floor (the CSL `perOccurrence`, or the
+    split-limits BI+PD component) ⇒ `below-stated-minimum` — a numeric comparison
+    of the certificate against the cited statute's stated minimum, phrased as a
+    tracked-obligation status, never an adjudication (this also demotes
+    `expiring`: the shortfall exists now, not at renewal);
+  - amount at/above a floor that ONE extracted figure cannot fully verify (split
+    limits / a statutory aggregate, e.g. §1702.124(c)'s three limits) ⇒
+    `needs-document-info` with a verify-sub-limits userAction — the engine never
+    certifies adequacy it cannot read;
+  - `expired` always stays `expired` (the stronger defect).
+  An `auto-liability` floor (49 CFR 387.33T, 43 TAC 218.16) is NEVER compared
+  against the extracted GENERAL-liability limit — wrong policy line; those keep
+  presence+expiry semantics until extraction reads an auto-liability limit (see
+  v1 KNOWN LIMITATIONS; tracks with product bug #397 on cell-pinning accuracy).
+- **Fixed-annual proof semantics (v1.2, UNVER-13).** A matched document with NO
+  printed expiry on a `fixed-annual` obligation reads `needs-document-info` —
+  which annual cycle an undated proof covers is not generically inferable (a late
+  filing for this cycle and an early one for the next look identical), so the
+  engine never guesses `satisfied`. The next occurrence still surfaces as
+  `NextDueDate` for reminders.
+- **Grace-period scope (v1.2).** `gracePeriodDays` is honored uniformly on the
+  printed-expiry and period-cadence paths (both classify via the same
+  grace-aware timing). It is NOT honored on `fixedDate`/`calendarDate` anchors
+  (the next-occurrence computation re-anchors on the evaluation date), so the
+  loader REJECTS grace > 0 there until the engine supports it.
+- **`validFrom` convention.** Versions carry the cited law's actual effective
+  date where the dossier supplies one (ch. 437B → 2026-07-01; TABC 2-yr terms →
+  2021-09-01; the franchise 2024+ regime → 2024-01-01); the remaining
+  current-law versions use the 2020-01-01 dataset floor. The engine only
+  evaluates at the current date in v1 — an as-of-history feature must first
+  backfill true effective dates for the floor-dated versions.
 - Only `confidence: verified` rule versions load in production; `probable`/
   `uncertain` versions are visible only behind the review flag.
 - Feature flag per rule-set file (jurisdiction × entity type) so rollout is
-  per-rule-set after founder sign-off.
+  per-rule-set after founder sign-off. Implemented v1.2: `RuleEngine:Enabled`
+  (default false) + `RuleEngine:EnabledRuleSets` ("us-fed/caterer", …) resolved
+  once at boot into `RegulatoryRuleCatalog`, fail-fast like the migration guard.
+  `VerifiedOnly`/`IncludeReviewGated` are deliberately NOT configurable — a
+  probable or review-gated rule can never ship via config; gates lift by data PR.
 
 ## Codebase fit (recon 2026-07-07)
 
@@ -208,12 +266,14 @@ These are non-negotiable outputs of the legal/compliance review. The engine and
 its UI must satisfy them; they are correctness requirements, not preferences.
 
 1. **Interstate-vs-intrastate branch (transportation).** The evaluator MUST
-   resolve the `operatesInterstate` fact before selecting any transportation
-   insurance floor. Federal for-hire passenger financial responsibility ($5M for
-   16+ seats / $1.5M for ≤15) and Texas intrastate minimums ($500k for 16–26
-   seats / $5M for 26+ not-incl-driver) are DIFFERENT floors on the same vehicle.
-   If `operatesInterstate` is unknown ⇒ `needs-profile-info`, never a flat
-   "compliant". FMCSA operating authority + UCR are interstate-only obligations.
+   resolve the direction facts before selecting any transportation insurance
+   floor. Federal for-hire passenger financial responsibility ($5M for 16+ seats
+   / $1.5M for ≤15, gated on `operatesInterstate`) and Texas intrastate minimums
+   ($500k for 16–26 seats / $5M for 27+ incl-driver per the 2024 §218.16(a)
+   amendment, gated on `operatesIntrastate` since v1.2) are DIFFERENT floors on
+   the same vehicle — and a MIXED carrier owes BOTH (CONF-23). If a direction
+   fact is unknown ⇒ `needs-profile-info` for that layer, never a flat
+   "compliant". FMCSA operating authority + MCS-150 + UCR are interstate-only.
 2. **No completeness illusion.** The evaluator MUST NEVER emit a bare
    "you are compliant" that implies the tracked set is exhaustive. Every
    `ObligationReport` carries an explicit non-exhaustiveness notice and surfaces
@@ -233,27 +293,49 @@ its UI must satisfy them; they are correctness requirements, not preferences.
    whole Texas security rule-set (methodology human-gate) stay behind the review
    flag until the founder confirms — see METHODOLOGY provenance rule.
 
-### v1 KNOWN LIMITATIONS (documented, founder-visible — from the engine review)
+### v1 KNOWN LIMITATIONS (documented, founder-visible — updated v1.2, 2026-07-08)
 
-- **Insurance amount is NOT enforced in v1 (A-2 / CC-4).** For an `insurance`
-  obligation, the engine's `Satisfied` means "a certificate of the right type is on
-  file and unexpired," NOT "the coverage amount meets the statutory floor." The
-  floor is carried in `insuranceMinimums` + stated in the `userAction` ("verify the
-  amount meets $X"), but the engine does not compare it — `IDocumentLike` has no
-  coverage-amount, and per SCHEMA §6 v1 satisfaction is presence + expiry (numeric
-  min-value comparison is the CONTRACTUAL grader's existing job).
-  **Follow-up (top priority before an insurance verdict is customer-facing):** add a
-  coverage-amount field sourced from extraction and enforce `insuranceMinimums`
-  (per-occurrence AND aggregate) before allowing `Satisfied`. Note the schema's
-  single `perOccurrence` field cannot represent the security 3-limit structure
-  ($100k BI+PD / $50k personal-injury / $200k aggregate) — the sub-limit lives in
-  prose today. Tracks alongside product bug #397.
+- **Insurance amounts: CLOSED for general-liability floors (v1.2), open for
+  auto-liability floors.** The A-2/CC-4 hole is closed where the extracted
+  `GeneralLiabilityLimit` is a valid comparison input: GL floors (§2151.1012
+  inflatables; §1702.124(c) security, review-gated) now gate `Satisfied` on the
+  amount (see §6 amount gate; below-floor ⇒ `below-stated-minimum`; unreadable ⇒
+  `needs-document-info`; split-limit sub-limits never certified from one figure).
+  The v1.2 `insuranceMinimums` shape carries all statutory components
+  machine-readably (the security $50k personal-injury sub-limit no longer lives
+  only in prose). STILL OPEN: the transport floors (49 CFR 387.33T, 43 TAC
+  218.16) are AUTO-liability — comparing them against the extracted
+  GENERAL-liability limit would grade the wrong policy line, so they keep
+  presence+expiry semantics until extraction reads an auto-liability limit.
+  The comparison inherits extraction's cell-pinning accuracy (product bug #397
+  stays open and tracks separately).
 - **A matched document with no readable expiry** on a renewing obligation yields
   `NeedsDocumentInfo` (not `Satisfied`) — the engine will not certify currency it
-  can't determine.
+  can't determine. v1.2 extends this to fixed-annual obligations with undated
+  proof (see §6) and to conditional filings WITH proof reading `Satisfied`
+  (UNVER-5 — uploading proof must never read worse than having none).
 - **Conditional filings** (amusement AR-800 injury report) surface as
   `NotApplicable` until a triggering-event fact exists; the rationale states "file
   only if a reportable injury occurs."
+- **CMV weight/hazmat prongs are not modeled (CONF-24).** The transportation
+  gates encode only the passenger-capacity prong of the §548.001 / 49 CFR 383.5
+  CMV definitions; the >26,000 lb weight, hazmat, school-bus and household-goods
+  prongs have no frozen fact. A heavy (>26,000 lb) vehicle seating ≤15 is out of
+  v1 scope — recorded in the rule files' headers and local-obligations wording.
+- **Charter non-expiring TxDMV certificates (CONF-25).** The charter/scheduled
+  service-type split has no frozen fact, so the TxDMV registration cadence is
+  `renewal`: a lawful non-expiring charter certificate with no printed expiry
+  reads `NeedsDocumentInfo` (never a wrong verdict, never Satisfied) pending the
+  charter-definition confirm (dossier Open question 4).
+- **`employeeCount` is a current-headcount proxy (CONF-7).** 29 CFR 1904.1's
+  exemption turns on headcount "at any time during the LAST calendar year"; the
+  registry has no last-year fact, so the OSHA gate uses current headcount and the
+  rationale/userAction carry the correct statutory test in prose.
+- **The TFER minimal-risk exemption is not encodable (CONF-9).** 25 TAC
+  228.31(c) exempts prepackaged-only / no-exposed-TCS operations from the CFM
+  requirement; no TCS/prepackaged fact exists, so a minimal-risk operation
+  answering `preparesOrServesFood=true` still sees the obligation — the
+  userAction states the exemption.
 
 ### Founder/counsel gates (NOT code — carry to RULES-REVIEW.md)
 

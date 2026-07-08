@@ -54,12 +54,68 @@ public enum RuleConfidence
 /// <summary>A month/day pair for a fixed-annual cadence (SCHEMA §5 <c>fixedDate</c>, e.g. franchise tax May 15).</summary>
 public sealed record MonthDay(int Month, int Day);
 
-/// <summary>Statutory insurance floor for <c>category = insurance</c> rules (SCHEMA §2).</summary>
+/// <summary>The structural shape of a statutory insurance floor — exactly as the statute states it (v1.2).</summary>
+[JsonConverter(typeof(InsuranceFloorKindJsonConverter))]
+public enum InsuranceFloorKind
+{
+    /// <summary>One combined single limit per occurrence (e.g. §2151.1012's "$1 million per occurrence" CSL).</summary>
+    CombinedSingleLimit,
+
+    /// <summary>Split per-occurrence limits, optionally with a statutory aggregate (e.g. §1702.124(c)'s three limits).</summary>
+    SplitLimits
+}
+
+/// <summary>Which policy line the statutory floor applies to (v1.2). Drives whether the extracted
+/// general-liability limit is a valid comparison input — an auto-liability floor must NEVER be compared
+/// against a document's GENERAL-liability limit (wrong policy line).</summary>
+[JsonConverter(typeof(InsuranceCoverageLineJsonConverter))]
+public enum InsuranceCoverageLine
+{
+    GeneralLiability,
+    AutoLiability
+}
+
+/// <summary>
+/// Statutory insurance floor for <c>category = insurance</c> rules (SCHEMA §2, reshaped v1.2 to represent
+/// exactly what each statute states — no field carries a figure the cited section does not contain).
+/// <see cref="Aggregate"/> is null when the statute states no aggregate (e.g. §2151.1012).
+/// </summary>
 public sealed record InsuranceMinimums
 {
-    public decimal PerOccurrence { get; init; }
-    public decimal Aggregate { get; init; }
+    /// <summary>NULLABLE so an omitted <c>kind</c> is detectable (same fail-safe rationale as confidence); the loader requires it.</summary>
+    public InsuranceFloorKind? Kind { get; init; }
+
+    /// <summary>NULLABLE so an omitted <c>coverageLine</c> can never silently default into the general-liability
+    /// comparison path (member 0) — the loader requires it. The evaluator compares ONLY an explicit general-liability line.</summary>
+    public InsuranceCoverageLine? CoverageLine { get; init; }
+
+    /// <summary>The combined single limit per occurrence. Set iff <see cref="Kind"/> is <see cref="InsuranceFloorKind.CombinedSingleLimit"/>.</summary>
+    public decimal? PerOccurrence { get; init; }
+
+    /// <summary>Split limit: per-occurrence bodily injury + property damage (e.g. §1702.124(c)(1)). Set iff <see cref="Kind"/> is <see cref="InsuranceFloorKind.SplitLimits"/>.</summary>
+    public decimal? PerOccurrenceBodilyInjuryAndPropertyDamage { get; init; }
+
+    /// <summary>Split limit: per-occurrence personal injury (e.g. §1702.124(c)(2)). Only when the statute states one.</summary>
+    public decimal? PerOccurrencePersonalInjury { get; init; }
+
+    /// <summary>Statutory aggregate (e.g. §1702.124(c)(3)'s $200,000). NULL when the statute states none — never fabricated.</summary>
+    public decimal? Aggregate { get; init; }
+
     public string Currency { get; init; } = "USD";
+
+    /// <summary>The single-number floor an extracted per-occurrence liability limit is compared against.</summary>
+    [JsonIgnore]
+    public decimal ComparableFloor => Kind == InsuranceFloorKind.CombinedSingleLimit
+        ? PerOccurrence!.Value
+        : PerOccurrenceBodilyInjuryAndPropertyDamage!.Value;
+
+    /// <summary>
+    /// True when meeting <see cref="ComparableFloor"/> verifies the WHOLE statutory floor from one extracted
+    /// number. False for split limits / statutory aggregates: sub-limits can't be read from a single
+    /// extracted general-liability figure, so the engine must not certify full adequacy.
+    /// </summary>
+    [JsonIgnore]
+    public bool FullyVerifiableFromSingleLimit => Kind == InsuranceFloorKind.CombinedSingleLimit && Aggregate is null;
 }
 
 /// <summary>Legal citation for a rule version (SCHEMA §2).</summary>
@@ -96,6 +152,13 @@ public sealed record Cadence
     public MonthDay? FixedDate { get; init; }
     public int GracePeriodDays { get; init; }
 
+    /// <summary>
+    /// When true, a period-based due date rounds to the LAST day of the due month (v1.2). Encodes
+    /// "calendar months" recency language (e.g. 14 CFR 107.65's "previous 24 calendar months" runs to the
+    /// end of the 24th month, not the same-day anniversary). Requires <see cref="PeriodMonths"/>.
+    /// </summary>
+    public bool RoundToMonthEnd { get; init; }
+
     /// <summary>Grace periods must be independently sourced (SCHEMA §5); null when <see cref="GracePeriodDays"/> is 0.</summary>
     public string? GraceCitation { get; init; }
 }
@@ -110,7 +173,13 @@ public sealed record RuleVersion
     public int Version { get; init; }
     public DateOnly ValidFrom { get; init; }
     public DateOnly? ValidTo { get; init; }
-    public RuleConfidence Confidence { get; init; }
+
+    /// <summary>
+    /// NULLABLE so an omitted <c>confidence</c> key is DETECTABLE: a non-nullable enum would silently
+    /// default to <see cref="RuleConfidence.Verified"/> (member 0) and ship an unreviewed rule in the
+    /// verified-only production posture. The loader rejects null (fail-safe direction).
+    /// </summary>
+    public RuleConfidence? Confidence { get; init; }
 
     /// <summary>The condition tree (SCHEMA §4). Evaluated with three-valued Kleene logic.</summary>
     public Applicability Applicability { get; init; } = null!;

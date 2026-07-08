@@ -18,7 +18,13 @@
           "validFrom": "2020-01-01",
           "validTo": null,
           "confidence": "verified",
-          "applicability": { "fact": "employeeCount", "op": "gte", "value": 1 },
+          "applicability": {
+            "any": [
+              { "fact": "employeeCount", "op": "gte", "value": 1 },
+              { "fact": "isFranchiseTaxableEntity", "op": "eq", "value": true },
+              { "fact": "servesOrSellsAlcohol", "op": "eq", "value": true }
+            ]
+          },
           "obligation": {
             "name": "Federal Employer Identification Number (EIN)",
             "documentType": "other",
@@ -35,13 +41,13 @@
           },
           "rationale": "Federal law requires a venue with employees (or organized as a partnership, LLC, or corporation, or paying employment/alcohol taxes) to obtain an Employer Identification Number from the IRS (IRC 6109). An EIN is a one-time, permanent identifier - it does not expire and is not renewed.",
           "userAction": "Confirm the venue has obtained its federal Employer Identification Number (EIN) - a one-time registration.",
-          "notes": "Recorded as a one-time, non-renewing identifier (no reminders). The dossier flags EIN as a standing identifier rather than a recurring obligation."
+          "notes": "Recorded as a one-time, non-renewing identifier (no reminders). The dossier flags EIN as a standing identifier rather than a recurring obligation. Applicability encodes the dossier's full trigger within the frozen vocabulary: employees OR a registered taxable entity (isFranchiseTaxableEntity is the registry's proxy for organized-as-LLC/corp/partnership) OR alcohol taxes (servesOrSellsAlcohol); the pays-employment/excise-taxes prong is covered by the employee leaf (CONF-5)."
         }
       ]
     },
     {
       "id": "fed-venue-osha-injury-log",
-      "obligationRef": "OBL-FED-VENUE-003",
+      "obligationRef": "OBL-FED-VENUE-004",
       "jurisdiction": "us-fed",
       "entityTypes": ["venue-org"],
       "category": "filing",
@@ -69,13 +75,13 @@
           },
           "rationale": "Federal OSHA requires a venue that had 11 or more employees at any time during the last calendar year (and is not in a partially exempt industry such as a restaurant) to keep the OSHA 300 injury log and 301 reports and to post the 300A annual summary from February 1 through April 30 each year (29 CFR 1904). Texas private employers are under federal OSHA.",
           "userAction": "If the venue had 11 or more employees last year, confirm it maintains the OSHA 300 log and posts the 300A summary (February 1 through April 30 each year).",
-          "notes": "Posting window is Feb 1-Apr 30; the fixed date models the Feb 1 posting deadline. A venue classified as a restaurant (NAICS 7221/7222) is exempt."
+          "notes": "Posting window is Feb 1-Apr 30; the fixed date models the Feb 1 posting deadline. A venue classified as a restaurant (NAICS 7221/7222) is exempt. The employeeCount fact is a CURRENT-headcount proxy for 1904.1's 'at any time during the last calendar year' test (the frozen registry has no last-year fact); the rationale and userAction carry the correct last-calendar-year test in prose (CONF-7)."
         }
       ]
     },
     {
       "id": "fed-venue-ttb-alcohol-dealer",
-      "obligationRef": "OBL-FED-VENUE-004",
+      "obligationRef": "OBL-FED-VENUE-003",
       "jurisdiction": "us-fed",
       "entityTypes": ["venue-org"],
       "category": "filing",
@@ -101,9 +107,9 @@
             "effectiveDateOfText": "current CFR (part 31 as revised after the 2008 special-tax repeal)",
             "verifiedDate": "2026-07-07"
           },
-          "rationale": "Federal law requires a venue that sells alcohol at retail for on-premise consumption to register with the TTB as an alcohol dealer by filing Form 5630.5d before commencing business; no federal permit or special tax applies (27 CFR 31.111). This is effectively a one-time filing, re-filed only when the registered information changes.",
-          "userAction": "If the venue serves or sells alcohol, confirm it has filed its TTB alcohol dealer registration (Form 5630.5d).",
-          "notes": "Held at 'probable' because ttb.gov and the primary CFR host could not be fetched live; the operative sentence is quoted from the Cornell LII reproduction and corroborated by the Federal Register repeal notice. The identical caterer TTB registration is verified via eCFR."
+          "rationale": "Federal law requires a venue that sells alcohol at retail for on-premise consumption to register with the TTB as an alcohol dealer by filing Form 5630.5d before commencing business; no federal permit or special tax applies (27 CFR 31.111). This is effectively a one-time filing, re-filed only when the registered information changes. The registration duty reaches dealers - entities that SELL alcohol; a venue that only pours client-supplied alcohol without selling it is not a dealer.",
+          "userAction": "If the venue sells alcohol at retail, confirm it has filed its TTB alcohol dealer registration (Form 5630.5d). A serve-only (client-supplied, no sale) venue is not a TTB dealer.",
+          "notes": "Held at 'probable' because ttb.gov and the primary CFR host could not be fetched live; the operative sentence is quoted from the Cornell LII reproduction and corroborated by the Federal Register repeal notice. The identical caterer TTB registration is verified via eCFR. The servesOrSellsAlcohol fact is broader than the statutory sells-at-retail trigger (a serve-only/BYOB venue answers yes) - the rationale/userAction carry the correct legal test; a sells-only fact split is a future registry revision (CONF-6)."
         }
       ]
     }

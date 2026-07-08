@@ -78,6 +78,7 @@ public class CadenceCalculatorTests
 
     [Theory]
     [InlineData("2026-04-30", CadenceTiming.NotYetDue)] // due - 32 days, before the 30-day window
+    [InlineData("2026-05-01", CadenceTiming.NotYetDue)] // due - 31 days: the EXACT last day outside the window (UNVER-28)
     [InlineData("2026-05-02", CadenceTiming.DueSoon)]   // due - 30 days, window opens (inclusive)
     [InlineData("2026-06-01", CadenceTiming.DueSoon)]   // exactly due
     [InlineData("2026-06-11", CadenceTiming.DueSoon)]   // due + 10 = end of grace (inclusive)

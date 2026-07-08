@@ -27,11 +27,12 @@ public class RealRuleDataLoadTests
     }
 
     [Fact]
-    public void All_ten_jurisdiction_entity_files_are_embedded()
+    public void All_eleven_rule_data_files_are_embedded()
     {
         // 6 entity types across (us-fed + us-tx), minus the (jurisdiction, entity) pairs with no
-        // encodable obligation: no us-fed/security-service and no us-tx/photographer-videographer.
-        EmbeddedRuleData.ResourceNames.Should().HaveCount(10);
+        // encodable obligation (no us-fed/security-service, no us-tx/photographer-videographer),
+        // plus us-tx/cross-cutting.json (the multi-entity sales-tax rule, CONF-17).
+        EmbeddedRuleData.ResourceNames.Should().HaveCount(11);
     }
 
     [Fact]
@@ -41,12 +42,12 @@ public class RealRuleDataLoadTests
         var prod = EmbeddedRuleData.LoadAll(); // DEFAULT = production posture: verified-only + review-gated excluded
         var verifiedInclGated = EmbeddedRuleData.LoadAll(new RuleLoadOptions(VerifiedOnly: true, IncludeReviewGated: true));
 
-        all.Rules.Should().HaveCount(39, "36 verified + 3 probable obligations are encoded");
-        verifiedInclGated.Rules.Should().HaveCount(36, "the 3 probable rules do not ship in the verified posture");
+        all.Rules.Should().HaveCount(40, "37 verified + 3 probable obligations are encoded (the 40th is the Pass-5 tx-venue-wc-coverage-notice, SPLIT-3)");
+        verifiedInclGated.Rules.Should().HaveCount(37, "the 3 probable rules do not ship in the verified posture");
 
-        // Production DEFAULT now also holds back the review-gated TX security rule-set (A-5/CC-8): 39 minus
-        // the 3 probable minus the 5 verified TX-security rules = 31.
-        prod.Rules.Should().HaveCount(31, "minus 3 probable and minus the 5 review-gated TX security rules");
+        // Production DEFAULT now also holds back the review-gated TX security rule-set (A-5/CC-8): 40 minus
+        // the 3 probable minus the 5 verified TX-security rules = 32.
+        prod.Rules.Should().HaveCount(32, "minus 3 probable and minus the 5 review-gated TX security rules");
         prod.Rules.Should().OnlyContain(
             r => r.Versions.All(v => v.Confidence == RuleConfidence.Verified),
             "the default load keeps only verified versions");
@@ -85,18 +86,66 @@ public class RealRuleDataLoadTests
     }
 
     [Fact]
-    public void Insurance_minimums_appear_only_on_insurance_rules_and_are_positive()
+    public void Insurance_minimums_appear_exactly_on_insurance_rules_with_a_declared_shape()
     {
+        // BOTH directions (UNVER-21): minimums only on insurance rules AND every insurance rule carries them.
         var all = EmbeddedRuleData.LoadAll(FullSet);
 
         foreach (var rule in all.Rules)
         foreach (var version in rule.Versions)
         {
-            if (version.InsuranceMinimums is null) continue;
-            rule.Category.Should().Be("insurance", $"{rule.Id} carries insuranceMinimums");
-            version.InsuranceMinimums.PerOccurrence.Should().BeGreaterThan(0);
-            version.InsuranceMinimums.Currency.Should().Be("USD");
+            if (rule.Category == "insurance")
+            {
+                version.InsuranceMinimums.Should().NotBeNull($"{rule.Id} is an insurance rule — the statutory floor is its point");
+                version.InsuranceMinimums!.Kind.Should().NotBeNull($"{rule.Id} must declare the floor's statutory shape");
+                version.InsuranceMinimums.CoverageLine.Should().NotBeNull($"{rule.Id} must declare which policy line the floor binds");
+                version.InsuranceMinimums.Currency.Should().Be("USD");
+            }
+            else
+            {
+                version.InsuranceMinimums.Should().BeNull($"{rule.Id} is not an insurance rule");
+            }
         }
+    }
+
+    [Fact]
+    public void Every_encoded_insurance_floor_is_pinned_to_its_statutory_figures()
+    {
+        // UNVER-25: pin ALL six floors numerically (incl. the review-gated security set) so a data edit
+        // can never silently shift a statutory dollar amount. Each figure traces to the dossier's
+        // verbatim Operative text and was re-verified against live primary sources 2026-07-08.
+        var all = EmbeddedRuleData.LoadAll(new RuleLoadOptions(VerifiedOnly: true, IncludeReviewGated: true));
+        InsuranceMinimums Of(string id) => all.Rules.Single(r => r.Id == id).Versions[0].InsuranceMinimums!;
+
+        // 49 CFR 387.33T Schedule of Limits rows (a)/(b) — auto-liability, no statutory aggregate.
+        var fed16 = Of("fed-transportation-financial-responsibility-16plus");
+        fed16.Kind.Should().Be(InsuranceFloorKind.CombinedSingleLimit);
+        fed16.CoverageLine.Should().Be(InsuranceCoverageLine.AutoLiability);
+        fed16.PerOccurrence.Should().Be(5_000_000m);
+        fed16.Aggregate.Should().BeNull("§387.33T states no aggregate");
+
+        var fed15 = Of("fed-transportation-financial-responsibility-15orless");
+        fed15.PerOccurrence.Should().Be(1_500_000m);
+        fed15.CoverageLine.Should().Be(InsuranceCoverageLine.AutoLiability);
+
+        // 43 TAC 218.16(a) intrastate tiers — auto-liability, no statutory aggregate.
+        Of("tx-transportation-intrastate-insurance-27plus").PerOccurrence.Should().Be(5_000_000m);
+        Of("tx-transportation-intrastate-insurance-16to26").PerOccurrence.Should().Be(500_000m);
+
+        // Tex. Occ. Code 2151.1012 — $1M per-occurrence CSL, NO statutory aggregate (CONF-16).
+        var inflatable = Of("tx-event-rental-amusement-ride-insurance");
+        inflatable.Kind.Should().Be(InsuranceFloorKind.CombinedSingleLimit);
+        inflatable.CoverageLine.Should().Be(InsuranceCoverageLine.GeneralLiability);
+        inflatable.PerOccurrence.Should().Be(1_000_000m);
+        inflatable.Aggregate.Should().BeNull("§2151.1012 states no aggregate — a mirrored value would be a fabricated figure");
+
+        // Tex. Occ. Code 1702.124(c) — the three statutory limits, all machine-readable (v1.2 split shape).
+        var securityGl = Of("tx-security-general-liability-insurance");
+        securityGl.Kind.Should().Be(InsuranceFloorKind.SplitLimits);
+        securityGl.CoverageLine.Should().Be(InsuranceCoverageLine.GeneralLiability);
+        securityGl.PerOccurrenceBodilyInjuryAndPropertyDamage.Should().Be(100_000m);
+        securityGl.PerOccurrencePersonalInjury.Should().Be(50_000m);
+        securityGl.Aggregate.Should().Be(200_000m);
     }
 
     [Fact]

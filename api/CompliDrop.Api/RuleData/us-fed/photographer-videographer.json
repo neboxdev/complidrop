@@ -4,7 +4,8 @@
 {
   "schemaVersion": 1,
   "localObligations": [
-    "Municipal / county film & photography shoot permit (public property, parks, closed streets)",
+    "Municipal / county film & photography shoot permit (public property, parks, closed streets; some venues and National Park Service / federal land units require their own)",
+    "Federal-land commercial filming/photography permit (NPS / USFS / BLM land units)",
     "Texas state-park commercial photography permit (Texas Parks & Wildlife)",
     "Local business registration (city / county)"
   ],
@@ -63,15 +64,16 @@
             "authority": "Federal Aviation Administration (FAA)",
             "perWorker": true
           },
-          "cadence": { "kind": "renewal", "anchor": "issueDate", "periodMonths": 24, "gracePeriodDays": 0 },
+          "cadence": { "kind": "renewal", "anchor": "issueDate", "periodMonths": 24, "roundToMonthEnd": true, "gracePeriodDays": 0 },
           "citation": {
             "section": "14 CFR 107.65",
-            "url": "https://www.law.cornell.edu/cfr/text/14/107.65",
+            "url": "https://www.ecfr.gov/current/title-14/chapter-I/subchapter-F/part-107/subpart-C/section-107.65",
             "effectiveDateOfText": "Amdt. 107-8, 86 FR 4382, Jan. 15, 2021 (eff. Apr 6, 2021)",
-            "verifiedDate": "2026-07-07"
+            "verifiedDate": "2026-07-08"
           },
-          "rationale": "Federal law requires a Part 107 remote pilot to complete recurrent training (or an initial/recurrent knowledge test) within the previous 24 calendar months to keep exercising remote-pilot privileges (14 CFR 107.65). This 24-month recency, measured from the completion date, is the recurring obligation to track - not a certificate expiry.",
-          "userAction": "For a drone-flying vendor, confirm the pilot's Part 107 recurrent training was completed within the last 24 calendar months."
+          "rationale": "Federal law requires a Part 107 remote pilot to complete recurrent training (or an initial/recurrent knowledge test) within the previous 24 calendar months to keep exercising remote-pilot privileges (14 CFR 107.65). \"Calendar months\" means the window runs through the END of the 24th month after the completion date - that month-end is the recurring deadline to track, not a certificate expiry.",
+          "userAction": "For a drone-flying vendor, confirm the pilot's Part 107 recurrent training was completed within the last 24 calendar months.",
+          "notes": "Cadence rounds to month-end (roundToMonthEnd): a completion on 2026-03-10 keeps privileges through 2028-03-31, not 2028-03-10. Citation re-read on the official eCFR host 2026-07-08 (upgraded from the Cornell LII reproduction)."
         }
       ]
     },

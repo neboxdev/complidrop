@@ -76,7 +76,9 @@ public sealed class EntityProfile
             if (fact.Kind != value.Kind)
                 throw new ArgumentException($"Fact '{name}' is {fact.Kind} but was given a {value.Kind} value.", nameof(facts));
         }
-        _facts = facts;
+        // Defensive copy: storing the caller's reference would let a reused builder (or any later mutation
+        // of the source dictionary) change an already-constructed profile, bypassing the validation above.
+        _facts = facts.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
     }
 
     /// <summary>An empty profile — every fact unknown.</summary>
@@ -111,8 +113,10 @@ public sealed class EntityProfileBuilder
     public EntityProfileBuilder OperatesForklifts(bool value) => Set(FactNames.OperatesForklifts, FactValue.Of(value));
     public EntityProfileBuilder ProvidesArmedGuards(bool value) => Set(FactNames.ProvidesArmedGuards, FactValue.Of(value));
     public EntityProfileBuilder ProvidesArmedCloseProtection(bool value) => Set(FactNames.ProvidesArmedCloseProtection, FactValue.Of(value));
+    public EntityProfileBuilder ProvidesUnarmedGuards(bool value) => Set(FactNames.ProvidesUnarmedGuards, FactValue.Of(value));
     public EntityProfileBuilder OperatesVehiclesForHire(bool value) => Set(FactNames.OperatesVehiclesForHire, FactValue.Of(value));
     public EntityProfileBuilder OperatesInterstate(bool value) => Set(FactNames.OperatesInterstate, FactValue.Of(value));
+    public EntityProfileBuilder OperatesIntrastate(bool value) => Set(FactNames.OperatesIntrastate, FactValue.Of(value));
     public EntityProfileBuilder MaxPassengerSeatingCapacity(int seats) => Set(FactNames.MaxPassengerSeatingCapacity, FactValue.Of(seats));
     public EntityProfileBuilder OperatesDronesCommercially(bool value) => Set(FactNames.OperatesDronesCommercially, FactValue.Of(value));
     public EntityProfileBuilder SellsTaxableGoodsOrServices(bool value) => Set(FactNames.SellsTaxableGoodsOrServices, FactValue.Of(value));

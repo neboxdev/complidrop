@@ -27,10 +27,13 @@ public class RuleDataGoldenTests
     private static ObligationResult? Find(ObligationReport report, string obligationRef) =>
         report.Obligations.FirstOrDefault(o => o.ObligationRef == obligationRef);
 
+    // A pure-direction shuttle: interstate XOR intrastate. The TX rules gate on operatesIntrastate=true
+    // (v1.2, CONF-23 — §643.002 exempts only EXCLUSIVELY-interstate carriers), so both facts are set.
     private static EntityProfile ShuttleProfile(bool interstate, int seats) =>
         EntityProfile.Builder().State("US-TX").EntityType("transportation")
             .OperatesVehiclesForHire(true)
             .OperatesInterstate(interstate)
+            .OperatesIntrastate(!interstate)
             .MaxPassengerSeatingCapacity(seats)
             .Build();
 
@@ -45,7 +48,9 @@ public class RuleDataGoldenTests
         var profile = EntityProfile.Builder()
             .State("US-TX").EntityType("caterer")
             .PreparesOrServesFood(true)
+            .EmployeeCount(5) // food-handler training gates on having food EMPLOYEES (CONF-12)
             .ServesOrSellsAlcohol(true)
+            .SellsTaxableGoodsOrServices(true) // the cross-cutting sales-tax permit reaches caterers (CONF-17)
             .OperatesFoodVendingVehicle(false) // a normal caterer, not a food truck
             .Build();
 
@@ -58,9 +63,12 @@ public class RuleDataGoldenTests
         Find(report, "OBL-TX-CATERER-002")!.Status.Should().Be(ObligationStatus.Missing); // certified food manager
         Find(report, "OBL-TX-CATERER-003")!.Status.Should().Be(ObligationStatus.Missing); // food handler training
 
-        // Alcohol obligations: the Texas TABC permit AND the federal TTB registration.
-        Find(report, "OBL-TX-CATERER-004")!.Status.Should().Be(ObligationStatus.Missing); // TABC Mixed Beverage (TX)
+        // Alcohol obligations: the Texas TABC retail permit AND the federal TTB registration.
+        Find(report, "OBL-TX-CATERER-004")!.Status.Should().Be(ObligationStatus.Missing); // TABC retail alcohol permit (TX)
         Find(report, "OBL-FED-CATERER-002")!.Status.Should().Be(ObligationStatus.Missing); // TTB dealer registration (FED)
+
+        // The cross-cutting Texas sales & use tax permit reaches the caterer entity type (CONF-17).
+        Find(report, "OBL-TX-VENUE-004")!.Status.Should().Be(ObligationStatus.Missing);
 
         // The food-vending-vehicle license does not apply to a caterer who does not run a food truck.
         Find(report, "OBL-TX-CATERER-007")!.Status.Should().Be(ObligationStatus.NotApplicable);
@@ -73,12 +81,46 @@ public class RuleDataGoldenTests
         report.Completeness.Text.Should().Contain("not a complete list");
     }
 
+    [Fact]
+    public void A_beer_wine_only_caterer_is_asked_for_the_neutral_tabc_retail_permit_not_specifically_mb()
+    {
+        // CONF-8: the required TABC permit TYPE depends on what is served (MB for spirits, BG for
+        // beer/wine only) — the obligation must be the neutral retail permit, never MB-specifically.
+        var rule = ProdRules.Rules.Single(r => r.Id == "tx-caterer-tabc-mixed-beverage");
+        var obligation = rule.Versions[0].Obligation;
+
+        obligation.Name.Should().Contain("Mixed Beverage or Wine & Malt Beverage");
+        obligation.DocumentSubType.Should().Be("tabc-retail-alcohol");
+        rule.Versions[0].Rationale.Should().Contain("beer/wine");
+    }
+
+    [Fact]
+    public void A_food_preparing_venue_gets_the_cfm_and_food_handler_obligations()
+    {
+        // UNVER-0: the TFER worker credentials reach every food establishment, including a
+        // food-preparing VENUE — not only caterers.
+        var venue = EntityProfile.Builder()
+            .State("US-TX").EntityType("venue-org")
+            .PreparesOrServesFood(true)
+            .EmployeeCount(12)
+            .Build();
+
+        var report = RegulatoryObligationEvaluator.Evaluate(venue, [], Eval, ProdRules);
+
+        Find(report, "OBL-TX-CATERER-002")!.Status.Should().Be(ObligationStatus.Missing); // certified food manager
+        Find(report, "OBL-TX-CATERER-003")!.Status.Should().Be(ObligationStatus.Missing); // food handler training
+    }
+
     // ---------------- (b) interstate vs intrastate 20-seat shuttle (legal-req #1) ----------------
 
     private static EntityProfileBuilder Shuttle20() =>
         EntityProfile.Builder().State("US-TX").EntityType("transportation")
             .OperatesVehiclesForHire(true)
             .MaxPassengerSeatingCapacity(20);
+
+    /// <summary>Pure interstate / pure intrastate 20-seat shuttle (both direction facts set).</summary>
+    private static EntityProfile Shuttle20Pure(bool interstate) =>
+        Shuttle20().OperatesInterstate(interstate).OperatesIntrastate(!interstate).Build();
 
     private static IEnumerable<ObligationResult> ApplicableTransportInsurance(ObligationReport report) =>
         report.Obligations.Where(o =>
@@ -88,8 +130,8 @@ public class RuleDataGoldenTests
     [Fact]
     public void The_same_20_seat_shuttle_faces_different_insurance_floors_interstate_vs_intrastate()
     {
-        var interstate = RegulatoryObligationEvaluator.Evaluate(Shuttle20().OperatesInterstate(true).Build(), [], Eval, ProdRules);
-        var intrastate = RegulatoryObligationEvaluator.Evaluate(Shuttle20().OperatesInterstate(false).Build(), [], Eval, ProdRules);
+        var interstate = RegulatoryObligationEvaluator.Evaluate(Shuttle20Pure(interstate: true), [], Eval, ProdRules);
+        var intrastate = RegulatoryObligationEvaluator.Evaluate(Shuttle20Pure(interstate: false), [], Eval, ProdRules);
 
         // Interstate: the only APPLICABLE passenger-liability floor is the $5,000,000 federal one.
         ApplicableTransportInsurance(interstate).Should().ContainSingle()
@@ -105,15 +147,29 @@ public class RuleDataGoldenTests
     }
 
     [Fact]
+    public void A_mixed_interstate_and_intrastate_carrier_owes_both_layers()
+    {
+        // CONF-23: §643.002 exempts only carriers operating EXCLUSIVELY in interstate commerce, so a
+        // carrier doing BOTH owes the federal layer AND the TxDMV registration + TX insurance filing.
+        var mixed = Shuttle20().OperatesInterstate(true).OperatesIntrastate(true).Build();
+
+        var report = RegulatoryObligationEvaluator.Evaluate(mixed, [], Eval, ProdRules);
+
+        Find(report, "OBL-FED-TRANSPORTATION-001")!.Status.Should().Be(ObligationStatus.Missing); // FMCSA authority
+        Find(report, "OBL-TX-TRANSPORTATION-001")!.Status.Should().Be(ObligationStatus.Missing);  // TxDMV registration
+        ApplicableTransportInsurance(report).Should().HaveCount(2, "both the federal and the Texas insurance filings apply to a mixed carrier");
+    }
+
+    [Fact]
     public void Fmcsa_operating_authority_appears_only_for_the_interstate_shuttle()
     {
-        var interstate = RegulatoryObligationEvaluator.Evaluate(Shuttle20().OperatesInterstate(true).Build(), [], Eval, ProdRules);
-        var intrastate = RegulatoryObligationEvaluator.Evaluate(Shuttle20().OperatesInterstate(false).Build(), [], Eval, ProdRules);
+        var interstate = RegulatoryObligationEvaluator.Evaluate(Shuttle20Pure(interstate: true), [], Eval, ProdRules);
+        var intrastate = RegulatoryObligationEvaluator.Evaluate(Shuttle20Pure(interstate: false), [], Eval, ProdRules);
 
         Find(interstate, "OBL-FED-TRANSPORTATION-001")!.Status.Should().Be(ObligationStatus.Missing);
         Find(intrastate, "OBL-FED-TRANSPORTATION-001")!.Status.Should().Be(ObligationStatus.NotApplicable);
 
-        // TxDMV intrastate registration is the mirror image.
+        // TxDMV intrastate registration is the mirror image (for PURE-direction carriers).
         Find(intrastate, "OBL-TX-TRANSPORTATION-001")!.Status.Should().Be(ObligationStatus.Missing);
         Find(interstate, "OBL-TX-TRANSPORTATION-001")!.Status.Should().Be(ObligationStatus.NotApplicable);
     }
@@ -121,7 +177,7 @@ public class RuleDataGoldenTests
     [Fact]
     public void The_texas_cdl_suppresses_the_federal_cdl_so_it_is_not_double_emitted()
     {
-        var report = RegulatoryObligationEvaluator.Evaluate(Shuttle20().OperatesInterstate(true).Build(), [], Eval, ProdRules);
+        var report = RegulatoryObligationEvaluator.Evaluate(Shuttle20Pure(interstate: true), [], Eval, ProdRules);
 
         Find(report, "OBL-FED-TRANSPORTATION-004").Should().BeNull("the applicable Texas CDL implements the federal CDL floor");
         Find(report, "OBL-TX-TRANSPORTATION-003")!.Status.Should().Be(ObligationStatus.Missing);
@@ -156,6 +212,7 @@ public class RuleDataGoldenTests
         var profile = EntityProfile.Builder().State("US-TX").EntityType("event-rental")
             .RentsInflatableAmusementDevices(false)
             .OperatesForklifts(false)
+            .SellsTaxableGoodsOrServices(false) // the cross-cutting sales-tax permit reaches event-rental (CONF-17)
             .Build();
 
         var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, ProdRules);
@@ -164,7 +221,23 @@ public class RuleDataGoldenTests
         Find(report, "OBL-TX-EVENT-002")!.Status.Should().Be(ObligationStatus.NotApplicable);
         Find(report, "OBL-TX-EVENT-003")!.Status.Should().Be(ObligationStatus.NotApplicable);
         report.Obligations.Should().OnlyContain(o => o.Status == ObligationStatus.NotApplicable,
-            "nothing is actively required for an event-rental with no inflatables and no forklifts");
+            "nothing is actively required for an event-rental with no inflatables, no forklifts and no taxable sales");
+    }
+
+    [Fact]
+    public void An_event_rental_selling_taxable_rentals_owes_the_sales_tax_permit()
+    {
+        // CONF-17: renting tables/chairs/tents/inflatables is a taxable activity — the cross-cutting
+        // sales & use tax permit (canonical entry on venue-org) must reach event-rental entities.
+        var profile = EntityProfile.Builder().State("US-TX").EntityType("event-rental")
+            .RentsInflatableAmusementDevices(false)
+            .OperatesForklifts(false)
+            .SellsTaxableGoodsOrServices(true)
+            .Build();
+
+        var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, ProdRules);
+
+        Find(report, "OBL-TX-VENUE-004")!.Status.Should().Be(ObligationStatus.Missing);
     }
 
     // ---------------- (d) unset operatesInterstate ⇒ needs-profile-info, never satisfied ----------------
@@ -211,6 +284,7 @@ public class RuleDataGoldenTests
     public void The_single_applicable_transport_insurance_floor_matches_capacity_and_interstate(
         int seats, bool interstate, string? expectedAmount)
     {
+        // ShuttleProfile is pure-direction (interstate XOR intrastate), so exactly one floor may apply.
         var report = RegulatoryObligationEvaluator.Evaluate(ShuttleProfile(interstate, seats), [], Eval, ProdRules);
 
         var applicable = report.Obligations.Where(o =>
@@ -270,13 +344,25 @@ public class RuleDataGoldenTests
     }
 
     [Theory]
-    [InlineData(8, ObligationStatus.NotApplicable)]  // ≤10 passengers ⇒ below the UCR threshold (CC-6)
-    [InlineData(11, ObligationStatus.Missing)]       // >10 passengers ⇒ UCR applies
-    public void Ucr_applies_only_above_the_ten_passenger_threshold(int seats, ObligationStatus expected)
+    [InlineData(8)]   // even a carrier with NO qualifying CMV registers (lowest fee bracket)
+    [InlineData(11)]
+    [InlineData(40)]
+    public void Ucr_registration_applies_to_every_interstate_for_hire_carrier_regardless_of_capacity(int seats)
     {
+        // CONF-2 (reverses CC-6): the >10-passenger figure is the UCR FEE CMV definition, not the
+        // registration trigger — the dossier records that a small interstate shuttle with no qualifying
+        // CMV still registers at the lowest fleet bracket.
         var report = RegulatoryObligationEvaluator.Evaluate(ShuttleProfile(interstate: true, seats: seats), [], Eval, ProdRules);
 
-        Find(report, "OBL-FED-TRANSPORTATION-007")!.Status.Should().Be(expected);
+        Find(report, "OBL-FED-TRANSPORTATION-007")!.Status.Should().Be(ObligationStatus.Missing);
+    }
+
+    [Fact]
+    public void Ucr_registration_is_not_applicable_to_a_pure_intrastate_carrier()
+    {
+        var report = RegulatoryObligationEvaluator.Evaluate(ShuttleProfile(interstate: false, seats: 40), [], Eval, ProdRules);
+
+        Find(report, "OBL-FED-TRANSPORTATION-007")!.Status.Should().Be(ObligationStatus.NotApplicable);
     }
 
     // ---------------- (f) drone photographer — Part 107 recency issueDate cadence (T-4/T-6) ----------------
@@ -288,16 +374,26 @@ public class RuleDataGoldenTests
             .OperatesDronesCommercially(true)
             .Build();
 
-        // Recent recency training (issued 2025-06-01) ⇒ due 2027-06-01 ⇒ Satisfied with a tracked next-due date.
+        // Recent recency training (issued 2025-06-01): "24 CALENDAR months" runs to the END of the 24th
+        // month (14 CFR 107.65, CONF-0) ⇒ due 2027-06-30 ⇒ Satisfied with the month-end next-due date.
         var recent = new[] { new DocumentLike("rec-1", "certification", "faa-part107-recency", IssueDate: new DateOnly(2025, 6, 1)) };
         var recency = Find(RegulatoryObligationEvaluator.Evaluate(photographer, recent, Eval, ProdRules), "OBL-FED-PHOTOGRAPHER-002")!;
         recency.Status.Should().Be(ObligationStatus.Satisfied);
-        recency.NextDueDate.Should().Be(new DateOnly(2027, 6, 1), "the 24-month recency clock runs from the issue date");
+        recency.NextDueDate.Should().Be(new DateOnly(2027, 6, 30), "the 24-calendar-month recency window runs to the end of the 24th month after completion");
 
-        // Stale recency (issued 2024-01-01) ⇒ due 2026-01-01, already past ⇒ Expired.
+        // Stale recency (issued 2024-01-01) ⇒ current through 2026-01-31, already past at 2026-08-01 ⇒ Expired.
         var stale = new[] { new DocumentLike("rec-2", "certification", "faa-part107-recency", IssueDate: new DateOnly(2024, 1, 1)) };
         Find(RegulatoryObligationEvaluator.Evaluate(photographer, stale, Eval, ProdRules), "OBL-FED-PHOTOGRAPHER-002")!
             .Status.Should().Be(ObligationStatus.Expired);
+
+        // A pilot completing recency mid-month stays legally current through month-end 24 months later:
+        // issued 2024-08-10 ⇒ current through 2026-08-31, so at eval 2026-08-01 this is NOT Expired
+        // (the day-precision anniversary 2026-08-10 alone would also not be expired yet — the month-end
+        // distinction is pinned by the NextDueDate assertion above and the CadenceCalculator unit tests).
+        var midMonth = new[] { new DocumentLike("rec-3", "certification", "faa-part107-recency", IssueDate: new DateOnly(2024, 8, 10)) };
+        var midMonthResult = Find(RegulatoryObligationEvaluator.Evaluate(photographer, midMonth, Eval, ProdRules), "OBL-FED-PHOTOGRAPHER-002")!;
+        midMonthResult.Status.Should().Be(ObligationStatus.Expiring, "due 2026-08-31 is within the 30-day window of 2026-08-01");
+        midMonthResult.NextDueDate.Should().Be(new DateOnly(2026, 8, 31));
 
         // No issue date AND no expiry ⇒ can't determine currency ⇒ NeedsDocumentInfo (A-1), never Satisfied.
         var noDates = new[] { new DocumentLike("rec-3", "certification", "faa-part107-recency") };
@@ -468,7 +564,7 @@ public class RuleDataGoldenTests
         var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, ProdRules);
 
         report.Coverage.Should().Be(JurisdictionCoverage.NotCovered);
-        report.CoverageMessage.Should().Contain("Texas");
+        report.CoverageMessage.Should().Contain("US-TX", "the message derives the covered set from the loaded rules (UNVER-7)");
         report.Completeness.Text.Should().NotBeNullOrWhiteSpace();
     }
 
