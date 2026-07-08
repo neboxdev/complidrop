@@ -3,6 +3,11 @@
 // caterer liability-insurance (sourced absence). Local city/county food permits are noted-not-encoded.
 {
   "schemaVersion": 1,
+  "localObligations": [
+    "Local city / county / public-health-district food establishment permit (operative for most caterers)",
+    "Per-event Temporary Food Establishment permit (25 TAC 228.222)",
+    "Certificate of occupancy / fire-marshal / grease-trap / commissary approval for the kitchen (local)"
+  ],
   "rules": [
     {
       "id": "tx-caterer-food-establishment-permit",

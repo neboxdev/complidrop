@@ -60,13 +60,15 @@ public class EntityProfileAndReportTests
     }
 
     [Fact]
-    public void The_frozen_registry_contains_the_sixteen_v1_facts_with_expected_kinds()
+    public void The_frozen_registry_contains_the_v1_facts_with_expected_kinds()
     {
-        FactRegistry.All.Should().HaveCount(16);
+        // 16 frozen v1 facts + the additive v1.1 providesArmedCloseProtection (CC-3) = 17.
+        FactRegistry.All.Should().HaveCount(17);
         FactRegistry.Get(FactNames.State).Kind.Should().Be(FactKind.String);
         FactRegistry.Get(FactNames.EmployeeCount).Kind.Should().Be(FactKind.Int);
         FactRegistry.Get(FactNames.MaxPassengerSeatingCapacity).Kind.Should().Be(FactKind.Int);
         FactRegistry.Get(FactNames.OperatesInterstate).Kind.Should().Be(FactKind.Bool);
+        FactRegistry.Get(FactNames.ProvidesArmedCloseProtection).Kind.Should().Be(FactKind.Bool);
         FactRegistry.IsKnown("invented").Should().BeFalse();
     }
 

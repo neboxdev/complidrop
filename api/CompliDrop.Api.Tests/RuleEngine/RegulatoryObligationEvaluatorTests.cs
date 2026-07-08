@@ -169,15 +169,39 @@ public class RegulatoryObligationEvaluatorTests
     }
 
     [Fact]
-    public void A_different_entity_type_filters_out_all_type_scoped_rules()
+    public void A_set_but_unmodeled_entity_type_reports_not_covered_never_an_empty_all_clear()
     {
+        // C-1/A-3: a KNOWN-but-unmodeled entity type must not yield a bare empty all-clear (the old
+        // "filters out everything ⇒ Covered with 0 obligations" completeness illusion). It reports
+        // NotCovered ("no rule set is modeled"). The synthetic fixtures model only "test-widget".
         var profile = EntityProfile.Builder().State("US-TX").EntityType("test-unrelated").Build();
 
         var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, Rules());
 
-        report.Coverage.Should().Be(JurisdictionCoverage.Covered);
-        report.Obligations.Should().BeEmpty("every fixture rule is scoped to test-widget");
+        report.Coverage.Should().Be(JurisdictionCoverage.NotCovered);
+        report.CoverageMessage.Should().Contain("test-unrelated");
+        report.Obligations.Should().BeEmpty();
         report.Completeness.Text.Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Fact]
+    public void A_null_entity_type_makes_type_scoped_rules_needs_profile_info_never_missing_or_satisfied()
+    {
+        // C-1/A-3 (other direction): with entityType UNKNOWN the engine must not bypass the type filter into
+        // a Kleene-True and emit a wrong Missing/Satisfied (e.g. an {all:[]} rule). Every type-scoped rule
+        // reads needs-profile-info(entityType); entityType is surfaced in OutstandingProfileFacts.
+        var profile = EntityProfile.Builder().State("US-TX").Build(); // no EntityType
+
+        var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, Rules());
+
+        report.Coverage.Should().Be(JurisdictionCoverage.Covered);
+        report.Obligations.Should().NotBeEmpty();
+        report.Obligations.Should().OnlyContain(o => o.Status == ObligationStatus.NeedsProfileInfo,
+            "every synthetic rule is type-scoped, so all read needs-profile-info when the type is unknown");
+        report.Obligations.Should().OnlyContain(o => o.MissingFacts.Contains(FactNames.EntityType));
+        report.Obligations.Should().NotContain(o =>
+            o.Status == ObligationStatus.Missing || o.Status == ObligationStatus.Satisfied);
+        report.OutstandingProfileFacts.Should().Contain(FactNames.EntityType);
     }
 
     // ---------------- document presence / expiry status ----------------
@@ -186,6 +210,7 @@ public class RegulatoryObligationEvaluatorTests
     [InlineData("2027-08-01", ObligationStatus.Satisfied)] // far future
     [InlineData("2026-08-31", ObligationStatus.Expiring)]  // exactly 30 days out
     [InlineData("2026-08-11", ObligationStatus.Expiring)]  // 10 days out
+    [InlineData("2026-08-01", ObligationStatus.Expiring)]  // expires TODAY (== evaluation date): strict < so not yet Expired (T-5)
     [InlineData("2026-09-01", ObligationStatus.Satisfied)] // 31 days out — beyond the window
     [InlineData("2026-07-31", ObligationStatus.Expired)]   // yesterday
     public void License_status_follows_the_matched_documents_expiry(string expiry, ObligationStatus expected)
@@ -229,6 +254,66 @@ public class RegulatoryObligationEvaluatorTests
     }
 
     [Fact]
+    public void A_matched_renewal_document_with_no_readable_expiry_is_needs_document_info_never_satisfied()
+    {
+        // A-1: the widget license is a renewal anchored on documentExpiration. A matched document with NO
+        // printed expiry and no issue date yields no determinable due date — it must read NeedsDocumentInfo
+        // (we hold the doc but can't confirm currency), NEVER a false Satisfied.
+        var profile = WidgetInTexas().OperatesInterstate(false).ServesOrSellsAlcohol(false).Build();
+        var docs = new[] { new DocumentLike("lic-noexp", "license", "test-tx-widget-license") }; // no expiry, no issue
+
+        var report = RegulatoryObligationEvaluator.Evaluate(profile, docs, Eval, Rules());
+
+        var license = Find(report, "OBL-TEST-TX-LICENSE")!;
+        license.Status.Should().Be(ObligationStatus.NeedsDocumentInfo);
+        license.MatchedDocumentId.Should().Be("lic-noexp");
+    }
+
+    // ---------------- satisfiesFederal suppression does NOT fire on an UNKNOWN state rule (T-1) ----------------
+
+    [Fact]
+    public void An_unknown_state_rule_does_not_suppress_the_federal_obligation_it_would_implement()
+    {
+        // T-1: interstate=true but capacity UNSET makes the state operator-cert rule's applicability Unknown.
+        // Suppression fires only on a Kleene-TRUE state match, so the federal cert must STILL be emitted
+        // (here as NeedsProfileInfo), never silently suppressed by an unresolved state rule. This kills the
+        // `== Kleene.True` → `!= Kleene.False` mutant that the capacity-10 (Kleene-False) case leaves alive.
+        var profile = WidgetInTexas()
+            .OperatesInterstate(true)
+            .ServesOrSellsAlcohol(false)
+            .Build(); // maxPassengerSeatingCapacity UNSET ⇒ both cert rules Unknown
+
+        var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, Rules());
+
+        var fed = Find(report, "OBL-TEST-FED-CERT");
+        fed.Should().NotBeNull("an UNKNOWN state rule must not suppress the federal obligation");
+        fed!.Status.Should().Be(ObligationStatus.NeedsProfileInfo);
+        Find(report, "OBL-TEST-TX-CERT")!.Status.Should().Be(ObligationStatus.NeedsProfileInfo);
+    }
+
+    // ---------------- unset state ⇒ federal-only, never assume Texas (T-3, synthetic) ----------------
+
+    [Fact]
+    public void An_unset_state_evaluates_federal_rules_only_and_surfaces_state_as_outstanding()
+    {
+        // T-3: no .State() ⇒ Covered (an UNKNOWN state is not a NOT-covered state), only federal rules are
+        // candidates (no state law applied from ignorance), and `state` is surfaced as outstanding.
+        var profile = EntityProfile.Builder().EntityType("test-widget")
+            .OperatesInterstate(true)
+            .MaxPassengerSeatingCapacity(20)
+            .ServesOrSellsAlcohol(false)
+            .Build();
+
+        var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, Rules());
+
+        report.Coverage.Should().Be(JurisdictionCoverage.Covered);
+        report.Obligations.Should().NotBeEmpty();
+        report.Obligations.Should().OnlyContain(o => o.RuleId.StartsWith("test-fed-"),
+            "with an unknown state only federal rules apply — never Texas by default");
+        report.OutstandingProfileFacts.Should().Contain(FactNames.State);
+    }
+
+    [Fact]
     public void A_missing_fixed_annual_filing_still_surfaces_its_next_due_date()
     {
         // The alcohol permit is a fixed-annual (May 15) filing; even with no document on record the engine
@@ -261,13 +346,37 @@ public class RegulatoryObligationEvaluatorTests
     }
 
     [Fact]
-    public void Obligations_are_emitted_in_a_deterministic_order()
+    public void Obligations_are_ordered_actionable_first_then_by_ref()
     {
         var profile = WidgetInTexas().OperatesInterstate(false).ServesOrSellsAlcohol(false).Build();
 
         var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, Rules());
 
-        var refs = report.Obligations.Select(o => o.ObligationRef).ToList();
-        refs.Should().BeInAscendingOrder();
+        // Actionable statuses sort before the inert ones (Satisfied/NotApplicable), so a same-obligationRef
+        // NotApplicable sibling can never shadow an actionable result (A-4). Within each tier: by obligationRef.
+        var ranks = report.Obligations.Select(o => IsActionable(o.Status) ? 0 : 1).ToList();
+        ranks.Should().BeInAscendingOrder("actionable obligations come first");
+
+        var actionableRefs = report.Obligations.Where(o => IsActionable(o.Status)).Select(o => o.ObligationRef).ToList();
+        actionableRefs.Should().Equal("OBL-TEST-TX-INSURANCE", "OBL-TEST-TX-LICENSE");
+
+        report.Obligations.Where(o => !IsActionable(o.Status)).Select(o => o.ObligationRef)
+            .Should().BeInAscendingOrder();
     }
+
+    [Fact]
+    public void Each_result_carries_its_unique_rule_id()
+    {
+        // A-4: RuleId is one-to-one with the emitted obligation (unlike the possibly-shared obligationRef).
+        var profile = WidgetInTexas().OperatesInterstate(false).ServesOrSellsAlcohol(false).Build();
+
+        var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, Rules());
+
+        report.Obligations.Should().OnlyContain(o => !string.IsNullOrEmpty(o.RuleId));
+        Find(report, "OBL-TEST-TX-LICENSE")!.RuleId.Should().Be("test-tx-widget-license");
+    }
+
+    private static bool IsActionable(ObligationStatus status) =>
+        status is ObligationStatus.Missing or ObligationStatus.Expiring or ObligationStatus.Expired
+               or ObligationStatus.NeedsDocumentInfo or ObligationStatus.NeedsProfileInfo;
 }

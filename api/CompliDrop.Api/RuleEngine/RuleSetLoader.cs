@@ -3,13 +3,19 @@ using System.Text.RegularExpressions;
 
 namespace CompliDrop.Api.RuleEngine;
 
-/// <summary>Options controlling how a rule set loads.</summary>
+/// <summary>Options controlling how a rule set loads. The defaults are the SAFE production posture (A-5/CC-8):
+/// verified-only AND review-gated rule-sets excluded.</summary>
 /// <param name="VerifiedOnly">
-/// When true, only <see cref="RuleConfidence.Verified"/> versions are kept and a rule left with no
-/// versions is dropped — the production posture (SCHEMA §6). Validation still runs over the FULL set first,
-/// so a state rule's <c>satisfiesFederal</c> reference to a to-be-filtered federal rule is still checked.
+/// When true (the DEFAULT — the production posture, SCHEMA §6), only <see cref="RuleConfidence.Verified"/>
+/// versions are kept and a rule left with no versions is dropped. Validation still runs over the FULL set
+/// first, so a state rule's <c>satisfiesFederal</c> reference to a to-be-filtered federal rule is still checked.
 /// </param>
-public sealed record RuleLoadOptions(bool VerifiedOnly = false);
+/// <param name="IncludeReviewGated">
+/// When false (the DEFAULT), rules from any rule-set FILE that declares a <c>reviewGate</c> (e.g. the TX
+/// security set) are excluded — independent of confidence — so a human-gated rule-set can't drive a verdict
+/// until it clears its founder/counsel gate (A-5). Set true only behind the review flag.
+/// </param>
+public sealed record RuleLoadOptions(bool VerifiedOnly = true, bool IncludeReviewGated = false);
 
 /// <summary>
 /// Thrown when a rule file violates the frozen schema (SCHEMA §1–§5). Fail-fast, like the migration drift
@@ -58,6 +64,9 @@ public static class RuleSetLoader
     {
         options ??= new RuleLoadOptions();
         var rules = new List<Rule>();
+        // Rule ids belonging to a review-gated FILE (A-5). Tracked by id so the exclusion survives the
+        // flatten-into-one-list merge.
+        var reviewGatedRuleIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (name, json) in sources)
         {
@@ -76,13 +85,31 @@ public static class RuleSetLoader
             if (file.SchemaVersion != SupportedSchemaVersion)
                 throw new RuleSchemaException($"{name}: unsupported schemaVersion {file.SchemaVersion} (this engine supports {SupportedSchemaVersion}).");
 
-            rules.AddRange(file.Rules);
+            var fileLocalObligations = file.LocalObligations ?? [];
+            var fileIsGated = !string.IsNullOrWhiteSpace(file.ReviewGate);
+
+            foreach (var rule in file.Rules)
+            {
+                // Denormalize the file's localObligations onto each rule (CC-7) so the evaluator can union
+                // the pointers of the rule-sets that applied to an entity.
+                rules.Add(fileLocalObligations.Count > 0 ? rule with { LocalObligations = fileLocalObligations } : rule);
+                if (fileIsGated)
+                    reviewGatedRuleIds.Add(rule.Id);
+            }
         }
 
+        // Validate the FULL merged set first (before any filtering) so satisfiesFederal refs, facts, and
+        // shapes are checked even for rules a filter will later drop.
         Validate(rules);
 
-        var effective = options.VerifiedOnly ? FilterVerified(rules) : rules;
-        return new RuleSet { SchemaVersion = SupportedSchemaVersion, Rules = effective };
+        IEnumerable<Rule> effective = rules;
+        if (!options.IncludeReviewGated && reviewGatedRuleIds.Count > 0)
+            effective = effective.Where(r => !reviewGatedRuleIds.Contains(r.Id));
+        var effectiveList = effective.ToList();
+        if (options.VerifiedOnly)
+            effectiveList = [.. FilterVerified(effectiveList)];
+
+        return new RuleSet { SchemaVersion = SupportedSchemaVersion, Rules = effectiveList };
     }
 
     /// <summary>Loads and merges every <c>*.json</c> under a directory tree.</summary>

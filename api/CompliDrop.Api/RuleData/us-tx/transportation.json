@@ -6,6 +6,10 @@
 // the verified federal medical-examiner-certificate in production.
 {
   "schemaVersion": 1,
+  "localObligations": [
+    "Municipal for-hire / limousine / shuttle & airport ground-transportation permits (vehicles at or below 15 passengers)",
+    "State vehicle inspection / registration, IFTA fuel tax, IRP apportioned plates"
+  ],
   "rules": [
     {
       "id": "tx-transportation-txdmv-motor-carrier-registration",

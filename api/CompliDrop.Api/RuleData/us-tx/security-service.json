@@ -5,6 +5,12 @@
 // criminal-penalty section (stated in rationale as statutory-general, not a document obligation).
 {
   "schemaVersion": 1,
+  "reviewGate": "founder-confirm-tx-security",
+  "localObligations": [
+    "Municipal peace-officer / off-duty officer extra-employment rules",
+    "City alarm-permit / special-event security-staffing ordinances",
+    "County/city occupancy & fire-marshal crowd-management rules"
+  ],
   "rules": [
     {
       "id": "tx-security-company-license",
@@ -153,7 +159,7 @@
           "validFrom": "2020-01-01",
           "validTo": null,
           "confidence": "verified",
-          "applicability": { "fact": "providesArmedGuards", "op": "eq", "value": true },
+          "applicability": { "fact": "providesArmedCloseProtection", "op": "eq", "value": true },
           "obligation": {
             "name": "Personal protection officer (PPO) license",
             "documentType": "certification",
@@ -170,7 +176,7 @@
           },
           "rationale": "Texas law requires an individual who, while carrying a firearm, provides personal protection (close protection / bodyguard services) to hold a personal protection officer license, layered on top of a security officer commission and Level IV training (Tex. Occ. Code 1702.201-1702.202). The PPO license expires no later than the underlying commission (1702.301(c)).",
           "userAction": "If this security company provides armed personal-protection (bodyguard) services, ask each such officer for a DPS personal protection officer license.",
-          "notes": "The frozen fact set has no personal-protection/bodyguard trigger, so this is gated on providesArmedGuards (a superset); the user-facing copy states the narrower close-protection condition."
+          "notes": "Gated on providesArmedCloseProtection (the close-protection / bodyguard trigger added in schema v1.1), matching the narrow statutory condition; a company that provides armed guards but not close protection does not owe the PPO license."
         }
       ]
     }

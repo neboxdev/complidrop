@@ -18,6 +18,14 @@ public enum ObligationStatus
     /// <summary>The obligation applies but no matching document/attestation is on record.</summary>
     Missing,
 
+    /// <summary>
+    /// A matching document IS on record but its currency can't be confirmed — no readable expiry and the
+    /// cadence yields no determinable due date — on a renewing/filing obligation (SCHEMA §6 v1 limitation,
+    /// A-1). Never a false <see cref="Satisfied"/> from an undeterminable expiry on a renewing obligation.
+    /// A held ONE-TIME credential with no expiry stays <see cref="Satisfied"/> (nothing to renew).
+    /// </summary>
+    NeedsDocumentInfo,
+
     /// <summary>Applicability is Unknown — a profile question must be answered first (SCHEMA §4). See <see cref="ObligationResult.MissingFacts"/>.</summary>
     NeedsProfileInfo,
 
@@ -42,6 +50,14 @@ public enum JurisdictionCoverage
 /// </summary>
 public sealed record ObligationResult
 {
+    /// <summary>
+    /// The unique rule <c>id</c> that produced this result (A-4). Unlike <see cref="ObligationRef"/> — a
+    /// dossier cross-ref that several rules may share (e.g. the interstate vs intrastate insurance floors both
+    /// map to OBL-…-TRANSPORTATION-003 / -002) — this is one-to-one with the emitted obligation, so a caller
+    /// can key on it without a NotApplicable sibling shadowing an actionable result.
+    /// </summary>
+    public string RuleId { get; init; } = "";
+
     public required string ObligationRef { get; init; }
     public required string Name { get; init; }
     public required ObligationStatus Status { get; init; }
@@ -64,7 +80,8 @@ public sealed record ObligationResult
 /// what makes a "bare compliant" structurally impossible: there is no overall compliant flag, only
 /// per-obligation statuses plus this notice. <see cref="LocalObligationPointers"/> surfaces the
 /// "noted, not encoded" local obligations (city/county health/food, fire-marshal, occupancy, per-event
-/// permits) — filled from rule-set metadata in the rule-data step; empty here in the engine core.
+/// permits) — the evaluator unions the <c>localObligations</c> metadata of the rule-sets that applied to
+/// the entity into it (CC-7).
 /// </summary>
 public sealed record CompletenessNotice
 {

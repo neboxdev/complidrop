@@ -3,6 +3,12 @@
 // tents are local IFC Ch.31). The inflatable amusement-ride regime (TDI, Occ. Code ch. 2151) is encoded.
 {
   "schemaVersion": 1,
+  "localObligations": [
+    "City / county tent, canopy & membrane-structure permit (IFC Ch. 31, typically over 400 sq ft)",
+    "Local business license / certificate of occupancy for the rental yard",
+    "Local fire-marshal sign-off for inflatables at a specific event venue",
+    "Host-city special-event / temporary-use permit"
+  ],
   "rules": [
     {
       "id": "tx-event-rental-amusement-ride-insurance",

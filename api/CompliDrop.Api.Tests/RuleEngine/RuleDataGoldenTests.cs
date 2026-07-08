@@ -15,11 +15,24 @@ public class RuleDataGoldenTests
 {
     private static readonly DateOnly Eval = new(2026, 8, 1); // after every rule's validFrom (incl. HB 2844, 2026-07-01)
 
-    // Production posture: verified-only, merged across all files so cross-file satisfiesFederal resolves.
-    private static readonly RuleSet ProdRules = EmbeddedRuleData.LoadAll(new RuleLoadOptions(VerifiedOnly: true));
+    // Production posture: verified-only + review-gated rule-sets excluded (the DEFAULT), merged across all
+    // files so cross-file satisfiesFederal resolves. The TX security set is HELD BACK here (A-5/CC-8).
+    private static readonly RuleSet ProdRules = EmbeddedRuleData.LoadAll();
+
+    // Verified + the review-gated TX security set included, for exercising the security behavioral goldens
+    // (the security set does not ship in the default production load until its founder gate clears).
+    private static readonly RuleSet GatedInclusiveRules =
+        EmbeddedRuleData.LoadAll(new RuleLoadOptions(VerifiedOnly: true, IncludeReviewGated: true));
 
     private static ObligationResult? Find(ObligationReport report, string obligationRef) =>
         report.Obligations.FirstOrDefault(o => o.ObligationRef == obligationRef);
+
+    private static EntityProfile ShuttleProfile(bool interstate, int seats) =>
+        EntityProfile.Builder().State("US-TX").EntityType("transportation")
+            .OperatesVehiclesForHire(true)
+            .OperatesInterstate(interstate)
+            .MaxPassengerSeatingCapacity(seats)
+            .Build();
 
     private static InsuranceMinimums MinimumsOf(string ruleId) =>
         ProdRules.Rules.Single(r => r.Id == ruleId).Versions[0].InsuranceMinimums!;
@@ -129,7 +142,12 @@ public class RuleDataGoldenTests
         Find(report, "OBL-TX-EVENT-001")!.Status.Should().Be(ObligationStatus.Missing);   // §2151.1012 insurance
         MinimumsOf("tx-event-rental-amusement-ride-insurance").PerOccurrence.Should().Be(1_000_000m);
         Find(report, "OBL-TX-EVENT-002")!.Status.Should().Be(ObligationStatus.Missing);   // inspection + AR-101 sticker
-        Find(report, "OBL-TX-EVENT-003")!.Status.Should().Be(ObligationStatus.Missing);   // AR-800 injury report
+
+        // AR-800 is a conditional filing owed only on a reportable injury the profile can't assert, so with
+        // no document on record it is NotApplicable (CC-1), NOT Missing — and its copy says "file only if…".
+        var ar800 = Find(report, "OBL-TX-EVENT-003")!;
+        ar800.Status.Should().Be(ObligationStatus.NotApplicable);
+        ar800.UserAction.Should().Contain("injury");
     }
 
     [Fact]
@@ -179,6 +197,267 @@ public class RuleDataGoldenTests
         report.OutstandingProfileFacts.Should().Contain(FactNames.OperatesInterstate);
     }
 
+    // ---------------- (e) transport insurance floor across every capacity/interstate edge (T-2) ----------------
+
+    [Theory]
+    [InlineData(15, true, "$1,500,000")]   // interstate ≤15 ⇒ federal $1.5M floor (fed $1.5M TRIGGERED)
+    [InlineData(16, true, "$5,000,000")]   // interstate 16+ ⇒ federal $5M floor
+    [InlineData(26, true, "$5,000,000")]
+    [InlineData(27, true, "$5,000,000")]
+    [InlineData(15, false, null)]          // intrastate ≤15 ⇒ not a CMV, no state insurance floor at all
+    [InlineData(16, false, "$500,000")]    // intrastate 16–26 ⇒ Texas $500k floor
+    [InlineData(26, false, "$500,000")]
+    [InlineData(27, false, "$5,000,000")]  // intrastate 27+ ⇒ Texas $5M floor (TX $5M TRIGGERED)
+    public void The_single_applicable_transport_insurance_floor_matches_capacity_and_interstate(
+        int seats, bool interstate, string? expectedAmount)
+    {
+        var report = RegulatoryObligationEvaluator.Evaluate(ShuttleProfile(interstate, seats), [], Eval, ProdRules);
+
+        var applicable = report.Obligations.Where(o =>
+            (o.ObligationRef == "OBL-FED-TRANSPORTATION-003" || o.ObligationRef == "OBL-TX-TRANSPORTATION-002")
+            && o.Status != ObligationStatus.NotApplicable).ToList();
+
+        if (expectedAmount is null)
+            applicable.Should().BeEmpty("a vehicle seating 15 or fewer, intrastate, is not a CMV with a state insurance floor");
+        else
+            applicable.Should().ContainSingle().Which.Name.Should().Contain(expectedAmount);
+    }
+
+    [Fact]
+    public void The_texas_cdl_does_not_suppress_the_federal_cdl_when_capacity_is_unknown()
+    {
+        // T-1 on real data: with capacity UNSET the Texas CDL rule is Unknown, so it cannot suppress the
+        // federal CDL floor — OBL-FED-TRANSPORTATION-004 must STILL be emitted (as NeedsProfileInfo).
+        var profile = EntityProfile.Builder().State("US-TX").EntityType("transportation")
+            .OperatesVehiclesForHire(true)
+            .OperatesInterstate(true)
+            .Build(); // maxPassengerSeatingCapacity UNSET
+
+        var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, ProdRules);
+
+        var fedCdl = Find(report, "OBL-FED-TRANSPORTATION-004");
+        fedCdl.Should().NotBeNull("an Unknown Texas CDL rule must not suppress the federal CDL");
+        fedCdl!.Status.Should().Be(ObligationStatus.NeedsProfileInfo);
+    }
+
+    [Fact]
+    public void Unset_state_on_a_transportation_entity_yields_federal_only_and_state_outstanding()
+    {
+        // T-3 on real data: no state ⇒ Covered, only us-fed obligations, state outstanding — never TX by default.
+        var profile = EntityProfile.Builder().EntityType("transportation")
+            .OperatesVehiclesForHire(true)
+            .OperatesInterstate(true)
+            .MaxPassengerSeatingCapacity(20)
+            .Build();
+
+        var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, ProdRules);
+
+        report.Coverage.Should().Be(JurisdictionCoverage.Covered);
+        report.Obligations.Should().NotBeEmpty();
+        report.Obligations.Should().OnlyContain(o => o.ObligationRef.StartsWith("OBL-FED-"),
+            "with an unknown state only federal obligations apply");
+        report.OutstandingProfileFacts.Should().Contain(FactNames.State);
+    }
+
+    [Fact]
+    public void Clearinghouse_attaches_to_an_intrastate_16plus_carrier_not_only_interstate()
+    {
+        // CC-2: the FMCSA Clearinghouse query follows CDL-driver employment (16+ seats) and attaches to
+        // intrastate Texas carriers too — it is NOT gated on interstate.
+        var report = RegulatoryObligationEvaluator.Evaluate(ShuttleProfile(interstate: false, seats: 40), [], Eval, ProdRules);
+
+        Find(report, "OBL-FED-TRANSPORTATION-006")!.Status.Should().Be(ObligationStatus.Missing);
+    }
+
+    [Theory]
+    [InlineData(8, ObligationStatus.NotApplicable)]  // ≤10 passengers ⇒ below the UCR threshold (CC-6)
+    [InlineData(11, ObligationStatus.Missing)]       // >10 passengers ⇒ UCR applies
+    public void Ucr_applies_only_above_the_ten_passenger_threshold(int seats, ObligationStatus expected)
+    {
+        var report = RegulatoryObligationEvaluator.Evaluate(ShuttleProfile(interstate: true, seats: seats), [], Eval, ProdRules);
+
+        Find(report, "OBL-FED-TRANSPORTATION-007")!.Status.Should().Be(expected);
+    }
+
+    // ---------------- (f) drone photographer — Part 107 recency issueDate cadence (T-4/T-6) ----------------
+
+    [Fact]
+    public void Drone_photographer_part107_recency_tracks_the_24_month_clock_from_issue_date()
+    {
+        var photographer = EntityProfile.Builder().State("US-TX").EntityType("photographer-videographer")
+            .OperatesDronesCommercially(true)
+            .Build();
+
+        // Recent recency training (issued 2025-06-01) ⇒ due 2027-06-01 ⇒ Satisfied with a tracked next-due date.
+        var recent = new[] { new DocumentLike("rec-1", "certification", "faa-part107-recency", IssueDate: new DateOnly(2025, 6, 1)) };
+        var recency = Find(RegulatoryObligationEvaluator.Evaluate(photographer, recent, Eval, ProdRules), "OBL-FED-PHOTOGRAPHER-002")!;
+        recency.Status.Should().Be(ObligationStatus.Satisfied);
+        recency.NextDueDate.Should().Be(new DateOnly(2027, 6, 1), "the 24-month recency clock runs from the issue date");
+
+        // Stale recency (issued 2024-01-01) ⇒ due 2026-01-01, already past ⇒ Expired.
+        var stale = new[] { new DocumentLike("rec-2", "certification", "faa-part107-recency", IssueDate: new DateOnly(2024, 1, 1)) };
+        Find(RegulatoryObligationEvaluator.Evaluate(photographer, stale, Eval, ProdRules), "OBL-FED-PHOTOGRAPHER-002")!
+            .Status.Should().Be(ObligationStatus.Expired);
+
+        // No issue date AND no expiry ⇒ can't determine currency ⇒ NeedsDocumentInfo (A-1), never Satisfied.
+        var noDates = new[] { new DocumentLike("rec-3", "certification", "faa-part107-recency") };
+        Find(RegulatoryObligationEvaluator.Evaluate(photographer, noDates, Eval, ProdRules), "OBL-FED-PHOTOGRAPHER-002")!
+            .Status.Should().Be(ObligationStatus.NeedsDocumentInfo);
+    }
+
+    // ---------------- (g) null-expiry vs one-time (A-1) on real data ----------------
+
+    [Fact]
+    public void A_matched_renewal_insurance_with_no_readable_expiry_is_needs_document_info()
+    {
+        // A-1: the amusement-ride liability policy is a renewal anchored on documentExpiration. A matched COI
+        // with no printed expiry can't be confirmed current ⇒ NeedsDocumentInfo, never a false Satisfied.
+        var eventRental = EntityProfile.Builder().State("US-TX").EntityType("event-rental")
+            .RentsInflatableAmusementDevices(true).OperatesForklifts(false)
+            .Build();
+        var docs = new[] { new DocumentLike("coi-noexp", "coi", "tx-amusement-ride-liability") }; // no expiry
+
+        var report = RegulatoryObligationEvaluator.Evaluate(eventRental, docs, Eval, ProdRules);
+
+        Find(report, "OBL-TX-EVENT-001")!.Status.Should().Be(ObligationStatus.NeedsDocumentInfo);
+    }
+
+    [Fact]
+    public void A_one_time_permit_with_a_matched_document_and_no_expiry_is_satisfied()
+    {
+        // A held ONE-TIME credential (Texas sales & use tax permit — no expiration) reads Satisfied even with
+        // no printed expiry: nothing to renew (contrast the renewal case above ⇒ NeedsDocumentInfo).
+        var venue = EntityProfile.Builder().State("US-TX").EntityType("venue-org")
+            .SellsTaxableGoodsOrServices(true)
+            .Build();
+        var docs = new[] { new DocumentLike("permit-1", "license", "tx-sales-use-tax") }; // no expiry
+
+        var salesTax = Find(RegulatoryObligationEvaluator.Evaluate(venue, docs, Eval, ProdRules), "OBL-TX-VENUE-004")!;
+        salesTax.Status.Should().Be(ObligationStatus.Satisfied);
+        salesTax.MatchedDocumentId.Should().Be("permit-1");
+    }
+
+    // ---------------- (h) venue behavioral goldens — franchise fixedDate + DWC-005 gate (T-6/CC-5) ----------------
+
+    [Fact]
+    public void Venue_franchise_report_is_a_fixed_annual_may_15_filing()
+    {
+        var venue = EntityProfile.Builder().State("US-TX").EntityType("venue-org")
+            .IsFranchiseTaxableEntity(true)
+            .Build();
+
+        var franchise = Find(RegulatoryObligationEvaluator.Evaluate(venue, [], Eval, ProdRules), "OBL-TX-VENUE-005")!;
+        franchise.Status.Should().Be(ObligationStatus.Missing);
+        franchise.NextDueDate.Should().Be(new DateOnly(2027, 5, 15), "May 15 has passed for 2026 by the Aug 1 evaluation date");
+    }
+
+    [Theory]
+    [InlineData(false, 5, ObligationStatus.Missing)]        // non-subscriber WITH employees ⇒ owes DWC-005
+    [InlineData(false, 0, ObligationStatus.NotApplicable)]  // non-subscriber with NO employees ⇒ not owed (CC-5)
+    [InlineData(true, 5, ObligationStatus.NotApplicable)]   // carries WC ⇒ not a non-subscriber
+    public void Venue_dwc005_requires_non_subscriber_and_at_least_one_employee(bool carriesWc, int employees, ObligationStatus expected)
+    {
+        var venue = EntityProfile.Builder().State("US-TX").EntityType("venue-org")
+            .CarriesWorkersComp(carriesWc)
+            .EmployeeCount(employees)
+            .Build();
+
+        Find(RegulatoryObligationEvaluator.Evaluate(venue, [], Eval, ProdRules), "OBL-TX-VENUE-002")!
+            .Status.Should().Be(expected);
+    }
+
+    // ---------------- (i) security behavioral goldens — armed-guard vs close-protection gate (T-6/CC-3) ----------------
+
+    [Fact]
+    public void Security_ppo_fires_only_on_armed_close_protection_not_on_armed_guards_generally()
+    {
+        // CC-3: the PPO license gates on providesArmedCloseProtection, NOT the superset providesArmedGuards.
+        var armedGuardsOnly = EntityProfile.Builder().State("US-TX").EntityType("security-service")
+            .ProvidesArmedGuards(true)
+            .ProvidesArmedCloseProtection(false)
+            .Build();
+
+        var report = RegulatoryObligationEvaluator.Evaluate(armedGuardsOnly, [], Eval, GatedInclusiveRules);
+
+        Find(report, "OBL-TX-SECURITY-005")!.Status.Should().Be(ObligationStatus.Missing);        // armed officer commission applies…
+        Find(report, "OBL-TX-SECURITY-006")!.Status.Should().Be(ObligationStatus.NotApplicable);  // …but PPO (close protection) does NOT
+
+        var closeProtection = EntityProfile.Builder().State("US-TX").EntityType("security-service")
+            .ProvidesArmedGuards(true)
+            .ProvidesArmedCloseProtection(true)
+            .Build();
+        Find(RegulatoryObligationEvaluator.Evaluate(closeProtection, [], Eval, GatedInclusiveRules), "OBL-TX-SECURITY-006")!
+            .Status.Should().Be(ObligationStatus.Missing);
+    }
+
+    [Fact]
+    public void Security_unarmed_company_owes_the_company_license_and_insurance_but_no_armed_credentials()
+    {
+        var unarmed = EntityProfile.Builder().State("US-TX").EntityType("security-service")
+            .ProvidesArmedGuards(false)
+            .ProvidesArmedCloseProtection(false)
+            .Build();
+
+        var report = RegulatoryObligationEvaluator.Evaluate(unarmed, [], Eval, GatedInclusiveRules);
+
+        Find(report, "OBL-TX-SECURITY-001")!.Status.Should().Be(ObligationStatus.Missing);        // company license (all:[])
+        Find(report, "OBL-TX-SECURITY-003")!.Status.Should().Be(ObligationStatus.Missing);        // GL insurance (all:[])
+        Find(report, "OBL-TX-SECURITY-005")!.Status.Should().Be(ObligationStatus.NotApplicable);  // armed commission
+        Find(report, "OBL-TX-SECURITY-006")!.Status.Should().Be(ObligationStatus.NotApplicable);  // PPO
+    }
+
+    // ---------------- (j) entity-type coverage + local obligations (A-3/CC-7) ----------------
+
+    [Fact]
+    public void An_unmodeled_entity_type_is_reported_not_covered_never_empty_compliant()
+    {
+        var florist = EntityProfile.Builder().State("US-TX").EntityType("florist").Build();
+
+        var report = RegulatoryObligationEvaluator.Evaluate(florist, [], Eval, ProdRules);
+
+        report.Coverage.Should().Be(JurisdictionCoverage.NotCovered);
+        report.CoverageMessage.Should().Contain("florist");
+        report.Obligations.Should().BeEmpty();
+        report.Completeness.Text.Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Fact]
+    public void The_completeness_notice_surfaces_local_obligation_pointers_scoped_to_the_entity()
+    {
+        // CC-7: the venue's dossier "noted, not encoded" LOCAL obligations are unioned into the notice, and a
+        // caterer does not inherit the venue's — the pointers are scoped to the rule-sets that applied.
+        var venue = EntityProfile.Builder().State("US-TX").EntityType("venue-org")
+            .SellsTaxableGoodsOrServices(true)
+            .Build();
+        var venueReport = RegulatoryObligationEvaluator.Evaluate(venue, [], Eval, ProdRules);
+        venueReport.Completeness.LocalObligationPointers.Should().NotBeEmpty();
+        venueReport.Completeness.LocalObligationPointers.Should().Contain(p => p.Contains("Certificate of occupancy"));
+
+        var caterer = EntityProfile.Builder().State("US-TX").EntityType("caterer")
+            .PreparesOrServesFood(true).ServesOrSellsAlcohol(false).OperatesFoodVendingVehicle(false)
+            .Build();
+        var catererReport = RegulatoryObligationEvaluator.Evaluate(caterer, [], Eval, ProdRules);
+        catererReport.Completeness.LocalObligationPointers.Should().Contain(p => p.Contains("food establishment permit"));
+        catererReport.Completeness.LocalObligationPointers.Should().NotContain(p => p.Contains("occupant-load"),
+            "a caterer must not inherit the venue-org local obligations");
+    }
+
+    [Fact]
+    public void A_matched_but_stale_document_reads_expired_via_rule_id_not_a_shadowing_sibling()
+    {
+        // A-4: OBL-FED-TRANSPORTATION-003 is shared by two rules (the $5M 16+ and the $1.5M ≤15 floors). For a
+        // 20-seat interstate shuttle the ≤15 rule is NotApplicable; a stale COI must surface as Expired
+        // (actionable, sorted first) and each result carries its own unique RuleId.
+        var docs = new[] { new DocumentLike("coi-old", "coi", "fed-passenger-bipd", ExpirationDate: new DateOnly(2026, 1, 1)) };
+
+        var report = RegulatoryObligationEvaluator.Evaluate(ShuttleProfile(interstate: true, seats: 20), docs, Eval, ProdRules);
+
+        Find(report, "OBL-FED-TRANSPORTATION-003")!.Status.Should().Be(ObligationStatus.Expired,
+            "the actionable Expired result sorts before its NotApplicable same-ref sibling");
+        report.Obligations.Where(o => o.ObligationRef == "OBL-FED-TRANSPORTATION-003")
+            .Select(o => o.RuleId).Should().OnlyHaveUniqueItems();
+    }
+
     // ---------------- coverage guard ----------------
 
     [Fact]
@@ -191,5 +470,37 @@ public class RuleDataGoldenTests
         report.Coverage.Should().Be(JurisdictionCoverage.NotCovered);
         report.CoverageMessage.Should().Contain("Texas");
         report.Completeness.Text.Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Theory]
+    [InlineData("US-TX")]
+    [InlineData("us-tx")]
+    [InlineData("tx")]
+    [InlineData("TX")]
+    [InlineData("Texas")]
+    [InlineData("  texas  ")]
+    public void Common_texas_state_spellings_all_resolve_to_covered(string state)
+    {
+        // A-7: "US-TX", "tx", "Texas" (case- and surrounding-space-insensitive) all normalize to us-tx and
+        // are covered — not a NotCovered landmine.
+        var profile = EntityProfile.Builder().State(state).EntityType("caterer").PreparesOrServesFood(true).Build();
+
+        var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, ProdRules);
+
+        report.Coverage.Should().Be(JurisdictionCoverage.Covered, $"\"{state}\" is a Texas spelling");
+        Find(report, "OBL-TX-CATERER-001")!.Status.Should().Be(ObligationStatus.Missing);
+    }
+
+    [Theory]
+    [InlineData("US-CA")]
+    [InlineData("california")]
+    [InlineData("FL")]
+    public void A_non_texas_state_stays_not_covered(string state)
+    {
+        var profile = EntityProfile.Builder().State(state).EntityType("caterer").PreparesOrServesFood(true).Build();
+
+        var report = RegulatoryObligationEvaluator.Evaluate(profile, [], Eval, ProdRules);
+
+        report.Coverage.Should().Be(JurisdictionCoverage.NotCovered);
     }
 }

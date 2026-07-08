@@ -10,12 +10,14 @@ namespace CompliDrop.Api.RuleEngine;
 /// CONTRACTUAL checklist). It mirrors that service's purity + date-injection idiom but shares no state.
 ///
 /// Pipeline:
-///   1. Jurisdiction coverage (SCHEMA §3): a known non-covered state ⇒ <c>NotCovered</c>, never empty-compliant.
+///   1. Coverage (SCHEMA §3): a known non-covered state, or a SET but unmodeled entity type, ⇒ <c>NotCovered</c>,
+///      never empty-compliant. A NULL entity type is NOT an all-clear — its type-scoped rules read needs-profile-info.
 ///   2. Candidate selection: federal rules + the entity's-state rules (additive), pre-filtered by entity type,
 ///      each resolved to the version effective at <paramref name="evaluationDate"/> (validFrom/validTo).
 ///   3. Kleene applicability per candidate.
 ///   4. satisfiesFederal suppression: an APPLICABLE (Kleene-True) state rule suppresses the federal rules it implements.
-///   5. Per-obligation status from matching document presence/expiry + cadence; Unknown ⇒ needs-profile-info.
+///   5. Per-obligation status from matching document presence/expiry + cadence; Unknown ⇒ needs-profile-info,
+///      a matched doc with no determinable currency on a renewing obligation ⇒ needs-document-info (never a false satisfied).
 /// </summary>
 public static class RegulatoryObligationEvaluator
 {
@@ -53,6 +55,19 @@ public static class RegulatoryObligationEvaluator
             ? entityTypeFact.AsString
             : null;
 
+        // Entity-type coverage (A-3/C-1). The modeled set is the union of the rule set's own entityTypes —
+        // for the production data this equals EntityTypes.KnownModeled (pinned by a test). A SET but UNMODELED
+        // type ⇒ NotCovered (mirrors the unknown-state path), never a bare all-clear; a NULL type is handled
+        // per-rule below (type-scoped rules ⇒ needs-profile-info), never bypassed into a wrong verdict.
+        var modeledEntityTypes = ruleSet.Rules
+            .SelectMany(r => r.EntityTypes)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (entityType is not null && modeledEntityTypes.Count > 0 && !modeledEntityTypes.Contains(entityType))
+            return ObligationReport.NotCovered(
+                $"No rule set is modeled for entity type \"{entityTypeFact.AsString}\".",
+                notice);
+
         // --- 2. Candidate selection + version resolution ------------------------------------------
         var candidates = new List<Candidate>();
         foreach (var rule in ruleSet.Rules)
@@ -64,16 +79,28 @@ public static class RegulatoryObligationEvaluator
                 continue;
 
             // Entity type: a structural pre-filter. Omit a type-scoped rule ONLY when we KNOW the type and
-            // it isn't in the list; an unknown entity type keeps the rule a candidate (its applicability,
-            // if it also gates on entityType, will read Unknown ⇒ needs-profile-info rather than a wrong pass).
-            if (rule.EntityTypes.Count > 0 && entityType is not null
+            // it isn't in the list (a SET but unmodeled type already returned NotCovered above).
+            var typeScoped = rule.EntityTypes.Count > 0;
+            if (typeScoped && entityType is not null
                 && !rule.EntityTypes.Contains(entityType, StringComparer.OrdinalIgnoreCase))
                 continue;
 
             var version = ResolveEffectiveVersion(rule, evaluationDate);
             if (version is null) continue; // no version in effect at this date
 
-            var applicability = ApplicabilityEvaluator.Evaluate(version.Applicability, profile);
+            ApplicabilityResult applicability;
+            if (typeScoped && entityType is null)
+            {
+                // Type-scoped but the entity type is UNKNOWN. Never bypass the type filter into a Kleene-True
+                // (which would emit a wrong Missing/Satisfied — e.g. tell a caterer it needs a DPS guard
+                // license, C-1). Force NeedsProfileInfo(entityType); as Unknown it also can't suppress a
+                // federal floor. Rules with NO type scope (EntityTypes empty) still evaluate normally.
+                applicability = new ApplicabilityResult(Kleene.Unknown, new HashSet<string> { FactNames.EntityType });
+            }
+            else
+            {
+                applicability = ApplicabilityEvaluator.Evaluate(version.Applicability, profile);
+            }
             candidates.Add(new Candidate(rule, version, applicability));
         }
 
@@ -96,9 +123,13 @@ public static class RegulatoryObligationEvaluator
             results.Add(BuildResult(candidate, documents, evaluationDate));
         }
 
-        // Deterministic order (obligationRef, then rule id) so output is stable regardless of file load order.
+        // Deterministic order: ACTIONABLE statuses first (A-4) so a same-obligationRef NotApplicable /
+        // Satisfied sibling can never shadow an actionable result in a naive First(ref==) lookup; then by
+        // obligationRef, then name. Output stays stable regardless of file load order.
         results.Sort((a, b) =>
         {
+            var byRank = ActionabilityRank(a.Status).CompareTo(ActionabilityRank(b.Status));
+            if (byRank != 0) return byRank;
             var byRef = string.CompareOrdinal(a.ObligationRef, b.ObligationRef);
             return byRef != 0 ? byRef : string.CompareOrdinal(a.Name, b.Name);
         });
@@ -108,6 +139,16 @@ public static class RegulatoryObligationEvaluator
         var extraOutstanding = new List<string>();
         if (stateSlug is null && coveredStates.Count > 0) extraOutstanding.Add(FactNames.State);
         if (entityType is null && ruleSet.Rules.Any(r => r.EntityTypes.Count > 0)) extraOutstanding.Add(FactNames.EntityType);
+
+        // Local obligations (CC-7): union the "noted, not encoded" pointers of every rule-set that applied to
+        // this entity (its candidate rules' source files) into the completeness notice.
+        var localPointers = candidates
+            .SelectMany(c => c.Rule.LocalObligations)
+            .Concat(notice.LocalObligationPointers)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (localPointers.Count > 0)
+            notice = notice with { LocalObligationPointers = localPointers };
 
         return ObligationReport.ForObligations(results, notice, extraOutstanding);
     }
@@ -133,6 +174,7 @@ public static class RegulatoryObligationEvaluator
 
         var baseResult = new ObligationResult
         {
+            RuleId = rule.Id,
             ObligationRef = rule.ObligationRef,
             Name = obligation.Name,
             Status = ObligationStatus.NotApplicable, // overwritten below
@@ -183,6 +225,12 @@ public static class RegulatoryObligationEvaluator
 
         if (match is null)
         {
+            // A conditional filing (e.g. the amusement injury report) is owed only on a triggering event the
+            // profile can't assert, so with no document on record it is NOT "Missing" — it is NotApplicable
+            // until the trigger occurs (CC-1). Its rationale/userAction state "file only if triggered".
+            if (cadence is { Kind: CadenceKind.ConditionalFiling })
+                return baseResult with { Status = ObligationStatus.NotApplicable };
+
             // Missing: no document/attestation on record. Still surface the next cadence deadline where the
             // cadence alone determines it (e.g. a fixed-annual filing), so the caller can schedule a reminder.
             var due = cadence is null ? null : CadenceCalculator.ComputeNextDueDate(cadence, null, null, evaluationDate);
@@ -200,11 +248,24 @@ public static class RegulatoryObligationEvaluator
         else if (cadence is not null)
         {
             nextDue = CadenceCalculator.ComputeNextDueDate(cadence, null, match.IssueDate, evaluationDate);
-            status = StatusFromTiming(CadenceCalculator.ClassifyTiming(nextDue, evaluationDate, cadence.GracePeriodDays, ExpiringWindowDays));
+            if (nextDue is not null)
+            {
+                // A determinable due date from the cadence (e.g. an issueDate-anchored Part-107 recency whose
+                // 24-month clock runs from the document's issue date): classify the timing normally.
+                status = StatusFromTiming(CadenceCalculator.ClassifyTiming(nextDue, evaluationDate, cadence.GracePeriodDays, ExpiringWindowDays));
+            }
+            else
+            {
+                // No printed expiry AND the cadence yields no due date. A held ONE-TIME credential needs no
+                // renewal (Satisfied); any renewing / fixed-annual / conditional-filing obligation can't be
+                // confirmed current from a document with no readable expiry ⇒ NeedsDocumentInfo. NEVER a
+                // false Satisfied from an undeterminable expiry on a renewing obligation (A-1).
+                status = cadence.Kind == CadenceKind.OneTime ? ObligationStatus.Satisfied : ObligationStatus.NeedsDocumentInfo;
+            }
         }
         else
         {
-            // Present, no printed expiry, no cadence → nothing more to track (a one-time credential we hold).
+            // Present, no printed expiry, no cadence block at all → nothing more to track (a one-time credential we hold).
             nextDue = null;
             status = ObligationStatus.Satisfied;
         }
@@ -238,12 +299,35 @@ public static class RegulatoryObligationEvaluator
         _ => ObligationStatus.Satisfied, // NotYetDue / NoDeadline
     };
 
+    /// <summary>
+    /// Sort rank so ACTIONABLE statuses (something the user must collect / resolve) come before the inert
+    /// ones (Satisfied / NotApplicable). This is what guarantees a same-obligationRef NotApplicable sibling
+    /// can't shadow an actionable result when a caller does a naive First(ref==) lookup (A-4).
+    /// </summary>
+    private static int ActionabilityRank(ObligationStatus status) => status switch
+    {
+        ObligationStatus.Missing => 0,
+        ObligationStatus.Expired => 0,
+        ObligationStatus.Expiring => 0,
+        ObligationStatus.NeedsDocumentInfo => 0,
+        ObligationStatus.NeedsProfileInfo => 0,
+        _ => 1, // Satisfied, NotApplicable
+    };
+
     private static bool IsFederal(string jurisdiction) => Eq(jurisdiction, FederalJurisdiction);
 
     private static bool Eq(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Maps a profile state value (e.g. "US-TX") to a jurisdiction slug ("us-tx").</summary>
-    private static string NormalizeStateSlug(string state) => state.Trim().ToLowerInvariant();
+    /// <summary>
+    /// Maps a profile state value to a jurisdiction slug. Accepts the common Texas spellings — "US-TX",
+    /// "us-tx", "tx", "Texas" (case- and surrounding-space-insensitive) — all mapping to "us-tx" (A-7). Any
+    /// other value passes through lowercased and, if not a covered state, yields NotCovered (fail-safe).
+    /// </summary>
+    private static string NormalizeStateSlug(string state)
+    {
+        var s = state.Trim().ToLowerInvariant();
+        return s is "tx" or "texas" or "us-tx" ? "us-tx" : s;
+    }
 
     private readonly record struct Candidate(Rule Rule, RuleVersion Version, ApplicabilityResult Applicability);
 }

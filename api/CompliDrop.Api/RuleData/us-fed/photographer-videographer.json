@@ -3,6 +3,11 @@
 // (no federal photographer license) is NOT a rule; every obligation below is gated on commercial drone use.
 {
   "schemaVersion": 1,
+  "localObligations": [
+    "Municipal / county film & photography shoot permit (public property, parks, closed streets)",
+    "Texas state-park commercial photography permit (Texas Parks & Wildlife)",
+    "Local business registration (city / county)"
+  ],
   "rules": [
     {
       "id": "fed-photographer-faa-part107-certificate",

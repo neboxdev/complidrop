@@ -144,6 +144,14 @@ public sealed record Rule
     /// <summary>Which entity types this rule applies to; empty = all. A structural pre-filter (SCHEMA §2).</summary>
     public IReadOnlyList<string> EntityTypes { get; init; } = [];
 
+    /// <summary>
+    /// The <c>localObligations</c> of the rule-set FILE this rule was loaded from (CC-7), denormalized onto
+    /// the rule during the merge so the evaluator can union the pointers of every rule-set that applied to an
+    /// entity. Not part of the per-rule JSON — it is copied from the file-level <see cref="RuleSet.LocalObligations"/>.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<string> LocalObligations { get; init; } = [];
+
     /// <summary>license|permit|worker-certification|insurance|filing (SCHEMA §2).</summary>
     public string Category { get; init; } = "";
 
@@ -162,6 +170,21 @@ public sealed record RuleSet
 {
     public int SchemaVersion { get; init; } = 1;
     public IReadOnlyList<Rule> Rules { get; init; } = [];
+
+    /// <summary>
+    /// Optional rule-set-level review gate (A-5/CC-8). When a FILE sets this (e.g. the TX security set's
+    /// <c>"founder-confirm-tx-security"</c>), its rules are held OUT of the production load — independent of
+    /// per-rule confidence — unless <see cref="RuleLoadOptions.IncludeReviewGated"/> is set. Null = ungated.
+    /// A merged rule set (several files) does not carry a single gate; this is a per-file authoring marker.
+    /// </summary>
+    public string? ReviewGate { get; init; }
+
+    /// <summary>
+    /// Optional rule-set-level "noted, not encoded" LOCAL obligations (CC-7) — short pointers (e.g.
+    /// "City/county tent permit (IFC Ch. 31)") sourced from the entity's dossier. The evaluator unions the
+    /// pointers of every rule-set that applied to an entity into <see cref="CompletenessNotice.LocalObligationPointers"/>.
+    /// </summary>
+    public IReadOnlyList<string> LocalObligations { get; init; } = [];
 
     public static RuleSet Empty { get; } = new();
 }

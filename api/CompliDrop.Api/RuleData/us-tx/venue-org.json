@@ -4,6 +4,13 @@
 // posting duty are folded into the DWC-005 rule's framing; the food-establishment permit is 'probable'.
 {
   "schemaVersion": 1,
+  "localObligations": [
+    "Certificate of occupancy (city building / permitting dept)",
+    "Fire-marshal inspection / assembly permit / occupant-load posting (local)",
+    "Retail food establishment permit (city / county health dept)",
+    "Local alcohol certifications on the TABC application (city / county sign-offs)",
+    "Noise / amplified-sound, special-event, parking / valet & sign permits (municipal)"
+  ],
   "rules": [
     {
       "id": "tx-venue-dwc005-nonsubscriber-notice",
@@ -18,7 +25,12 @@
           "validFrom": "2020-01-01",
           "validTo": null,
           "confidence": "verified",
-          "applicability": { "fact": "carriesWorkersComp", "op": "eq", "value": false },
+          "applicability": {
+            "all": [
+              { "fact": "carriesWorkersComp", "op": "eq", "value": false },
+              { "fact": "employeeCount", "op": "gte", "value": 1 }
+            ]
+          },
           "obligation": {
             "name": "Non-subscriber notice to DWC (Form DWC-005)",
             "documentType": "other",
@@ -35,7 +47,7 @@
           },
           "rationale": "Workers' compensation is elective for private Texas employers, but a venue that chooses not to carry coverage (a non-subscriber) with non-exempt employees must file the DWC Form-005 non-subscriber notice - within 30 days of its first hire and again each year between February 1 and April 30 (Tex. Labor Code 406.004; the annual window is stated on the form). A non-subscriber also owes the separate employee-notice and workplace-posting duty (406.005).",
           "userAction": "If the venue does not carry workers' compensation, confirm it files the annual DWC Form-005 non-subscriber notice (by April 30 each year) and posts the employee coverage notice.",
-          "notes": "Annual filing window opens February 1 and closes April 30; the fixed date models the April 30 deadline. Applicability keys on carriesWorkersComp = false (the non-subscriber election)."
+          "notes": "Annual filing window opens February 1 and closes April 30; the fixed date models the April 30 deadline. Applicability requires carriesWorkersComp = false (the non-subscriber election) AND employeeCount >= 1, since the non-subscriber notice and workplace-posting duty attaches only to a non-subscriber that has employees."
         }
       ]
     },

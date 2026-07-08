@@ -314,5 +314,196 @@ only). Cross-confirm or mark the specific cadence `probable`.
 - Human eyeball on the 49 CFR 387.33 "suspended (82 FR 5307)" artifact before the
   $5M figure drives a verdict.
 
-## Pass 3 — Adversarial  (PENDING — after founder dossier approval / engine)
-## Pass 4 — Standard code review (security/correctness/architecture)  (PENDING — after engine build)
+## Phase 2 build — verified milestones (2026-07-07)
+
+- **Engine core** (commit 087c6e1): built to FROZEN SCHEMA; orchestrator-verified
+  `dotnet build` clean + **110 RuleEngine tests green**. 3 legal gates structural.
+- **Rule data**: 39 rules (36 verified + 3 probable) across 10 JSON files;
+  orchestrator spot-checked the highest-stakes figures directly against the
+  dossier — security $100k/$200k(+$50k in rationale); fed transport $5M/$1.5M;
+  TX intrastate $5M(≥27)/$500k(16–26); interstate/intrastate gating + satisfiesFed
+  CDL suppression all correct.
+
+## Pass 3 — Adversarial (engine)  (COMPLETE 2026-07-07)
+
+Each CONFIRMED break was proven with a throwaway xUnit test against the real
+verified-only rule data. **Core logic CLEARED**: capacity tiers (15/16, 26/27) no
+overlap/gap, Kleene laundering not achievable (applicability resolved before
+satisfaction; satisfiesFederal fires only on Kleene-True), version boundaries
+correct, cadence date-math clean (DateOnly, leap/month-end/grace all right),
+loader rejects the main malformed shapes. Findings (fix in the consolidated pass):
+
+- **A-1 (HIGH, false pass) — null `ExpirationDate` ⇒ `Satisfied` forever.** A
+  matched doc with null expiry on a `documentExpiration`-anchored, no-`periodMonths`
+  rule → `ComputeNextDueDate` null → `NoDeadline` → **Satisfied**
+  (RegulatoryObligationEvaluator.cs:195-239, CadenceCalculator.cs:104). Hits ~8
+  real insurance/renewal rules whenever extraction can't read an expiry. Untested
+  path. FIX: matched-but-no-determinable-currency ⇒ NOT Satisfied (a
+  can't-confirm status).
+- **A-2 (HIGH-ish, scoped) — insurance dollar minimums never enforced.** `Matches`
+  keys only on `(DocumentType, DocumentSubType)`; `InsuranceMinimums` is decorative;
+  `IDocumentLike` has no coverage-amount. Any COI satisfies the $5M floor. SCHEMA §6
+  scopes v1 to presence+expiry (so partly by-design vs the contractual grader), but
+  the "Satisfied" label OVERCLAIMS. FIX: honest status semantics + userAction "verify
+  amount ≥ $X"; document the v1 limitation; (amount-enforcement = follow-up needing a
+  coverage-amount extraction field).
+- **A-3 (MEDIUM, completeness illusion) — unrecognized `entityType` ⇒ silent
+  empty all-clear.** A set-but-unmodeled type (dj/florist/valet) skips all rules and
+  adds nothing to OutstandingProfileFacts (only `null` does) ⇒ Coverage=Covered, 0
+  obligations, 0 outstanding (RegulatoryObligationEvaluator.cs:69-71,108-110). FIX:
+  unrecognized type ⇒ NotCovered-like signal, never a bare all-clear.
+- **A-4 (MEDIUM, latent trap) — `obligationRef` not unique in output; the
+  NotApplicable tier sorts first and hides a Missing.** Two results share
+  OBL-FED-TRANSPORTATION-003 / OBL-TX-TRANSPORTATION-002; a naive
+  `First(ref==)` returns the NotApplicable decoy. Golden tests already work around
+  it. FIX: unique obligationRef per emitted tier (or suppress NotApplicable
+  siblings); reject duplicate obligationRef in loader.
+- **A-5 (MEDIUM, gate conflation) — the whole TX security set ships under
+  verified-only load, violating SCHEMA legal-req #4** (security set stays behind the
+  human-gate until founder G2). All security rules are `verified`, so the confidence
+  filter doesn't hold them; only the not-yet-built per-rule-set flag would. FIX: an
+  explicit gate marker (independent of confidence) so the security set is held back.
+- **A-6 (LOWER, over-obligation) — small (<10-seat) interstate carrier gets
+  UCR/FMCSA authority/MCS-150/Clearinghouse** (gate only forHire+interstate, no
+  capacity leaf, though rationale states ">10 passengers"). Claim/code mismatch;
+  over-obligates (safe). FIX: add the stated capacity leaves.
+- **A-7 (LOWER, usability) — brittle state normalization**: only exact "US-TX"
+  matches; "TX"/"Texas"/"tx " ⇒ NotCovered (fails safe but a landmine). FIX:
+  normalize common TX forms.
+- Loader gaps (feed A-4): `documentSubType` not validated vs a vocabulary (typo ⇒
+  permanent Missing); duplicate `obligationRef` not rejected.
+
+## Pass 4 — Standard code review (engine)  (correctness + compliance-claims IN PROGRESS)
+
+### test-quality-reviewer (COMPLETE) — mutation-style gaps (no vacuous tests found; Kleene/cadence coverage praised)
+- **T-1 (major).** satisfiesFederal Unknown-suppression untested — the test uses
+  capacity 10 (Kleene-FALSE, not UNKNOWN); mutation `==Kleene.True`→`!=Kleene.False`
+  survives. Add: state rule Unknown (unset capacity) ⇒ federal cert still emitted;
+  real-data unset-capacity interstate shuttle still emits OBL-FED-TRANSPORTATION-004.
+- **T-2 (major).** Interstate/intrastate insurance only tested at 20 seats. Edges
+  15/16 + 26/27 untested; fed $1.5M(≤15) and TX $5M(≥27) NEVER triggered. Add
+  parametrized {15,16,26,27}×{inter,intra} asserting the single applicable
+  obligation + its dollar amount.
+- **T-3 (major).** Unset-state ⇒ federal-only branch untested (a default-to-TX
+  regression would pass). Add: no `.State()` ⇒ Covered, federal refs only, 0 us-tx,
+  `state` in OutstandingProfileFacts.
+- **T-4 (minor).** issueDate-anchored no-expiry path (real FAA Part-107 recency)
+  never exercised end-to-end. Add a drone-photographer golden with null-expiry +
+  IssueDate.
+- **T-5 (minor).** expiry==evaluationDate ("expires today") untested; strict `<`
+  ⇒ should be Expiring. Add the InlineData row.
+- **T-6 (minor).** No behavioral golden for security-service (armed-guard gate),
+  venue-org (franchise fixedDate + DWC-005 firing on carriesWorkersComp==FALSE),
+  photographer. Add fixtures for each.
+
+### correctness-reviewer (COMPLETE) — core logic CONFIRMED correct; one defect
+Independently verified as CORRECT: Kleene combinators, cadence clamps/grace/DST,
+version validFrom/validTo selection, capacity partitions, satisfiesFederal
+Kleene-True gating, decimal parse, engine purity.
+- **C-1 (major) = refines A-3.** The entityType path is wrong in BOTH directions
+  because no rule's applicability references `entityType` (scoping is purely
+  structural via `rule.EntityTypes`):
+  - entityType **null** ⇒ the `&& entityType is not null` guard BYPASSES the type
+    filter ⇒ all type-scoped rules become candidates ⇒ the `{all:[]}` security
+    rules resolve Kleene-True and emit **Missing** (a caterer told it needs a DPS
+    guard license). Over-assertion from ignorance.
+  - entityType **set-but-unmodeled** ⇒ filter skips all ⇒ empty all-clear
+    (A-3). Under-assertion.
+  FIX (unifies A-3): known-modeled-type set; entityType null ⇒ type-scoped rules
+  are NeedsProfileInfo (entityType in MissingFacts), never Missing/Satisfied;
+  entityType not in the modeled set ⇒ NotCovered-like ("entity type not modeled"),
+  never a bare all-clear.
+
+### compliance-claims-reviewer (COMPLETE) — framing/numbers CONFIRMED; claim-vs-code gaps
+PASSED: framing (legal-req #3 — no user adjudication), completeness structure
+(#2 — no isCompliant bool), confidence honesty (#4 — exactly 3 probable, filtered),
+and ALL numbers match the dossier verbatim (no drift). Findings:
+- **CC-1 (major).** AR-800 injury report emits `Missing` for EVERY inflatable
+  renter — the engine never reads `cadence.Kind`, so the `conditional-filing` tag is
+  inert. FIX: honor ConditionalFiling (no doc + no trigger ⇒ NotApplicable).
+- **CC-2 (major).** Clearinghouse gated on interstate-only, but the dossier says it
+  ALSO attaches intrastate (TX FMCSR adoption) ⇒ DROPS a verified fed obligation for
+  TX intrastate 16+ carriers. FIX: gate on capacity ≥16, remove the interstate leaf.
+- **CC-3 (major) = encoder flag #3.** PPO gated on `providesArmedGuards` (superset)
+  ⇒ Missing for every armed-guard company. FIX: add `providesArmedCloseProtection`
+  fact, gate PPO on it.
+- **CC-4 (major) = A-2.** Insurance amounts never enforced; underinsured COI reads
+  Satisfied. v1-scoped (SCHEMA §6) but overclaims. FIX: honest framing + documented
+  limitation; amount-enforcement = follow-up (needs a coverage-amount field).
+- **CC-5 (minor).** DWC-005 gates only on carriesWorkersComp==false, missing the
+  employee condition ⇒ a 0-employee venue sees it Missing. FIX: add employeeCount ≥1.
+- **CC-6 (minor) = A-6/UCR.** UCR no capacity gate ⇒ over-emits for <10-seat
+  interstate. FIX: add maxPassengerSeatingCapacity ≥11.
+- **CC-7 (minor).** `CompletenessNotice.LocalObligationPointers` never populated —
+  the per-entity local obligations the dossiers compiled aren't delivered. FIX: add
+  localObligations metadata to rule-set files + populate.
+- **CC-8 (minor) = A-5-adjacent.** `RuleLoadOptions.VerifiedOnly` defaults FALSE
+  (unsafe). FIX: default to verified-only.
+
+---
+
+## CONSOLIDATED FIX PLAN (all 4 passes; design decisions LOCKED by orchestrator)
+
+Dedup + resolutions (I own these engine/schema decisions; no rule-content changed):
+1. **Null-expiry false Satisfied (A-1/T-4).** Add `ObligationStatus.NeedsDocumentInfo`.
+   Expiry-anchored/renewal + matched doc + no expiry ⇒ NeedsDocumentInfo (NOT
+   Satisfied). `one-time` + matched doc ⇒ Satisfied (unchanged, correct).
+2. **entityType (A-3/C-1).** Known-modeled set = the 6. entityType null ⇒ type-scoped
+   rules NeedsProfileInfo (+entityType missing), never Missing/Satisfied; entityType
+   set-but-unmodeled ⇒ NotCovered ("entity type not modeled"), never a bare all-clear.
+3. **Conditional-filing (CC-1).** Engine honors `CadenceKind.ConditionalFiling`: no
+   matching doc ⇒ NotApplicable (rationale carries "file only if triggered").
+4. **Clearinghouse (CC-2).** Rule-data: gate on capacity ≥16, drop interstate leaf.
+5. **PPO (CC-3).** Add fact `providesArmedCloseProtection` (bool, security-service);
+   gate PPO on it (schema v1.1 additive fact).
+6. **DWC-005 (CC-5).** Rule-data: add `employeeCount ≥1` to the all-block.
+7. **UCR (CC-6).** Rule-data: add `maxPassengerSeatingCapacity ≥11`.
+8. **Insurance amount (A-2/CC-4).** Document v1 limitation in SCHEMA + RULES-REVIEW;
+   keep userAction "verify amount ≥ $X"; no enforcement now (follow-up).
+9. **obligationRef collision (A-4).** Add unique `RuleId` to `ObligationResult`; sort
+   actionable statuses before NotApplicable; obligationRef stays a cross-ref.
+10. **A-5/CC-8 gating.** Add rule-set `reviewGate` marker; set on us-tx/security;
+    default prod load excludes gated rule-sets + `VerifiedOnly` defaults TRUE.
+11. **State norm (A-7).** Accept tx / texas / us-tx.
+12. **LocalObligations (CC-7).** Add `localObligations` metadata per rule-set file
+    (from dossiers) + populate CompletenessNotice.
+13. **Tests (T-1..T-6 + regressions)** for every fix above, incl. capacity edges
+    {15,16,26,27}, unset-state, satisfiesFederal-Unknown, expires-today, null-expiry,
+    entityType both directions, conditional-filing, the new fact/status.
+14. Clean phantom "encoding brief" note references.
+
+Schema additions (all additive, v1.1, documented): `ObligationStatus.NeedsDocumentInfo`,
+fact `providesArmedCloseProtection`, rule-set `reviewGate`, rule-set `localObligations`.
+
+---
+
+## FIX PASS — COMPLETE + ORCHESTRATOR-VERIFIED (2026-07-08)
+
+**Every finding from all 4 passes is fixed.** No finding deferred except the one
+explicitly scoped-and-documented item (fix 8, insurance-amount enforcement — see
+SCHEMA "v1 KNOWN LIMITATIONS"; it needs a coverage-amount extraction field and is
+the top follow-up, tracked alongside product bug #397).
+
+Verification (run by the orchestrator, not taken on trust):
+- `dotnet build CompliDrop.Api.csproj` → 0 errors, 0 warnings.
+- `dotnet test --filter RuleEngine` → **154 passed / 0 failed** (110 → 154; +44
+  regression/edge cases covering every finding).
+- Data-gate spot-check: Clearinghouse now `for-hire + capacity ≥16`, NO interstate
+  leaf (CC-2 closed); UCR gained `capacity ≥11` (CC-6); fed CDL/medical remain
+  capacity-only; fed $5M/$1.5M and TX $5M/$500k tiers unchanged and correct.
+- Prod load posture: `VerifiedOnly=true` + `IncludeReviewGated=false` by default ⇒
+  **31 rules ship** (39 − 3 probable − 5 review-gated TX security). The TX security
+  set is now held back by `reviewGate: "founder-confirm-tx-security"` independent of
+  confidence, closing A-5/CC-8.
+
+Fix-pass design notes (orchestrator-approved):
+- Modeled-entity-type set is derived from the loaded rule set (so synthetic
+  `test-widget` fixtures still work), with `EntityTypes.KnownModeled` as the
+  canonical constant pinned to the real data by a test.
+- Photographer `localObligations` live on the federal file (there is no
+  `us-tx/photographer-videographer.json` — TCEQ was correctly not encoded).
+- SCHEMA §6 status vocabulary updated to include `needs-document-info` (v1.1).
+
+**Pass 3 + Pass 4 CLOSED.** Remaining Phase-2 work: entity-profile migration +
+per-rule-set feature-flag wiring (DB-schema, careful-review), then founder gates
+G1 (counsel) / G2 (browser spot-confirm) before any customer exposure.

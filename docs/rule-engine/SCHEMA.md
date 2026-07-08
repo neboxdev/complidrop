@@ -164,7 +164,11 @@ every threshold in the rules is expressed incl-driver so one fact serves all.
 
 - Pure C#: `(EntityProfile, IReadOnlyList<Document>, LocalDate evaluationDate, RuleSet)`
   → `ObligationReport` with per-obligation status:
-  `satisfied | expiring | expired | missing | needs-profile-info | not-applicable`.
+  `satisfied | expiring | expired | missing | needs-profile-info |
+  needs-document-info | not-applicable`.
+  (`needs-document-info` added v1.1 — a matched document whose currency cannot be
+  determined, e.g. no readable expiry on a renewing obligation. It must never read
+  `satisfied`.)
   No LLM calls, no clock reads (evaluation date injected), no DB access inside
   the evaluator.
 - Only `confidence: verified` rule versions load in production; `probable`/
@@ -228,6 +232,28 @@ its UI must satisfy them; they are correctness requirements, not preferences.
    verified` load in prod.** Single-reproduction entries (`probable`) and the
    whole Texas security rule-set (methodology human-gate) stay behind the review
    flag until the founder confirms — see METHODOLOGY provenance rule.
+
+### v1 KNOWN LIMITATIONS (documented, founder-visible — from the engine review)
+
+- **Insurance amount is NOT enforced in v1 (A-2 / CC-4).** For an `insurance`
+  obligation, the engine's `Satisfied` means "a certificate of the right type is on
+  file and unexpired," NOT "the coverage amount meets the statutory floor." The
+  floor is carried in `insuranceMinimums` + stated in the `userAction` ("verify the
+  amount meets $X"), but the engine does not compare it — `IDocumentLike` has no
+  coverage-amount, and per SCHEMA §6 v1 satisfaction is presence + expiry (numeric
+  min-value comparison is the CONTRACTUAL grader's existing job).
+  **Follow-up (top priority before an insurance verdict is customer-facing):** add a
+  coverage-amount field sourced from extraction and enforce `insuranceMinimums`
+  (per-occurrence AND aggregate) before allowing `Satisfied`. Note the schema's
+  single `perOccurrence` field cannot represent the security 3-limit structure
+  ($100k BI+PD / $50k personal-injury / $200k aggregate) — the sub-limit lives in
+  prose today. Tracks alongside product bug #397.
+- **A matched document with no readable expiry** on a renewing obligation yields
+  `NeedsDocumentInfo` (not `Satisfied`) — the engine will not certify currency it
+  can't determine.
+- **Conditional filings** (amusement AR-800 injury report) surface as
+  `NotApplicable` until a triggering-event fact exists; the rationale states "file
+  only if a reportable injury occurs."
 
 ### Founder/counsel gates (NOT code — carry to RULES-REVIEW.md)
 

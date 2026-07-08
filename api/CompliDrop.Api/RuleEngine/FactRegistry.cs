@@ -24,12 +24,35 @@ public static class FactNames
     public const string RentsInflatableAmusementDevices = "rentsInflatableAmusementDevices";
     public const string OperatesForklifts = "operatesForklifts";
     public const string ProvidesArmedGuards = "providesArmedGuards";
+    public const string ProvidesArmedCloseProtection = "providesArmedCloseProtection";
     public const string OperatesVehiclesForHire = "operatesVehiclesForHire";
     public const string OperatesInterstate = "operatesInterstate";
     public const string MaxPassengerSeatingCapacity = "maxPassengerSeatingCapacity";
     public const string OperatesDronesCommercially = "operatesDronesCommercially";
     public const string SellsTaxableGoodsOrServices = "sellsTaxableGoodsOrServices";
     public const string IsFranchiseTaxableEntity = "isFranchiseTaxableEntity";
+}
+
+/// <summary>
+/// The entity types the rule set MODELS (SCHEMA §4 <c>entityType</c> value space: "the 6 types"). This is
+/// the canonical list; the real embedded rule data is pinned to it by a test. The evaluator treats a SET but
+/// unmodeled <c>entityType</c> as <c>NotCovered</c> (never a bare all-clear) and computes the operative
+/// modeled set from its input rule set's <c>entityTypes</c> — which, for the production data, equals this.
+/// </summary>
+public static class EntityTypes
+{
+    public const string Caterer = "caterer";
+    public const string EventRental = "event-rental";
+    public const string SecurityService = "security-service";
+    public const string Transportation = "transportation";
+    public const string PhotographerVideographer = "photographer-videographer";
+    public const string VenueOrg = "venue-org";
+
+    /// <summary>The 6 known-modeled entity types, case-insensitive.</summary>
+    public static IReadOnlySet<string> KnownModeled { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        Caterer, EventRental, SecurityService, Transportation, PhotographerVideographer, VenueOrg,
+    };
 }
 
 /// <summary>One entry in the frozen fact registry (SCHEMA §4): name + value type + UI prompt text.</summary>
@@ -56,6 +79,7 @@ public static class FactRegistry
         new(FactNames.RentsInflatableAmusementDevices, FactKind.Bool, "Does this entity rent inflatable amusement devices?"),
         new(FactNames.OperatesForklifts, FactKind.Bool, "Does this entity operate forklifts or powered industrial trucks?"),
         new(FactNames.ProvidesArmedGuards, FactKind.Bool, "Does this entity provide armed security guards?"),
+        new(FactNames.ProvidesArmedCloseProtection, FactKind.Bool, "Does this entity provide armed close-protection (bodyguard) services?"),
         new(FactNames.OperatesVehiclesForHire, FactKind.Bool, "Does this entity operate vehicles for hire?"),
         new(FactNames.OperatesInterstate, FactKind.Bool, "Does this entity operate across state lines (interstate)?"),
         new(FactNames.MaxPassengerSeatingCapacity, FactKind.Int, "What is the largest vehicle's seating capacity, including the driver?"),

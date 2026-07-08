@@ -254,7 +254,7 @@
           "applicability": {
             "all": [
               { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
-              { "fact": "operatesInterstate", "op": "eq", "value": true }
+              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 }
             ]
           },
           "obligation": {
@@ -273,7 +273,7 @@
           },
           "rationale": "Federal law requires an employer of CDL drivers to run an FMCSA Drug & Alcohol Clearinghouse query on each driver before use and at least once every 12 months (49 CFR 382.701).",
           "userAction": "If this carrier employs CDL drivers, confirm it runs the FMCSA Clearinghouse annual query for each driver.",
-          "notes": "The Clearinghouse applies to employers of CDL drivers (vehicles seating 16+); gated here on interstate for-hire per the encoding brief."
+          "notes": "The Clearinghouse applies to employers of CDL drivers (vehicles seating 16 or more, including the driver). It attaches to intrastate Texas carriers too via the state's adoption of the FMCSRs, so it is gated on for-hire + 16+ seats (maxPassengerSeatingCapacity gte 16), not on interstate operation."
         }
       ]
     },
@@ -293,7 +293,8 @@
           "applicability": {
             "all": [
               { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
-              { "fact": "operatesInterstate", "op": "eq", "value": true }
+              { "fact": "operatesInterstate", "op": "eq", "value": true },
+              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 11 }
             ]
           },
           "obligation": {
@@ -312,7 +313,7 @@
           },
           "rationale": "Federal law requires a motor carrier operating in interstate commerce to complete an annual Unified Carrier Registration and pay the fee, which expires December 31 each year (49 U.S.C. 14504a). For passenger carriers the threshold is a vehicle designed for more than 10 people, including the driver.",
           "userAction": "If this carrier operates interstate, ask for its current-year UCR registration receipt (annual, due by December 31).",
-          "notes": "The UCR passenger threshold is >10 including the driver; gated here on interstate for-hire per the encoding brief."
+          "notes": "The UCR passenger threshold is more than 10 people, including the driver (49 U.S.C. 31101(1)(B)), encoded as maxPassengerSeatingCapacity gte 11; gated on interstate for-hire."
         }
       ]
     }

@@ -68,13 +68,24 @@ public class RuleSetLoaderTests
     [Fact]
     public void VerifiedOnly_drops_probable_versions_and_keeps_verified()
     {
-        var all = RuleSetLoader.LoadFromDirectory(ValidFixtureDir);
+        var all = RuleSetLoader.LoadFromDirectory(ValidFixtureDir, new RuleLoadOptions(VerifiedOnly: false));
         var verifiedOnly = RuleSetLoader.LoadFromDirectory(ValidFixtureDir, new RuleLoadOptions(VerifiedOnly: true));
 
         all.Rules.Should().Contain(r => r.Id == "test-tx-probable-only");
         verifiedOnly.Rules.Should().NotContain(r => r.Id == "test-tx-probable-only",
             "a rule left with no verified versions is dropped in the production posture");
         verifiedOnly.Rules.Should().Contain(r => r.Id == "test-tx-widget-license");
+    }
+
+    [Fact]
+    public void VerifiedOnly_defaults_to_true_the_safe_production_posture()
+    {
+        // A-5/CC-8: the DEFAULT load is verified-only, so a bare LoadFromDirectory drops the probable rule.
+        var defaultLoad = RuleSetLoader.LoadFromDirectory(ValidFixtureDir);
+
+        defaultLoad.Rules.Should().NotContain(r => r.Id == "test-tx-probable-only",
+            "verified-only is the default posture, so probable rules do not ship");
+        defaultLoad.Rules.Should().Contain(r => r.Id == "test-tx-widget-license");
     }
 
     // ---------------- rejections (fail-fast) ----------------

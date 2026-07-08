@@ -110,6 +110,7 @@ public sealed class EntityProfileBuilder
     public EntityProfileBuilder RentsInflatableAmusementDevices(bool value) => Set(FactNames.RentsInflatableAmusementDevices, FactValue.Of(value));
     public EntityProfileBuilder OperatesForklifts(bool value) => Set(FactNames.OperatesForklifts, FactValue.Of(value));
     public EntityProfileBuilder ProvidesArmedGuards(bool value) => Set(FactNames.ProvidesArmedGuards, FactValue.Of(value));
+    public EntityProfileBuilder ProvidesArmedCloseProtection(bool value) => Set(FactNames.ProvidesArmedCloseProtection, FactValue.Of(value));
     public EntityProfileBuilder OperatesVehiclesForHire(bool value) => Set(FactNames.OperatesVehiclesForHire, FactValue.Of(value));
     public EntityProfileBuilder OperatesInterstate(bool value) => Set(FactNames.OperatesInterstate, FactValue.Of(value));
     public EntityProfileBuilder MaxPassengerSeatingCapacity(int seats) => Set(FactNames.MaxPassengerSeatingCapacity, FactValue.Of(seats));
