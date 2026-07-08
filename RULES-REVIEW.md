@@ -10,6 +10,11 @@ rule inventory. Full evidence: [docs/rules-research/](docs/rules-research/) (eve
 obligation with verbatim statutory quotes); review detail:
 [docs/rule-engine/REVIEW-LOG.md](docs/rule-engine/REVIEW-LOG.md).
 
+> **Auditing this work?** Start at
+> **[docs/rule-engine/audit/README.md](docs/rule-engine/audit/README.md)** — the audit
+> index. It maps every encoded rule to its primary source, every engine guarantee to
+> a named test, and states plainly what is *not* verified or enforced.
+
 ---
 
 ## 1. What you are approving (and what you are NOT)

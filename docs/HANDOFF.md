@@ -1,5 +1,10 @@
 # HANDOFF — Compliance rule engine session (started 2026-07-07)
 
+> **AUDIT TRAIL:** [docs/rule-engine/audit/](rule-engine/audit/README.md) — index,
+> process log, provenance map (rule → primary source), verification guide
+> (guarantee → test), and the limitations/gates register. Written 2026-07-08 for
+> external audit.
+
 Continuous handoff state for the rule-engine build. Updated after every
 completed unit of work. If you are a weaker model (Opus) reading this
 mid-session: do ONLY tasks tagged [OPUS]. Never derive/modify rule content,
@@ -178,12 +183,20 @@ CUSTOMER EXPOSURE, not building; engine ships feature-flag OFF regardless.
 - ✅ **SCHEMA.md FROZEN** — fact registry locked (§4); design questions resolved
   (RD-a filings as cadence-tracked; RD-b worker creds vendor-level v1; RD-c
   documentType → existing extraction vocab); build plan recorded.
-- ⏳ **Engine core building** (agent ac6fd44): RuleData types, JSON loader+validate,
-  Kleene evaluator, cadence date-math, ObligationReport DTOs, the 3 legal gates,
-  SYNTHETIC-fixture unit+property tests. Must compile + tests green.
-- ⬜ Next: encode verified dossier → RuleData/{us-fed,us-tx}/*.json + golden tests;
-  entity-profile migration + per-rule-set feature flag; pass 3 adversarial + pass 4
-  code review.
+- ✅ **Engine core** (commit 087c6e1) — orchestrator-verified: build clean, 110 tests.
+  3 legal gates enforced structurally (no `IsCompliant` boolean exists).
+- ✅ **Rule data encoded** (087c6e1) — 39 rules / 10 files; high-stakes figures
+  spot-checked directly against the dossier by the orchestrator.
+- ✅ **Pass 3 (adversarial) + Pass 4 (correctness / compliance-claims / test-quality)**
+  — core logic independently certified correct; all findings fixed in **c53a975**;
+  110 → **154 tests**, orchestrator-verified. Prod posture = **31 rules**
+  (39 − 3 probable − 5 review-gated TX security).
+- ✅ **Audit documentation** (2026-07-08): [docs/rule-engine/audit/](rule-engine/audit/README.md)
+  — index, process log, provenance map, verification guide, limitations & gates.
+- ⬜ **Remaining:** entity-profile persistence migration + per-rule-set feature flag
+  (DB-schema, `careful-review`, flags default OFF); close the insurance-amount hole
+  (top follow-up); founder gates **G1** (counsel on user-facing framing) and **G2**
+  (browser spot-confirm of TX statutory figures) before ANY customer exposure.
 
 Provenance status: load-bearing numbers/terms upgraded to `official` (re-derived
 via Playwright); single-reproduction existence facts held
