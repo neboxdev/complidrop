@@ -44,17 +44,17 @@ public class CadenceCalculatorTests
         };
 
         foreach (var start in starts)
-        foreach (var months in Enumerable.Range(0, 37))
-        {
-            var result = CadenceCalculator.AddMonthsClamped(start, months);
+            foreach (var months in Enumerable.Range(0, 37))
+            {
+                var result = CadenceCalculator.AddMonthsClamped(start, months);
 
-            result.Day.Should().BeLessThanOrEqualTo(start.Day, $"{start:O} + {months}mo");
-            var expectedMonth = ((start.Month - 1 + months) % 12) + 1;
-            result.Month.Should().Be(expectedMonth, $"{start:O} + {months}mo month");
-            // Round-trips to a valid date: constructing it back must not throw.
-            var act = () => new DateOnly(result.Year, result.Month, result.Day);
-            act.Should().NotThrow();
-        }
+                result.Day.Should().BeLessThanOrEqualTo(start.Day, $"{start:O} + {months}mo");
+                var expectedMonth = ((start.Month - 1 + months) % 12) + 1;
+                result.Month.Should().Be(expectedMonth, $"{start:O} + {months}mo month");
+                // Round-trips to a valid date: constructing it back must not throw.
+                var act = () => new DateOnly(result.Year, result.Month, result.Day);
+                act.Should().NotThrow();
+            }
     }
 
     // ---------------- NextAnnualOccurrence: fixed-annual, incl. Feb 29 ----------------

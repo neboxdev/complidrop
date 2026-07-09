@@ -93,20 +93,20 @@ public class RealRuleDataLoadTests
         var all = EmbeddedRuleData.LoadAll(FullSet);
 
         foreach (var rule in all.Rules)
-        foreach (var version in rule.Versions)
-        {
-            if (rule.Category == "insurance")
+            foreach (var version in rule.Versions)
             {
-                version.InsuranceMinimums.Should().NotBeNull($"{rule.Id} is an insurance rule — the statutory floor is its point");
-                version.InsuranceMinimums!.Kind.Should().NotBeNull($"{rule.Id} must declare the floor's statutory shape");
-                version.InsuranceMinimums.CoverageLine.Should().NotBeNull($"{rule.Id} must declare which policy line the floor binds");
-                version.InsuranceMinimums.Currency.Should().Be("USD");
+                if (rule.Category == "insurance")
+                {
+                    version.InsuranceMinimums.Should().NotBeNull($"{rule.Id} is an insurance rule — the statutory floor is its point");
+                    version.InsuranceMinimums!.Kind.Should().NotBeNull($"{rule.Id} must declare the floor's statutory shape");
+                    version.InsuranceMinimums.CoverageLine.Should().NotBeNull($"{rule.Id} must declare which policy line the floor binds");
+                    version.InsuranceMinimums.Currency.Should().Be("USD");
+                }
+                else
+                {
+                    version.InsuranceMinimums.Should().BeNull($"{rule.Id} is not an insurance rule");
+                }
             }
-            else
-            {
-                version.InsuranceMinimums.Should().BeNull($"{rule.Id} is not an insurance rule");
-            }
-        }
     }
 
     [Fact]

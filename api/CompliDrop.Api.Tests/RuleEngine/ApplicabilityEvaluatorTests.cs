@@ -82,39 +82,39 @@ public class ApplicabilityEvaluatorTests
     public void All_matches_the_kleene_truth_table_for_every_operand_pair()
     {
         foreach (var a in AllValues)
-        foreach (var b in AllValues)
-        {
-            var actual = ApplicabilityEvaluator.EvaluateValue(Condition.All(LeafFor(a), LeafFor(b)), Profile);
-            actual.Should().Be(RefAll([a, b]), $"all({a},{b})");
-        }
+            foreach (var b in AllValues)
+            {
+                var actual = ApplicabilityEvaluator.EvaluateValue(Condition.All(LeafFor(a), LeafFor(b)), Profile);
+                actual.Should().Be(RefAll([a, b]), $"all({a},{b})");
+            }
     }
 
     [Fact]
     public void Any_matches_the_kleene_truth_table_for_every_operand_pair()
     {
         foreach (var a in AllValues)
-        foreach (var b in AllValues)
-        {
-            var actual = ApplicabilityEvaluator.EvaluateValue(Condition.Any(LeafFor(a), LeafFor(b)), Profile);
-            actual.Should().Be(RefAny([a, b]), $"any({a},{b})");
-        }
+            foreach (var b in AllValues)
+            {
+                var actual = ApplicabilityEvaluator.EvaluateValue(Condition.Any(LeafFor(a), LeafFor(b)), Profile);
+                actual.Should().Be(RefAny([a, b]), $"any({a},{b})");
+            }
     }
 
     [Fact]
     public void All_and_any_match_the_reference_over_every_operand_triple()
     {
         foreach (var a in AllValues)
-        foreach (var b in AllValues)
-        foreach (var c in AllValues)
-        {
-            var operands = new[] { a, b, c };
-            var leaves = operands.Select(LeafFor).ToArray();
+            foreach (var b in AllValues)
+                foreach (var c in AllValues)
+                {
+                    var operands = new[] { a, b, c };
+                    var leaves = operands.Select(LeafFor).ToArray();
 
-            ApplicabilityEvaluator.EvaluateValue(Condition.All(leaves), Profile)
-                .Should().Be(RefAll(operands), $"all({a},{b},{c})");
-            ApplicabilityEvaluator.EvaluateValue(Condition.Any(leaves), Profile)
-                .Should().Be(RefAny(operands), $"any({a},{b},{c})");
-        }
+                    ApplicabilityEvaluator.EvaluateValue(Condition.All(leaves), Profile)
+                        .Should().Be(RefAll(operands), $"all({a},{b},{c})");
+                    ApplicabilityEvaluator.EvaluateValue(Condition.Any(leaves), Profile)
+                        .Should().Be(RefAny(operands), $"any({a},{b},{c})");
+                }
     }
 
     [Fact]

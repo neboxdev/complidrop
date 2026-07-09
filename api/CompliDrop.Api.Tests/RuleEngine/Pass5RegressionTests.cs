@@ -21,13 +21,13 @@ public class Pass5RegressionTests
         Obligation? obligation = null,
         Cadence? cadence = null,
         InsuranceMinimums? minimums = null) => new()
-    {
-        Id = id,
-        ObligationRef = "OBL-" + id.ToUpperInvariant(),
-        Jurisdiction = jurisdiction,
-        EntityTypes = ["test-widget"],
-        Category = category,
-        Versions =
+        {
+            Id = id,
+            ObligationRef = "OBL-" + id.ToUpperInvariant(),
+            Jurisdiction = jurisdiction,
+            EntityTypes = ["test-widget"],
+            Category = category,
+            Versions =
         [
             new RuleVersion
             {
@@ -43,7 +43,7 @@ public class Pass5RegressionTests
                 UserAction = "Synthetic.",
             },
         ],
-    };
+        };
 
     private static RuleSet SetOf(params Rule[] rules) => new() { Rules = rules };
 

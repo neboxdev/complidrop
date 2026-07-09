@@ -75,7 +75,7 @@ public static class RegulatoryProfileMapper
                 case FactKind.String when property.Value.ValueKind == JsonValueKind.String:
                     builder.Set(fact.Name, FactValue.Of(property.Value.GetString()!));
                     break;
-                // Kind/value mismatch: skip — the fact stays UNKNOWN (fail-safe, needs-profile-info).
+                    // Kind/value mismatch: skip — the fact stays UNKNOWN (fail-safe, needs-profile-info).
             }
         }
     }
