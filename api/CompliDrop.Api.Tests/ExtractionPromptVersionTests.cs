@@ -19,8 +19,8 @@ public sealed class ExtractionPromptVersionTests
     //   2. re-pin this hash (the test failure message prints the new value).
     // Updating the hash without bumping the version defeats the audit trail this
     // tripwire exists to protect.
-    private const string PinnedVersion = "v2-2026-06-12-eo-addl-insured";
-    private const string PinnedPromptSha256 = "3ED6C1A5E646F522F8A1761B32BB7B56F448745096ADD43AF18E2B4442C48F46";
+    private const string PinnedVersion = "v2-2026-07-09-liquor-liability";
+    private const string PinnedPromptSha256 = "528F4ADCB6BA247064F131620FC6E3518902B7F9C81D6C661512E4E4E47C9856";
 
     [Fact]
     public void Prompt_content_and_version_are_pinned_together()
