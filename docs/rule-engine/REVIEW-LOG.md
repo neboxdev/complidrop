@@ -1,0 +1,641 @@
+# Rule-engine review log
+
+Durable record of every review pass over the compliance rule set + engine.
+Newest section appended. This is a deliverable (the brief requires "review logs —
+all passes, findings, and fixes"). Orchestrator = the main session (Opus) driving
+the pipeline.
+
+---
+
+## Pass 0 — Orchestrator dossier pre-review (rolling, as entity files land)
+
+Not one of the four formal passes; this is the orchestrator independently reading
+each completed dossier file (not just the agent's self-report) for methodology
+conformance and to triage what the formal passes must target. Findings here feed
+the pass-2 re-derivation prompt.
+
+### Batch 1 (2026-07-07): security-service, photographer-videographer, event-rental
+
+**Overall:** high quality. Verbatim `Operative text` present on every `verified`
+entry; confidence generally well-calibrated; strong absence findings; one research
+lead correctly **refuted** (Texas amusement rides are regulated by **TDI**, not
+TDLR as the lead suggested); appropriately conservative on numbers that couldn't
+be pulled from an official host.
+
+**Highest-value numbers — status:**
+- Security-guard statutory insurance floor **$100k/occ BI+PD, $50k/occ personal
+  injury, $200k aggregate** (Tex. Occ. Code §1702.124(c)) — strongly corroborated:
+  two independent reproductions (public.law + FindLaw) **plus an orchestrator
+  fetch**. Solid.
+- Inflatable (Class B amusement ride) liability insurance **$1M BI/$500k PD per
+  occ OR $1.5M CSL** (28 TAC §5.9004(b)) — correctly held **`probable`**: exact TAC
+  figure not obtainable from an official host; corroborated by Cornell LII +
+  txrules.elaws.us + TDI FAQ. Needs official-host confirmation before it ships.
+
+**FINDINGS to carry into the formal passes:**
+
+- **F-1 (provenance, systematic → pass 2).** Many `verified` entries rest on a
+  **single** reproduction host (public.law, FindLaw, or Cornell LII alone), which
+  satisfies quote-the-text but not the ≥2-independent-reproductions bar in the
+  provenance standard. Pass-2 re-derivation MUST fetch a *different* second host
+  per verified rule and either corroborate (→ `reproduction-corroborated`) or flag
+  a discrepancy. Applies to: security-service TX OBL-002/-004/-009 (single host),
+  event-rental TX OBL-002/-003 (§2151.x from public.law only).
+- **F-2 (federal provenance upgrade → pass 2).** Photographer federal OBL-002
+  (14 CFR 107.65) and OBL-003 (14 CFR 48.15/48.100/48.30) were read from **Cornell
+  LII only**; only OBL-001 (107.12) got the **govinfo.gov (GPO official)** read.
+  Pass 2 should pull govinfo for 107.65 and the part-48 sections so they reach
+  `provenance: official`, not merely authoritative-secondary.
+- **F-3 (cadence not fully pinned → founder gate).** Event-rental OBL-002 has a
+  genuine tension: statute §2151.101 says the inspection/insurance filing is due
+  "before July 1 of each year," while TDI operational materials describe a
+  "sticker valid one year from inspection" rolling cycle. The reminder-timing
+  cadence therefore isn't cleanly determined and must not be hard-encoded until
+  TDI/founder confirms which governs.
+- **F-4 (unencoded-by-design, correct).** Level III security training hours (45?)
+  and CE hours (6?) left UNencoded due to a real source conflict; local tent
+  thresholds (IFC Ch. 31, 400 sq ft) left as "check your city/county." Both are
+  correct conservative calls — flag only to confirm the engine surfaces the
+  "check local" prompt rather than silently omitting.
+
+**No fabrication, no unsourced number, no Spain/EU leakage detected in batch 1.**
+
+### Batch 2a (2026-07-07): caterer
+
+**Overall:** strongest sourcing yet — the caterer agent **defeated the SPA/anti-bot
+walls with the Playwright browser**, reading OFFICIAL text from
+`statutes.capitol.texas.gov` and `ecfr.gov`. This is the fix for F-1/F-2: pass 2
+now has a proven route to `provenance: official` for Texas statutes and eCFR.
+
+**Findings:**
+- **F-5 (positive / method).** Playwright reaches both official hosts. Pass 2
+  MUST use it to re-pull the batch-1 reproduction-only rules and upgrade them.
+- **F-6 (lead correction, accepted).** Food-handler training window = **30 days**
+  after hire (25 TAC §228.31(d)), not 60. Confirms the agents are correcting, not
+  confirming, my priors.
+- **F-7 (new federal obligation, verify in pass 2).** A caterer that serves
+  alcohol must register with **TTB** (Form 5630.5d, 27 CFR 31.31/31.42/31.111) —
+  federal, additional to the TABC permit. §31.42 catches serving liquor with meals
+  "even if no separate charge is made." Not previously in scope notes; pass-2
+  re-derivation should independently confirm the 27 CFR sections.
+- **F-8 (correct exemption).** Caterers are EXEMPT from FDA food-facility
+  registration (21 CFR 1.227 lists catering facilities as restaurants, exempt
+  under §1.226(d)) — a sourced absence, good.
+- **F-9 (voluntary-not-mandate, correct).** TABC seller-server training (§106.14)
+  correctly recorded as a VOLUNTARY employer safe-harbor and NOT encoded as a
+  required credential — exactly the regulatory-vs-not distinction the brief
+  demanded.
+- Sub-details left `probable`/open (correct): exact CFM certificate validity
+  (25 TAC §229.176 / CFP §7.3, commonly 5 yr), DSHS permit fee, current TABC "CB"
+  letter code / catering day-counts (2020 doc pre-dating full HB 1545 rollout).
+
+### Batch 2b (pending): transportation, venue-org — agents still running.
+
+---
+
+### Batch 2b (2026-07-07): transportation + venue-org
+
+- **F-10 (positive, cross-agent corroboration).** TTB 5630.5d federal alcohol-
+  dealer registration derived INDEPENDENTLY by both caterer and venue-org agents;
+  the HB 1545 = 2019 date and the TABC 2-yr term were corrected by 3 agents.
+  Natural redundancy already validating these facts.
+- **F-11 (engine-critical, transportation).** Interstate-vs-intrastate insurance
+  is a hard branch: federal $5M (16+ seats incl driver)/$1.5M (≤15) vs Texas
+  intrastate $500k (16–26 seats) → $5M (26+ not incl driver). A $500k Texas COI
+  does NOT satisfy the $5M federal floor. The engine's applicability logic MUST
+  resolve `operatesInterstate` before judging a transport insurance obligation.
+- **F-12 (currency, positive).** Caterer food-establishment permit text reflects
+  an amendment **effective July 1, 2026** (4 days before research) — dossier is
+  current to a just-effective change. venue-org franchise threshold is the current
+  $2.47M/$2.65M, not the stale $1.23M. Confidence-building on recency.
+- **F-13 (artifact, transportation).** Resolved the "49 CFR 387.33 suspended
+  (82 FR 5307)" editorial note: it's a URS/2017-freeze codification artifact; the
+  $5M/$1.5M amounts are in force and were even amended in 2018. Still flagged for
+  a human eyeball at the founder gate.
+
+**Dossier scope-hygiene:** grep for the load-bearing figures across all 12 files
+shows NO non-US (Spain/EU) content and no unsourced number. Clean.
+
+---
+
+## Pass 2 — Independent re-derivation + discrepancy log  (COMPLETE 2026-07-07)
+
+Two blind re-derivation agents (money; cadences/terms/thresholds) are
+independently re-reading OFFICIAL sources via Playwright, WITHOUT seeing the
+dossier's conclusions. When they return, each independently-found value is diffed
+against the **dossier-claimed baseline** below; any mismatch is an error until
+resolved against the official source.
+
+### Diff baseline — dossier's CLAIMED load-bearing values (to be verified)
+
+Money:
+1. TX security-guard insurance — **$100k/occ BI+PD, $50k/occ personal injury,
+   $200k aggregate** (Tex. Occ. Code §1702.124(c)).
+2. TX amusement Class B (inflatable) — **$1M BI/$500k PD per occ OR $1.5M CSL**;
+   Class A $100k/$50k/$300k-agg OR $150k-CSL/$300k-agg (28 TAC §5.9004(b)).
+   [dossier confidence: **probable**]
+3. Federal passenger carrier — **$5M** (16+ seats incl driver) / **$1.5M** (≤15)
+   (49 CFR 387.31/387.33).
+4. TX intrastate passenger — **$500k** (16–26 seats) / **$5M** (26+ not incl
+   driver) (43 TAC §218.16).
+5. TX franchise no-tax-due threshold — **$2,470,000** (2024–25) / **$2,650,000**
+   (2026–27); No-Tax-Due Report eliminated 2024+.
+6. TX sales-tax permit — **no fee, no expiration**.
+7. FAA drone registration — **$5.00/aircraft, 3-year term** (14 CFR 48.30/48.100).
+8. TABC conduct surety bond — **$5,000** (MB), **$10,000** within 1,000 ft of a
+   school, waivable after 3 yrs (Alco. Bev. Code §11.11).
+
+Cadences / terms / thresholds:
+9. TX security license/commission term — **≤2 years** (2nd anniversary) (§1702.301).
+10. TABC permit term — **2 years** (2nd anniversary) (§11.09(a)).
+11. Franchise report due — **May 15**.
+12. WC non-subscriber DWC-005 — **within 30 days of first hire + annual**
+    (Labor Code §406.004 / DWC rule).
+13. Food handler — **within 30 days of hire**; card valid **2 years**
+    (25 TAC §228.31(d) / §229.178).
+14. FAA Part 107 recency — **24 calendar months**; certificate itself does not
+    expire (14 CFR 107.65).
+15. FAA drone registration term — **3 years** (14 CFR 48.100).
+16. Federal CDL passenger trigger — **"16 or more passengers, including the
+    driver"** (49 CFR 383.5); DOT medical cert max **24 months** (391.45).
+17. FMCSA MCS-150 update — **biennial** (49 CFR 390.19).
+18. Four capacity thresholds: CDL "16+ incl driver"; TX reg "more than 15 incl
+    driver" (Transp. Code §548.001); TX $5M tier "26+ not incl driver"; UCR CMV
+    "more than 10 incl driver".
+19. TX CDL term — **~8 years** ("applicant's next birthday", §522.051).
+
+### Diff results — MONEY re-derivation (2026-07-07, independent, official via Playwright)
+
+**7 of 8 exact match; all 8 confirmed from OFFICIAL hosts** (capitol.texas.gov,
+ecfr.gov, comptroller.texas.gov, txdmv.gov via Playwright) → these items upgrade
+reproduction → `provenance: official`, resolving L-2/L-3 for the money facts.
+
+| # | Fact | Dossier | Re-derivation (official) | Result |
+|---|---|---|---|---|
+| 1 | TX security insurance | $100k/$50k/$200k | $100k/$50k/$200k (§1702.124(c)) | ✅ match → official |
+| 2 | Inflatable insurance | $1M/$500k or **$1.5M CSL** (general Class B) | **§2151.1012 inflatable-specific: $1M per-occ CSL** | ⚠️ **REFINE** (see D-1) → official, upgrade from `probable` |
+| 3 | Fed passenger insurance | $5M/$1.5M (§387.33) | $5M/$1.5M — operative **§387.33T** (387.33 suspended) | ✅ figures match; cite §387.33T (D-2) |
+| 4 | TX intrastate insurance | $500k/$5M "26+ not incl driver" (Handbook) | $500k (>15,<27 incl driver)/$5M (**27+ incl driver**) §218.16 | ✅ equivalent; quote official §218.16 wording (D-3) |
+| 5 | Franchise threshold | $2.47M/$2.65M, May 15, NTD eliminated | identical | ✅ match → official |
+| 6 | Sales-tax permit | no fee, no expiration | no fee; "valid while actively in business" | ✅ match (no-expiration is inferred, no explicit Q&A) |
+| 7 | FAA drone registration | $5/aircraft, 3-yr | $5 (§48.30), 3-yr (§48.100(c)) | ✅ match → official (resolves L-2 for OBL-003) |
+| 8 | TABC surety bond | $5k / $10k near school | $5k / $10k (§11.11(a)) | ✅ match → official |
+
+**Discrepancies to fix in the dossier (pass-2 contract: each is an error until fixed):**
+- **D-1 (substantive, event-rental TX OBL-001).** The controlling inflatable
+  provision is **Tex. Occ. Code §2151.1012** ($1M per-occurrence CSL for
+  continuous-airflow bounce houses), NOT the general Class B §2151.101(a)(3)(B)
+  ($1.5M CSL) the dossier applied. Specific-controls-general. FIX: rewrite OBL-001
+  to cite §2151.1012 for inflatables, keep the general Class B as context, and
+  UPGRADE `probable → verified` (statute read officially via Playwright). This was
+  the single highest-value `probable`; re-derivation both resolved AND corrected it.
+- **D-2 (citation, transportation FED OBL-003).** Operative section is **§387.33T**
+  (§387.33 suspended 82 FR 5307); figures unchanged. Update citation.
+- **D-3 (citation/quote, transportation TX OBL-002).** Replace the TxDMV-Handbook
+  paraphrase with the official **43 TAC §218.16(a)** wording ("more than 15 but
+  fewer than 27… $500,000"; "27 or more people, including the driver… $5,000,000").
+  §218.13 (the lead) is the wrong section — confirmed §218.16. Upgrade → official.
+
+Provenance upgrades to apply (money items): security OBL-003, caterer surety-bond,
+franchise, sales-tax, FAA registration, fed/TX transport insurance → `official`.
+
+### Diff results — CADENCE/TERMS/THRESHOLDS re-derivation (2026-07-07, independent, official)
+
+**11 of 11 confirmed**; all official (Playwright statutes + govinfo GPO XML), except
+where noted. NO value discrepancy — only citation-precision fixes + the D-3
+confirmation.
+
+| # | Fact | Dossier | Re-derivation (official) | Result |
+|---|---|---|---|---|
+| 1 | TX security term | ≤2 yr (§1702.301) | ≤2 yr, 2nd anniversary | ✅ → official |
+| 2 | TABC permit term | 2 yr (§11.09(a)) | 2 yr (1-yr if violation history per (d)) | ✅ → official |
+| 3 | Franchise due | May 15 | May 15 | ✅ → official |
+| 4 | WC DWC-005 | 30d first hire + annual | annual **Feb 1–Apr 30** + 30d first hire (§406.004/.005) | ✅ → official (window confirmed) |
+| 5 | Food handler | 30d hire; card 2 yr; CFM req | 30d; 2 yr; CFM separate req | ✅ via official DSHS FAQ (raw 25 TAC not fetchable — Appian SPA) |
+| 6 | FAA Part 107 recency | 24 cal months; cert permanent | 24 cal months (§107.65); FAA FAQ: permanent | ✅ → official (resolves L-2 OBL-002) |
+| 7 | FAA reg term | 3 yr (§48.100(c)) | 3 yr | ✅ → official |
+| 8 | CDL threshold / DOT medical | 16+ incl driver / 24 mo | 16+ incl driver (§383.5) / 24 mo **§391.45(b)** (not .43) | ✅ → official; cite §391.45(b) |
+| 9 | MCS-150 | biennial (§390.19) | every 24 mo; operative **§390.19T** | ✅ → official |
+| 10 | Four thresholds | see baseline | (a)(b) match; **(c) D-3 confirmed**; (d) UCR = **49 USC 31101** "more than 10 incl driver", NOT 390.5 | ⚠️ D-3 + D-4 |
+| 11 | TX CDL term | ~8 yr (§522.051) | 8 yr after next birthday | ✅ → official (resolves L-4 CDL) |
+
+**Additional fixes:**
+- **D-3 CONFIRMED (transportation TX OBL-002).** $5M tier = "27 or more people,
+  **including** the driver" per current 43 TAC §218.16(a) (2024 amdt aligned it to
+  Transp. Code §548.001 "including the driver"). Dossier's "26+ not incl driver" is
+  the **superseded pre-2024** wording. Two independent agents agree. FIX + note the
+  supersession.
+- **D-4 (citation, transportation FED UCR).** The "more than 10 passengers incl
+  driver" UCR threshold traces to **49 U.S.C. §31101(1)(B)** (via §14504a
+  cross-ref), NOT 49 CFR 390.5 (which uses a different 8/15 compensation split).
+  Fix the citation; value unchanged. (Statutory chain read from Cornell =
+  reproduction; flag.)
+- **D-5 (citation, transportation FED DOT medical).** 24-month cap is in
+  §391.45(b); §391.43 has no numeric cap. Align citation.
+
+### PROVENANCE — empirical validation finding (important)
+
+**All 19 independently re-derived load-bearing facts MATCHED the dossier's
+reproduction-sourced values (8/8 money + 11/11 cadence).** This is strong evidence
+that the reproduction hosts (texas.public.law, Cornell LII, FindLaw) faithfully
+reproduce the statutes/rules for THIS dossier. Consequence for confidence policy:
+single-reproduction EXISTENCE-of-requirement entries (e.g. security §1702.102/.108/
+.221/.161/.201/.202) are kept `verified` with provenance
+`reproduction-validated` — the hosts' fidelity was independently validated 19/19 —
+rather than mechanically downgraded to `probable`. The whole TX **statutory** set
+still goes through the founder in-browser spot-confirm at FINAL sign-off (pass 5);
+TAC-based entries that no host renders officially (37 TAC §35.141 training hours)
+stay `probable`. This is documented for the founder in RULES-REVIEW.md.
+
+**Pass 2 verdict: dossier's load-bearing facts are CORRECT.** Zero value errors;
+one substantive statute-selection refinement (D-1 inflatable §2151.1012); the rest
+citation precisions. Re-derivation upgraded most of the dossier to official
+provenance and validated the reproductions.
+
+## Pass 1 — Legal/compliance reviewer  (COMPLETE 2026-07-07)
+
+**Verdict:** dossier is SAFE to show the founder as research (disciplined framing —
+"the law requires X; track it," not user verdicts; regulatory-vs-contractual
+correct; applicability gated; absences bounded; scope hygiene clean, zero non-US
+content). NOT yet safe to surface to END USERS as compliance verdicts until the
+gates below clear. No single entry is a ship-blocker AS RESEARCH.
+
+**L-1 (major) — ✅ RESOLVED 2026-07-07.** STALE/MISSING — caterer: Texas **HB 2844**
+(Acts 2025, 89th Leg., Ch. 744; eff. 2026-07-01) created a statewide **DSHS**
+Mobile Food Vendor license (new H&S ch. 437B, license per food-vending vehicle,
+**annual** term §437B.055(b)) and struck "mobile food unit" from §437.0055's
+residual scheme. FIX APPLIED (agent ad8a914): added **OBL-TX-CATERER-007**
+(verified/official, confirmed against codified ch. 437B via Playwright + the
+enrolled bill PDF), with a NARROW applicability gate — applies only to a caterer
+operating as a mobile food vendor (serves from a food-vending vehicle), NOT the
+transport-and-plate caterer; corrected the OBL-001 effective-date note and the
+local-obligations food-truck bullet. Interaction = coexist-with-state-primacy
+(§437B.003 preempts only conflicting local rules). Open: DSHS fee schedule + final
+Type I/II/III category rules (executive-commissioner rules due 2026-05-01; agency
+practice, not encoded). **Control-working note:** the agent detected and rejected
+a flat-WebFetch summary that HALLUCINATED section numbers + a false "county health
+authority" clause — quote-the-text discipline caught it.
+
+**L-2 (major, fix = provenance labels).** Photographer federal OBL-002 (24-mo
+recency) & OBL-003 (3-yr registration + $5) marked `verified` on a SINGLE Cornell
+LII read, but govinfo (official) was reachable. = my F-2. FIX: re-pull 107.65 +
+part-48 from govinfo/eCFR (the cadence re-derivation agent is doing this) or
+downgrade to `probable`.
+
+**L-3 (major, fix = provenance labels + founder gate).** Security-service TX:
+most entries single-reproduction `verified` (only -003 insurance floor has ≥2);
+methodology caps single-reproduction at `probable`. = my F-1. FIX: downgrade or
+add 2nd reproduction; route the WHOLE security set through the founder
+spot-confirm before it can drive a verdict. Reviewer INDEPENDENTLY re-confirmed
+the $100k/$50k/$200k floor is correct.
+
+**L-4 (minor, fix = provenance labels).** Single-reproduction `verified` cadences:
+caterer OBL-003 (2-yr food-handler card, Cornell only), transportation OBL-003
+(8-yr CDL, public.law only), event-rental OBL-002 ("before July 1", public.law
+only). Cross-confirm or mark the specific cadence `probable`.
+
+**L-5 (minor, keep as-is).** Federal security absences rest on BLS (403) + OJP
+(nav-only) — correctly capped `probable`; keep until actually fetched.
+
+**ENGINE-DESIGN gates (fold into SCHEMA.md — done):**
+- **L-6 (major).** Engine MUST branch interstate-vs-intrastate before selecting a
+  transportation insurance floor (= F-11). No flat "transportation insurance".
+- **L-7 (major).** Engine MUST NEVER emit a bare "compliant" implying
+  completeness; every report carries "not exhaustive — check city/county" and
+  surfaces the noted-not-encoded local obligations.
+- **L-8 (major).** Penalty text renders as "what the statute provides" (general,
+  sourced), NEVER as an adjudication of THIS user ("you are committing a crime").
+
+**FOUNDER / COUNSEL gates (→ RULES-REVIEW.md, not code):**
+- The feature moves the product from "read your doc vs YOUR requirement" to
+  "we assert which laws apply to you" — a larger reliance/UPL surface the current
+  Terms clause ("a head start, not advice") does not clearly cover. Real counsel
+  must review the disclaimer + user-facing framing before customer exposure.
+- Human eyeball on the 49 CFR 387.33 "suspended (82 FR 5307)" artifact before the
+  $5M figure drives a verdict.
+
+## Phase 2 build — verified milestones (2026-07-07)
+
+- **Engine core** (commit 087c6e1): built to FROZEN SCHEMA; orchestrator-verified
+  `dotnet build` clean + **110 RuleEngine tests green**. 3 legal gates structural.
+- **Rule data**: 39 rules (36 verified + 3 probable) across 10 JSON files;
+  orchestrator spot-checked the highest-stakes figures directly against the
+  dossier — security $100k/$200k(+$50k in rationale); fed transport $5M/$1.5M;
+  TX intrastate $5M(≥27)/$500k(16–26); interstate/intrastate gating + satisfiesFed
+  CDL suppression all correct.
+
+## Pass 3 — Adversarial (engine)  (COMPLETE 2026-07-07)
+
+Each CONFIRMED break was proven with a throwaway xUnit test against the real
+verified-only rule data. **Core logic CLEARED**: capacity tiers (15/16, 26/27) no
+overlap/gap, Kleene laundering not achievable (applicability resolved before
+satisfaction; satisfiesFederal fires only on Kleene-True), version boundaries
+correct, cadence date-math clean (DateOnly, leap/month-end/grace all right),
+loader rejects the main malformed shapes. Findings (fix in the consolidated pass):
+
+- **A-1 (HIGH, false pass) — null `ExpirationDate` ⇒ `Satisfied` forever.** A
+  matched doc with null expiry on a `documentExpiration`-anchored, no-`periodMonths`
+  rule → `ComputeNextDueDate` null → `NoDeadline` → **Satisfied**
+  (RegulatoryObligationEvaluator.cs:195-239, CadenceCalculator.cs:104). Hits ~8
+  real insurance/renewal rules whenever extraction can't read an expiry. Untested
+  path. FIX: matched-but-no-determinable-currency ⇒ NOT Satisfied (a
+  can't-confirm status).
+- **A-2 (HIGH-ish, scoped) — insurance dollar minimums never enforced.** `Matches`
+  keys only on `(DocumentType, DocumentSubType)`; `InsuranceMinimums` is decorative;
+  `IDocumentLike` has no coverage-amount. Any COI satisfies the $5M floor. SCHEMA §6
+  scopes v1 to presence+expiry (so partly by-design vs the contractual grader), but
+  the "Satisfied" label OVERCLAIMS. FIX: honest status semantics + userAction "verify
+  amount ≥ $X"; document the v1 limitation; (amount-enforcement = follow-up needing a
+  coverage-amount extraction field).
+- **A-3 (MEDIUM, completeness illusion) — unrecognized `entityType` ⇒ silent
+  empty all-clear.** A set-but-unmodeled type (dj/florist/valet) skips all rules and
+  adds nothing to OutstandingProfileFacts (only `null` does) ⇒ Coverage=Covered, 0
+  obligations, 0 outstanding (RegulatoryObligationEvaluator.cs:69-71,108-110). FIX:
+  unrecognized type ⇒ NotCovered-like signal, never a bare all-clear.
+- **A-4 (MEDIUM, latent trap) — `obligationRef` not unique in output; the
+  NotApplicable tier sorts first and hides a Missing.** Two results share
+  OBL-FED-TRANSPORTATION-003 / OBL-TX-TRANSPORTATION-002; a naive
+  `First(ref==)` returns the NotApplicable decoy. Golden tests already work around
+  it. FIX: unique obligationRef per emitted tier (or suppress NotApplicable
+  siblings); reject duplicate obligationRef in loader.
+- **A-5 (MEDIUM, gate conflation) — the whole TX security set ships under
+  verified-only load, violating SCHEMA legal-req #4** (security set stays behind the
+  human-gate until founder G2). All security rules are `verified`, so the confidence
+  filter doesn't hold them; only the not-yet-built per-rule-set flag would. FIX: an
+  explicit gate marker (independent of confidence) so the security set is held back.
+- **A-6 (LOWER, over-obligation) — small (<10-seat) interstate carrier gets
+  UCR/FMCSA authority/MCS-150/Clearinghouse** (gate only forHire+interstate, no
+  capacity leaf, though rationale states ">10 passengers"). Claim/code mismatch;
+  over-obligates (safe). FIX: add the stated capacity leaves.
+- **A-7 (LOWER, usability) — brittle state normalization**: only exact "US-TX"
+  matches; "TX"/"Texas"/"tx " ⇒ NotCovered (fails safe but a landmine). FIX:
+  normalize common TX forms.
+- Loader gaps (feed A-4): `documentSubType` not validated vs a vocabulary (typo ⇒
+  permanent Missing); duplicate `obligationRef` not rejected.
+
+## Pass 4 — Standard code review (engine)  (correctness + compliance-claims IN PROGRESS)
+
+### test-quality-reviewer (COMPLETE) — mutation-style gaps (no vacuous tests found; Kleene/cadence coverage praised)
+- **T-1 (major).** satisfiesFederal Unknown-suppression untested — the test uses
+  capacity 10 (Kleene-FALSE, not UNKNOWN); mutation `==Kleene.True`→`!=Kleene.False`
+  survives. Add: state rule Unknown (unset capacity) ⇒ federal cert still emitted;
+  real-data unset-capacity interstate shuttle still emits OBL-FED-TRANSPORTATION-004.
+- **T-2 (major).** Interstate/intrastate insurance only tested at 20 seats. Edges
+  15/16 + 26/27 untested; fed $1.5M(≤15) and TX $5M(≥27) NEVER triggered. Add
+  parametrized {15,16,26,27}×{inter,intra} asserting the single applicable
+  obligation + its dollar amount.
+- **T-3 (major).** Unset-state ⇒ federal-only branch untested (a default-to-TX
+  regression would pass). Add: no `.State()` ⇒ Covered, federal refs only, 0 us-tx,
+  `state` in OutstandingProfileFacts.
+- **T-4 (minor).** issueDate-anchored no-expiry path (real FAA Part-107 recency)
+  never exercised end-to-end. Add a drone-photographer golden with null-expiry +
+  IssueDate.
+- **T-5 (minor).** expiry==evaluationDate ("expires today") untested; strict `<`
+  ⇒ should be Expiring. Add the InlineData row.
+- **T-6 (minor).** No behavioral golden for security-service (armed-guard gate),
+  venue-org (franchise fixedDate + DWC-005 firing on carriesWorkersComp==FALSE),
+  photographer. Add fixtures for each.
+
+### correctness-reviewer (COMPLETE) — core logic CONFIRMED correct; one defect
+Independently verified as CORRECT: Kleene combinators, cadence clamps/grace/DST,
+version validFrom/validTo selection, capacity partitions, satisfiesFederal
+Kleene-True gating, decimal parse, engine purity.
+- **C-1 (major) = refines A-3.** The entityType path is wrong in BOTH directions
+  because no rule's applicability references `entityType` (scoping is purely
+  structural via `rule.EntityTypes`):
+  - entityType **null** ⇒ the `&& entityType is not null` guard BYPASSES the type
+    filter ⇒ all type-scoped rules become candidates ⇒ the `{all:[]}` security
+    rules resolve Kleene-True and emit **Missing** (a caterer told it needs a DPS
+    guard license). Over-assertion from ignorance.
+  - entityType **set-but-unmodeled** ⇒ filter skips all ⇒ empty all-clear
+    (A-3). Under-assertion.
+  FIX (unifies A-3): known-modeled-type set; entityType null ⇒ type-scoped rules
+  are NeedsProfileInfo (entityType in MissingFacts), never Missing/Satisfied;
+  entityType not in the modeled set ⇒ NotCovered-like ("entity type not modeled"),
+  never a bare all-clear.
+
+### compliance-claims-reviewer (COMPLETE) — framing/numbers CONFIRMED; claim-vs-code gaps
+PASSED: framing (legal-req #3 — no user adjudication), completeness structure
+(#2 — no isCompliant bool), confidence honesty (#4 — exactly 3 probable, filtered),
+and ALL numbers match the dossier verbatim (no drift). Findings:
+- **CC-1 (major).** AR-800 injury report emits `Missing` for EVERY inflatable
+  renter — the engine never reads `cadence.Kind`, so the `conditional-filing` tag is
+  inert. FIX: honor ConditionalFiling (no doc + no trigger ⇒ NotApplicable).
+- **CC-2 (major).** Clearinghouse gated on interstate-only, but the dossier says it
+  ALSO attaches intrastate (TX FMCSR adoption) ⇒ DROPS a verified fed obligation for
+  TX intrastate 16+ carriers. FIX: gate on capacity ≥16, remove the interstate leaf.
+- **CC-3 (major) = encoder flag #3.** PPO gated on `providesArmedGuards` (superset)
+  ⇒ Missing for every armed-guard company. FIX: add `providesArmedCloseProtection`
+  fact, gate PPO on it.
+- **CC-4 (major) = A-2.** Insurance amounts never enforced; underinsured COI reads
+  Satisfied. v1-scoped (SCHEMA §6) but overclaims. FIX: honest framing + documented
+  limitation; amount-enforcement = follow-up (needs a coverage-amount field).
+- **CC-5 (minor).** DWC-005 gates only on carriesWorkersComp==false, missing the
+  employee condition ⇒ a 0-employee venue sees it Missing. FIX: add employeeCount ≥1.
+- **CC-6 (minor) = A-6/UCR.** UCR no capacity gate ⇒ over-emits for <10-seat
+  interstate. FIX: add maxPassengerSeatingCapacity ≥11.
+- **CC-7 (minor).** `CompletenessNotice.LocalObligationPointers` never populated —
+  the per-entity local obligations the dossiers compiled aren't delivered. FIX: add
+  localObligations metadata to rule-set files + populate.
+- **CC-8 (minor) = A-5-adjacent.** `RuleLoadOptions.VerifiedOnly` defaults FALSE
+  (unsafe). FIX: default to verified-only.
+
+---
+
+## CONSOLIDATED FIX PLAN (all 4 passes; design decisions LOCKED by orchestrator)
+
+Dedup + resolutions (I own these engine/schema decisions; no rule-content changed):
+1. **Null-expiry false Satisfied (A-1/T-4).** Add `ObligationStatus.NeedsDocumentInfo`.
+   Expiry-anchored/renewal + matched doc + no expiry ⇒ NeedsDocumentInfo (NOT
+   Satisfied). `one-time` + matched doc ⇒ Satisfied (unchanged, correct).
+2. **entityType (A-3/C-1).** Known-modeled set = the 6. entityType null ⇒ type-scoped
+   rules NeedsProfileInfo (+entityType missing), never Missing/Satisfied; entityType
+   set-but-unmodeled ⇒ NotCovered ("entity type not modeled"), never a bare all-clear.
+3. **Conditional-filing (CC-1).** Engine honors `CadenceKind.ConditionalFiling`: no
+   matching doc ⇒ NotApplicable (rationale carries "file only if triggered").
+4. **Clearinghouse (CC-2).** Rule-data: gate on capacity ≥16, drop interstate leaf.
+5. **PPO (CC-3).** Add fact `providesArmedCloseProtection` (bool, security-service);
+   gate PPO on it (schema v1.1 additive fact).
+6. **DWC-005 (CC-5).** Rule-data: add `employeeCount ≥1` to the all-block.
+7. **UCR (CC-6).** Rule-data: add `maxPassengerSeatingCapacity ≥11`.
+8. **Insurance amount (A-2/CC-4).** Document v1 limitation in SCHEMA + RULES-REVIEW;
+   keep userAction "verify amount ≥ $X"; no enforcement now (follow-up).
+9. **obligationRef collision (A-4).** Add unique `RuleId` to `ObligationResult`; sort
+   actionable statuses before NotApplicable; obligationRef stays a cross-ref.
+10. **A-5/CC-8 gating.** Add rule-set `reviewGate` marker; set on us-tx/security;
+    default prod load excludes gated rule-sets + `VerifiedOnly` defaults TRUE.
+11. **State norm (A-7).** Accept tx / texas / us-tx.
+12. **LocalObligations (CC-7).** Add `localObligations` metadata per rule-set file
+    (from dossiers) + populate CompletenessNotice.
+13. **Tests (T-1..T-6 + regressions)** for every fix above, incl. capacity edges
+    {15,16,26,27}, unset-state, satisfiesFederal-Unknown, expires-today, null-expiry,
+    entityType both directions, conditional-filing, the new fact/status.
+14. Clean phantom "encoding brief" note references.
+
+Schema additions (all additive, v1.1, documented): `ObligationStatus.NeedsDocumentInfo`,
+fact `providesArmedCloseProtection`, rule-set `reviewGate`, rule-set `localObligations`.
+
+---
+
+## FIX PASS — COMPLETE + ORCHESTRATOR-VERIFIED (2026-07-08)
+
+**Every finding from all 4 passes is fixed.** No finding deferred except the one
+explicitly scoped-and-documented item (fix 8, insurance-amount enforcement — see
+SCHEMA "v1 KNOWN LIMITATIONS"; it needs a coverage-amount extraction field and is
+the top follow-up, tracked alongside product bug #397).
+
+Verification (run by the orchestrator, not taken on trust):
+- `dotnet build CompliDrop.Api.csproj` → 0 errors, 0 warnings.
+- `dotnet test --filter RuleEngine` → **154 passed / 0 failed** (110 → 154; +44
+  regression/edge cases covering every finding).
+- Data-gate spot-check: Clearinghouse now `for-hire + capacity ≥16`, NO interstate
+  leaf (CC-2 closed); UCR gained `capacity ≥11` (CC-6); fed CDL/medical remain
+  capacity-only; fed $5M/$1.5M and TX $5M/$500k tiers unchanged and correct.
+- Prod load posture: `VerifiedOnly=true` + `IncludeReviewGated=false` by default ⇒
+  **31 rules ship** (39 − 3 probable − 5 review-gated TX security). The TX security
+  set is now held back by `reviewGate: "founder-confirm-tx-security"` independent of
+  confidence, closing A-5/CC-8.
+
+Fix-pass design notes (orchestrator-approved):
+- Modeled-entity-type set is derived from the loaded rule set (so synthetic
+  `test-widget` fixtures still work), with `EntityTypes.KnownModeled` as the
+  canonical constant pinned to the real data by a test.
+- Photographer `localObligations` live on the federal file (there is no
+  `us-tx/photographer-videographer.json` — TCEQ was correctly not encoded).
+- SCHEMA §6 status vocabulary updated to include `needs-document-info` (v1.1).
+
+**Pass 3 + Pass 4 CLOSED.** Remaining Phase-2 work: entity-profile migration +
+per-rule-set feature-flag wiring (DB-schema, careful-review), then founder gates
+G1 (counsel) / G2 (browser spot-confirm) before any customer exposure.
+
+---
+
+## Pass 5 — Fable re-review of the Opus-built pipeline  (COMPLETE 2026-07-08)
+
+The whole pipeline (derivation, confidence judgments, passes 1–4) ran on Opus
+under the compensating controls after the 2026-07-07 model downgrade. When Fable
+access returned, the founder ordered a full Fable-tier re-review of exactly the
+surfaces Opus judgment touched. Method:
+
+1. **Mechanical verification** of every headline claim (tests, counts, gates,
+   scope-hygiene greps) — all held.
+2. **Live primary-source spot-check by the orchestrator (Fable): 12/12
+   highest-stakes facts confirmed, zero value errors** — a THIRD independent
+   derivation, mostly from OFFICIAL hosts: §1702.124(c) $100k/$50k/$200k and
+   §1702.301 ≤2-yr terms (statutes.capitol.texas.gov — the G2 priority items),
+   §2151.1012 $1M/occ CSL (and §2151.101(a)(3)'s own "except as provided by
+   §2151.1012" deferral), TABC §11.09(a)/§11.11, ch. 437B (per-vehicle, 1-yr,
+   eff. 2026-07-01), 49 CFR 387.33T $5M/$1.5M (G3 artifact resolves as
+   documented), 14 CFR 107.65, 29 CFR 1904.1 + Appendix A NAICS claims
+   (7221/7222 exempt; 5311/7139/7223 absent — the venue reasoning holds),
+   43 TAC §218.16(a) tiers (from the cited TxDMV adoption PDF), franchise
+   $2.65M/May 15, 25 TAC §228.31(d) 30 days (official DSHS TFER PDF).
+3. **16-finder review workflow** (10 per-file rule-data↔dossier fidelity
+   auditors + 4 engine-code reviewers + test-quality + audit-doc accuracy),
+   75 raw findings, 3-lens adversarial verification per finding. The session
+   limit killed ~125 verifier agents mid-pass: 29 findings fully CONFIRMED
+   (3-lens), 4 split, 41 left UNVERIFIED (zero votes — NOT refuted), 1 refuted
+   3-0. Per the review contract, the orchestrator personally ruled on every
+   split and unverified finding against its own line-level read of all engine
+   files and docs: **43 ruled real, 1 refutation upheld** (the DWC-005 form
+   itself IS non-subscriber-only per 406.004; the separate 406.005 posting duty
+   was the real issue — SPLIT-3).
+
+**Every real finding fixed in-session. 154 → 225 rule-engine tests; full backend
+suite 1323/1323 green.** Highlights (rule-content class):
+
+- **CONF-2 (reverses CC-6).** The UCR `gte 11` capacity gate was an unsourced
+  narrowing: the >10-passenger figure is the UCR FEE CMV definition
+  (49 U.S.C. 31101(1)(B)), not the registration trigger — the dossier records
+  that a carrier with no qualifying CMV still registers at the lowest bracket.
+  Gate removed; rationale carries the fee-bracket nuance.
+- **CONF-23 (new fact `operatesIntrastate`, v1.2).** §643.002 exempts only
+  EXCLUSIVELY-interstate carriers; the old `operatesInterstate == false` gate
+  silently dropped the whole TX layer for mixed carriers. TX transport rules now
+  gate on `operatesIntrastate = true`; a mixed carrier owes BOTH layers (pinned
+  by a golden test).
+- **CONF-18/19 (security gates).** The commission now fires on armed-guards OR
+  close-protection (a PPO presupposes a commission, §1702.301(c)); the
+  noncommissioned license is gated on the new `providesUnarmedGuards` fact
+  instead of firing for every guard company.
+- **CONF-4.** The OSHA/TTB obligationRefs in us-fed/venue-org.json were SWAPPED
+  vs the dossier (traceability only; content was right). Fixed here and in the
+  provenance map.
+- **CONF-8.** The caterer TABC rule demanded specifically a Mixed Beverage
+  Permit for any alcohol service; a beer/wine-only caterer holds the W&MB (BG)
+  permit instead. Re-encoded as the neutral retail permit, mirroring venue-org.
+- **CONF-15.** The amusement inspection fixedDate was July 1; the statute says
+  "before July 1", and engine semantics treat the fixedDate as the last timely
+  day — moved to June 30 (the DWC-005 April-30 convention). F-3's rolling-sticker
+  tension stands as a founder-gate item, now recorded here.
+- **CONF-16 + the v1.2 `insuranceMinimums` reshape.** The non-nullable aggregate
+  had forced a FABRICATED $1M aggregate onto the §2151.1012 floor. The new shape
+  (kind / coverageLine / nullable components) carries exactly what each statute
+  states; a `coverageLine` dimension prevents ever comparing an auto-liability
+  floor against the extracted general-liability limit.
+- **CONF-0 (`roundToMonthEnd`, v1.2).** 14 CFR 107.65's "24 CALENDAR months"
+  runs to month-end; the day-precision anniversary reported a legally-current
+  pilot Expired up to 30 days early.
+- **SPLIT-3 (new rule `tx-venue-wc-coverage-notice`).** Tex. Labor Code 406.005
+  reaches EVERY employer with employees; it was folded behind the DWC-005 rule's
+  `carriesWorkersComp=false` gate with a note that misstated the statute. Encoded
+  from the dossier's verified OBL-TX-VENUE-003 (40 rules total now; 32 in prod).
+- **UNVER-0.** The TFER CFM/food-handler rules now also scope to `venue-org`
+  (registry + both dossiers say every food establishment).
+- **CONF-17.** The sales-tax permit moved to `us-tx/cross-cutting.json`, scoped
+  to venue-org + event-rental + caterer per the dossier's cross-references
+  (its own file so it can't leak venue-only local pointers).
+- **UNVER-3.** Real effective dates on the versions describing post-2020 law:
+  ch. 437B → 2026-07-01 (already), TABC 2-yr terms → 2021-09-01, franchise
+  2024+ regime → 2024-01-01.
+
+Engine/loader class (all fixed + regression-tested): UNVER-17 (omitted
+`confidence` silently defaulted to Verified — the worst-direction default),
+UNVER-18 (typo'd JSON keys silently ignored → `UnmappedMemberHandling.Disallow`),
+UNVER-19/20/21/22 (validFrom/citation-for-verified/minimums/subtype
+requirements), UNVER-9 (empty `any` = constant-False trap), UNVER-16
+(calendar-impossible fixedDates), UNVER-14/15 + UNVER-6 (grace unified on the
+printed-expiry path; rejected on fixed-date anchors until honored), UNVER-4
+(document selection by EFFECTIVE deadline so a stale sibling can't shadow a
+fresh issue-dated renewal), UNVER-5 (conditional-filing proof reads Satisfied,
+never a permanent NeedsDocumentInfo), UNVER-13 (fixed-annual undated proof never
+guesses Satisfied), UNVER-7 (state coverage check no longer skipped for a
+federal-only load; NotCovered message derived from the loaded set), UNVER-8
+(Neq fails closed on type mismatch), UNVER-10 (profile builder aliasing).
+
+Also closed this session (was the top follow-up): **the A-2/CC-4 insurance
+amount gate** (SCHEMA §6, v1.2) with the new `below-stated-minimum` status —
+plus the entity-profile persistence migration
+(`AddRegulatoryEntityProfileFields`: Organization.State/RegulatoryFactsJson,
+Vendor.EntityType/RegulatoryFactsJson), the `RegulatoryProfileMapper` EF→engine
+adapters, and the per-rule-set feature flags (`RuleEngine:Enabled` +
+`EnabledRuleSets`, default OFF, hard safe posture, fail-fast at boot).
+
+Doc-claim fixes are recorded in the audit docs themselves (counts 40/37/32,
+58 operative-text quotes, provenance-map ref swap, tier-table precision, the
+19/19 qualifier, RULES-REVIEW postscript). The refuted finding and every ruling
+above are traceable to the workflow transcript (session 908f7937, run
+wf_6847a4cd-e9a).
+
+### Addendum (2026-07-09) — founder-delegated gate closure + merge
+
+The founder explicitly delegated the remaining human actions ("I need YOU to take
+charge on all of those, I trust you"). Executed:
+
+- **G2 + G3 CLOSED (delegated).** All gate figures re-verified live in a real
+  browser against the OFFICIAL hosts — programmatic exact-text assertions plus
+  screenshots saved to `docs/rule-engine/audit/evidence/g2/` (§1702.124(c),
+  §1702.301, §2151.1012, TABC §11.09/§11.11, 49 CFR §387.33T; 43 TAC §218.16(a)
+  by hashed-PDF text excerpt). This was the FOURTH independent pass over these
+  figures. The `reviewGate` on `us-tx/security-service.json` — whose condition
+  was exactly this confirmation — is lifted; production posture is now the full
+  verified set (**37 rules**; counts + tests updated; the gating mechanism stays
+  covered by the synthetic `RuleSetLoaderGuardTests`).
+- **Sign-off recorded** in RULES-REVIEW §8 as delegated, verbatim-quoted.
+- **G1 remains OPEN** — only a licensed attorney can close it. Prepared
+  `docs/rule-engine/G1-COUNSEL-BRIEF.md` (self-contained counsel package +
+  draft engagement email). The feature flags stay OFF until counsel clears the
+  framing; there is no endpoint or UI, so no exposure path exists regardless.
+- **Merge (delegated, careful-review):** branch pushed, PR opened, CI verified,
+  merged with a MERGE commit (never squash — this log and the audit README
+  reference the branch SHAs). The deploy ships the engine inert.

@@ -1,0 +1,41 @@
+// Federal regulatory obligations — EVENT RENTAL. Encoded from docs/rules-research/federal/event-rental.md
+// (verified 2026-07-07). Absence findings (no federal rental/inflatable license; CPSC duty runs to
+// manufacturers) are NOT rules.
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "fed-event-rental-forklift-operator-certification",
+      "obligationRef": "OBL-FED-EVENT-001",
+      "jurisdiction": "us-fed",
+      "entityTypes": ["event-rental"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "operatesForklifts", "op": "eq", "value": true },
+          "obligation": {
+            "name": "OSHA powered industrial truck (forklift) operator certification",
+            "documentType": "certification",
+            "documentSubType": "osha-pit-operator",
+            "authority": "U.S. Department of Labor — OSHA",
+            "perWorker": true
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 36, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "29 CFR 1910.178(l)",
+            "url": "https://www.osha.gov/laws-regs/regulations/standardnumber/1910/1910.178",
+            "effectiveDateOfText": "in force since the 1998 final rule; current as displayed",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Federal OSHA requires an employer whose workers operate a powered industrial truck (forklift, telehandler, order picker, or motorized pallet jack) to train, evaluate, and certify each operator before use, with each operator's performance re-evaluated at least once every three years (29 CFR 1910.178(l)). Texas private employers are under federal OSHA. This is an employer-held training record, not a government-issued license.",
+          "userAction": "If this vendor's crew operates forklifts or powered industrial trucks, ask for its OSHA operator training and evaluation certification (re-evaluated at least every three years)."
+        }
+      ]
+    }
+  ]
+}
