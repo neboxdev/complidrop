@@ -26,8 +26,16 @@ public record VendorSummary(
 /// document — <see cref="MissingTypes"/> names them), <c>ActionNeeded</c> (a required type's latest
 /// doc is effectively Expired / NonCompliant / not-yet-graded), or <c>Covered</c> (every required
 /// type's latest doc is effectively Compliant or ExpiringSoon).
+///
+/// <para><see cref="CoveredThrough"/> is the DISPLAY-ONLY "covered through {date}" honesty line
+/// (#399): the nearest (earliest) expiration among this vendor's covered required docs — the date
+/// its coverage as a whole first lapses, so a venue manager can eyeball it against an event date.
+/// The <c>Covered</c> verdict means "current as of today", NOT "covered on some future date"; this
+/// field surfaces the horizon without changing what counts as Covered. It is <c>null</c> for any
+/// non-<c>Covered</c> status, and null when Covered with only undated docs (no expiration to show).
+/// It is never an input to the coverage computation.</para>
 /// </summary>
-public record VendorCoverage(string Status, string[] MissingTypes);
+public record VendorCoverage(string Status, string[] MissingTypes, DateTime? CoveredThrough);
 
 public record VendorDetail(
     Guid Id,
