@@ -85,7 +85,7 @@ should walk.**
 | Guarantee | Test |
 |---|---|
 | Every rule file loads and passes fail-fast validation | `Every_embedded_rule_data_file_loads_and_validates` |
-| Prod posture = 31 rules (39 − 3 probable − 5 gated) | `The_full_and_production_sets_have_the_expected_rule_counts` |
+| Prod posture = 37 rules (since G2 closed 2026-07-09) (39 − 3 probable − 5 gated) | `The_full_and_production_sets_have_the_expected_rule_counts` |
 | Every rule has an `obligationRef` and `basis: regulatory` | `Every_rule_carries_a_mandatory_obligation_ref_and_regulatory_basis` |
 | Every `satisfiesFederal` reference resolves | `Satisfies_federal_references_resolve_against_loaded_federal_rules` |
 | Only the TX security set is review-gated | `Only_the_tx_security_rule_set_is_review_gated` |
@@ -154,7 +154,7 @@ Delegated work was **never** accepted on its own report:
 | "Security insurance is $100k/$200k" | Orchestrator fetched Tex. Occ. Code §1702.124 independently and confirmed the text |
 | "Texas statutes site is unreachable" | Orchestrator fetched it directly (got the JS shell), and confirmed `web.archive.org` is blocked |
 | "All review findings fixed, 154 tests pass" | Orchestrator ran the suite itself and re-read the Clearinghouse/UCR gates in the JSON |
-| "39 rules, 3 probable, 5 gated, 31 ship" | Extracted programmatically from the JSON (see `02-PROVENANCE-MAP.md` §1) |
+| "40 rules, 3 probable, 37 ship" (was 39/3/5-gated/31 before Pass 5 + the G2 closure) | Extracted programmatically from the JSON (see `02-PROVENANCE-MAP.md` §1) |
 
 ---
 

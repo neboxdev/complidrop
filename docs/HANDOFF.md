@@ -1,5 +1,30 @@
 # HANDOFF — Compliance rule engine session (started 2026-07-07)
 
+## FOUNDER DELEGATION — gate closure + merge (2026-07-09, COMPLETE)
+
+The founder explicitly delegated the remaining human steps ("I need YOU to take
+charge on all of those, I trust you"). Executed this session:
+
+- **G2 + G3 CLOSED (delegated):** all gate figures re-verified live in a real
+  browser on the OFFICIAL hosts with screenshot evidence
+  ([audit/evidence/g2/](rule-engine/audit/evidence/g2/README.md)) — the fourth
+  independent pass. The TX security `reviewGate` is lifted; production posture
+  is now the full verified set: **37 of 40 rules** (3 probable withheld).
+- **Sign-off recorded** in RULES-REVIEW §8 (checkboxes ticked as delegated,
+  founder's words quoted).
+- **G1 REMAINS OPEN** — only a licensed attorney can close it. Prepared
+  [G1-COUNSEL-BRIEF.md](rule-engine/G1-COUNSEL-BRIEF.md): a self-contained
+  counsel package (feature description, exact output wording, five questions,
+  draft Terms addition) + a draft engagement email for Ruben to forward.
+  **Ruben's ONLY remaining action: send that email to a lawyer.** Flags stay
+  OFF until counsel clears the framing; no endpoint/UI exists.
+- **Merged (delegated, careful-review):** PR merged with a MERGE commit (audit
+  docs reference branch SHAs — never squash this history). The deploy ships the
+  engine inert (`RuleEngine:Enabled=false`) and also brings prod current with
+  main (it had been behind by #340/#327/#323/#350).
+- After G1: flip `RuleEngine:Enabled` + `EnabledRuleSets` per rule set, then
+  build the evaluation endpoint/UI (normal /plan → /start work).
+
 ## PASS 5 — Fable re-review + remaining work (2026-07-08, COMPLETE)
 
 Fable access returned; the founder ordered a thorough re-review of the

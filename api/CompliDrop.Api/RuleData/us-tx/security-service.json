@@ -3,9 +3,12 @@
 // 1702 (Private Security), administered by DPS. Skipped: the 2-year term rule (folded as the 24-month
 // cadence on each credential), Level II/III/IV training (evidenced by holding the credential), and the
 // criminal-penalty section (stated in rationale as statutory-general, not a document obligation).
+// The reviewGate ("founder-confirm-tx-security", gate G2) was LIFTED 2026-07-09: its condition — a
+// browser confirmation of the statutory figures on the official host — was performed under explicit
+// founder delegation, with screenshot evidence in docs/rule-engine/audit/evidence/g2/. Enablement still
+// requires the RuleEngine feature flags (default OFF) and gate G1 (counsel).
 {
   "schemaVersion": 1,
-  "reviewGate": "founder-confirm-tx-security",
   "localObligations": [
     "Municipal peace-officer / off-duty officer extra-employment rules",
     "City alarm-permit / special-event security-staffing ordinances",

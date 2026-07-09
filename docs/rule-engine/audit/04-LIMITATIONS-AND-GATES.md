@@ -9,10 +9,9 @@ customer. It is written to be uncomfortable rather than reassuring.
 
 | | |
 |---|---|
-| Merged? | **No.** Three commits on `feat/compliance-rule-engine` (`6931d35`, `087c6e1`, `c53a975`) |
-| Pushed / PR? | **No** |
-| Wired into the application? | **No.** The engine is inert — no DI registration, no boot loading, no endpoint, no UI. Zero runtime behaviour change |
-| Customer-visible? | **No**, and it must not be until gates G1–G2 clear |
+| Merged? | **Yes — 2026-07-09, founder-delegated** ("take charge on all of those"), via PR with a MERGE commit so the audit trail's SHA references stay valid |
+| Wired into the application? | **Boot wiring only** (`RegulatoryRuleCatalog`, resolved fail-fast at startup): with `RuleEngine:Enabled=false` (the shipped default) nothing loads and nothing evaluates. No endpoint, no UI. The migration is additive (4 nullable columns) |
+| Customer-visible? | **No**, and it must not be until gate G1 (counsel) clears — the flags stay OFF |
 
 ---
 
@@ -33,11 +32,22 @@ Related: penalty text ("Class A misdemeanor", "third-degree felony") appears in
 `rationale` fields as *what the statute provides*. Rendered next to a red status
 badge, that could read as "you are committing a crime." The UI must not do that.
 
-### G2 — Founder must confirm the Texas statutory figures in a browser. **Blocking for enabling TX rule-sets.**
-The official Texas statutes site (`statutes.capitol.texas.gov`) serves only a
-JavaScript shell to automated fetchers. Verbatim text for the Texas *existence-of-
-requirement* facts therefore came from faithful reproductions (`texas.public.law`,
-Cornell LII, FindLaw), not from the official host.
+### G2 — Texas statutory figures browser confirmation. **CLOSED 2026-07-09 (founder-delegated).**
+The founder explicitly delegated this gate's closure ("I need YOU to take charge on
+all of those, I trust you"). The delegated verification was performed live in a
+real browser against the official hosts, with programmatic exact-text assertions
+plus screenshot evidence: see
+[`evidence/g2/README.md`](evidence/g2/README.md). It was the FOURTH independent
+pass over these figures (Phase-1 research, Pass-2 blind re-derivation, Pass-5 live
+re-read, this closure). The TX security `reviewGate` is lifted in the same commit;
+the production posture is now the full verified set (37 rules). Customer exposure
+remains blocked by G1 and the default-off feature flags.
+
+Original gate rationale (kept for the record): the official Texas statutes site
+(`statutes.capitol.texas.gov`) serves only a JavaScript shell to automated
+fetchers. Verbatim text for the Texas *existence-of-requirement* facts therefore
+came from faithful reproductions (`texas.public.law`, Cornell LII, FindLaw), not
+from the official host.
 
 Mitigation already in place: 19 of 19 load-bearing Texas + federal facts were
 independently re-derived and **all matched** (18 components on official hosts via
@@ -52,12 +62,13 @@ closes.
 (`$100,000 / $50,000 / $200,000`, Tex. Occ. Code §1702.124(c)), the TABC two-year
 permit term (§11.09(a)), and the intrastate insurance tiers (43 TAC §218.16(a)).
 
-### G3 — A human should eyeball the `49 CFR §387.33` suspension artifact
+### G3 — The `49 CFR §387.33` suspension artifact. **CLOSED 2026-07-09 (founder-delegated).**
 §387.33 carries an editorial note: *"At 82 FR 5307, Jan. 17, 2017, §387.33 was
 suspended."* The section actually in force is **§387.33T**, and both carry the
-identical `$5,000,000` / `$1,500,000` figures. This was investigated and resolved
-by two independent agents, and the rule cites §387.33T. It is still an unusual
-regulatory shape worth one human look before the `$5M` figure drives a verdict.
+identical `$5,000,000` / `$1,500,000` figures. Investigated and resolved by two
+independent agents; the rule cites §387.33T; the Pass-5 review and the delegated
+G2 closure both re-read the live eCFR section (screenshot:
+[`evidence/g2/g3-387-33T-schedule-of-limits.png`](evidence/g2/g3-387-33T-schedule-of-limits.png)).
 
 ### G4 — DPS-dependent facts remain unconfirmed
 `dps.texas.gov` was down (connection refused) throughout the research. Anything
@@ -101,8 +112,8 @@ is a valid comparison input:
 | Held back | Count | Mechanism |
 |---|---|---|
 | `confidence: probable` rules | 3 | `RuleLoadOptions.VerifiedOnly = true` (default; NOT configurable in the app wiring) |
-| Review-gated (all TX security) | 5 | `reviewGate` + `IncludeReviewGated = false` (default; NOT configurable in the app wiring) |
-| **Total withheld** | **8 of 40** | prod posture loads **32** |
+| Review-gated | 0 | the TX security `reviewGate` was lifted 2026-07-09 when G2 closed (evidence/g2/); the gating MECHANISM stays test-covered on synthetic fixtures |
+| **Total withheld** | **3 of 40** | prod posture loads **37** |
 
 Since Pass 5 the whole engine additionally sits behind `RuleEngine:Enabled`
 (default **false**) + per-rule-set `RuleEngine:EnabledRuleSets` flags resolved

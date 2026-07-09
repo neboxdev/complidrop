@@ -16,8 +16,8 @@ The `citation` is what to open at the regulator. See §5 for the exact commands.
 | Rules encoded | **40** (Pass 5 added `tx-venue-wc-coverage-notice`, SPLIT-3) |
 | `confidence: verified` | 37 |
 | `confidence: probable` (never ships) | 3 |
-| Review-gated (TX security; held back regardless of confidence) | 5 |
-| **Load in the production posture** | **32** |
+| Review-gated | 0 (the TX security gate was lifted 2026-07-09 when G2 closed — evidence/g2/) |
+| **Load in the production posture** | **37** |
 
 Pinned by test `The_full_and_production_sets_have_the_expected_rule_counts`
 (`api/CompliDrop.Api.Tests/RuleEngine/RealRuleDataLoadTests.cs`).
@@ -74,11 +74,11 @@ Dossier: `docs/rules-research/texas/<entity>.md`
 | `tx-event-rental-amusement-ride-insurance` | OBL-TX-EVENT-001 | insurance | verified | ✅ | **Tex. Occ. Code 2151.1012** (general Class B: 2151.101(a)(3)) |
 | `tx-event-rental-amusement-ride-inspection` | OBL-TX-EVENT-002 | permit | verified | ✅ | Tex. Occ. Code 2151.101; 28 TAC 5.9004 |
 | `tx-event-rental-amusement-ride-injury-report` | OBL-TX-EVENT-003 | filing | verified | ✅ | Tex. Occ. Code 2151.103 |
-| `tx-security-company-license` | OBL-TX-SECURITY-001 | license | verified | ❌ **gated** | Tex. Occ. Code 1702.102, 1702.108, 1702.301 |
-| `tx-security-general-liability-insurance` | OBL-TX-SECURITY-003 | insurance | verified | ❌ **gated** | Tex. Occ. Code 1702.124(a), (c) — re-read on the OFFICIAL host 2026-07-08 (Pass 5) |
-| `tx-security-noncommissioned-officer-license` | OBL-TX-SECURITY-004 | worker-certification | verified | ❌ **gated** | Tex. Occ. Code 1702.221, 1702.301 |
-| `tx-security-officer-commission` | OBL-TX-SECURITY-005 | worker-certification | verified | ❌ **gated** | Tex. Occ. Code 1702.161, 1702.301 |
-| `tx-security-personal-protection-officer-license` | OBL-TX-SECURITY-006 | worker-certification | verified | ❌ **gated** | Tex. Occ. Code 1702.201, 1702.202, 1702.301 |
+| `tx-security-company-license` | OBL-TX-SECURITY-001 | license | verified | ✅ | Tex. Occ. Code 1702.102, 1702.108, 1702.301 |
+| `tx-security-general-liability-insurance` | OBL-TX-SECURITY-003 | insurance | verified | ✅ | Tex. Occ. Code 1702.124(a), (c) — re-read on the OFFICIAL host 2026-07-08 (Pass 5) |
+| `tx-security-noncommissioned-officer-license` | OBL-TX-SECURITY-004 | worker-certification | verified | ✅ | Tex. Occ. Code 1702.221, 1702.301 |
+| `tx-security-officer-commission` | OBL-TX-SECURITY-005 | worker-certification | verified | ✅ | Tex. Occ. Code 1702.161, 1702.301 |
+| `tx-security-personal-protection-officer-license` | OBL-TX-SECURITY-006 | worker-certification | verified | ✅ | Tex. Occ. Code 1702.201, 1702.202, 1702.301 |
 | `tx-transportation-txdmv-motor-carrier-registration` | OBL-TX-TRANSPORTATION-001 | license | verified | ✅ | Tex. Transp. Code 643.051, 643.002, 548.001; 43 TAC ch. 218 |
 | `tx-transportation-intrastate-insurance-27plus` | OBL-TX-TRANSPORTATION-002 | insurance | verified | ✅ | 43 TAC 218.16(a); Tex. Transp. Code 643.101 |
 | `tx-transportation-intrastate-insurance-16to26` | OBL-TX-TRANSPORTATION-002 | insurance | verified | ✅ | 43 TAC 218.16(a); Tex. Transp. Code 643.101 |
@@ -91,11 +91,10 @@ Dossier: `docs/rules-research/texas/<entity>.md`
 | `tx-venue-tabc-retail-permit` | OBL-TX-VENUE-006 | permit | verified | ✅ | Tex. Alco. Bev. Code chs. 25, 28; 11.09 |
 | `tx-venue-food-establishment-permit` | OBL-TX-VENUE-008 | permit | **probable** | ❌ held | Tex. H&S Code ch. 437; 25 TAC ch. 228 |
 
-> The 5 TX security rules carry `"reviewGate": "founder-confirm-tx-security"` at the
-> top of `us-tx/security-service.json`. They are `verified` but held back until the
-> founder confirms the Texas statutory figures in a browser (gate **G2**) — because
-> the official Texas statute site defeats automated fetching. Pinned by test
-> `Only_the_tx_security_rule_set_is_review_gated`.
+> The 5 TX security rules shipped behind `reviewGate: "founder-confirm-tx-security"` until
+> 2026-07-09, when gate G2 closed under explicit founder delegation (live official-host
+> verification with screenshot evidence — `evidence/g2/`). The gate marker is removed; the
+> gating mechanism remains test-covered on synthetic fixtures (`RuleSetLoaderGuardTests`).
 
 ---
 

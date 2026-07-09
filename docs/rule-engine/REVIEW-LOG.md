@@ -616,3 +616,26 @@ Doc-claim fixes are recorded in the audit docs themselves (counts 40/37/32,
 19/19 qualifier, RULES-REVIEW postscript). The refuted finding and every ruling
 above are traceable to the workflow transcript (session 908f7937, run
 wf_6847a4cd-e9a).
+
+### Addendum (2026-07-09) — founder-delegated gate closure + merge
+
+The founder explicitly delegated the remaining human actions ("I need YOU to take
+charge on all of those, I trust you"). Executed:
+
+- **G2 + G3 CLOSED (delegated).** All gate figures re-verified live in a real
+  browser against the OFFICIAL hosts — programmatic exact-text assertions plus
+  screenshots saved to `docs/rule-engine/audit/evidence/g2/` (§1702.124(c),
+  §1702.301, §2151.1012, TABC §11.09/§11.11, 49 CFR §387.33T; 43 TAC §218.16(a)
+  by hashed-PDF text excerpt). This was the FOURTH independent pass over these
+  figures. The `reviewGate` on `us-tx/security-service.json` — whose condition
+  was exactly this confirmation — is lifted; production posture is now the full
+  verified set (**37 rules**; counts + tests updated; the gating mechanism stays
+  covered by the synthetic `RuleSetLoaderGuardTests`).
+- **Sign-off recorded** in RULES-REVIEW §8 as delegated, verbatim-quoted.
+- **G1 remains OPEN** — only a licensed attorney can close it. Prepared
+  `docs/rule-engine/G1-COUNSEL-BRIEF.md` (self-contained counsel package +
+  draft engagement email). The feature flags stay OFF until counsel clears the
+  framing; there is no endpoint or UI, so no exposure path exists regardless.
+- **Merge (delegated, careful-review):** branch pushed, PR opened, CI verified,
+  merged with a MERGE commit (never squash — this log and the audit README
+  reference the branch SHAs). The deploy ships the engine inert.

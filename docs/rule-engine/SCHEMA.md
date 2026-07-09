@@ -289,9 +289,11 @@ its UI must satisfy them; they are correctness requirements, not preferences.
    obligation STATUS (satisfied/expiring/expired/missing/needs-info), not legal
    conclusions about the user's conduct.
 4. **Only `provenance ∈ {official, reproduction-corroborated}` + `confidence:
-   verified` load in prod.** Single-reproduction entries (`probable`) and the
-   whole Texas security rule-set (methodology human-gate) stay behind the review
-   flag until the founder confirms — see METHODOLOGY provenance rule.
+   verified` load in prod.** Single-reproduction entries (`probable`) stay behind
+   the review flag. The Texas security rule-set's methodology human-gate (G2)
+   closed 2026-07-09 via delegated official-host confirmation
+   (audit `evidence/g2/`); its reviewGate is lifted — see METHODOLOGY provenance
+   rule and REVIEW-LOG § Pass 5.
 
 ### v1 KNOWN LIMITATIONS (documented, founder-visible — updated v1.2, 2026-07-08)
 

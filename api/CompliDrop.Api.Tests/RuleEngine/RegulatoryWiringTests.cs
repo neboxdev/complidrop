@@ -66,17 +66,28 @@ public class RegulatoryWiringTests
     }
 
     [Fact]
-    public void The_catalog_can_never_load_probable_or_review_gated_rules()
+    public void The_catalog_can_never_load_probable_rules_and_honors_a_review_gate()
     {
-        // The safe posture is hard-coded, not configurable: enabling the security file loads NOTHING from
-        // it (every rule sits behind the reviewGate), and probable rules never load from any file.
-        var catalog = RegulatoryRuleCatalog.Create(new RuleEngineSettings
+        // The safe posture is hard-coded, not configurable: probable versions never load from any file
+        // (us-tx/venue-org carries the probable food-establishment permit), and a review-gated file loads
+        // nothing (mechanism pinned on synthetic data in RuleSetLoaderGuardTests — the shipped TX security
+        // gate was lifted 2026-07-09 after G2 closed, so it now loads its 5 verified rules).
+        var venueCatalog = RegulatoryRuleCatalog.Create(new RuleEngineSettings
+        {
+            Enabled = true,
+            EnabledRuleSets = ["us-tx/venue-org"],
+        });
+        venueCatalog.RuleSet.Rules.Should().NotContain(r => r.Id == "tx-venue-food-establishment-permit",
+            "probable rules never load through the app wiring");
+        venueCatalog.RuleSet.Rules.Should().Contain(r => r.Id == "tx-venue-franchise-tax-report");
+
+        var securityCatalog = RegulatoryRuleCatalog.Create(new RuleEngineSettings
         {
             Enabled = true,
             EnabledRuleSets = ["us-tx/security-service"],
         });
-
-        catalog.RuleSet.Rules.Should().BeEmpty("the TX security set is review-gated until founder gate G2 clears");
+        securityCatalog.RuleSet.Rules.Should().HaveCount(5,
+            "the TX security set ships since its G2 gate closed (2026-07-09)");
     }
 
     [Fact]

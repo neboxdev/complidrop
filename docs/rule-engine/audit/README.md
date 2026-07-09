@@ -9,8 +9,9 @@ guarantee back to a test**, without trusting any narrative.
 entity types, encoded as versioned data, evaluated by a deterministic engine.
 Built 2026-07-07 → 2026-07-08 on branch `feat/compliance-rule-engine`.
 
-**Status:** built, reviewed, fixed, verified. **Not merged. Not deployed. Ships
-feature-flag OFF.** Two human gates remain open (see `04-LIMITATIONS-AND-GATES.md`).
+**Status:** built, reviewed, fixed, verified; merged 2026-07-09 (founder-delegated).
+**Ships feature-flag OFF — inert in production.** One human gate remains open: G1,
+counsel review of the user-facing framing (see `04-LIMITATIONS-AND-GATES.md`).
 
 ---
 
@@ -20,7 +21,7 @@ feature-flag OFF.** Two human gates remain open (see `04-LIMITATIONS-AND-GATES.m
 |---|---|
 | `README.md` (this file) | What exists, where it lives, how to verify in 2 minutes |
 | [`01-PROCESS-LOG.md`](01-PROCESS-LOG.md) | Every step taken, in order, with dates, decisions, and rationale — including a mid-session model downgrade and the controls added to compensate |
-| [`02-PROVENANCE-MAP.md`](02-PROVENANCE-MAP.md) | **The audit table.** Every one of the 39 encoded rules → its statutory citation → the dossier entry holding the verbatim quote → confidence + provenance tier |
+| [`02-PROVENANCE-MAP.md`](02-PROVENANCE-MAP.md) | **The audit table.** Every one of the 40 encoded rules → its statutory citation → the dossier entry holding the verbatim quote → confidence + provenance tier |
 | [`03-VERIFICATION-GUIDE.md`](03-VERIFICATION-GUIDE.md) | How to independently re-verify: commands, test-name → guarantee mapping, the 4 review passes and what each found |
 | [`04-LIMITATIONS-AND-GATES.md`](04-LIMITATIONS-AND-GATES.md) | What is **not** verified, **not** enforced, and **not** shipped — plus residual risk and the open human gates |
 
@@ -33,8 +34,8 @@ feature-flag OFF.** Two human gates remain open (see `04-LIMITATIONS-AND-GATES.m
 | Encoded rules | **40** | `api/CompliDrop.Api/RuleData/**/*.json` (Pass 5 added `tx-venue-wc-coverage-notice`) |
 | …`verified` confidence | 37 | field `versions[].confidence` |
 | …`probable` (do NOT ship) | 3 | filtered by `RuleLoadOptions.VerifiedOnly` (default `true`) |
-| …review-gated (TX security) | 5 | field `reviewGate` on `us-tx/security-service.json` |
-| **Rules that load in prod posture** | **32** | test `The_full_and_production_sets_have_the_expected_rule_counts` |
+| …review-gated | 0 | the TX security gate was lifted 2026-07-09 when G2 closed — see `evidence/g2/` |
+| **Rules that load in prod posture** | **37** | test `The_full_and_production_sets_have_the_expected_rule_counts` |
 | Rule-data files | 11 | `RuleData/us-fed/` (5), `RuleData/us-tx/` (6, incl. `cross-cutting.json`) |
 | Research dossier files | 12 | `docs/rules-research/{federal,texas}/*.md` |
 | Engine tests | **225 pass / 0 fail** | `dotnet test --filter RuleEngine` |
@@ -62,7 +63,7 @@ Entities: `caterer`, `event-rental`, `security-service`, `transportation`,
 | Path | What it is |
 |---|---|
 | `api/CompliDrop.Api/RuleData/us-fed/*.json` | Federal rule data (5 files) |
-| `api/CompliDrop.Api/RuleData/us-tx/*.json` | Texas rule data (5 files) |
+| `api/CompliDrop.Api/RuleData/us-tx/*.json` | Texas rule data (6 files, incl. cross-cutting.json) |
 
 Each rule carries `obligationRef` (→ dossier entry), `citation.section`,
 `citation.url`, `citation.verifiedDate`, `confidence`, `applicability`, `cadence`,
@@ -100,13 +101,13 @@ Each rule carries `obligationRef` (→ dossier entry), `citation.section`,
 ## 4. Two-minute independent verification
 
 ```bash
-# 1. Engine compiles and every guarantee holds (expect: 154 passed, 0 failed)
+# 1. Engine compiles and every guarantee holds (expect: 225 passed, 0 failed)
 dotnet test api/CompliDrop.Api.Tests/CompliDrop.Api.Tests.csproj --filter "FullyQualifiedName~RuleEngine"
 
 # 2. Every rule file loads and passes fail-fast validation
 #    (test: Every_embedded_rule_data_file_loads_and_validates)
 
-# 3. Prod posture ships exactly 31 rules (39 - 3 probable - 5 review-gated)
+# 3. Prod posture ships exactly 37 rules (40 - 3 probable; no review gate since G2 closed 2026-07-09)
 #    (test: The_full_and_production_sets_have_the_expected_rule_counts)
 
 # 4. No non-US regulation anywhere. Expect EXACTLY TWO benign hits, both verified:

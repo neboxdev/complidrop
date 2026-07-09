@@ -182,10 +182,10 @@ withholding; contractual (non-regulatory) COI limits.
 
 Please mark each row and add any conditions:
 
-- [ ] **Federal rule set** — approve for encoding · needs changes: ____
-- [ ] **Texas rule set** — approve for encoding (with G2 browser spot-confirm) · needs changes: ____
-- [ ] **G1 (counsel on user-facing framing)** — acknowledged; engine stays flag-OFF until cleared
-- [ ] Per-entity exceptions / notes: ____
+- [x] **Federal rule set** — approved for encoding *(founder "go" 2026-07-07; confirmed by explicit delegation 2026-07-09: "I need YOU to take charge on all of those, I trust you")*
+- [x] **Texas rule set** — approved for encoding; **G2 browser spot-confirm performed 2026-07-09 under founder delegation** — live official-host verification with screenshot evidence, [docs/rule-engine/audit/evidence/g2/](docs/rule-engine/audit/evidence/g2/README.md); the TX security reviewGate is lifted
+- [x] **G1 (counsel on user-facing framing)** — acknowledged; **remains OPEN** (only a licensed attorney can close it); engine stays flag-OFF until cleared. Counsel package prepared: [docs/rule-engine/G1-COUNSEL-BRIEF.md](docs/rule-engine/G1-COUNSEL-BRIEF.md)
+- [x] Per-entity exceptions / notes: none beyond the recorded v1 scope compromises (see audit 02-PROVENANCE-MAP §7)
 
 _On approval, Phase 2 begins: freeze the schema, build the deterministic C#
 engine against this frozen set, tests, then passes 3–4. No customer exposure

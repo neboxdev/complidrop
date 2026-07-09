@@ -15,12 +15,13 @@ public class RuleDataGoldenTests
 {
     private static readonly DateOnly Eval = new(2026, 8, 1); // after every rule's validFrom (incl. HB 2844, 2026-07-01)
 
-    // Production posture: verified-only + review-gated rule-sets excluded (the DEFAULT), merged across all
-    // files so cross-file satisfiesFederal resolves. The TX security set is HELD BACK here (A-5/CC-8).
+    // Production posture: verified-only (the DEFAULT), merged across all files so cross-file
+    // satisfiesFederal resolves. Since G2 closed (2026-07-09) no shipped file is review-gated, so this
+    // includes the TX security set.
     private static readonly RuleSet ProdRules = EmbeddedRuleData.LoadAll();
 
-    // Verified + the review-gated TX security set included, for exercising the security behavioral goldens
-    // (the security set does not ship in the default production load until its founder gate clears).
+    // Kept as an explicit gated-inclusive load for the security behavioral goldens — identical to
+    // ProdRules today (no shipped gate), and stays correct if a future rule set ships gated.
     private static readonly RuleSet GatedInclusiveRules =
         EmbeddedRuleData.LoadAll(new RuleLoadOptions(VerifiedOnly: true, IncludeReviewGated: true));
 

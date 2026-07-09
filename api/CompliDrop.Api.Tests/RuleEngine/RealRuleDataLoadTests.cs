@@ -45,14 +45,15 @@ public class RealRuleDataLoadTests
         all.Rules.Should().HaveCount(40, "37 verified + 3 probable obligations are encoded (the 40th is the Pass-5 tx-venue-wc-coverage-notice, SPLIT-3)");
         verifiedInclGated.Rules.Should().HaveCount(37, "the 3 probable rules do not ship in the verified posture");
 
-        // Production DEFAULT now also holds back the review-gated TX security rule-set (A-5/CC-8): 40 minus
-        // the 3 probable minus the 5 verified TX-security rules = 32.
-        prod.Rules.Should().HaveCount(32, "minus 3 probable and minus the 5 review-gated TX security rules");
+        // The TX security reviewGate (G2) was lifted 2026-07-09 after the delegated official-host
+        // confirmation (docs/rule-engine/audit/evidence/g2/), so the production posture is now the full
+        // verified set: 40 minus the 3 probable = 37.
+        prod.Rules.Should().HaveCount(37, "minus the 3 probable rules; no rule set is review-gated since G2 closed");
         prod.Rules.Should().OnlyContain(
             r => r.Versions.All(v => v.Confidence == RuleConfidence.Verified),
             "the default load keeps only verified versions");
-        prod.Rules.Should().NotContain(r => r.EntityTypes.Contains("security-service"),
-            "the review-gated TX security rule-set is excluded from the default production load");
+        prod.Rules.Should().Contain(r => r.EntityTypes.Contains("security-service"),
+            "the TX security rule-set ships since its G2 gate closed (2026-07-09)");
     }
 
     [Fact]
@@ -161,20 +162,17 @@ public class RealRuleDataLoadTests
     }
 
     [Fact]
-    public void Only_the_tx_security_rule_set_is_review_gated()
+    public void No_shipped_rule_set_is_review_gated_since_g2_closed()
     {
-        // A-5/CC-8: the whole TX security set is held out of the default load by a rule-set reviewGate,
-        // independent of confidence. Confirm exactly that set is affected and nothing else.
-        var prod = EmbeddedRuleData.LoadAll(); // default: gated set excluded
+        // The TX security reviewGate (A-5/CC-8 → gate G2) was lifted 2026-07-09 with evidence in
+        // docs/rule-engine/audit/evidence/g2/. The GATING MECHANISM itself stays covered by the synthetic
+        // fixtures in RuleSetLoaderGuardTests (added for exactly this moment — UNVER-23), so this test
+        // now pins that the default load equals the gated-inclusive load over the shipped data.
+        var prod = EmbeddedRuleData.LoadAll();
         var withGated = EmbeddedRuleData.LoadAll(new RuleLoadOptions(VerifiedOnly: true, IncludeReviewGated: true));
 
-        var onlyWhenGatedIncluded = withGated.Rules.Select(r => r.Id)
-            .Except(prod.Rules.Select(r => r.Id))
-            .ToList();
-
-        onlyWhenGatedIncluded.Should().OnlyContain(id => id.StartsWith("tx-security-"),
-            "the review gate holds back the TX security rule-set and nothing else");
-        onlyWhenGatedIncluded.Should().HaveCount(5, "all 5 TX security rules are gated");
+        prod.Rules.Select(r => r.Id).Should().BeEquivalentTo(withGated.Rules.Select(r => r.Id),
+            "no shipped rule-set file declares a reviewGate anymore");
     }
 
     [Fact]
