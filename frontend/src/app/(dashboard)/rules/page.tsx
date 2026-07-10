@@ -4,7 +4,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Check, Pencil, Plus, RotateCw, Trash2, X } from "lucide-react";
+import { AlertTriangle, Check, Pencil, Plus, RotateCw, ShieldCheck, Trash2, X } from "lucide-react";
 import { api, friendly, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import {
   REQUIREMENT_GROUPS,
@@ -75,6 +75,17 @@ type RulePayload = {
   expectedValue: string | null;
   errorMessage: string;
 };
+
+// The catalog entry for the additional-insured requirement (#400). This requirement is
+// deliberately NOT seeded onto the suggested checklists — a venue names ITSELF, so the value is
+// per-tenant — so a venue that clones (say) the Caterer checklist gets GL / expiration / workers'
+// comp / liquor but no additional-insured check. The nudge below points them at it with their own
+// venue name, replacing seeding it with a one-size-fits-nobody placeholder.
+const ADDITIONAL_INSURED: RequirementType = findRequirementType({
+  documentType: "coi",
+  fieldName: "additional_insured",
+  operator: "contains",
+})!;
 
 export default function RulesPage() {
   const qc = useQueryClient();
@@ -496,6 +507,16 @@ function ChecklistEditor({
 }) {
   const readOnly = detail.isSystemTemplate;
   const rules = [...detail.rules].sort((a, b) => a.sortOrder - b.sortOrder);
+  // Nudge the additional-insured requirement (#400) only on an EDITABLE checklist that already
+  // governs certificates of insurance but hasn't added the (deliberately-unseeded) additional-
+  // insured check yet — so a venue that cloned a suggested checklist is reminded to name itself.
+  const governsCoi = rules.some((r) => r.documentType === "coi");
+  const hasAdditionalInsured = rules.some(
+    (r) =>
+      r.documentType === ADDITIONAL_INSURED.documentType &&
+      r.fieldName === ADDITIONAL_INSURED.fieldName &&
+      r.operator === ADDITIONAL_INSURED.operator,
+  );
 
   return (
     <div className="space-y-4">
@@ -558,6 +579,10 @@ function ChecklistEditor({
         </CardContent>
       </Card>
 
+      {!readOnly && governsCoi && !hasAdditionalInsured && (
+        <AdditionalInsuredNudge onAdd={onAddRequirement} />
+      )}
+
       {rules.length > 0 && <ComplianceSummary name={detail.name} rules={rules} />}
 
       {/* Editor dead-ended after authoring — the tip promises assignment but offered no
@@ -581,6 +606,54 @@ function ChecklistEditor({
           )}
         </p>
       )}
+    </div>
+  );
+}
+
+// The additional-insured nudge (#400). Hoisted to module scope per the react-hooks/static-components
+// rule. "Add it now" expands the SAME value form the add-requirement menu uses, pre-set to the
+// additional-insured requirement, so the venue types its exact legal name and the rule is created
+// through the existing onAdd path. Self-dismisses once the requirement is on the checklist.
+function AdditionalInsuredNudge({ onAdd }: { onAdd: (rule: RulePayload) => void }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (expanded) {
+    return (
+      <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-4">
+        <RequirementValueForm
+          type={ADDITIONAL_INSURED}
+          initialValue={null}
+          submitLabel="Add requirement"
+          onSubmit={(payload) => {
+            onAdd(payload);
+            setExpanded(false);
+          }}
+          onCancel={() => setExpanded(false)}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-sky-200 bg-sky-50/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-start gap-2.5">
+        <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-sky-600" aria-hidden="true" />
+        <div className="min-w-0 text-sm">
+          <p className="font-medium text-sky-900">Add your additional-insured requirement</p>
+          <p className="mt-0.5 text-slate-600">
+            Most venues require vendors to name them as an additional insured on the certificate.
+            Enter your venue&apos;s exact legal name and we&apos;ll check every certificate for it.
+          </p>
+        </div>
+      </div>
+      <Button
+        size="sm"
+        variant="outline"
+        className="shrink-0 self-start sm:self-auto"
+        onClick={() => setExpanded(true)}
+      >
+        <Plus className="mr-1 h-4 w-4" /> Add it now
+      </Button>
     </div>
   );
 }

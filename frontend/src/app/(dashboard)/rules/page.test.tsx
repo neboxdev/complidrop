@@ -511,3 +511,104 @@ describe("RulesPage — FP-081 / FP-082 / FP-083 (Batch E #319)", () => {
     expect(screen.getByText(/each license must prove/i)).toBeInTheDocument();
   });
 });
+
+describe("RulesPage — additional-insured nudge (#400)", () => {
+  // The additional-insured requirement is deliberately UNSEEDED (a venue names itself, a per-tenant
+  // value). The nudge reminds an editable COI checklist to add it — see AdditionalInsuredNudge.
+  const DETAIL_WITH_AI = {
+    ...DETAIL,
+    rules: [
+      ...DETAIL.rules,
+      {
+        id: "r_ai_01",
+        documentType: "coi",
+        fieldName: "additional_insured",
+        operator: "contains",
+        expectedValue: "Riverside Event Hall",
+        errorMessage: "Not named",
+        sortOrder: 2,
+      },
+    ],
+  };
+
+  const LICENSE_ONLY_DETAIL = {
+    ...DETAIL,
+    rules: [
+      {
+        id: "r_lic_01",
+        documentType: "license",
+        fieldName: "license_number",
+        operator: "required",
+        expectedValue: null,
+        errorMessage: null,
+        sortOrder: 1,
+      },
+    ],
+  };
+
+  it("shows the nudge on an editable COI checklist that lacks the additional-insured requirement", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL)),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    expect(await screen.findByText(/add your additional-insured requirement/i)).toBeInTheDocument();
+    expect(screen.getByText(/exact legal name/i)).toBeInTheDocument();
+  });
+
+  it("hides the nudge once the additional-insured requirement is on the checklist", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL_WITH_AI)),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    // Wait for the editor to load (the add-requirement control only renders on an editable
+    // checklist), then assert the nudge is absent because the requirement is already present.
+    await screen.findByRole("button", { name: /add a requirement/i });
+    expect(screen.queryByText(/add your additional-insured requirement/i)).toBeNull();
+  });
+
+  it("does not nag a licenses-only checklist that governs no certificates of insurance", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(LICENSE_ONLY_DETAIL)),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    await screen.findByRole("button", { name: /add a requirement/i });
+    expect(screen.queryByText(/add your additional-insured requirement/i)).toBeNull();
+  });
+
+  it("'Add it now' adds the additional-insured requirement with the typed venue name", async () => {
+    let body: Record<string, unknown> | undefined;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL)),
+      http.post(url("/api/compliance/templates/:id/rules"), async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return jsonOk({ id: "r_ai_new" });
+      }),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    fireEvent.click(await screen.findByRole("button", { name: /add it now/i }));
+    fireEvent.change(screen.getByLabelText(/name to look for/i), {
+      target: { value: "Riverside Event Hall" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^add requirement$/i }));
+
+    await waitFor(() => expect(body).toBeDefined());
+    expect(body).toMatchObject({
+      documentType: "coi",
+      fieldName: "additional_insured",
+      operator: "contains",
+      expectedValue: "Riverside Event Hall",
+    });
+  });
+});
