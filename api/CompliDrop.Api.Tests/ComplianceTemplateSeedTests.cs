@@ -135,6 +135,101 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
         }
     }
 
+    // ---- the back-fill re-evaluates documents already graded against the shared system template ----
+
+    [Fact]
+    public async Task EnsureAsync_reevaluates_documents_across_orgs_when_a_rule_is_backfilled_onto_a_shared_system_template()
+    {
+        // Finding 2 (#400): the reconcile back-fills rules onto SHARED system templates, and a vendor
+        // can be assigned a system template directly (the #238 sample vendor is), so the documents
+        // graded against it must be re-graded — ACROSS ORGS — after the back-fill. Otherwise a caterer
+        // COI persisted Compliant under the PRE-#400 rule set silently STAYS Compliant despite carrying
+        // no liquor coverage: a wrong persisted compliance verdict failing OPEN (the product IS the
+        // verdict — reviewers.md blocker). The endpoint path already fans out on a rule edit (#257),
+        // but endpoint edits are blocked on system templates, so the seed is now the only mutator and
+        // must fan out too. Built in a rolled-back transaction (system templates are shared across the
+        // collection); asserts the persisted verdict flips Compliant → NonCompliant.
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            var now = new DateTime(2026, 7, 10, 12, 0, 0, DateTimeKind.Utc);
+            var tenantOrgId = Guid.NewGuid();
+            var vendorId = Guid.NewGuid();
+            var docId = Guid.NewGuid();
+
+            // Recreate the PRE-#400 seeded state: the system Caterer row exists but LACKS the liquor rule.
+            await ExecAsync(conn, tx, """
+                DELETE FROM "ComplianceRules" cr USING "ComplianceTemplates" ct
+                WHERE cr."ComplianceTemplateId" = ct."Id" AND ct."IsSystemTemplate" = true
+                  AND ct."Name" = 'Caterer' AND cr."FieldName" = 'liquor_liability_limit';
+                """);
+            (await ScalarAsync(conn, tx, CatererLiquorCountSql))
+                .Should().Be(0, "precondition: the system Caterer lacks the liquor rule");
+
+            await using (var seed = TxContext(conn))
+            {
+                await seed.Database.UseTransactionAsync(tx);
+                var catererId = (await seed.ComplianceTemplates.IgnoreQueryFilters()
+                    .FirstAsync(t => t.IsSystemTemplate && t.Name == ComplianceTemplateSeed.SampleVendorTemplateName)).Id;
+
+                seed.Organizations.Add(new Organization { Id = tenantOrgId, Name = "Tenant", CreatedAt = now, UpdatedAt = now });
+                // A vendor assigned the SYSTEM Caterer template DIRECTLY (as the #238 sample vendor is).
+                seed.Vendors.Add(new Vendor
+                {
+                    Id = vendorId, OrganizationId = tenantOrgId, Name = "Caterer Co",
+                    ComplianceTemplateId = catererId, CreatedAt = now, UpdatedAt = now,
+                });
+                // GL ≥ $1M, a future expiration, workers-comp present, NO liquor coverage — genuinely
+                // Compliant under the pre-#400 rule set. Persist that verdict, as prod would have.
+                seed.Documents.Add(new Document
+                {
+                    Id = docId, OrganizationId = tenantOrgId, VendorId = vendorId,
+                    DocumentType = "coi", OriginalFileName = "coi.pdf",
+                    GeneralLiabilityLimit = 2_000_000m, ExpirationDate = now.AddYears(1),
+                    ExtractionFields = JsonSerializer.SerializeToDocument(
+                        new Dictionary<string, object> { ["workers_comp_limit"] = "1000000" }),
+                    ComplianceStatus = ComplianceStatus.Compliant,
+                    CreatedAt = now, UpdatedAt = now,
+                });
+                await seed.SaveChangesAsync();
+            }
+
+            (await ReadStatusAsync(conn, tx, docId))
+                .Should().Be(ComplianceStatus.Compliant, "precondition: graded Compliant under the pre-#400 rule set");
+
+            // Run the seed WITH the real re-eval fan-out (simulating the deploy). Every context shares
+            // the transaction, so the fan-out (on SystemDbContext) sees the just-back-filled rule and
+            // the tenant document. appDb is required by the ctor but unused on the system path.
+            var reevalUser = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = tenantOrgId };
+            await using var appDbForEval = CreateAppDb(reevalUser);
+            await using var sysDbForEval = TxContext(conn);
+            await sysDbForEval.Database.UseTransactionAsync(tx);
+            var reevaluator = new ComplianceCheckService(
+                appDbForEval, sysDbForEval, new FixedTimeProvider(now), NullLogger<ComplianceCheckService>.Instance);
+
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, reevaluator);
+            }
+
+            // The back-fill landed AND the document was re-graded across orgs: it now FAILS the new
+            // liquor rule, so the persisted verdict flips to NonCompliant — the #400 false-Compliant is
+            // closed. (With the fan-out removed the doc stays Compliant and this assertion fails.)
+            (await ScalarAsync(conn, tx, CatererLiquorCountSql))
+                .Should().Be(1, "the reconcile back-filled the liquor rule");
+            (await ReadStatusAsync(conn, tx, docId))
+                .Should().Be(ComplianceStatus.NonCompliant,
+                    "back-filling the liquor rule onto the shared system template must re-grade the caterer COI that carries no liquor coverage");
+        }
+        finally
+        {
+            await tx.RollbackAsync(); // restore the shared system seed for the rest of the collection
+        }
+    }
+
     // ---- discriminating behaviour: the seeded Caterer liquor rule actually grades ----
 
     [Theory]
@@ -194,6 +289,17 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
 
     private static SystemDbContext TxContext(NpgsqlConnection conn) =>
         new(new DbContextOptionsBuilder<SystemDbContext>().UseNpgsql(conn).Options);
+
+    // Reads a document's persisted ComplianceStatus through a fresh, no-tracking context enlisted in
+    // the same transaction — so EF converts the enum column regardless of its storage type and the
+    // read reflects the transaction's current committed-to-tx state (never a cached tracked entity).
+    private static async Task<ComplianceStatus> ReadStatusAsync(NpgsqlConnection conn, NpgsqlTransaction tx, Guid docId)
+    {
+        await using var read = TxContext(conn);
+        await read.Database.UseTransactionAsync(tx);
+        var doc = await read.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+        return doc.ComplianceStatus;
+    }
 
     private const string CatererLiquorCountSql =
         "SELECT count(*) FROM \"ComplianceRules\" cr JOIN \"ComplianceTemplates\" ct ON ct.\"Id\" = cr.\"ComplianceTemplateId\" " +
