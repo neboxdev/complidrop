@@ -139,6 +139,9 @@ public static class ComplianceTemplateSeed
         // reconcile actually added a rule, so a normal boot with nothing to back-fill does no extra
         // work. Best-effort and batched, respecting ADR 0030 (each page commits verdict + checks in
         // one unit of work). Guarded on the reevaluator so structural/insert-only callers can opt out.
+        // Sample-demo documents are deliberately EXCLUDED from this cross-org re-grade — a pre-#400
+        // sample predates the newly-seeded fields and would falsely flip Compliant → NonCompliant on
+        // deploy, breaking the ADR 0028 one-click-demo contract (see ReevaluateForTemplateForSystemAsync).
         if (reevaluator is not null && backfilledTemplateIds.Count > 0)
         {
             foreach (var (id, name) in backfilledTemplateIds)

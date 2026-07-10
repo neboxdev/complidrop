@@ -55,9 +55,18 @@ public interface IComplianceCheckService
     /// OLD rule set silently stays Compliant despite failing the new rule — a false-Compliant verdict
     /// (#400). Vendors can be assigned a system template directly (the #238 sample vendor is), and
     /// the seed is the only path that mutates system-template rules (endpoint rule edits are blocked
-    /// on system templates), so nothing else heals this. Same batched, best-effort machinery as the
-    /// endpoint fan-out (ADR 0030: each page commits verdict + checks in ONE unit of work). Returns
-    /// the number of documents targeted, for the seed's one-line summary log.
+    /// on system templates), so nothing else heals this. EXCLUDES sample-demo documents
+    /// (<see cref="Document.IsSample"/>): a pre-#400 sample COI was generated + extracted before
+    /// <c>liquor_liability_limit</c> existed, so re-grading it here (this fan-out never re-extracts)
+    /// would flip a genuinely-<see cref="ComplianceStatus.Compliant"/> demo artifact to
+    /// <see cref="ComplianceStatus.NonCompliant"/> on the next deploy and break the ADR 0028
+    /// one-click-demo contract — it is left untouched (Compliant) and self-heals on clear + recreate.
+    /// Only THIS seed/system fan-out skips samples; the tenant-filtered re-grades
+    /// (<see cref="ReevaluateForTemplateAsync"/> / <see cref="ReevaluateForVendorAsync"/>) still touch
+    /// them on a user-initiated Check-again / rule edit / reassignment. Same batched, best-effort
+    /// machinery as the endpoint fan-out (ADR 0030: each page commits verdict + checks in ONE unit of
+    /// work). Returns the number of documents targeted (sample docs excluded), for the seed's one-line
+    /// summary log.
     /// </summary>
     Task<int> ReevaluateForTemplateForSystemAsync(Guid templateId, CancellationToken ct);
 }
@@ -89,11 +98,26 @@ public class ComplianceCheckService(
 
     public Task<int> ReevaluateForTemplateForSystemAsync(Guid templateId, CancellationToken ct) =>
         // System context (no tenant filter): re-grade the template's documents across EVERY org.
-        // Same predicate as the tenant path above, evaluated against SystemDbContext — the seed-time
-        // fan-out used after the startup reconcile back-fills a rule onto a shared system template
-        // (#400). The Vendor soft-delete filter still applies (SystemDbContext keeps it), so a
+        // Same vendor→template predicate as the tenant path above, evaluated against SystemDbContext —
+        // the seed-time fan-out used after the startup reconcile back-fills a rule onto a shared system
+        // template (#400). The Vendor soft-delete filter still applies (SystemDbContext keeps it), so a
         // deleted vendor's documents are excluded, exactly as on the tenant path.
-        ReevaluateWhereAsync(sysDb, d => d.Vendor != null && d.Vendor.ComplianceTemplateId == templateId, ct);
+        //
+        // ...but EXCLUDE sample-demo documents (!d.IsSample) on THIS seed/system path ONLY. The
+        // one-click sample (ADR 0028, #238) attaches its sample vendor DIRECTLY to the system Caterer
+        // template, and existing sample COIs were generated + extracted BEFORE liquor_liability_limit
+        // existed — so their persisted ExtractionFields carry no such field. This fan-out only re-runs
+        // rule EVALUATION (never re-extraction), so including a pre-#400 sample would flip a genuinely-
+        // Compliant demo artifact to NonCompliant on the very next deploy — a NEW user-visible
+        // regression, for every org holding a sample (incl. the protected "Garden Hall" demo), that the
+        // ticket never asked for and no user action caused. A sample is a labelled, plan-limit-excluded
+        // demo artifact, not a compliance decision about a real vendor: leaving it untouched is
+        // do-no-harm (it was Compliant and stays Compliant), and it self-heals — SampleCertificateGenerator
+        // now emits a liquor-liability line, so clear + recreate regenerates a genuinely-Compliant sample.
+        // Scoped to the seed fan-out ONLY: a user-initiated Check-again / rule edit / reassignment (the
+        // tenant-filtered ReevaluateForTemplateAsync / ReevaluateForVendorAsync[s]) still re-grades a
+        // sample exactly as before.
+        ReevaluateWhereAsync(sysDb, d => d.Vendor != null && d.Vendor.ComplianceTemplateId == templateId && !d.IsSample, ct);
 
     public Task ReevaluateForVendorAsync(Guid vendorId, CancellationToken ct) =>
         // Delegates to the plural so there is a single vendor-membership predicate to maintain.
