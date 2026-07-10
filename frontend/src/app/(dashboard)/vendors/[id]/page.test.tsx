@@ -50,7 +50,7 @@ const VENDOR_DETAIL = {
   ],
   createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-05-26T00:00:00Z",
-  coverage: { status: "NoRequirements" as const, missingTypes: [] as string[] },
+  coverage: { status: "NoRequirements" as const, missingTypes: [] as string[], coveredThrough: null },
   contactEmailStatus: null,
 };
 

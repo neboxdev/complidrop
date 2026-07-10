@@ -49,7 +49,7 @@ const VENDORS: VendorSummary[] = [
     documentCount: 3,
     activePortalLinks: 1,
     isSample: false,
-    coverage: { status: "Covered", missingTypes: [] },
+    coverage: { status: "Covered", missingTypes: [], coveredThrough: null },
     contactEmailStatus: null,
   },
   {
@@ -63,7 +63,7 @@ const VENDORS: VendorSummary[] = [
     documentCount: 0,
     activePortalLinks: 0,
     isSample: false,
-    coverage: { status: "NoRequirements", missingTypes: [] },
+    coverage: { status: "NoRequirements", missingTypes: [], coveredThrough: null },
     contactEmailStatus: null,
   },
 ];
@@ -90,7 +90,7 @@ const VENDOR_DETAIL: VendorDetail = {
   ],
   createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-05-26T00:00:00Z",
-  coverage: { status: "Covered", missingTypes: [] },
+  coverage: { status: "Covered", missingTypes: [], coveredThrough: null },
   contactEmailStatus: null,
 };
 
