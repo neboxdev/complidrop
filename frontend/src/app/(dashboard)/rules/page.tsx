@@ -81,11 +81,16 @@ type RulePayload = {
 // per-tenant — so a venue that clones (say) the Caterer checklist gets GL / expiration / workers'
 // comp / liquor but no additional-insured check. The nudge below points them at it with their own
 // venue name, replacing seeding it with a one-size-fits-nobody placeholder.
-const ADDITIONAL_INSURED: RequirementType = findRequirementType({
+//
+// Kept OPTIONAL (no non-null assertion): every other findRequirementType call site handles
+// `RequirementType | undefined`, and a force-unwrap here meant a renamed/removed catalog entry
+// would turn a localized nudge into a whole-page crash (ChecklistEditor dereferencing undefined).
+// The nudge simply doesn't render when the entry is absent — see the guarded call site below.
+const ADDITIONAL_INSURED = findRequirementType({
   documentType: "coi",
   fieldName: "additional_insured",
   operator: "contains",
-})!;
+});
 
 export default function RulesPage() {
   const qc = useQueryClient();
@@ -511,12 +516,16 @@ function ChecklistEditor({
   // governs certificates of insurance but hasn't added the (deliberately-unseeded) additional-
   // insured check yet — so a venue that cloned a suggested checklist is reminded to name itself.
   const governsCoi = rules.some((r) => r.documentType === "coi");
-  const hasAdditionalInsured = rules.some(
-    (r) =>
-      r.documentType === ADDITIONAL_INSURED.documentType &&
-      r.fieldName === ADDITIONAL_INSURED.fieldName &&
-      r.operator === ADDITIONAL_INSURED.operator,
-  );
+  // Guarded on the catalog entry existing (ADDITIONAL_INSURED is now optional): a
+  // renamed/removed entry degrades to "no nudge", never a crash dereferencing undefined.
+  const hasAdditionalInsured =
+    ADDITIONAL_INSURED != null &&
+    rules.some(
+      (r) =>
+        r.documentType === ADDITIONAL_INSURED.documentType &&
+        r.fieldName === ADDITIONAL_INSURED.fieldName &&
+        r.operator === ADDITIONAL_INSURED.operator,
+    );
 
   return (
     <div className="space-y-4">
@@ -579,8 +588,8 @@ function ChecklistEditor({
         </CardContent>
       </Card>
 
-      {!readOnly && governsCoi && !hasAdditionalInsured && (
-        <AdditionalInsuredNudge onAdd={onAddRequirement} />
+      {!readOnly && governsCoi && ADDITIONAL_INSURED != null && !hasAdditionalInsured && (
+        <AdditionalInsuredNudge type={ADDITIONAL_INSURED} onAdd={onAddRequirement} />
       )}
 
       {rules.length > 0 && <ComplianceSummary name={detail.name} rules={rules} />}
@@ -614,14 +623,20 @@ function ChecklistEditor({
 // rule. "Add it now" expands the SAME value form the add-requirement menu uses, pre-set to the
 // additional-insured requirement, so the venue types its exact legal name and the rule is created
 // through the existing onAdd path. Self-dismisses once the requirement is on the checklist.
-function AdditionalInsuredNudge({ onAdd }: { onAdd: (rule: RulePayload) => void }) {
+function AdditionalInsuredNudge({
+  type,
+  onAdd,
+}: {
+  type: RequirementType;
+  onAdd: (rule: RulePayload) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
 
   if (expanded) {
     return (
       <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-4">
         <RequirementValueForm
-          type={ADDITIONAL_INSURED}
+          type={type}
           initialValue={null}
           submitLabel="Add requirement"
           onSubmit={(payload) => {
