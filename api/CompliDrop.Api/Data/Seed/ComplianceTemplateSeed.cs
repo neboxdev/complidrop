@@ -1,7 +1,6 @@
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
 
 namespace CompliDrop.Api.Data.Seed;
 
