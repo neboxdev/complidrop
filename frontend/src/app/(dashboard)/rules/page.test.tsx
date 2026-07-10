@@ -546,6 +546,25 @@ describe("RulesPage — additional-insured nudge (#400)", () => {
     ],
   };
 
+  // A SYSTEM (suggested, read-only) checklist that governs COI and lacks the additional-insured
+  // rule — the exact shape the nudge gate must suppress via its `!readOnly` clause.
+  const SYSTEM_COI_SUMMARY = {
+    id: "t_sys_coi",
+    name: "Caterer",
+    description: "Suggested",
+    isSystemTemplate: true,
+    ruleCount: 1,
+    vendorCount: 0,
+  };
+
+  const SYSTEM_COI_DETAIL = {
+    id: "t_sys_coi",
+    name: "Caterer",
+    description: "Suggested",
+    isSystemTemplate: true,
+    rules: [DETAIL.rules[0]], // coi general_liability, no additional_insured
+  };
+
   it("shows the nudge on an editable COI checklist that lacks the additional-insured requirement", async () => {
     server.use(
       http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
@@ -581,6 +600,22 @@ describe("RulesPage — additional-insured nudge (#400)", () => {
     fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
 
     await screen.findByRole("button", { name: /add a requirement/i });
+    expect(screen.queryByText(/add your additional-insured requirement/i)).toBeNull();
+  });
+
+  it("does not nudge on a read-only system checklist preview — the nudge would POST to a read-only template", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([SYSTEM_COI_SUMMARY])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(SYSTEM_COI_DETAIL)),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    // Preview the suggested (system) checklist from the rail.
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    // The read-only editor renders (a system template shows "A suggested starting point" and no
+    // add-requirement control). The nudge is gated on !readOnly, so it must be absent — otherwise
+    // "Add it now" would POST a rule to a read-only system template (line 169 blocks that).
+    await screen.findByText(/a suggested starting point/i);
     expect(screen.queryByText(/add your additional-insured requirement/i)).toBeNull();
   });
 
