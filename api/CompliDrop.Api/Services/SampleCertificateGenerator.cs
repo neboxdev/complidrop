@@ -9,7 +9,9 @@ namespace CompliDrop.Api.Services;
 /// one-click demo (#238). The PDF is built so the REAL extraction pipeline (Document AI OCR → LLM)
 /// reads it cleanly and the resulting document PASSES the "Caterer" system checklist
 /// (<see cref="Data.Seed.ComplianceTemplateSeed.SampleVendorTemplateName"/>): general-liability
-/// each-occurrence ≥ $1M, an expiration date in the future, and workers-comp coverage present.
+/// each-occurrence ≥ $1M, an expiration date in the future, workers-comp coverage present, and
+/// liquor-liability ≥ $1M (the Caterer checklist now covers bar / alcohol service — #400, so the
+/// sample vendor is modelled as a full-service caterer that carries liquor liability).
 ///
 /// A compliance product must never look like it ships a real customer certificate, so every copy
 /// carries a fictional insurer/policy number plus a "SAMPLE — NOT A REAL CERTIFICATE" banner,
@@ -29,6 +31,7 @@ public sealed class SampleCertificateGenerator(TimeProvider timeProvider) : ISam
     internal const string SampleBanner = "SAMPLE — NOT A REAL CERTIFICATE OF INSURANCE";
     private const string GeneralLiabilityEachOccurrence = "$2,000,000";
     private const string WorkersCompEachAccident = "$1,000,000";
+    private const string LiquorLiabilityEachOccurrence = "$1,000,000";
 
     public byte[] GeneratePdf(string insuredName, string certificateHolderName)
     {
@@ -77,6 +80,10 @@ public sealed class SampleCertificateGenerator(TimeProvider timeProvider) : ISam
                         "Workers Compensation & Employers' Liability",
                         $"E.L. Each Accident: {WorkersCompEachAccident}",
                         "Limits: Statutory"));
+                    col.Item().Element(e => CoverageRow(e,
+                        "Liquor Liability",
+                        $"Each Occurrence Limit: {LiquorLiabilityEachOccurrence}",
+                        "Aggregate: $2,000,000"));
 
                     col.Item().PaddingTop(6).Row(r =>
                     {
@@ -86,13 +93,14 @@ public sealed class SampleCertificateGenerator(TimeProvider timeProvider) : ISam
                             LabeledBlock(e, "Policy Expiration Date", expiration.ToString("MMMM d, yyyy")));
                     });
 
-                    // A plain, machine-readable echo of the three fields the Caterer checklist grades,
+                    // A plain, machine-readable echo of the four fields the Caterer checklist grades,
                     // so OCR + the LLM extract them reliably regardless of how the table above is parsed.
                     col.Item().PaddingTop(8).Background("#f1f5f9").Padding(8).Column(s =>
                     {
                         s.Spacing(2);
                         s.Item().Text($"General Liability Limit: {GeneralLiabilityEachOccurrence} per occurrence");
                         s.Item().Text($"Workers Compensation Limit: {WorkersCompEachAccident}");
+                        s.Item().Text($"Liquor Liability Limit: {LiquorLiabilityEachOccurrence} per occurrence");
                         s.Item().Text($"Expiration Date: {expiration:yyyy-MM-dd}");
                     });
                 });

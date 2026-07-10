@@ -36,5 +36,7 @@ public class SampleCertificateGeneratorTests
         ExtractionPrompts.SystemPrompt.Should().Contain("general_liability_limit");
         ExtractionPrompts.SystemPrompt.Should().Contain("workers_comp_limit");
         ExtractionPrompts.SystemPrompt.Should().Contain("expiration_date");
+        // #400: the Caterer checklist now grades liquor liability too, so the prompt must emit the key.
+        ExtractionPrompts.SystemPrompt.Should().Contain("liquor_liability_limit");
     }
 }
