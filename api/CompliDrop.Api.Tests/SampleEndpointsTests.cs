@@ -238,9 +238,10 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
     [Fact]
     public async Task Sample_certificate_fields_pass_the_seeded_Caterer_checklist()
     {
-        // Pins ADR 0028's contract independent of the LLM: a document carrying the three fields the
-        // generated sample COI is built to yield — GL ≥ $1M, a future expiration, workers-comp present
-        // — evaluated against the REAL seeded Caterer template, grades to Compliant.
+        // Pins ADR 0028's contract independent of the LLM: a document carrying the four fields the
+        // generated sample COI is built to yield — GL ≥ $1M, a future expiration, workers-comp present,
+        // and liquor-liability ≥ $1M (#400) — evaluated against the REAL seeded Caterer template,
+        // grades to Compliant.
         var orgId = Guid.NewGuid();
         var vendorId = Guid.NewGuid();
         var docId = Guid.NewGuid();
@@ -272,7 +273,15 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
                 GeneralLiabilityLimit = 2_000_000m,
                 ExpirationDate = now.AddYears(1),
                 ExtractionFields = JsonSerializer.SerializeToDocument(
-                    new Dictionary<string, object> { ["workers_comp_limit"] = "1000000" }),
+                    new Dictionary<string, object>
+                    {
+                        ["workers_comp_limit"] = "1000000",
+                        // #400: the Caterer checklist now also grades liquor liability (bar / alcohol
+                        // service). The generated sample COI emits a $1M liquor line, so the sample
+                        // vendor carries it here too — otherwise the seeded liquor min_value rule fails
+                        // and the demo grades NonCompliant.
+                        ["liquor_liability_limit"] = "1000000",
+                    }),
                 IsSample = true,
                 CreatedAt = now,
                 UpdatedAt = now,
@@ -331,7 +340,8 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
         clone.IsSystemTemplate.Should().BeFalse();
         clone.OrganizationId.Should().Be(auth.OrgId);
         clone.Rules.Select(r => r.FieldName)
-            .Should().BeEquivalentTo(["general_liability_limit", "expiration_date", "workers_comp_limit"]);
+            .Should().BeEquivalentTo(
+                ["general_liability_limit", "expiration_date", "workers_comp_limit", "liquor_liability_limit"]);
 
         // Editable: the org can rename/update its clone (a system template would 4xx here).
         (await auth.Client.PutAsJsonAsync($"/api/compliance/templates/{cloneId}",
