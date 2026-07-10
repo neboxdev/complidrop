@@ -471,7 +471,11 @@ using (var scope = app.Services.CreateScope())
     {
         if (await sysDb.Database.CanConnectAsync())
         {
-            await ComplianceTemplateSeed.EnsureAsync(sysDb);
+            // Pass the compliance-check service so a rule back-filled onto a shared system template
+            // this boot re-grades the documents graded against it across every org (#400) — the
+            // resolved service shares this scope's SystemDbContext, the same instance the seed uses.
+            var reevaluator = scope.ServiceProvider.GetRequiredService<IComplianceCheckService>();
+            await ComplianceTemplateSeed.EnsureAsync(sysDb, reevaluator, logger);
             logger.LogInformation("Seed: system compliance templates ensured.");
         }
         else

@@ -1,5 +1,7 @@
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CompliDrop.Api.Data.Seed;
 
@@ -31,7 +33,21 @@ public static class ComplianceTemplateSeed
     /// </summary>
     internal static int TemplateCount => Templates.Length;
 
-    public static async Task EnsureAsync(SystemDbContext db, CancellationToken ct = default)
+    /// <param name="reevaluator">
+    /// When supplied, documents graded against a system template that GAINS a rule this run are
+    /// re-evaluated ACROSS ALL ORGS after the back-fill commits (#400). The back-fill mutates
+    /// SHARED system-template rules — the only path that does, since endpoint rule edits are blocked
+    /// on system templates — so without this a caterer COI persisted <c>Compliant</c> under the old
+    /// rule set would silently stay Compliant despite failing the newly-added rule (a false-Compliant
+    /// verdict). Null (the default) skips the fan-out — used by structural tests that seed no
+    /// documents. The re-grade runs ONLY when a rule was actually added, so a normal boot with
+    /// nothing to back-fill stays free.
+    /// </param>
+    public static async Task EnsureAsync(
+        SystemDbContext db,
+        IComplianceCheckService? reevaluator = null,
+        ILogger? logger = null,
+        CancellationToken ct = default)
     {
         var org = await db.Organizations.IgnoreQueryFilters()
             .FirstOrDefaultAsync(o => o.Id == SystemOrgId, ct);
@@ -64,10 +80,17 @@ public static class ComplianceTemplateSeed
             .ToListAsync(ct);
         var byName = existingTemplates.ToDictionary(t => t.Name, StringComparer.Ordinal);
 
+        // System templates that GAIN ≥1 rule this run. After the back-fill commits, the documents
+        // graded against each must be re-evaluated across every org (#400) — see the fan-out below.
+        // A brand-new template (inserted whole) is NOT listed: it has no pre-existing documents to
+        // re-grade (no vendor could have been assigned a template that did not exist yet).
+        var backfilledTemplateIds = new List<(Guid Id, string Name)>();
+
         foreach (var tpl in Templates)
         {
             if (byName.TryGetValue(tpl.Name, out var live))
             {
+                var addedAnyRule = false;
                 // Back-fill any seed rule the live template lacks, keyed on the
                 // (DocumentType, FieldName, Operator) natural key the rules endpoints also dedupe
                 // on. Each seed template's rules are distinct on that key, so a re-run adds at most
@@ -82,8 +105,13 @@ public static class ComplianceTemplateSeed
                 {
                     var present = live.Rules.Any(r => RuleMatches(r, rule));
                     if (!present)
+                    {
                         db.ComplianceRules.Add(NewRule(live.Id, rule));
+                        addedAnyRule = true;
+                    }
                 }
+                if (addedAnyRule)
+                    backfilledTemplateIds.Add((live.Id, live.Name));
                 continue;
             }
 
@@ -102,6 +130,25 @@ public static class ComplianceTemplateSeed
                 db.ComplianceRules.Add(NewRule(templateId, rule));
         }
         await db.SaveChangesAsync(ct);
+
+        // A rule back-filled onto a SHARED system template must re-grade the documents already graded
+        // against it — across EVERY org — or a document persisted Compliant under the OLD rule set
+        // stays Compliant despite failing the new rule (a false-Compliant verdict, #400). This is
+        // normal application re-evaluation (the same fan-out the endpoint path runs on a rule edit,
+        // #257), NOT a destructive migration: no schema change, no ad-hoc SQL. It runs ONLY when the
+        // reconcile actually added a rule, so a normal boot with nothing to back-fill does no extra
+        // work. Best-effort and batched, respecting ADR 0030 (each page commits verdict + checks in
+        // one unit of work). Guarded on the reevaluator so structural/insert-only callers can opt out.
+        if (reevaluator is not null && backfilledTemplateIds.Count > 0)
+        {
+            foreach (var (id, name) in backfilledTemplateIds)
+            {
+                var regraded = await reevaluator.ReevaluateForTemplateForSystemAsync(id, ct);
+                logger?.LogInformation(
+                    "Seed: back-filled rules onto system template '{Template}' — re-graded {Count} document(s) across orgs.",
+                    name, regraded);
+            }
+        }
     }
 
     // The (DocumentType, FieldName, Operator) natural key — mirrors the dedupe key the compliance
