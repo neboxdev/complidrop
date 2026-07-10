@@ -1,5 +1,24 @@
 # HANDOFF — Compliance rule engine session (started 2026-07-07)
 
+## G1 RESEARCH — non-attorney legal memo (2026-07-10, COMPLETE; gate stays OPEN)
+
+Founder direction: feature is deferred (phase 2/3) and counsel is unaffordable now, so Claude
+performed the G1 legal research itself, as close to finished as a non-lawyer can get:
+[rule-engine/G1-LEGAL-RESEARCH.md](rule-engine/G1-LEGAL-RESEARCH.md). Keystone: Tex. Gov't Code
+§81.101(c) (verified live + screenshot) — the 1999 post-Parsons safe harbor for internet software
+that clearly and conspicuously states it is not a substitute for an attorney. Memo includes: UPL
+analysis (Cortez/Fadia/Parsons/Janson line; keep the engine fully automated), §552 negligent-
+misrepresentation + Orca reliance-negation + economic-loss channeling, Winter/Jeppesen honest
+product-liability placement, DTPA architecture (no waiver possible; customers ARE consumers; caps
+do not stop DTPA misrep — claim accuracy is the defense), FTC Henry Schein/TRUSTe/SkyMed analogies,
+competitor three-layer disclaimer pattern (Harbor Compliance verified live), E&O placement checks
+(~$1–4k/yr bundled), and FULL DRAFT deliverables: product disclaimer (the §81.101(c) instrument),
+ToS rider (Italian Cowboy-compliant no-reliance covenant), UI framing rules, marketing claim rules.
+Research method: 6-domain adversarial fan-out; authorities tiered A (author-verified live) /
+B (2-lens workflow-verified) / C (workflow-sourced, flagged). **Ruben's eventual action: hand the
+memo to a Texas attorney for validation (memo §VII); G1 closes only then. Flags stay OFF.**
+
+
 ## FOUNDER DELEGATION — gate closure + merge (2026-07-09, COMPLETE)
 
 The founder explicitly delegated the remaining human steps ("I need YOU to take
