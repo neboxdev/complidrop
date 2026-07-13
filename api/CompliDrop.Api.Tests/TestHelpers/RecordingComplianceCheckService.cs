@@ -17,10 +17,13 @@ public sealed class RecordingComplianceCheckService : IComplianceCheckService
 {
     public List<Guid> RegradedTemplateIds { get; } = [];
 
-    public Task<int> ReevaluateForTemplateForSystemAsync(Guid templateId, CancellationToken ct)
+    public Task<RegradeResult> ReevaluateForTemplateForSystemAsync(Guid templateId, CancellationToken ct)
     {
         RegradedTemplateIds.Add(templateId);
-        return Task.FromResult(0);
+        // Report FULL success (no failed page) so the seed advances the template's watermark — the
+        // convergence tests using this spy assert the template WAS re-graded. The partial-failure
+        // (watermark-held-back) path is exercised by FailingSystemReevaluator instead.
+        return Task.FromResult(new RegradeResult(0, 0, 0));
     }
 
     public Task ApplyEvaluationAsync(DbContext context, Document doc, CancellationToken ct) =>

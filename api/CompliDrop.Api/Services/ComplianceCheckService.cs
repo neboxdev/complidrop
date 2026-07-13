@@ -65,10 +65,25 @@ public interface IComplianceCheckService
     /// (<see cref="ReevaluateForTemplateAsync"/> / <see cref="ReevaluateForVendorAsync"/>) still touch
     /// them on a user-initiated Check-again / rule edit / reassignment. Same batched, best-effort
     /// machinery as the endpoint fan-out (ADR 0030: each page commits verdict + checks in ONE unit of
-    /// work). Returns the number of documents targeted (sample docs excluded), for the seed's one-line
-    /// summary log.
+    /// work). Returns a <see cref="RegradeResult"/> (targeted / regraded / failed-page counts, sample docs
+    /// excluded) so the seed can tell a FULLY-successful fan-out from one that caught-and-skipped a page —
+    /// only the former may advance the template's re-grade watermark (#416, ADR 0036 Amendment 2).
     /// </summary>
-    Task<int> ReevaluateForTemplateForSystemAsync(Guid templateId, CancellationToken ct);
+    Task<RegradeResult> ReevaluateForTemplateForSystemAsync(Guid templateId, CancellationToken ct);
+}
+
+/// <summary>
+/// Outcome of a batched re-grade fan-out. <see cref="Targeted"/> is how many documents the predicate
+/// selected; <see cref="Regraded"/> how many were actually re-evaluated and committed; <see cref="FailedPages"/>
+/// how many pages had their <c>SaveChanges</c> caught-and-skipped (the fan-out is best-effort — a failed page is
+/// logged, not thrown, so a shared system-rule mutation that already committed can't be un-done by a re-grade
+/// hiccup). <see cref="AllSucceeded"/> is the durability signal the seed keys on: only a fan-out that skipped NO
+/// page may advance a system template's <c>RegradedThroughRevision</c>, so an interrupted or partially-failed
+/// re-grade re-fires on the next boot until every document catches up (#416, ADR 0036 Amendment 2).
+/// </summary>
+public readonly record struct RegradeResult(int Targeted, int Regraded, int FailedPages)
+{
+    public bool AllSucceeded => FailedPages == 0;
 }
 
 public class ComplianceCheckService(
@@ -96,7 +111,7 @@ public class ComplianceCheckService(
         // link is the join; a doc with no vendor (or a vendor on another template) is excluded.
         ReevaluateWhereAsync(db, d => d.Vendor != null && d.Vendor.ComplianceTemplateId == templateId, ct);
 
-    public Task<int> ReevaluateForTemplateForSystemAsync(Guid templateId, CancellationToken ct) =>
+    public Task<RegradeResult> ReevaluateForTemplateForSystemAsync(Guid templateId, CancellationToken ct) =>
         // System context (no tenant filter): re-grade the template's documents across EVERY org.
         // Same vendor→template predicate as the tenant path above, evaluated against SystemDbContext —
         // the seed-time fan-out used after the startup reconcile back-fills a rule onto a shared system
@@ -133,28 +148,41 @@ public class ComplianceCheckService(
     }
 
     // Best-effort fan-out, batched per page (#293). The triggering mutation (rule edit / checklist
-    // assignment / template delete) has already committed before this runs, so a page that fails to
-    // persist is logged and skipped — those documents keep their prior verdict until the nightly
-    // sweep or a manual "Check again", never a 500 that, on the rule-create path, would duplicate the
-    // rule on retry. Cancellation still propagates (a shutdown isn't a per-page failure).
+    // assignment / template delete / seed convergence) has already committed before this runs, so a page
+    // that fails to persist is logged and SKIPPED rather than thrown — never a 500 that, on the rule-create
+    // path, would duplicate the rule on retry. Those documents keep their prior verdict until something
+    // re-fires the re-grade. Cancellation still propagates (a shutdown isn't a per-page failure).
     //
-    // Granularity note: a page commits as a unit (one SaveChanges), so one document that fails to
-    // persist forfeits the re-grade of its WHOLE page (≤ PageSize), not just itself — coarser than
-    // the old per-document loop. Accepted trade-off of batching the writes, and bounded: the one
-    // known write-path failure (oversize check text → 22001) is clamped at the source (#272), so a
-    // realistic page rarely fails, and the sweep heals any page that does.
-    // Parameterized on the DbContext so the SAME batched fan-out serves both the tenant-filtered
-    // path (AppDbContext — the global query filter scopes it to the caller org) and the cross-org
-    // seed path (SystemDbContext — no tenant filter, #400). Returns the number of documents targeted.
-    private async Task<int> ReevaluateWhereAsync(DbContext context, Expression<Func<Document, bool>> predicate, CancellationToken ct)
+    // How a skipped page is HEALED depends on the caller — and it is NOT the nightly sweep:
+    // ComplianceSweepBackgroundService only does date-transition ExecuteUpdates (Compliant→Expired etc.);
+    // it never re-runs rule EVALUATION, so it cannot heal a stale rule-verdict. Instead:
+    //   * Tenant-path callers (rule edit / reassignment / Check-again) recover on the next user-initiated
+    //     re-grade of the same document.
+    //   * The SEED/system caller (ReevaluateForTemplateForSystemAsync) recovers DURABLY: this method reports
+    //     FailedPages via the returned RegradeResult, the seed holds that template's re-grade watermark back
+    //     when any page failed, and the next boot re-fires the re-grade until every page lands (#416, ADR
+    //     0036 Amendment 2). That watermark — not the sweep — is what stops a stale verdict surviving an
+    //     interrupted boot.
+    //
+    // Granularity note: a page commits as a unit (one SaveChanges), so one document that fails to persist
+    // forfeits the re-grade of its WHOLE page (≤ PageSize), not just itself — coarser than the old
+    // per-document loop. Accepted trade-off of batching the writes, and bounded: the one known write-path
+    // failure (oversize check text → 22001) is clamped at the source (#272), so a realistic page rarely
+    // fails. Parameterized on the DbContext so the SAME batched fan-out serves both the tenant-filtered path
+    // (AppDbContext — the global query filter scopes it to the caller org) and the cross-org seed path
+    // (SystemDbContext — no tenant filter, #400). Returns a RegradeResult (targeted / actually-regraded /
+    // failed-page counts) so the seed can distinguish a fully-successful fan-out from a partial one.
+    private async Task<RegradeResult> ReevaluateWhereAsync(DbContext context, Expression<Func<Document, bool>> predicate, CancellationToken ct)
     {
         // Snapshot the affected ids first — a cheap key-only projection (no ExtractionFields, no
         // joins) — then re-grade them a page at a time.
         var docIds = await context.Set<Document>().Where(predicate).Select(d => d.Id).ToListAsync(ct);
-        if (docIds.Count == 0) return 0;
+        if (docIds.Count == 0) return new RegradeResult(0, 0, 0);
 
         var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
 
+        var regraded = 0;
+        var failedPages = 0;
         foreach (var page in docIds.Chunk(reevaluationPageSize))
         {
             ct.ThrowIfCancellationRequested();
@@ -173,9 +201,11 @@ public class ComplianceCheckService(
                     .ToListAsync(ct);
 
                 await ApplyEvaluationsAsync(context, docs, nowUtc, ct);
+                regraded += docs.Count;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                failedPages++;
                 logger.LogError(ex, "Re-evaluation fan-out failed for a page of {Count} documents", page.Length);
             }
             finally
@@ -187,7 +217,7 @@ public class ComplianceCheckService(
                 context.ChangeTracker.Clear();
             }
         }
-        return docIds.Count;
+        return new RegradeResult(docIds.Count, regraded, failedPages);
     }
 
     // Applies one page of evaluations as a single round-trip group: one bulk load of the page's

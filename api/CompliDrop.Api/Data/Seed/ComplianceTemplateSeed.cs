@@ -33,19 +33,24 @@ public static class ComplianceTemplateSeed
     internal static int TemplateCount => Templates.Length;
 
     /// <param name="reevaluator">
-    /// When supplied, documents graded against a system template whose RULE SET this run changes AT ALL —
-    /// any rule added, deleted, or updated (including a message- or sort-order-only edit) — are re-evaluated
-    /// ACROSS ALL ORGS after convergence commits (ADR 0036). Convergence mutates SHARED system-template
-    /// rules — the only path that does, since endpoint rule edits are blocked on system templates — so
-    /// without this a caterer COI persisted <c>Compliant</c> under the old rule set would silently stay
-    /// Compliant despite failing the corrected rules (a false-Compliant verdict). The trigger is ANY
-    /// rule-set change rather than only a verdict-affecting one deliberately (#416 re-review): it decouples
-    /// this data-layer seeder from <see cref="ComplianceCheckService"/>'s evaluator internals — a future
-    /// evaluator that reads ErrorMessage / SortOrder / a new column must not silently skip a needed
-    /// re-grade — and a redundant re-grade on a pure message / sort edit is negligible at MVP scale. Null
-    /// (the default) skips the fan-out — used by structural tests that seed no documents. A DESCRIPTION-only
-    /// edit is display-only and triggers NO re-grade, and a boot whose templates already match the seed does
-    /// nothing at all (ADR 0036 idempotency invariant #3).
+    /// When supplied, documents graded against a system template whose re-grade WATERMARK is behind
+    /// (<see cref="ComplianceTemplate.RulesRevision"/> != <see cref="ComplianceTemplate.RegradedThroughRevision"/>)
+    /// are re-evaluated ACROSS ALL ORGS after convergence commits (ADR 0036 Amendment 2). Convergence bumps
+    /// <c>RulesRevision</c> on ANY rule-set change (add / delete / value / message / sort — see the loop below),
+    /// so the watermark falls behind both when THIS boot changes the rules AND when a PRIOR boot committed the
+    /// rule change but its re-grade never finished (SIGTERM / startup timeout / a caught-and-skipped page).
+    /// Convergence mutates SHARED system-template rules — the only path that does, since endpoint rule edits
+    /// are blocked on system templates — so without a durable re-grade a caterer COI persisted <c>Compliant</c>
+    /// under the old rule set would silently stay Compliant despite failing the corrected rules (a
+    /// false-Compliant verdict; the project's blocker-class failure). The trigger is ANY rule-set change
+    /// rather than only a verdict-affecting one deliberately (#416 re-review): it decouples this data-layer
+    /// seeder from <see cref="ComplianceCheckService"/>'s evaluator internals — a future evaluator that reads
+    /// ErrorMessage / SortOrder / a new column must not silently skip a needed re-grade — and a redundant
+    /// re-grade on a pure message / sort edit is negligible at MVP scale. A template's watermark advances ONLY
+    /// when its fan-out reports FULL success, so a partially-failed re-grade re-fires next boot. Null (the
+    /// default) skips the fan-out — used by structural tests that seed no documents. A DESCRIPTION-only edit is
+    /// display-only and bumps no revision (NO re-grade), and a boot whose system templates are all caught up
+    /// (<c>RulesRevision == RegradedThroughRevision</c>) does nothing at all (ADR 0036 idempotency invariant #3).
     /// </param>
     public static async Task EnsureAsync(
         SystemDbContext db,
@@ -86,17 +91,20 @@ public static class ComplianceTemplateSeed
             .ToListAsync(ct);
         var byName = existingTemplates.ToDictionary(t => t.Name, StringComparer.Ordinal);
 
-        // System templates whose RULE SET changed this run — any rule added, deleted, or updated (including
-        // a message- or sort-order-only edit). After convergence commits, the documents graded against each
-        // must be re-evaluated across every org (ADR 0036) — see the fan-out below. The trigger is any
+        // Re-grade durability (#416, ADR 0036 Amendment 2): rather than re-grade only the templates THIS
+        // boot mutated (a best-effort, this-boot-only trigger that stranded a stale verdict whenever the boot
+        // was interrupted after committing the rules but before finishing the re-grade), convergence bumps a
+        // system template's RulesRevision whenever its rule set changes AT ALL — any rule added, deleted, or
+        // updated (message- and sort-order-only edits included; see the loop). The post-commit re-grade below
+        // then fans out over EVERY system template whose RulesRevision has outrun its RegradedThroughRevision,
+        // which catches both this boot's changes AND a prior boot's unfinished re-grade. The trigger is any
         // rule-set change, not only a verdict-affecting one, to decouple this seeder from the evaluator's
         // internals (#416 re-review): a future ComplianceCheckService.EvaluateRule that reads ErrorMessage /
         // SortOrder / a new column would otherwise make convergence skip a needed re-grade and leave a stale
-        // persisted verdict — the project's blocker-class failure. A DESCRIPTION-only drift updates the row
-        // but does NOT list the template here (display-only, verdict-neutral). A brand-new template (inserted
-        // whole) is NOT listed either: it has no pre-existing documents to re-grade (no vendor could have
-        // been assigned a template that did not exist yet).
-        var changedTemplateIds = new List<(Guid Id, string Name)>();
+        // persisted verdict. A DESCRIPTION-only drift updates the row but bumps NO revision (display-only,
+        // verdict-neutral). A brand-new template (inserted whole) starts at revision 0/0: it has no
+        // pre-existing documents to re-grade (no vendor could have been assigned a template that did not exist
+        // yet), so its watermark is already caught up.
 
         // Ids of live system-template rules this pass REMOVES. Their dependent ComplianceCheck rows must be
         // deleted in the SAME unit of work as the rule removals (the FK-safety block before SaveChanges).
@@ -162,8 +170,12 @@ public static class ComplianceTemplateSeed
                     }
                 }
 
+                // Bump the revision so the post-commit re-grade fires for this template (and re-fires next
+                // boot until it fully succeeds). The increment rides the SAME convergence SaveChanges as the
+                // rule changes it accounts for, so RulesRevision can never advance without its rule change
+                // also committing.
                 if (ruleSetChanged)
-                    changedTemplateIds.Add((live.Id, live.Name));
+                    live.RulesRevision++;
                 continue;
             }
 
@@ -201,25 +213,54 @@ public static class ComplianceTemplateSeed
         }
         await db.SaveChangesAsync(ct);
 
-        // A rule-set change to a SHARED system template must re-grade the documents already graded against
-        // it — across EVERY org — or a document persisted Compliant under the OLD rule set stays Compliant
-        // despite failing the corrected rules (a false-Compliant verdict, ADR 0036). This is normal
+        // DURABLE re-grade (#416, ADR 0036 Amendment 2). A rule-set change to a SHARED system template must
+        // re-grade the documents already graded against it — across EVERY org — or a document persisted
+        // Compliant under the OLD rule set stays Compliant despite failing the corrected rules (a
+        // false-Compliant verdict; the project's blocker-class failure). Gate the re-grade on the persisted
+        // WATERMARK, not on "templates this boot mutated": re-grade every system template whose RulesRevision
+        // has outrun its RegradedThroughRevision. That set is exactly the templates changed THIS boot (their
+        // revision was just bumped, committed by the SaveChanges above) PLUS any template a PRIOR boot changed
+        // but never finished re-grading (SIGTERM / startup timeout / a caught-and-skipped page left
+        // RegradedThroughRevision behind) — the durability the old this-boot-only gate lacked. This is normal
         // application re-evaluation (the same fan-out the endpoint path runs on a rule edit, #257), NOT a
-        // destructive migration: no schema change, no ad-hoc SQL. It runs ONLY for templates whose rule set
-        // changed this run, so a boot with no drift — or a DESCRIPTION-only edit — does no extra work.
-        // Best-effort and batched, respecting ADR 0030 (each page commits verdict + checks in one unit of
-        // work). Guarded on the reevaluator so structural/insert-only callers can opt out. Sample-demo
-        // documents are deliberately EXCLUDED from this cross-org re-grade — a sample predating a newly-
-        // required field would falsely flip Compliant → NonCompliant on deploy, breaking the ADR 0028
-        // one-click-demo contract (see ReevaluateForTemplateForSystemAsync).
-        if (reevaluator is not null && changedTemplateIds.Count > 0)
+        // destructive migration: no schema change, no ad-hoc SQL on the rules. Best-effort and batched,
+        // respecting ADR 0030 (each page commits verdict + checks in one unit of work). Guarded on the
+        // reevaluator so structural/insert-only callers can opt out. Sample-demo documents are deliberately
+        // EXCLUDED from this cross-org re-grade — a sample predating a newly-required field would falsely flip
+        // Compliant → NonCompliant on deploy, breaking the ADR 0028 one-click-demo contract (see
+        // ReevaluateForTemplateForSystemAsync). Idempotent (invariant #3): a boot whose system templates are
+        // all caught up (RulesRevision == RegradedThroughRevision) re-grades nothing.
+        if (reevaluator is not null)
         {
-            foreach (var (id, name) in changedTemplateIds)
+            foreach (var tpl in existingTemplates)
             {
-                var regraded = await reevaluator.ReevaluateForTemplateForSystemAsync(id, ct);
+                if (tpl.RulesRevision == tpl.RegradedThroughRevision)
+                    continue;
+
+                // Capture the revision we are re-grading THROUGH before the fan-out runs, so a concurrent
+                // bump (there is none today — one seed per boot) could never advance the watermark past work
+                // this fan-out actually covered.
+                var targetRevision = tpl.RulesRevision;
+                var result = await reevaluator.ReevaluateForTemplateForSystemAsync(tpl.Id, ct);
+
+                if (result.AllSucceeded)
+                {
+                    // Advance the watermark ONLY on a fully-successful fan-out; a skipped page leaves
+                    // RegradedThroughRevision behind so the next boot re-fires. Written via ExecuteUpdate,
+                    // NOT the tracked entity: ReevaluateForTemplateForSystemAsync shares this SystemDbContext
+                    // and clears its ChangeTracker per page (ReevaluateWhereAsync), so `tpl` is DETACHED by
+                    // the time we get here — a tracked-property write would be silently dropped at the next
+                    // SaveChanges. ExecuteUpdate issues the UPDATE directly and enlists in the ambient
+                    // transaction when there is one (the tests), or commits standalone in production.
+                    await db.ComplianceTemplates.IgnoreQueryFilters()
+                        .Where(t => t.Id == tpl.Id)
+                        .ExecuteUpdateAsync(s => s.SetProperty(t => t.RegradedThroughRevision, targetRevision), ct);
+                }
+
                 logger?.LogInformation(
-                    "Seed: converged system template '{Template}' — re-graded {Count} document(s) across orgs.",
-                    name, regraded);
+                    "Seed: converged system template '{Template}' — re-graded {Regraded}/{Targeted} document(s) across orgs ({FailedPages} page(s) failed; watermark {WatermarkState}).",
+                    tpl.Name, result.Regraded, result.Targeted, result.FailedPages,
+                    result.AllSucceeded ? $"advanced to revision {targetRevision}" : "held back for retry on the next boot");
             }
         }
     }
