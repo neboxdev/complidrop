@@ -33,17 +33,19 @@ public static class ComplianceTemplateSeed
     internal static int TemplateCount => Templates.Length;
 
     /// <param name="reevaluator">
-    /// When supplied, documents graded against a system template whose rule set this run changes in a
-    /// VERDICT-AFFECTING way — a rule added, a rule deleted, or an existing rule's compared value
-    /// (<see cref="ComplianceRule.ExpectedValue"/>) / natural key changed — are re-evaluated ACROSS ALL
-    /// ORGS after convergence commits (ADR 0036). Convergence mutates SHARED system-template rules — the
-    /// only path that does, since endpoint rule edits are blocked on system templates — so without this a
-    /// caterer COI persisted <c>Compliant</c> under the old rule set would silently stay Compliant despite
-    /// failing the corrected rules (a false-Compliant verdict). Null (the default) skips the fan-out —
-    /// used by structural tests that seed no documents. The re-grade runs ONLY for templates that actually
-    /// changed a verdict-affecting way this run; a pure error-message / sort-order / description edit
-    /// updates the row but is verdict-neutral and triggers NO re-grade, and a boot whose templates already
-    /// match the seed does nothing at all.
+    /// When supplied, documents graded against a system template whose RULE SET this run changes AT ALL —
+    /// any rule added, deleted, or updated (including a message- or sort-order-only edit) — are re-evaluated
+    /// ACROSS ALL ORGS after convergence commits (ADR 0036). Convergence mutates SHARED system-template
+    /// rules — the only path that does, since endpoint rule edits are blocked on system templates — so
+    /// without this a caterer COI persisted <c>Compliant</c> under the old rule set would silently stay
+    /// Compliant despite failing the corrected rules (a false-Compliant verdict). The trigger is ANY
+    /// rule-set change rather than only a verdict-affecting one deliberately (#416 re-review): it decouples
+    /// this data-layer seeder from <see cref="ComplianceCheckService"/>'s evaluator internals — a future
+    /// evaluator that reads ErrorMessage / SortOrder / a new column must not silently skip a needed
+    /// re-grade — and a redundant re-grade on a pure message / sort edit is negligible at MVP scale. Null
+    /// (the default) skips the fan-out — used by structural tests that seed no documents. A DESCRIPTION-only
+    /// edit is display-only and triggers NO re-grade, and a boot whose templates already match the seed does
+    /// nothing at all (ADR 0036 idempotency invariant #3).
     /// </param>
     public static async Task EnsureAsync(
         SystemDbContext db,
@@ -84,20 +86,27 @@ public static class ComplianceTemplateSeed
             .ToListAsync(ct);
         var byName = existingTemplates.ToDictionary(t => t.Name, StringComparer.Ordinal);
 
-        // System templates whose rule set changed in a VERDICT-AFFECTING way this run (a rule added,
-        // deleted, or an existing rule's compared value changed). After convergence commits, the documents
-        // graded against each must be re-evaluated across every org (ADR 0036) — see the fan-out below. A
-        // pure message / sort-order / description edit is verdict-neutral: the row is updated but the
-        // template is NOT listed here. A brand-new template (inserted whole) is NOT listed either: it has
-        // no pre-existing documents to re-grade (no vendor could have been assigned a template that did not
-        // exist yet).
+        // System templates whose RULE SET changed this run — any rule added, deleted, or updated (including
+        // a message- or sort-order-only edit). After convergence commits, the documents graded against each
+        // must be re-evaluated across every org (ADR 0036) — see the fan-out below. The trigger is any
+        // rule-set change, not only a verdict-affecting one, to decouple this seeder from the evaluator's
+        // internals (#416 re-review): a future ComplianceCheckService.EvaluateRule that reads ErrorMessage /
+        // SortOrder / a new column would otherwise make convergence skip a needed re-grade and leave a stale
+        // persisted verdict — the project's blocker-class failure. A DESCRIPTION-only drift updates the row
+        // but does NOT list the template here (display-only, verdict-neutral). A brand-new template (inserted
+        // whole) is NOT listed either: it has no pre-existing documents to re-grade (no vendor could have
+        // been assigned a template that did not exist yet).
         var changedTemplateIds = new List<(Guid Id, string Name)>();
+
+        // Ids of live system-template rules this pass REMOVES. Their dependent ComplianceCheck rows must be
+        // deleted in the SAME unit of work as the rule removals (the FK-safety block before SaveChanges).
+        var removedRuleIds = new List<Guid>();
 
         foreach (var tpl in Templates)
         {
             if (byName.TryGetValue(tpl.Name, out var live))
             {
-                var verdictAffectingChange = false;
+                var ruleSetChanged = false;
 
                 // Description is display-only (verdict-neutral): update it in place if it drifted, but
                 // never let it, on its own, trigger a re-grade.
@@ -108,42 +117,52 @@ public static class ComplianceTemplateSeed
                 // the rules endpoints also dedupe on (RuleMatches). A natural-key match is an UPDATE (of
                 // value / message / sort); no match is an ADD. Changing a rule's operator / field /
                 // document type is not an in-place reinterpretation — it surfaces as an add-of-new here plus
-                // a delete-of-old below (both verdict-affecting).
+                // a delete-of-old below. Any of these is a rule-set change and re-grades the template.
                 foreach (var seed in tpl.Rules)
                 {
                     var match = live.Rules.FirstOrDefault(r => RuleMatches(r, seed));
                     if (match is null)
                     {
                         db.ComplianceRules.Add(NewRule(live.Id, seed));
-                        verdictAffectingChange = true; // a new governing rule can flip a verdict
+                        ruleSetChanged = true; // a new governing rule can flip a verdict
                         continue;
                     }
-                    // ExpectedValue is the ONLY non-natural-key field the evaluator reads (EvaluateRule),
-                    // so a change to it is verdict-affecting; ErrorMessage and SortOrder are display-only.
+                    // Converge every non-natural-key field to the seed. ExpectedValue drives the verdict
+                    // directly; ErrorMessage / SortOrder are display-only — but ANY change re-grades, because
+                    // the trigger is rule-set change, not verdict-affecting change, keeping this seeder
+                    // decoupled from ComplianceCheckService.EvaluateRule's internals (#416 re-review).
                     if (!string.Equals(match.ExpectedValue, seed.ExpectedValue, StringComparison.Ordinal))
                     {
                         match.ExpectedValue = seed.ExpectedValue;
-                        verdictAffectingChange = true;
+                        ruleSetChanged = true;
                     }
                     if (!string.Equals(match.ErrorMessage, seed.ErrorMessage, StringComparison.Ordinal))
+                    {
                         match.ErrorMessage = seed.ErrorMessage;
+                        ruleSetChanged = true;
+                    }
                     if (match.SortOrder != seed.SortOrder)
+                    {
                         match.SortOrder = seed.SortOrder;
+                        ruleSetChanged = true;
+                    }
                 }
 
                 // Delete any live rule the corrected seed no longer defines — a stale rule that graded a
-                // fact the checklist should not (ADR 0036 §Context). Removing a governing rule can flip a
-                // verdict, so it is verdict-affecting.
+                // fact the checklist should not (ADR 0036 §Context). Removing a governing rule is a rule-set
+                // change and re-grades the template. Record the id so its dependent ComplianceCheck rows are
+                // deleted in the same unit of work (FK-safety block below).
                 foreach (var liveRule in live.Rules.ToList())
                 {
                     if (!tpl.Rules.Any(seed => RuleMatches(liveRule, seed)))
                     {
                         db.ComplianceRules.Remove(liveRule);
-                        verdictAffectingChange = true;
+                        removedRuleIds.Add(liveRule.Id);
+                        ruleSetChanged = true;
                     }
                 }
 
-                if (verdictAffectingChange)
+                if (ruleSetChanged)
                     changedTemplateIds.Add((live.Id, live.Name));
                 continue;
             }
@@ -162,20 +181,37 @@ public static class ComplianceTemplateSeed
             foreach (var rule in tpl.Rules)
                 db.ComplianceRules.Add(NewRule(templateId, rule));
         }
+
+        // FK-safety (#416, mirrors ComplianceEndpoints.DeleteRule / #269): ComplianceCheck → ComplianceRule
+        // is ON DELETE RESTRICT, so a rule this pass removes cannot be deleted while any document's check
+        // row still references it. Delete those dependent checks in the SAME unit of work as the rule
+        // removals — EF orders the dependent-check deletes before the principal-rule deletes, so the single
+        // shared SaveChanges below commits atomically and never raises Postgres 23503. Cross-org by design:
+        // one system rule is referenced by checks in many orgs (SystemDbContext skips the tenant filter) and
+        // all must go with the rule. The post-commit re-grade recreates checks for the SURVIVING rules.
+        // Without this, on any existing DB where a document was graded against a dropped rule the shared
+        // SaveChanges throws, the whole convergence rolls back, Program.cs swallows it, and the §4 correction
+        // silently never applies — re-failing every boot.
+        if (removedRuleIds.Count > 0)
+        {
+            var orphanedChecks = await db.ComplianceChecks
+                .Where(c => removedRuleIds.Contains(c.ComplianceRuleId))
+                .ToListAsync(ct);
+            db.ComplianceChecks.RemoveRange(orphanedChecks);
+        }
         await db.SaveChangesAsync(ct);
 
-        // A verdict-affecting change to a SHARED system template must re-grade the documents already graded
-        // against it — across EVERY org — or a document persisted Compliant under the OLD rule set stays
-        // Compliant despite failing the corrected rules (a false-Compliant verdict, ADR 0036). This is
-        // normal application re-evaluation (the same fan-out the endpoint path runs on a rule edit, #257),
-        // NOT a destructive migration: no schema change, no ad-hoc SQL. It runs ONLY for templates that
-        // changed a verdict-affecting way this run, so a boot with no drift — or a verdict-neutral
-        // message / sort-order / description-only edit — does no extra work. Best-effort and batched,
-        // respecting ADR 0030 (each page commits verdict + checks in one unit of work). Guarded on the
-        // reevaluator so structural/insert-only callers can opt out. Sample-demo documents are deliberately
-        // EXCLUDED from this cross-org re-grade — a sample predating a newly-required field would falsely
-        // flip Compliant → NonCompliant on deploy, breaking the ADR 0028 one-click-demo contract (see
-        // ReevaluateForTemplateForSystemAsync).
+        // A rule-set change to a SHARED system template must re-grade the documents already graded against
+        // it — across EVERY org — or a document persisted Compliant under the OLD rule set stays Compliant
+        // despite failing the corrected rules (a false-Compliant verdict, ADR 0036). This is normal
+        // application re-evaluation (the same fan-out the endpoint path runs on a rule edit, #257), NOT a
+        // destructive migration: no schema change, no ad-hoc SQL. It runs ONLY for templates whose rule set
+        // changed this run, so a boot with no drift — or a DESCRIPTION-only edit — does no extra work.
+        // Best-effort and batched, respecting ADR 0030 (each page commits verdict + checks in one unit of
+        // work). Guarded on the reevaluator so structural/insert-only callers can opt out. Sample-demo
+        // documents are deliberately EXCLUDED from this cross-org re-grade — a sample predating a newly-
+        // required field would falsely flip Compliant → NonCompliant on deploy, breaking the ADR 0028
+        // one-click-demo contract (see ReevaluateForTemplateForSystemAsync).
         if (reevaluator is not null && changedTemplateIds.Count > 0)
         {
             foreach (var (id, name) in changedTemplateIds)
