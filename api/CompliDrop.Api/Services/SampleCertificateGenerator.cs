@@ -31,7 +31,10 @@ public sealed class SampleCertificateGenerator(TimeProvider timeProvider) : ISam
     internal const string SampleBanner = "SAMPLE — NOT A REAL CERTIFICATE OF INSURANCE";
     private const string GeneralLiabilityEachOccurrence = "$2,000,000";
     private const string WorkersCompEachAccident = "$1,000,000";
-    private const string LiquorLiabilityEachOccurrence = "$1,000,000";
+    // internal so a test can pin that this each-occurrence figure still MEETS the seeded Caterer
+    // liquor-liability threshold (#400 / #416): the sample's Compliant verdict (ADR 0028) hinges on it,
+    // and dropping it below the checklist floor would silently ship a NonCompliant demo.
+    internal const string LiquorLiabilityEachOccurrence = "$1,000,000";
 
     public byte[] GeneratePdf(string insuredName, string certificateHolderName)
     {
@@ -98,10 +101,8 @@ public sealed class SampleCertificateGenerator(TimeProvider timeProvider) : ISam
                     col.Item().PaddingTop(8).Background("#f1f5f9").Padding(8).Column(s =>
                     {
                         s.Spacing(2);
-                        s.Item().Text($"General Liability Limit: {GeneralLiabilityEachOccurrence} per occurrence");
-                        s.Item().Text($"Workers Compensation Limit: {WorkersCompEachAccident}");
-                        s.Item().Text($"Liquor Liability Limit: {LiquorLiabilityEachOccurrence} per occurrence");
-                        s.Item().Text($"Expiration Date: {expiration:yyyy-MM-dd}");
+                        foreach (var line in MachineReadableFieldEcho(expiration))
+                            s.Item().Text(line);
                     });
                 });
 
@@ -114,6 +115,21 @@ public sealed class SampleCertificateGenerator(TimeProvider timeProvider) : ISam
             });
         }).GeneratePdf();
     }
+
+    // The plain "field: value" lines echoed into the PDF below the coverage table so OCR + the LLM
+    // reliably extract the four fields the Caterer checklist grades regardless of how the visual table is
+    // parsed. Factored out (and internal — InternalsVisibleTo the test project) so a test reads the SAME
+    // source the PDF renders and can pin that the LIQUOR line the demo's Compliant verdict depends on is
+    // actually emitted with its value: dropping it here breaks both the PDF and that test, instead of
+    // silently shipping a NonCompliant demo (ADR 0028 / #416). Keep the exact strings the extraction
+    // pipeline was tuned against — a wording change is a prompt↔extraction contract change.
+    internal static IReadOnlyList<string> MachineReadableFieldEcho(DateTime expiration) =>
+    [
+        $"General Liability Limit: {GeneralLiabilityEachOccurrence} per occurrence",
+        $"Workers Compensation Limit: {WorkersCompEachAccident}",
+        $"Liquor Liability Limit: {LiquorLiabilityEachOccurrence} per occurrence",
+        $"Expiration Date: {expiration:yyyy-MM-dd}",
+    ];
 
     private static void LabeledBlock(IContainer container, string label, string value) =>
         container.Column(col =>
