@@ -667,6 +667,108 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
     }
 
     [Fact]
+    public async Task Interrupted_regrade_leaves_watermark_behind_and_the_next_boot_heals_the_stale_verdict()
+    {
+        // Finding 1 (#416 re-review, BLOCKER) — the re-grade must be DURABLE. Convergence commits the
+        // corrected rules and re-grades the affected documents in SEPARATE steps; if the boot is interrupted
+        // (SIGTERM / startup timeout) or a re-grade page is caught-and-skipped, the rules persist but a
+        // document keeps its STALE verdict. The OLD this-boot-only gate (re-grade only templates THIS boot
+        // mutated) never healed it: the next boot's convergence is idempotent (rules already match → nothing
+        // "changed" → re-grade skipped), so a caterer COI persisted Compliant with no liquor coverage stayed
+        // Compliant forever (ADR 0036 invariant #2 violated — the product's blocker-class failure). The fix is
+        // a persisted revision WATERMARK: RulesRevision bumps on the rule-set change, RegradedThroughRevision
+        // advances ONLY on a fully-successful re-grade, and every boot re-grades any template whose watermark
+        // is behind.
+        //
+        // Both halves run in ONE rolled-back transaction:
+        //   (a) converge with a rule change that SHOULD flip a doc, but the re-grade FAILS its page
+        //       (FailingSystemReevaluator → FailedPages>0): the doc stays STALE and RegradedThroughRevision
+        //       does NOT advance (still behind RulesRevision).
+        //   (b) a SECOND EnsureAsync with a WORKING reevaluator and NO new rule mutation (rules already match
+        //       the seed): it STILL re-grades because the watermark is behind, the doc heals, and the watermark
+        //       catches up.
+        // Reverting the gate to the this-boot-only "changedTemplateIds" set makes (b) skip the re-grade and
+        // the doc stay Compliant — the exact bug this watermark closes.
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            var now = new DateTime(2026, 7, 13, 12, 0, 0, DateTimeKind.Utc);
+            var orgId = Guid.NewGuid();
+            var vendorId = Guid.NewGuid();
+            var docId = Guid.NewGuid();
+
+            var catererId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Caterer"));
+
+            // Recreate the PRE-#400 seeded state: the system Caterer row exists but LACKS the liquor rule.
+            // The watermark starts caught up (0/0) — the fixture booted the templates at the current seed.
+            await ExecAsync(conn, tx, """
+                DELETE FROM "ComplianceRules" cr USING "ComplianceTemplates" ct
+                WHERE cr."ComplianceTemplateId" = ct."Id" AND ct."IsSystemTemplate" = true
+                  AND ct."Name" = 'Caterer' AND cr."FieldName" = 'liquor_liability_limit';
+                """);
+            (await RulesRevisionAsync(conn, tx, catererId)).Should().Be(0, "precondition: the Caterer watermark starts caught up");
+            (await RegradedThroughRevisionAsync(conn, tx, catererId)).Should().Be(0, "precondition: the Caterer watermark starts caught up");
+
+            // A normal caterer COI: GL ≥ $1M, future expiration, workers-comp present, NO liquor coverage —
+            // genuinely Compliant under the pre-#400 rule set. Persist that verdict, as prod would have.
+            await using (var seed = TxContext(conn))
+            {
+                await seed.Database.UseTransactionAsync(tx);
+                seed.Organizations.Add(new Organization { Id = orgId, Name = "Caterer Org", CreatedAt = now, UpdatedAt = now });
+                seed.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = orgId, Name = "No-Liquor Caterer", ComplianceTemplateId = catererId, CreatedAt = now, UpdatedAt = now });
+                seed.Documents.Add(NoLiquorCatererDoc(docId, orgId, vendorId, now, isSample: false));
+                await seed.SaveChangesAsync();
+            }
+            (await ReadStatusAsync(conn, tx, docId)).Should().Be(ComplianceStatus.Compliant, "precondition: Compliant under the pre-#400 rule set");
+
+            // ---- (a) converge, but the re-grade FAILS its page ----
+            var failing = new FailingSystemReevaluator();
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, failing);
+            }
+
+            // Convergence committed: the liquor rule is back and the revision bumped 0 → 1...
+            (await ScalarAsync(conn, tx, CatererLiquorCountSql)).Should().Be(1, "convergence back-filled the liquor rule and committed it");
+            (await RulesRevisionAsync(conn, tx, catererId)).Should().Be(1, "the rule-set change bumped RulesRevision");
+            failing.RegradedTemplateIds.Should().Contain(catererId, "the watermark-behind template was handed to the re-grade");
+            // ...but the re-grade FAILED, so the watermark is HELD BACK and the document is STILL STALE.
+            (await RegradedThroughRevisionAsync(conn, tx, catererId)).Should().Be(0, "a failed re-grade must NOT advance the watermark");
+            (await ReadStatusAsync(conn, tx, docId)).Should().Be(ComplianceStatus.Compliant, "the failed re-grade left the caterer COI its stale Compliant verdict");
+
+            // ---- (b) a SECOND boot with a WORKING reevaluator and NO new rule mutation ----
+            var reevalUser = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = orgId };
+            await using var appDbForEval = new AppDbContext(
+                new DbContextOptionsBuilder<AppDbContext>().UseNpgsql(conn).Options, reevalUser);
+            await appDbForEval.Database.UseTransactionAsync(tx);
+            await using var sysDbForEval = TxContext(conn);
+            await sysDbForEval.Database.UseTransactionAsync(tx);
+            var reevaluator = new ComplianceCheckService(
+                appDbForEval, sysDbForEval, new FixedTimeProvider(now), NullLogger<ComplianceCheckService>.Instance);
+
+            await using (var run2 = TxContext(conn))
+            {
+                await run2.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run2, reevaluator);
+            }
+
+            // No rule changed this boot (idempotent convergence), yet the doc HEALS — because the watermark was
+            // behind (RulesRevision 1 > RegradedThroughRevision 0), the durable gate re-fired the re-grade.
+            (await RulesRevisionAsync(conn, tx, catererId)).Should().Be(1, "no new rule change — RulesRevision stays 1");
+            (await ReadStatusAsync(conn, tx, docId)).Should().Be(ComplianceStatus.NonCompliant,
+                "the watermark-driven re-grade heals the stale verdict on the next boot even with no new rule mutation");
+            (await RegradedThroughRevisionAsync(conn, tx, catererId)).Should().Be(1, "a fully-successful re-grade advances the watermark to catch up");
+        }
+        finally
+        {
+            await tx.RollbackAsync(); // restore the shared system seed for the rest of the collection
+        }
+    }
+
+    [Fact]
     public async Task EnsureAsync_never_touches_a_tenant_template_that_shares_a_system_name()
     {
         // Hard invariant (ADR 0036 #1): convergence is SYSTEM-ONLY. A tenant clone that shares a system
@@ -823,6 +925,14 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
         cmd.CommandText = sql;
         return (Guid)(await cmd.ExecuteScalarAsync())!;
     }
+
+    // The re-grade durability watermark columns (#416, ADR 0036 Amendment 2), read through the same
+    // transaction so they reflect the transaction's current state.
+    private static Task<long> RulesRevisionAsync(NpgsqlConnection conn, NpgsqlTransaction tx, Guid templateId) =>
+        ScalarAsync(conn, tx, $"SELECT \"RulesRevision\"::bigint FROM \"ComplianceTemplates\" WHERE \"Id\" = '{templateId}'");
+
+    private static Task<long> RegradedThroughRevisionAsync(NpgsqlConnection conn, NpgsqlTransaction tx, Guid templateId) =>
+        ScalarAsync(conn, tx, $"SELECT \"RegradedThroughRevision\"::bigint FROM \"ComplianceTemplates\" WHERE \"Id\" = '{templateId}'");
 
     // Reads a document's persisted ComplianceStatus through a fresh, no-tracking context enlisted in
     // the same transaction — so EF converts the enum column regardless of its storage type and the
