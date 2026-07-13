@@ -2,7 +2,7 @@ namespace CompliDrop.Api.Services.Extraction;
 
 public static class ExtractionPrompts
 {
-    public const string Version = "v2-2026-07-09-liquor-liability";
+    public const string Version = "v2-2026-07-13-gl-each-occurrence";
 
     public const string SystemPrompt = """
 You extract structured data from a compliance document (Certificate of Insurance, license, permit, certification, or similar).
@@ -38,6 +38,12 @@ For every document, always extract any date that looks like an expiration or ren
 FORMATTING RULES
 - Dates: YYYY-MM-DD
 - Currency: plain integer, no currency symbol, no commas (e.g. "1000000" not "$1,000,000")
+- general_liability_limit: read the Commercial General Liability "EACH OCCURRENCE" limit —
+  the per-occurrence cell on ACORD 25. Do NOT use the "GENERAL AGGREGATE",
+  "PRODUCTS-COMP/OP AGG", or "DAMAGE TO RENTED PREMISES" figures: the aggregate is
+  usually 2x the per-occurrence limit, so reading it would overstate the coverage a
+  single event actually has. When only an aggregate is shown and no each-occurrence
+  figure, omit the field rather than substitute the aggregate
 - professional_liability_limit: the Professional Liability / Errors & Omissions (E&O)
   per-occurrence or per-claim limit, when that coverage line appears on the certificate
 - liquor_liability_limit: the Liquor Liability / Liquor Legal Liability per-occurrence or

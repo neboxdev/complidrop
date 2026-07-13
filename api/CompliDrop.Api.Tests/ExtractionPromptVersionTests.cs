@@ -19,8 +19,8 @@ public sealed class ExtractionPromptVersionTests
     //   2. re-pin this hash (the test failure message prints the new value).
     // Updating the hash without bumping the version defeats the audit trail this
     // tripwire exists to protect.
-    private const string PinnedVersion = "v2-2026-07-09-liquor-liability";
-    private const string PinnedPromptSha256 = "528F4ADCB6BA247064F131620FC6E3518902B7F9C81D6C661512E4E4E47C9856";
+    private const string PinnedVersion = "v2-2026-07-13-gl-each-occurrence";
+    private const string PinnedPromptSha256 = "311C6D71FE3DC8179B06ECF50768894127E0D845A72C9DE7660F847079F0AC1A";
 
     [Fact]
     public void Prompt_content_and_version_are_pinned_together()
@@ -35,5 +35,22 @@ public sealed class ExtractionPromptVersionTests
             "a prompt edit must consciously bump the version (see the comment on the pinned constants)");
         hash.Should().Be(PinnedPromptSha256,
             $"the prompt content changed — bump ExtractionPrompts.Version AND re-pin this hash to {hash}");
+    }
+
+    [Fact]
+    public void Prompt_pins_general_liability_to_the_each_occurrence_cell()
+    {
+        // #397: general_liability_limit must be read from the ACORD 25 "EACH OCCURRENCE" cell, never the
+        // General Aggregate — a $2M aggregate over a $500k/occ policy is the review's #1 fail-open, so the
+        // prompt has to say so explicitly. Pin the instruction (a dropped bullet regresses the extraction).
+        ExtractionPrompts.SystemPrompt.Should().Contain("EACH OCCURRENCE",
+            "the prompt must pin general_liability_limit to the ACORD per-occurrence cell (#397)");
+        ExtractionPrompts.SystemPrompt.Should().Contain("GENERAL AGGREGATE",
+            "the prompt must name the aggregate as the value NOT to read (#397)");
+
+        // The version must move off the prior (liquor-only) prompt so ExtractionPromptVersion stays an
+        // honest provenance stamp for documents extracted under the new each-occurrence instruction.
+        ExtractionPrompts.Version.Should().NotBe("v2-2026-07-09-liquor-liability",
+            "adding the each-occurrence pin is a prompt change and must bump the version");
     }
 }
