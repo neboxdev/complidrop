@@ -48,9 +48,9 @@ public sealed class ExtractionPromptVersionTests
         ExtractionPrompts.SystemPrompt.Should().Contain("GENERAL AGGREGATE",
             "the prompt must name the aggregate as the value NOT to read (#397)");
 
-        // The version must move off the prior (liquor-only) prompt so ExtractionPromptVersion stays an
-        // honest provenance stamp for documents extracted under the new each-occurrence instruction.
-        ExtractionPrompts.Version.Should().NotBe("v2-2026-07-09-liquor-liability",
-            "adding the each-occurrence pin is a prompt change and must bump the version");
+        // The version bump on any prompt edit is enforced durably by Prompt_content_and_version_are_pinned_together
+        // (Version.Should().Be(PinnedVersion) + the content hash) — a single current-slug pin that catches EVERY
+        // forgotten bump, not just one historical literal. This test's job is the EACH OCCURRENCE / GENERAL
+        // AGGREGATE content pin above; a non-durable NotBe("<one old slug>") added nothing and is dropped (#416).
     }
 }
