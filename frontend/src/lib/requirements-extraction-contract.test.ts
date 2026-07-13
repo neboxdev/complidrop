@@ -139,10 +139,13 @@ describe("seeded rule fields ⊆ requirement catalog (#400)", () => {
   const seededTriples = parseSeededTriples(seedSource);
 
   it("sanity: the seed parser found the seeded rules (never a vacuous pass)", () => {
-    // The current seed installs ≥ 8 distinct (type, field, operator) rule triples across its
-    // system templates; a parse that suddenly finds far fewer means the RuleSeed literal shape
-    // changed and this test's derivation must be revisited — fail loudly, don't pass empty.
-    expect(seededTriples.length).toBeGreaterThanOrEqual(8);
+    // The corrected §4 seed (#416) installs 7 distinct (type, field, operator) rule triples across
+    // its system templates — the review removed three rules that graded a fact no real document
+    // carries (Security certification-expiry, Transport license_type == CDL, Photographer E&O), so
+    // the floor dropped from 10 to 7. A parse that suddenly finds far fewer means the RuleSeed
+    // literal shape changed and this test's derivation must be revisited — fail loudly, don't pass
+    // empty. (The real assertion is the per-triple catalog-home check below; this is only its guard.)
+    expect(seededTriples.length).toBeGreaterThanOrEqual(7);
   });
 
   it.each(seededTriples.map((t) => [`${t.documentType}/${t.fieldName}/${t.operator}`, t] as const))(
