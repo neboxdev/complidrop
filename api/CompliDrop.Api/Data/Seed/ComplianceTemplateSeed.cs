@@ -33,14 +33,17 @@ public static class ComplianceTemplateSeed
     internal static int TemplateCount => Templates.Length;
 
     /// <param name="reevaluator">
-    /// When supplied, documents graded against a system template that GAINS a rule this run are
-    /// re-evaluated ACROSS ALL ORGS after the back-fill commits (#400). The back-fill mutates
-    /// SHARED system-template rules — the only path that does, since endpoint rule edits are blocked
-    /// on system templates — so without this a caterer COI persisted <c>Compliant</c> under the old
-    /// rule set would silently stay Compliant despite failing the newly-added rule (a false-Compliant
-    /// verdict). Null (the default) skips the fan-out — used by structural tests that seed no
-    /// documents. The re-grade runs ONLY when a rule was actually added, so a normal boot with
-    /// nothing to back-fill stays free.
+    /// When supplied, documents graded against a system template whose rule set this run changes in a
+    /// VERDICT-AFFECTING way — a rule added, a rule deleted, or an existing rule's compared value
+    /// (<see cref="ComplianceRule.ExpectedValue"/>) / natural key changed — are re-evaluated ACROSS ALL
+    /// ORGS after convergence commits (ADR 0036). Convergence mutates SHARED system-template rules — the
+    /// only path that does, since endpoint rule edits are blocked on system templates — so without this a
+    /// caterer COI persisted <c>Compliant</c> under the old rule set would silently stay Compliant despite
+    /// failing the corrected rules (a false-Compliant verdict). Null (the default) skips the fan-out —
+    /// used by structural tests that seed no documents. The re-grade runs ONLY for templates that actually
+    /// changed a verdict-affecting way this run; a pure error-message / sort-order / description edit
+    /// updates the row but is verdict-neutral and triggers NO re-grade, and a boot whose templates already
+    /// match the seed does nothing at all.
     /// </param>
     public static async Task EnsureAsync(
         SystemDbContext db,
@@ -66,51 +69,82 @@ public static class ComplianceTemplateSeed
             await db.SaveChangesAsync(ct);
         }
 
-        // Load already-seeded system templates WITH their rules so a re-run can additively
-        // reconcile MISSING rules onto them — not just insert whole new templates. Seeding was
-        // historically insert-only (skip a template whose Name already exists), so a rule added
-        // to a template definition here would be INERT in prod: the system Caterer / Security
-        // Service rows already exist, so they would never gain the new rule (#400). The reconcile
-        // is ADDITIVE ONLY — it never edits or deletes an existing rule (system rows are shared
-        // across every org, and a tenant's evaluation may rely on the exact stored wording).
+        // Load already-seeded system templates WITH their rules so a re-run can CONVERGE each existing
+        // system template to its seed definition (ADR 0036) — add a missing seed rule, update a live rule
+        // whose value / message / sort differs, delete a live rule no seed rule matches, and update the
+        // description. Convergence is SYSTEM-ONLY: the query filters to IsSystemTemplate, so a tenant's
+        // clone (its own edited copy — user data) is never loaded and never touched. The seed is the single
+        // source of truth for system templates; endpoint rule edits are blocked on them, so this is the one
+        // path that mutates them. (Seeding was historically insert-only and then, in #400, additive-only —
+        // it could neither correct a changed value nor remove a stale rule on a live system row; ADR 0036
+        // supersedes both.)
         var existingTemplates = await db.ComplianceTemplates.IgnoreQueryFilters()
             .Where(t => t.IsSystemTemplate)
             .Include(t => t.Rules)
             .ToListAsync(ct);
         var byName = existingTemplates.ToDictionary(t => t.Name, StringComparer.Ordinal);
 
-        // System templates that GAIN ≥1 rule this run. After the back-fill commits, the documents
-        // graded against each must be re-evaluated across every org (#400) — see the fan-out below.
-        // A brand-new template (inserted whole) is NOT listed: it has no pre-existing documents to
-        // re-grade (no vendor could have been assigned a template that did not exist yet).
-        var backfilledTemplateIds = new List<(Guid Id, string Name)>();
+        // System templates whose rule set changed in a VERDICT-AFFECTING way this run (a rule added,
+        // deleted, or an existing rule's compared value changed). After convergence commits, the documents
+        // graded against each must be re-evaluated across every org (ADR 0036) — see the fan-out below. A
+        // pure message / sort-order / description edit is verdict-neutral: the row is updated but the
+        // template is NOT listed here. A brand-new template (inserted whole) is NOT listed either: it has
+        // no pre-existing documents to re-grade (no vendor could have been assigned a template that did not
+        // exist yet).
+        var changedTemplateIds = new List<(Guid Id, string Name)>();
 
         foreach (var tpl in Templates)
         {
             if (byName.TryGetValue(tpl.Name, out var live))
             {
-                var addedAnyRule = false;
-                // Back-fill any seed rule the live template lacks, keyed on the
-                // (DocumentType, FieldName, Operator) natural key the rules endpoints also dedupe
-                // on. Each seed template's rules are distinct on that key, so a re-run adds at most
-                // the genuinely-new rules and is a no-op once they are present (idempotent) — the
-                // back-fill self-limits to the ONE first boot after a rule is added to the seed.
-                // No cross-instance guard: the deploy model boots a single instance through this
-                // seed (the old instance already seeded at its own boot and does not re-run), and a
-                // rule's natural key is unique per template, so a repeat run never rewrites — it only
-                // skips. (A concurrent double-boot is the sole unguarded window; add a unique index
-                // on the rule natural key if that ever needs closing.)
-                foreach (var rule in tpl.Rules)
+                var verdictAffectingChange = false;
+
+                // Description is display-only (verdict-neutral): update it in place if it drifted, but
+                // never let it, on its own, trigger a re-grade.
+                if (!string.Equals(live.Description, tpl.Description, StringComparison.Ordinal))
+                    live.Description = tpl.Description;
+
+                // Add or update from the seed, keyed on the (DocumentType, FieldName, Operator) natural key
+                // the rules endpoints also dedupe on (RuleMatches). A natural-key match is an UPDATE (of
+                // value / message / sort); no match is an ADD. Changing a rule's operator / field /
+                // document type is not an in-place reinterpretation — it surfaces as an add-of-new here plus
+                // a delete-of-old below (both verdict-affecting).
+                foreach (var seed in tpl.Rules)
                 {
-                    var present = live.Rules.Any(r => RuleMatches(r, rule));
-                    if (!present)
+                    var match = live.Rules.FirstOrDefault(r => RuleMatches(r, seed));
+                    if (match is null)
                     {
-                        db.ComplianceRules.Add(NewRule(live.Id, rule));
-                        addedAnyRule = true;
+                        db.ComplianceRules.Add(NewRule(live.Id, seed));
+                        verdictAffectingChange = true; // a new governing rule can flip a verdict
+                        continue;
+                    }
+                    // ExpectedValue is the ONLY non-natural-key field the evaluator reads (EvaluateRule),
+                    // so a change to it is verdict-affecting; ErrorMessage and SortOrder are display-only.
+                    if (!string.Equals(match.ExpectedValue, seed.ExpectedValue, StringComparison.Ordinal))
+                    {
+                        match.ExpectedValue = seed.ExpectedValue;
+                        verdictAffectingChange = true;
+                    }
+                    if (!string.Equals(match.ErrorMessage, seed.ErrorMessage, StringComparison.Ordinal))
+                        match.ErrorMessage = seed.ErrorMessage;
+                    if (match.SortOrder != seed.SortOrder)
+                        match.SortOrder = seed.SortOrder;
+                }
+
+                // Delete any live rule the corrected seed no longer defines — a stale rule that graded a
+                // fact the checklist should not (ADR 0036 §Context). Removing a governing rule can flip a
+                // verdict, so it is verdict-affecting.
+                foreach (var liveRule in live.Rules.ToList())
+                {
+                    if (!tpl.Rules.Any(seed => RuleMatches(liveRule, seed)))
+                    {
+                        db.ComplianceRules.Remove(liveRule);
+                        verdictAffectingChange = true;
                     }
                 }
-                if (addedAnyRule)
-                    backfilledTemplateIds.Add((live.Id, live.Name));
+
+                if (verdictAffectingChange)
+                    changedTemplateIds.Add((live.Id, live.Name));
                 continue;
             }
 
@@ -130,24 +164,25 @@ public static class ComplianceTemplateSeed
         }
         await db.SaveChangesAsync(ct);
 
-        // A rule back-filled onto a SHARED system template must re-grade the documents already graded
-        // against it — across EVERY org — or a document persisted Compliant under the OLD rule set
-        // stays Compliant despite failing the new rule (a false-Compliant verdict, #400). This is
-        // normal application re-evaluation (the same fan-out the endpoint path runs on a rule edit,
-        // #257), NOT a destructive migration: no schema change, no ad-hoc SQL. It runs ONLY when the
-        // reconcile actually added a rule, so a normal boot with nothing to back-fill does no extra
-        // work. Best-effort and batched, respecting ADR 0030 (each page commits verdict + checks in
-        // one unit of work). Guarded on the reevaluator so structural/insert-only callers can opt out.
-        // Sample-demo documents are deliberately EXCLUDED from this cross-org re-grade — a pre-#400
-        // sample predates the newly-seeded fields and would falsely flip Compliant → NonCompliant on
-        // deploy, breaking the ADR 0028 one-click-demo contract (see ReevaluateForTemplateForSystemAsync).
-        if (reevaluator is not null && backfilledTemplateIds.Count > 0)
+        // A verdict-affecting change to a SHARED system template must re-grade the documents already graded
+        // against it — across EVERY org — or a document persisted Compliant under the OLD rule set stays
+        // Compliant despite failing the corrected rules (a false-Compliant verdict, ADR 0036). This is
+        // normal application re-evaluation (the same fan-out the endpoint path runs on a rule edit, #257),
+        // NOT a destructive migration: no schema change, no ad-hoc SQL. It runs ONLY for templates that
+        // changed a verdict-affecting way this run, so a boot with no drift — or a verdict-neutral
+        // message / sort-order / description-only edit — does no extra work. Best-effort and batched,
+        // respecting ADR 0030 (each page commits verdict + checks in one unit of work). Guarded on the
+        // reevaluator so structural/insert-only callers can opt out. Sample-demo documents are deliberately
+        // EXCLUDED from this cross-org re-grade — a sample predating a newly-required field would falsely
+        // flip Compliant → NonCompliant on deploy, breaking the ADR 0028 one-click-demo contract (see
+        // ReevaluateForTemplateForSystemAsync).
+        if (reevaluator is not null && changedTemplateIds.Count > 0)
         {
-            foreach (var (id, name) in backfilledTemplateIds)
+            foreach (var (id, name) in changedTemplateIds)
             {
                 var regraded = await reevaluator.ReevaluateForTemplateForSystemAsync(id, ct);
                 logger?.LogInformation(
-                    "Seed: back-filled rules onto system template '{Template}' — re-graded {Count} document(s) across orgs.",
+                    "Seed: converged system template '{Template}' — re-graded {Count} document(s) across orgs.",
                     name, regraded);
             }
         }
@@ -187,54 +222,73 @@ public static class ComplianceTemplateSeed
     // by the RenameSystemTemplatesToVenueTypes migration so existing databases
     // pick up the new names without duplicating. Keep the (name → rules) pairing
     // in lockstep with that migration's renames.
+    //
+    // This is the corrected set from the deep template review (#416,
+    // docs/rule-engine/TEMPLATE-REQUIREMENTS-REVIEW.md §4): rules that graded a fact no
+    // real certificate/document carries were removed (Security's certification expiry,
+    // Photographer's photographer-license expiry and E&O, Transportation's CDL-for-every-driver
+    // check), and two floors were raised to their federal/insurance minimum (Photographer GL
+    // $500k → $1M, Transportation auto $1M → $1.5M). EnsureAsync CONVERGES the live system rows
+    // to exactly this definition on boot and re-grades the affected documents (ADR 0036).
     private static readonly TemplateSeed[] Templates =
     [
         new(SampleVendorTemplateName,
             "Typical insurance for a food & beverage caterer, including bar / alcohol service.",
             [
-                new("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000.", 1),
-                new("coi", "expiration_date", "required", null, "Expiration date is required.", 2),
-                new("coi", "workers_comp_limit", "required", null, "Workers comp coverage is required.", 3),
+                new("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000 per occurrence.", 1),
                 // Bar / alcohol service is the classic private-event (dram-shop / social-host)
                 // exposure that general liability excludes — a bar-service caterer graded "Covered"
                 // with no liquor liability is exactly the gap #400 was filed for. A food-only
                 // caterer failing this is safe friction: the owner removes it from their own clone.
-                new("coi", "liquor_liability_limit", "min_value", "1000000", "Liquor liability must be at least $1,000,000.", 4)
+                new("coi", "liquor_liability_limit", "min_value", "1000000", "Liquor liability of at least $1,000,000 is required for alcohol service. If this caterer doesn't serve alcohol, remove this rule from your checklist.", 2),
+                new("coi", "workers_comp_limit", "required", null, "Workers' compensation coverage is required.", 3),
+                new("coi", "expiration_date", "required", null, "Expiration date is required.", 4)
             ]),
         new("Event Rental Company",
-            "Coverage for table, tent, and equipment rental vendors.",
+            "Coverage for table, tent, and equipment rental vendors. (Bounce-house / inflatable vendors: Texas law also mandates a $1M amusement-ride policy — ask for that certificate.)",
             [
                 // The "names your venue as additional insured" requirement is intentionally
                 // NOT seeded: a venue names ITSELF, so the value is per-tenant — the user adds
                 // it (with their own venue name) after cloning. A one-size placeholder reads
                 // nonsensically. (#192 review.)
-                new("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000.", 1),
+                new("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000 per occurrence.", 1),
                 new("coi", "expiration_date", "required", null, "Expiration date is required.", 2)
             ]),
         new("Security Service",
-            "Licensing plus general-liability insurance for event security and guard services.",
+            "DPS guard-company licensing plus general-liability insurance. (Ask in writing that assault & battery is covered at full limits — certificates don't show it.)",
             [
                 new("license", "license_number", "required", null, "License number is required.", 1),
                 new("license", "expiration_date", "required", null, "License expiration date is required.", 2),
-                new("certification", "expiration_date", "required", null, "Certification expiration date is required.", 3),
                 // Guard / security vendors carry assault-and-battery exposure; a licence alone
                 // insures nothing. Require general liability like every other insured category
                 // — a Security Service checklist that asks for NO insurance was the #400 gap.
-                new("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000.", 4)
+                new("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000 per occurrence.", 3),
+                // The old (certification, expiration_date) rule was removed (#416): a guard COMPANY
+                // provides a DPS license + a COI, never a personal "certification" document, so the
+                // rule was a permanent false "Missing". A COI expiry check replaces it.
+                new("coi", "expiration_date", "required", null, "Expiration date is required.", 4)
             ]),
         new("Transportation / Shuttle",
-            "Auto coverage and a CDL for shuttle and transport vendors.",
+            "Auto liability and a current driver credential for shuttle and transport vendors. (Vehicles seating 16+ including the driver: require $5,000,000 and a CDL with passenger endorsement.)",
             [
-                new("coi", "auto_liability_limit", "min_value", "1000000", "Auto liability must be at least $1,000,000.", 1),
-                new("license", "license_type", "equals", "CDL", "Driver must hold a CDL.", 2),
-                new("license", "expiration_date", "required", null, "License expiration date is required.", 3)
+                // $1.5M is the federal floor for small for-hire passenger vehicles (49 CFR 387.33T);
+                // the old $1M was below it. The old (license, license_type == "CDL") rule was removed
+                // (#416): a CDL attaches only at 16+ seats (49 CFR 383.5), so it failed every lawful
+                // ≤15-seat shuttle driver — a real license number + expiry are what to verify instead.
+                new("coi", "auto_liability_limit", "min_value", "1500000", "Auto liability must be at least $1,500,000 (the federal floor for small for-hire passenger vehicles).", 1),
+                new("coi", "expiration_date", "required", null, "Expiration date is required.", 2),
+                new("license", "license_number", "required", null, "Driver license number is required.", 3),
+                new("license", "expiration_date", "required", null, "License expiration date is required.", 4)
             ]),
         new("Photographer / Videographer",
-            "General + professional (E&O) coverage for photo and video vendors.",
+            "General liability coverage for photo and video vendors.",
             [
-                new("coi", "general_liability_limit", "min_value", "500000", "General liability must be at least $500,000.", 1),
-                new("coi", "professional_liability_limit", "min_value", "1000000", "Professional liability (E&O) must be at least $1,000,000.", 2),
-                new("license", "expiration_date", "required", null, "Professional license expiration date is required.", 3)
+                // GL raised $500k → $1M (the standard venue floor, #416). The old E&O rule and the
+                // photographer-license expiry rule were removed: Texas issues no photographer license,
+                // and a venue has no insurable interest in a photographer's E&O — both graded facts no
+                // real photographer document carries, so they were permanent false "Missing"s.
+                new("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000 per occurrence.", 1),
+                new("coi", "expiration_date", "required", null, "Expiration date is required.", 2)
             ])
     ];
 }
