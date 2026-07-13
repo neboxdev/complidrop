@@ -14,11 +14,12 @@ namespace CompliDrop.Api.Tests;
 /// <summary>
 /// Pins the seed's CONVERGENCE contract (#416 / ADR 0036): <see cref="ComplianceTemplateSeed.EnsureAsync"/>
 /// converges each already-seeded system template to its seed definition on boot — adding a missing rule,
-/// updating a changed value / message / sort, deleting a stale rule, and correcting the description — and
-/// re-grades the affected documents across orgs ONLY on a verdict-affecting change (rule add / delete /
-/// ExpectedValue change), never for a verdict-neutral message / sort / description edit. Tenant clones are
-/// never touched. Also pins the #400 rule content that survives into §4 (Caterer liquor liability, Security
-/// general liability) and the discriminating liquor grading.
+/// updating a changed value / message / sort, deleting a stale rule (and its dependent ComplianceCheck rows,
+/// FK-safe), and correcting the description — and re-grades the affected documents across orgs on ANY
+/// rule-set change (rule add / delete / update including a message- or sort-only edit), never for a
+/// description-only edit or an already-converged boot. Tenant clones are never touched. Also pins the #400
+/// rule content that survives into §4 (Caterer liquor liability, Security general liability) and the
+/// discriminating liquor grading.
 ///
 /// The system templates are shared across the integration collection (Respawn ignores the
 /// ComplianceTemplates / ComplianceRules tables — see IntegrationTestFixture), so every test that MUTATES
@@ -421,6 +422,106 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
     }
 
     [Fact]
+    public async Task EnsureAsync_deletes_a_rule_with_graded_check_rows_then_recreates_surviving_checks_and_regrades()
+    {
+        // Finding 1 (#416 re-review, BLOCKER): the convergence DELETE arm removes a ComplianceRule, but
+        // ComplianceCheck → ComplianceRule is ON DELETE RESTRICT. On any DB where a document was graded
+        // against a rule #416 drops, a real ComplianceCheck row references it — so the shared SaveChanges
+        // would raise Postgres 23503 and roll the WHOLE convergence back (Program.cs swallows it; the §4
+        // correction then silently never applies and re-fails every boot). This reproduces that state: it
+        // re-injects the dropped Photographer E&O rule, attaches a real vendor + COI, GRADES it (so a
+        // genuine check row references the E&O rule), then converges — and asserts EnsureAsync SUCCEEDS,
+        // the E&O rule AND its check rows are gone, the surviving rules' checks are recreated, and the doc's
+        // persisted verdict re-grades NonCompliant → Compliant. Reverting the FK-safety check-delete makes
+        // EnsureAsync throw DbUpdateException (23503) here — the discrimination this test exists to make.
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            var now = new DateTime(2026, 7, 13, 12, 0, 0, DateTimeKind.Utc);
+            var orgId = Guid.NewGuid();
+            var vendorId = Guid.NewGuid();
+            var docId = Guid.NewGuid();
+
+            var photographerId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Photographer / Videographer"));
+
+            // Re-inject the E&O rule #416 removed, recreating a pre-correction production row.
+            await ExecAsync(conn, tx, InsertRuleSql("Photographer / Videographer", "coi", "professional_liability_limit", "min_value", "1000000", "Professional liability (E&O) must be at least $1,000,000.", 92));
+            var eoRuleId = await ScalarGuidAsync(conn, tx,
+                "SELECT cr.\"Id\" FROM \"ComplianceRules\" cr JOIN \"ComplianceTemplates\" ct ON ct.\"Id\" = cr.\"ComplianceTemplateId\" " +
+                "WHERE ct.\"IsSystemTemplate\" = true AND ct.\"Name\" = 'Photographer / Videographer' " +
+                "AND cr.\"FieldName\" = 'professional_liability_limit' AND cr.\"Operator\" = 'min_value'");
+
+            // A real vendor on the SYSTEM Photographer template + a COI that PASSES the surviving rules
+            // (GL $2M ≥ $1M, a future expiration) but carries NO E&O value — so it grades NonCompliant
+            // while the E&O rule is present, and Compliant once it is dropped.
+            await using (var seed = TxContext(conn))
+            {
+                await seed.Database.UseTransactionAsync(tx);
+                seed.Organizations.Add(new Organization { Id = orgId, Name = "Photo Org", CreatedAt = now, UpdatedAt = now });
+                seed.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = orgId, Name = "Shutter Co", ComplianceTemplateId = photographerId, CreatedAt = now, UpdatedAt = now });
+                seed.Documents.Add(new Document
+                {
+                    Id = docId, OrganizationId = orgId, VendorId = vendorId,
+                    DocumentType = "coi", OriginalFileName = "coi.pdf",
+                    GeneralLiabilityLimit = 2_000_000m, ExpirationDate = now.AddYears(1),
+                    ExtractionFields = JsonSerializer.SerializeToDocument(new Dictionary<string, object>()),
+                    ComplianceStatus = ComplianceStatus.Pending,
+                    CreatedAt = now, UpdatedAt = now,
+                });
+                await seed.SaveChangesAsync();
+            }
+
+            // GRADE the doc against the template (E&O rule present) → creates a real ComplianceCheck per
+            // applicable rule, INCLUDING one referencing the E&O rule. Verdict: NonCompliant (E&O missing).
+            var gradeUser = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = orgId };
+            await using (var appDbForGrade = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseNpgsql(conn).Options, gradeUser))
+            await using (var sysDbForGrade = TxContext(conn))
+            {
+                await appDbForGrade.Database.UseTransactionAsync(tx);
+                await sysDbForGrade.Database.UseTransactionAsync(tx);
+                await new ComplianceCheckService(appDbForGrade, sysDbForGrade, new FixedTimeProvider(now), NullLogger<ComplianceCheckService>.Instance)
+                    .EvaluateForSystemAsync(docId, default);
+            }
+
+            // Pre-state: three checks (GL, expiration, E&O), graded NonCompliant, one check on the E&O rule.
+            (await ReadStatusAsync(conn, tx, docId)).Should().Be(ComplianceStatus.NonCompliant, "precondition: a missing E&O value fails the re-injected rule");
+            (await ScalarAsync(conn, tx, $"SELECT count(*) FROM \"ComplianceChecks\" WHERE \"DocumentId\" = '{docId}'")).Should().Be(3, "precondition: a check exists per applicable rule (GL, expiration, E&O)");
+            (await ScalarAsync(conn, tx, $"SELECT count(*) FROM \"ComplianceChecks\" WHERE \"ComplianceRuleId\" = '{eoRuleId}'")).Should().Be(1, "precondition: a real check row references the to-be-dropped E&O rule — this is what makes the FK bite");
+
+            // Converge WITH the real cross-org re-grade fan-out (production shape). The system SaveChanges
+            // must NOT 23503: the FK-safety block deletes the E&O check in the same unit of work as the rule.
+            var reevalUser = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = orgId };
+            await using var appDbForEval = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseNpgsql(conn).Options, reevalUser);
+            await appDbForEval.Database.UseTransactionAsync(tx);
+            await using var sysDbForEval = TxContext(conn);
+            await sysDbForEval.Database.UseTransactionAsync(tx);
+            var reevaluator = new ComplianceCheckService(appDbForEval, sysDbForEval, new FixedTimeProvider(now), NullLogger<ComplianceCheckService>.Instance);
+
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, reevaluator); // must NOT throw 23503
+            }
+
+            // The E&O rule and its check rows are gone (the rule delete itself proves the checks went with
+            // it — ON DELETE RESTRICT would have blocked it otherwise).
+            (await ScalarAsync(conn, tx, RuleCountSql("Photographer / Videographer", "coi", "professional_liability_limit", "min_value"))).Should().Be(0, "convergence deletes the stale E&O rule");
+            (await ScalarAsync(conn, tx, $"SELECT count(*) FROM \"ComplianceChecks\" WHERE \"ComplianceRuleId\" = '{eoRuleId}'")).Should().Be(0, "the E&O rule's dependent check rows are deleted in the same unit of work");
+
+            // The surviving rules' checks are recreated by the post-commit re-grade, and the doc re-grades
+            // Compliant now that the unmeetable E&O rule is gone.
+            (await ScalarAsync(conn, tx, $"SELECT count(*) FROM \"ComplianceChecks\" WHERE \"DocumentId\" = '{docId}'")).Should().Be(2, "the re-grade recreates checks for the two surviving rules (GL, expiration)");
+            (await ReadStatusAsync(conn, tx, docId)).Should().Be(ComplianceStatus.Compliant, "with the unmeetable E&O rule dropped, the COI re-grades Compliant");
+        }
+        finally
+        {
+            await tx.RollbackAsync();
+        }
+    }
+
+    [Fact]
     public async Task EnsureAsync_adds_a_missing_seed_rule_and_regrades_that_template()
     {
         // Convergence ADD arm, isolated: delete one §4 rule from a system template, converge, and assert it
@@ -489,11 +590,15 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
     }
 
     [Fact]
-    public async Task EnsureAsync_updates_a_message_or_sort_only_change_without_regrading()
+    public async Task EnsureAsync_updates_and_regrades_on_a_message_or_sort_only_change()
     {
-        // The core discrimination: an ErrorMessage / SortOrder edit on a rule whose natural key AND
-        // ExpectedValue are unchanged is written back to the seed value (convergence) but is VERDICT-NEUTRAL,
-        // so it must NOT re-grade. Prove both halves: the row is corrected AND the template is not re-graded.
+        // Re-grade trigger is ANY rule-set change (#416 re-review, ADR 0036 invariant #2): an ErrorMessage /
+        // SortOrder edit on a rule whose natural key AND ExpectedValue are unchanged is written back to the
+        // seed value (convergence) AND now re-grades the template — the seeder no longer reaches into the
+        // evaluator to decide the edit is verdict-neutral, so a future evaluator that reads those fields can
+        // never leave a stale persisted verdict. Prove both halves: the row is corrected AND the template IS
+        // re-graded. (The idempotency guarantee that an ALREADY-CONVERGED boot re-grades nothing is pinned
+        // separately by EnsureAsync_is_a_no_op_with_no_regrade_when_system_templates_already_match_the_seed.)
         await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
         await conn.OpenAsync();
         await using var tx = await conn.BeginTransactionAsync();
@@ -523,7 +628,8 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
                 "WHERE ct.\"IsSystemTemplate\" = true AND ct.\"Name\" = 'Event Rental Company' AND cr.\"FieldName\" = 'general_liability_limit'"))
                 .Should().Be(1, "convergence restores the seeded sort order");
 
-            spy.RegradedTemplateIds.Should().BeEmpty("a message/sort-only change is verdict-neutral — no template is re-graded");
+            spy.RegradedTemplateIds.Should().Contain(eventRentalId,
+                "a message/sort-only change is a rule-set change and now re-grades the template (#416, ADR 0036)");
         }
         finally
         {
