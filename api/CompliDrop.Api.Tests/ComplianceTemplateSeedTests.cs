@@ -12,15 +12,17 @@ using Npgsql;
 namespace CompliDrop.Api.Tests;
 
 /// <summary>
-/// Pins the #400 seed changes: the Caterer checklist now requires liquor liability (bar / alcohol
-/// service) and the Security Service checklist now requires general liability, plus the additive
-/// idempotent reconcile that lets <see cref="ComplianceTemplateSeed.EnsureAsync"/> back-fill those
-/// new rules onto ALREADY-SEEDED system templates (the seed was historically insert-only, so a
-/// rule added to a definition would be inert in prod without the reconcile).
+/// Pins the seed's CONVERGENCE contract (#416 / ADR 0036): <see cref="ComplianceTemplateSeed.EnsureAsync"/>
+/// converges each already-seeded system template to its seed definition on boot — adding a missing rule,
+/// updating a changed value / message / sort, deleting a stale rule, and correcting the description — and
+/// re-grades the affected documents across orgs ONLY on a verdict-affecting change (rule add / delete /
+/// ExpectedValue change), never for a verdict-neutral message / sort / description edit. Tenant clones are
+/// never touched. Also pins the #400 rule content that survives into §4 (Caterer liquor liability, Security
+/// general liability) and the discriminating liquor grading.
 ///
 /// The system templates are shared across the integration collection (Respawn ignores the
-/// ComplianceTemplates / ComplianceRules tables — see IntegrationTestFixture), so the reconcile
-/// test mutates them only inside a rolled-back transaction, exactly like SystemTemplateDedupTests.
+/// ComplianceTemplates / ComplianceRules tables — see IntegrationTestFixture), so every test that MUTATES
+/// them does so only inside a rolled-back transaction, exactly like SystemTemplateDedupTests.
 /// </summary>
 public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
@@ -330,10 +332,391 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
         status.Should().Be(expected);
     }
 
+    // ---- convergence: EnsureAsync updates / deletes / re-grades to the corrected §4 seed (#416, ADR 0036) ----
+
+    [Fact]
+    public async Task EnsureAsync_updates_a_changed_ExpectedValue_and_regrades_that_template()
+    {
+        // Convergence UPDATE arm: a live system rule whose compared value drifted from the seed is
+        // corrected in place, and because ExpectedValue is the one non-natural-key field the evaluator
+        // reads, that change is VERDICT-AFFECTING → the template is re-graded across orgs. Drift the two
+        // #416 value corrections back to their pre-correction numbers, converge, and assert both.
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            var photographerId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Photographer / Videographer"));
+            var transportId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Transportation / Shuttle"));
+
+            // Pre-correction values: Photographer GL $1M → $500k, Transport auto $1.5M → $1M.
+            await ExecAsync(conn, tx, SetRuleValueSql("Photographer / Videographer", "coi", "general_liability_limit", "min_value", "500000"));
+            await ExecAsync(conn, tx, SetRuleValueSql("Transportation / Shuttle", "coi", "auto_liability_limit", "min_value", "1000000"));
+
+            var spy = new RecordingComplianceCheckService();
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+            }
+
+            (await ScalarStringAsync(conn, tx, RuleValueSql("Photographer / Videographer", "general_liability_limit")))
+                .Should().Be("1000000", "convergence raises the Photographer GL floor to the corrected $1M");
+            (await ScalarStringAsync(conn, tx, RuleValueSql("Transportation / Shuttle", "auto_liability_limit")))
+                .Should().Be("1500000", "convergence raises the Transport auto floor to the corrected $1.5M");
+
+            spy.RegradedTemplateIds.Should().Contain(photographerId)
+                .And.Contain(transportId, "a changed ExpectedValue is verdict-affecting and must re-grade the template");
+        }
+        finally
+        {
+            await tx.RollbackAsync();
+        }
+    }
+
+    [Fact]
+    public async Task EnsureAsync_deletes_live_rules_the_corrected_seed_dropped_and_regrades_those_templates()
+    {
+        // Convergence DELETE arm: a live rule matching NO seed rule is removed, and removing a governing
+        // rule is verdict-affecting → re-grade. Re-inject the three rules #416 removed (the review §2
+        // "graded a fact no real document carries" set) onto their system templates, converge, and assert
+        // each is deleted and its template re-graded.
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            var securityId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Security Service"));
+            var transportId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Transportation / Shuttle"));
+            var photographerId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Photographer / Videographer"));
+
+            // The removed rules: Security certification expiry, Transport CDL-for-every-driver, Photographer E&O.
+            await ExecAsync(conn, tx, InsertRuleSql("Security Service", "certification", "expiration_date", "required", null, "Certification expiration date is required.", 90));
+            await ExecAsync(conn, tx, InsertRuleSql("Transportation / Shuttle", "license", "license_type", "equals", "CDL", "Driver must hold a CDL.", 91));
+            await ExecAsync(conn, tx, InsertRuleSql("Photographer / Videographer", "coi", "professional_liability_limit", "min_value", "1000000", "Professional liability (E&O) must be at least $1,000,000.", 92));
+
+            (await ScalarAsync(conn, tx, RuleCountSql("Security Service", "certification", "expiration_date", "required"))).Should().Be(1, "precondition: the stale certification rule is present");
+            (await ScalarAsync(conn, tx, RuleCountSql("Transportation / Shuttle", "license", "license_type", "equals"))).Should().Be(1, "precondition: the stale CDL rule is present");
+            (await ScalarAsync(conn, tx, RuleCountSql("Photographer / Videographer", "coi", "professional_liability_limit", "min_value"))).Should().Be(1, "precondition: the stale E&O rule is present");
+
+            var spy = new RecordingComplianceCheckService();
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+            }
+
+            (await ScalarAsync(conn, tx, RuleCountSql("Security Service", "certification", "expiration_date", "required"))).Should().Be(0, "convergence deletes the stale certification rule");
+            (await ScalarAsync(conn, tx, RuleCountSql("Transportation / Shuttle", "license", "license_type", "equals"))).Should().Be(0, "convergence deletes the stale CDL rule");
+            (await ScalarAsync(conn, tx, RuleCountSql("Photographer / Videographer", "coi", "professional_liability_limit", "min_value"))).Should().Be(0, "convergence deletes the stale E&O rule");
+
+            spy.RegradedTemplateIds.Should()
+                .Contain(securityId).And.Contain(transportId).And.Contain(photographerId,
+                    "deleting a governing rule is verdict-affecting and must re-grade the template");
+        }
+        finally
+        {
+            await tx.RollbackAsync();
+        }
+    }
+
+    [Fact]
+    public async Task EnsureAsync_adds_a_missing_seed_rule_and_regrades_that_template()
+    {
+        // Convergence ADD arm, isolated: delete one §4 rule from a system template, converge, and assert it
+        // is re-added and the template re-graded. (The liquor back-fill test above exercises ADD end-to-end
+        // with real documents; this pins the discrimination via the spy on a single template.)
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            var securityId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Security Service"));
+
+            // Drop Security's COI expiration rule (added by #416) to recreate a pre-correction gap.
+            await ExecAsync(conn, tx, DeleteRuleSql("Security Service", "coi", "expiration_date", "required"));
+            (await ScalarAsync(conn, tx, RuleCountSql("Security Service", "coi", "expiration_date", "required"))).Should().Be(0, "precondition: the COI expiration rule is missing");
+
+            var spy = new RecordingComplianceCheckService();
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+            }
+
+            (await ScalarAsync(conn, tx, RuleCountSql("Security Service", "coi", "expiration_date", "required"))).Should().Be(1, "convergence back-fills the missing COI expiration rule");
+            spy.RegradedTemplateIds.Should().Contain(securityId, "adding a governing rule is verdict-affecting and must re-grade the template");
+        }
+        finally
+        {
+            await tx.RollbackAsync();
+        }
+    }
+
+    [Fact]
+    public async Task EnsureAsync_updates_a_drifted_description_without_regrading()
+    {
+        // A description is display-only. Convergence corrects it, but on its own it is VERDICT-NEUTRAL and
+        // must trigger NO re-grade — the discrimination the re-grade trigger exists to make.
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            var photographerId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Photographer / Videographer"));
+            const string seededDesc = "General liability coverage for photo and video vendors.";
+
+            await ExecAsync(conn, tx,
+                "UPDATE \"ComplianceTemplates\" SET \"Description\" = 'DRIFTED DESCRIPTION' " +
+                "WHERE \"IsSystemTemplate\" = true AND \"Name\" = 'Photographer / Videographer';");
+
+            var spy = new RecordingComplianceCheckService();
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+            }
+
+            (await ScalarStringAsync(conn, tx,
+                "SELECT \"Description\" FROM \"ComplianceTemplates\" WHERE \"IsSystemTemplate\" = true AND \"Name\" = 'Photographer / Videographer'"))
+                .Should().Be(seededDesc, "convergence restores the seeded description");
+            spy.RegradedTemplateIds.Should().NotContain(photographerId, "a description-only change is verdict-neutral — no re-grade");
+        }
+        finally
+        {
+            await tx.RollbackAsync();
+        }
+    }
+
+    [Fact]
+    public async Task EnsureAsync_updates_a_message_or_sort_only_change_without_regrading()
+    {
+        // The core discrimination: an ErrorMessage / SortOrder edit on a rule whose natural key AND
+        // ExpectedValue are unchanged is written back to the seed value (convergence) but is VERDICT-NEUTRAL,
+        // so it must NOT re-grade. Prove both halves: the row is corrected AND the template is not re-graded.
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            var eventRentalId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Event Rental Company"));
+
+            await ExecAsync(conn, tx,
+                "UPDATE \"ComplianceRules\" cr SET \"ErrorMessage\" = 'DRIFTED MSG', \"SortOrder\" = 99 " +
+                "FROM \"ComplianceTemplates\" ct WHERE cr.\"ComplianceTemplateId\" = ct.\"Id\" " +
+                "AND ct.\"IsSystemTemplate\" = true AND ct.\"Name\" = 'Event Rental Company' " +
+                "AND cr.\"FieldName\" = 'general_liability_limit' AND cr.\"Operator\" = 'min_value';");
+
+            var spy = new RecordingComplianceCheckService();
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+            }
+
+            (await ScalarStringAsync(conn, tx,
+                "SELECT cr.\"ErrorMessage\" FROM \"ComplianceRules\" cr JOIN \"ComplianceTemplates\" ct ON ct.\"Id\" = cr.\"ComplianceTemplateId\" " +
+                "WHERE ct.\"IsSystemTemplate\" = true AND ct.\"Name\" = 'Event Rental Company' AND cr.\"FieldName\" = 'general_liability_limit'"))
+                .Should().Be("General liability must be at least $1,000,000 per occurrence.", "convergence restores the seeded error message");
+            (await ScalarAsync(conn, tx,
+                "SELECT cr.\"SortOrder\"::bigint FROM \"ComplianceRules\" cr JOIN \"ComplianceTemplates\" ct ON ct.\"Id\" = cr.\"ComplianceTemplateId\" " +
+                "WHERE ct.\"IsSystemTemplate\" = true AND ct.\"Name\" = 'Event Rental Company' AND cr.\"FieldName\" = 'general_liability_limit'"))
+                .Should().Be(1, "convergence restores the seeded sort order");
+
+            spy.RegradedTemplateIds.Should().BeEmpty("a message/sort-only change is verdict-neutral — no template is re-graded");
+        }
+        finally
+        {
+            await tx.RollbackAsync();
+        }
+    }
+
+    [Fact]
+    public async Task EnsureAsync_is_a_no_op_with_no_regrade_when_system_templates_already_match_the_seed()
+    {
+        // Idempotency invariant (ADR 0036 #3): a boot whose system templates already match the seed makes
+        // no rule changes and triggers no re-grade. The fixture booted the templates at the current seed, so
+        // a fresh EnsureAsync must touch nothing.
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            var before = await ScalarAsync(conn, tx, AllSystemRuleCountSql);
+
+            var spy = new RecordingComplianceCheckService();
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+            }
+
+            spy.RegradedTemplateIds.Should().BeEmpty("an already-converged boot re-grades nothing");
+            (await ScalarAsync(conn, tx, AllSystemRuleCountSql)).Should().Be(before, "an already-converged boot adds/deletes no rules");
+        }
+        finally
+        {
+            await tx.RollbackAsync();
+        }
+    }
+
+    [Fact]
+    public async Task EnsureAsync_never_touches_a_tenant_template_that_shares_a_system_name()
+    {
+        // Hard invariant (ADR 0036 #1): convergence is SYSTEM-ONLY. A tenant clone that shares a system
+        // template's NAME and carries the OLD (pre-correction) rules — a venue's own user data — is never
+        // loaded and never touched, even as the system row of the same name converges around it.
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            var tenantOrgId = Guid.NewGuid();
+            var tenantTemplateId = Guid.NewGuid();
+            var now = DateTime.UtcNow;
+
+            await using (var seed = TxContext(conn))
+            {
+                await seed.Database.UseTransactionAsync(tx);
+                seed.Organizations.Add(new Organization { Id = tenantOrgId, Name = "Tenant", CreatedAt = now, UpdatedAt = now });
+                seed.ComplianceTemplates.Add(new ComplianceTemplate
+                {
+                    Id = tenantTemplateId, OrganizationId = tenantOrgId, Name = "Photographer / Videographer",
+                    Description = "My own tweaked checklist", IsSystemTemplate = false, CreatedAt = now,
+                });
+                // The OLD Photographer rules the system template no longer carries (GL $500k, E&O, license expiry).
+                seed.ComplianceRules.Add(new ComplianceRule { Id = Guid.NewGuid(), ComplianceTemplateId = tenantTemplateId, DocumentType = "coi", FieldName = "general_liability_limit", Operator = "min_value", ExpectedValue = "500000", SortOrder = 1 });
+                seed.ComplianceRules.Add(new ComplianceRule { Id = Guid.NewGuid(), ComplianceTemplateId = tenantTemplateId, DocumentType = "coi", FieldName = "professional_liability_limit", Operator = "min_value", ExpectedValue = "1000000", SortOrder = 2 });
+                seed.ComplianceRules.Add(new ComplianceRule { Id = Guid.NewGuid(), ComplianceTemplateId = tenantTemplateId, DocumentType = "license", FieldName = "expiration_date", Operator = "required", ExpectedValue = null, SortOrder = 3 });
+                await seed.SaveChangesAsync();
+            }
+
+            var spy = new RecordingComplianceCheckService();
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+            }
+
+            // The tenant rules are byte-for-byte what the venue authored — untouched by convergence.
+            (await ScalarAsync(conn, tx, $"SELECT count(*) FROM \"ComplianceRules\" WHERE \"ComplianceTemplateId\" = '{tenantTemplateId}'"))
+                .Should().Be(3, "the tenant template keeps exactly its own three rules");
+            (await ScalarStringAsync(conn, tx, $"SELECT \"ExpectedValue\" FROM \"ComplianceRules\" WHERE \"ComplianceTemplateId\" = '{tenantTemplateId}' AND \"FieldName\" = 'general_liability_limit'"))
+                .Should().Be("500000", "the tenant's GL floor is user data — convergence must not raise it to $1M");
+            (await ScalarAsync(conn, tx, $"SELECT count(*) FROM \"ComplianceRules\" WHERE \"ComplianceTemplateId\" = '{tenantTemplateId}' AND \"FieldName\" = 'professional_liability_limit'"))
+                .Should().Be(1, "the tenant's E&O rule is user data — convergence must not delete it");
+            (await ScalarStringAsync(conn, tx, $"SELECT \"Description\" FROM \"ComplianceTemplates\" WHERE \"Id\" = '{tenantTemplateId}'"))
+                .Should().Be("My own tweaked checklist", "the tenant description is user data — convergence must not overwrite it");
+            spy.RegradedTemplateIds.Should().NotContain(tenantTemplateId, "a tenant template is never in the system re-grade fan-out");
+        }
+        finally
+        {
+            await tx.RollbackAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Seeded_system_templates_match_the_corrected_section_4_rule_set_exactly()
+    {
+        // The end state: each of the five system templates carries EXACTLY the review §4 rule set — natural
+        // keys AND compared values, no extra, none missing. This is the single assertion that locks the
+        // corrected set (#416); a stray add/remove/value-typo in the seed fails here.
+        var expected = new Dictionary<string, (string DocumentType, string? FieldName, string Operator, string? ExpectedValue)[]>
+        {
+            ["Caterer"] =
+            [
+                ("coi", "general_liability_limit", "min_value", "1000000"),
+                ("coi", "liquor_liability_limit", "min_value", "1000000"),
+                ("coi", "workers_comp_limit", "required", null),
+                ("coi", "expiration_date", "required", null),
+            ],
+            ["Event Rental Company"] =
+            [
+                ("coi", "general_liability_limit", "min_value", "1000000"),
+                ("coi", "expiration_date", "required", null),
+            ],
+            ["Security Service"] =
+            [
+                ("license", "license_number", "required", null),
+                ("license", "expiration_date", "required", null),
+                ("coi", "general_liability_limit", "min_value", "1000000"),
+                ("coi", "expiration_date", "required", null),
+            ],
+            ["Transportation / Shuttle"] =
+            [
+                ("coi", "auto_liability_limit", "min_value", "1500000"),
+                ("coi", "expiration_date", "required", null),
+                ("license", "license_number", "required", null),
+                ("license", "expiration_date", "required", null),
+            ],
+            ["Photographer / Videographer"] =
+            [
+                ("coi", "general_liability_limit", "min_value", "1000000"),
+                ("coi", "expiration_date", "required", null),
+            ],
+        };
+
+        await using var db = CreateSystemDb();
+        foreach (var (name, expectedRules) in expected)
+        {
+            var tpl = await db.ComplianceTemplates.IgnoreQueryFilters().Include(t => t.Rules)
+                .FirstAsync(t => t.IsSystemTemplate && t.Name == name);
+
+            tpl.Rules.Select(r => (r.DocumentType, r.FieldName, r.Operator, r.ExpectedValue))
+                .Should().BeEquivalentTo(expectedRules,
+                    $"the system '{name}' template must carry exactly the §4 rule set");
+        }
+    }
+
     // ---- helpers ----
 
     private static SystemDbContext TxContext(NpgsqlConnection conn) =>
         new(new DbContextOptionsBuilder<SystemDbContext>().UseNpgsql(conn).Options);
+
+    private static string SystemTemplateIdSql(string name) =>
+        $"SELECT \"Id\" FROM \"ComplianceTemplates\" WHERE \"IsSystemTemplate\" = true AND \"Name\" = '{name}'";
+
+    // A system template's stored ExpectedValue for one field (used by the value-convergence assertions).
+    private static string RuleValueSql(string templateName, string fieldName) =>
+        "SELECT cr.\"ExpectedValue\" FROM \"ComplianceRules\" cr JOIN \"ComplianceTemplates\" ct ON ct.\"Id\" = cr.\"ComplianceTemplateId\" " +
+        $"WHERE ct.\"IsSystemTemplate\" = true AND ct.\"Name\" = '{templateName}' AND cr.\"FieldName\" = '{fieldName}'";
+
+    private static string SetRuleValueSql(string templateName, string documentType, string fieldName, string op, string value) =>
+        $"UPDATE \"ComplianceRules\" cr SET \"ExpectedValue\" = '{value}' FROM \"ComplianceTemplates\" ct " +
+        "WHERE cr.\"ComplianceTemplateId\" = ct.\"Id\" AND ct.\"IsSystemTemplate\" = true " +
+        $"AND ct.\"Name\" = '{templateName}' AND cr.\"DocumentType\" = '{documentType}' " +
+        $"AND cr.\"FieldName\" = '{fieldName}' AND cr.\"Operator\" = '{op}';";
+
+    private static string RuleCountSql(string templateName, string documentType, string fieldName, string op) =>
+        "SELECT count(*) FROM \"ComplianceRules\" cr JOIN \"ComplianceTemplates\" ct ON ct.\"Id\" = cr.\"ComplianceTemplateId\" " +
+        $"WHERE ct.\"IsSystemTemplate\" = true AND ct.\"Name\" = '{templateName}' " +
+        $"AND cr.\"DocumentType\" = '{documentType}' AND cr.\"FieldName\" = '{fieldName}' AND cr.\"Operator\" = '{op}'";
+
+    private static string DeleteRuleSql(string templateName, string documentType, string fieldName, string op) =>
+        "DELETE FROM \"ComplianceRules\" cr USING \"ComplianceTemplates\" ct " +
+        "WHERE cr.\"ComplianceTemplateId\" = ct.\"Id\" AND ct.\"IsSystemTemplate\" = true " +
+        $"AND ct.\"Name\" = '{templateName}' AND cr.\"DocumentType\" = '{documentType}' " +
+        $"AND cr.\"FieldName\" = '{fieldName}' AND cr.\"Operator\" = '{op}';";
+
+    private static string InsertRuleSql(string templateName, string documentType, string fieldName, string op, string? value, string message, int sortOrder)
+    {
+        var valueLiteral = value is null ? "NULL" : $"'{value}'";
+        return "INSERT INTO \"ComplianceRules\" (\"Id\", \"ComplianceTemplateId\", \"DocumentType\", \"FieldName\", \"Operator\", \"ExpectedValue\", \"ErrorMessage\", \"SortOrder\") " +
+            $"SELECT gen_random_uuid(), ct.\"Id\", '{documentType}', '{fieldName}', '{op}', {valueLiteral}, '{message.Replace("'", "''")}', {sortOrder} " +
+            $"FROM \"ComplianceTemplates\" ct WHERE ct.\"IsSystemTemplate\" = true AND ct.\"Name\" = '{templateName}';";
+    }
+
+    private const string AllSystemRuleCountSql =
+        "SELECT count(*) FROM \"ComplianceRules\" cr JOIN \"ComplianceTemplates\" ct ON ct.\"Id\" = cr.\"ComplianceTemplateId\" " +
+        "WHERE ct.\"IsSystemTemplate\" = true";
+
+    private static async Task<Guid> ScalarGuidAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string sql)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = sql;
+        return (Guid)(await cmd.ExecuteScalarAsync())!;
+    }
 
     // Reads a document's persisted ComplianceStatus through a fresh, no-tracking context enlisted in
     // the same transaction — so EF converts the enum column regardless of its storage type and the
