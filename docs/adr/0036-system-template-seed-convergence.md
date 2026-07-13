@@ -1,6 +1,6 @@
 # 0036. System templates converge to their seed definition (add / update / delete), tenant clones never
 
-- **Status:** accepted
+- **Status:** accepted (amended 2026-07-13 — see [Amendment 1](#amendment-1-2026-07-13--re-grade-on-any-rule-set-change-fk-safe-rule-deletes))
 - **Date:** 2026-07-10
 - **Deciders:** Ruben G. (founder), autonomous session
 
@@ -32,7 +32,7 @@ The seeder is the **single source of truth for system templates**, and `EnsureAs
 Hard invariants:
 
 1. **Tenant clones (`IsSystemTemplate == false`) are never loaded and never touched** — a venue's own edits are user data. Only the system org's templates converge.
-2. **A changed system template re-grades its documents across all orgs** via the existing `ReevaluateForTemplateForSystemAsync` — which **excludes sample-demo docs** (ADR 0028; a pre-change sample predates newly-required fields and must not falsely flip). Verdict + checks commit in one unit of work per page (ADR 0030).
+2. **A system template whose RULE SET changed re-grades its documents across all orgs** — on ANY rule add, delete, or update, message- and sort-order-only edits included ([Amendment 1](#amendment-1-2026-07-13--re-grade-on-any-rule-set-change-fk-safe-rule-deletes)) — via the existing `ReevaluateForTemplateForSystemAsync`, which **excludes sample-demo docs** (ADR 0028; a pre-change sample predates newly-required fields and must not falsely flip). Verdict + checks commit in one unit of work per page (ADR 0030).
 3. **Idempotent:** a boot whose system templates already match the seed makes no change and triggers no re-grade.
 4. **No raw SQL, no EF data migration** for the rule content — convergence is app-level so it composes with the re-grade and with ADR 0009 (there is no `timestamptz` raw SQL to get wrong).
 
@@ -63,6 +63,16 @@ Rejected: every future template correction that changes a value or removes a rul
 
 ### Option C — Version the system templates and insert a new version rather than mutate in place
 Rejected as over-engineering for the current scale (single-digit orgs, five templates): vendors reference a template by id, so versioning would require a reassignment/migration of every vendor to the new version — more moving parts than convergence, with no benefit until there is a real need to preserve historical system-template versions (Phase 2 territory).
+
+## Amendment 1 (2026-07-13) — re-grade on any rule-set change; FK-safe rule deletes
+
+A post-implementation re-review of #416 found two gaps in the convergence path as first shipped.
+
+**Re-grade trigger decoupled from the evaluator (invariant #2).** The original code re-graded a converged template only on a *verdict-affecting* change — a rule add, a rule delete, or an `ExpectedValue` change — and skipped the re-grade for a pure `ErrorMessage` / `SortOrder` edit, on the reasoning that "`ExpectedValue` is the only non-natural-key field `ComplianceCheckService.EvaluateRule` reads." That coupled this data-layer seeder to the evaluator's internals: a future `EvaluateRule` that read `ErrorMessage`, `SortOrder`, or a new column for a pass/fail decision would make convergence silently skip a needed re-grade and leave a **stale persisted verdict** — the project's blocker-class failure. **Revised rule:** convergence re-grades a system template whenever its rule set changes AT ALL — any rule add, delete, or update, message- and sort-order-only edits included. The dropped optimization saved a re-grade only on a verdict-neutral message/sort edit, negligible at MVP scale; the decoupling is worth far more than the saving. Invariant #3 is unchanged: a boot with no drift makes no change and triggers no re-grade — and a *description*-only edit likewise updates the row without re-grading, since the description is not a rule.
+
+**FK-safe rule deletes.** `ComplianceCheck.ComplianceRuleId` is a required FK with `ON DELETE RESTRICT`. On any existing DB where a document was graded against a rule this correction drops, a live `ComplianceCheck` references it, so removing the rule in the shared `SaveChanges` raised Postgres `23503` and rolled the WHOLE convergence back — the §4 correction would then silently never apply and re-fail every boot (`Program.cs` swallows the seed error). The delete arm now deletes each removed rule's dependent `ComplianceCheck` rows in the SAME unit of work as the rule removal (EF orders the dependent deletes before the principal-rule deletes), cross-org by design — mirroring the rules-page trash button's #269 fix. The post-commit re-grade recreates checks for the surviving rules.
+
+Both are safe-direction corrections: strictly more re-grading (never a missed one), and an atomic convergence that either fully applies or fully rolls back. See [#416](https://github.com/neboxdev/complidrop/issues/416).
 
 ## References
 
