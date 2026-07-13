@@ -1,6 +1,6 @@
 # 0036. System templates converge to their seed definition (add / update / delete), tenant clones never
 
-- **Status:** accepted (amended 2026-07-13 — see [Amendment 1](#amendment-1-2026-07-13--re-grade-on-any-rule-set-change-fk-safe-rule-deletes))
+- **Status:** accepted (amended 2026-07-13 — see [Amendment 1](#amendment-1-2026-07-13--re-grade-on-any-rule-set-change-fk-safe-rule-deletes) and [Amendment 2](#amendment-2-2026-07-13--durable-re-grade-via-a-revision-watermark))
 - **Date:** 2026-07-10
 - **Deciders:** Ruben G. (founder), autonomous session
 
@@ -32,9 +32,9 @@ The seeder is the **single source of truth for system templates**, and `EnsureAs
 Hard invariants:
 
 1. **Tenant clones (`IsSystemTemplate == false`) are never loaded and never touched** — a venue's own edits are user data. Only the system org's templates converge.
-2. **A system template whose RULE SET changed re-grades its documents across all orgs** — on ANY rule add, delete, or update, message- and sort-order-only edits included ([Amendment 1](#amendment-1-2026-07-13--re-grade-on-any-rule-set-change-fk-safe-rule-deletes)) — via the existing `ReevaluateForTemplateForSystemAsync`, which **excludes sample-demo docs** (ADR 0028; a pre-change sample predates newly-required fields and must not falsely flip). Verdict + checks commit in one unit of work per page (ADR 0030).
-3. **Idempotent:** a boot whose system templates already match the seed makes no change and triggers no re-grade.
-4. **No raw SQL, no EF data migration** for the rule content — convergence is app-level so it composes with the re-grade and with ADR 0009 (there is no `timestamptz` raw SQL to get wrong).
+2. **A system template whose RULE SET changed re-grades its documents across all orgs** — on ANY rule add, delete, or update, message- and sort-order-only edits included ([Amendment 1](#amendment-1-2026-07-13--re-grade-on-any-rule-set-change-fk-safe-rule-deletes)) — via the existing `ReevaluateForTemplateForSystemAsync`, which **excludes sample-demo docs** (ADR 0028; a pre-change sample predates newly-required fields and must not falsely flip). Verdict + checks commit in one unit of work per page (ADR 0030). The re-grade is **DURABLE**: it is gated on a persisted revision watermark, not on "templates this boot mutated," so an interrupted or partially-failed re-grade re-fires on the next boot until every document catches up ([Amendment 2](#amendment-2-2026-07-13--durable-re-grade-via-a-revision-watermark)).
+3. **Idempotent:** a boot whose system templates are all **caught up** (`RulesRevision == RegradedThroughRevision` — see [Amendment 2](#amendment-2-2026-07-13--durable-re-grade-via-a-revision-watermark); before the watermark this was "already match the seed") makes no rule change and triggers no re-grade.
+4. **No raw SQL, no EF data migration for the rule content** — convergence is app-level so it composes with the re-grade and with ADR 0009 (there is no `timestamptz` raw SQL to get wrong). ([Amendment 2](#amendment-2-2026-07-13--durable-re-grade-via-a-revision-watermark) adds an **additive** schema migration for two `int` *bookkeeping* watermark columns — not a rule-content data migration — so this principle still holds: the rule rows are still reconciled only by the app-level convergence.)
 
 This supersedes the additive-only note in the #400 seeder comments.
 
@@ -74,8 +74,25 @@ A post-implementation re-review of #416 found two gaps in the convergence path a
 
 Both are safe-direction corrections: strictly more re-grading (never a missed one), and an atomic convergence that either fully applies or fully rolls back. See [#416](https://github.com/neboxdev/complidrop/issues/416).
 
+## Amendment 2 (2026-07-13) — durable re-grade via a revision watermark
+
+A re-review of #416 found the convergence path re-graded **best-effort** and gated on the wrong thing, so a corrected rule set could persist while documents kept a stale verdict — indefinitely.
+
+**The gap.** Convergence commits the corrected rules, then re-grades the affected documents in a *separate*, paged, best-effort step. That step could be lost two ways: (a) the boot is interrupted between the rule commit and the end of the re-grade (Railway SIGTERM on redeploy / startup-timeout), or (b) a re-grade page throws and is caught-and-continued inside `ReevaluateWhereAsync`. Either way the rules are corrected but some document keeps its OLD verdict — and **nothing healed it.** The re-grade was gated on `changedTemplateIds` = the templates *this boot* mutated, and the next boot's convergence is idempotent: the rules already match the seed, so `changedTemplateIds` is empty and the re-grade is skipped. `ComplianceEndpoints.UpsertRule` is blocked on system templates, and `ComplianceSweepBackgroundService` only runs date-transition `ExecuteUpdate`s (Compliant→Expired etc.) — it never re-runs rule evaluation. So a caterer COI persisted `Compliant` with no liquor coverage could stay `Compliant` forever — a false-`Compliant` persisted verdict, the product's blocker-class failure, and a violation of invariant #2.
+
+**The fix — a durable revision watermark.** Two additive `int` columns on `ComplianceTemplate`, both default `0`: `RulesRevision` and `RegradedThroughRevision`.
+
+- Convergence **bumps `RulesRevision`** whenever it changes a system template's rule set at all (any rule add / delete / `ExpectedValue` / message / sort change — the existing `ruleSetChanged` flag; a description-only edit does not count). The bump rides the SAME convergence `SaveChanges` as the rule change, so the revision can never advance without its rule change also committing.
+- After the commit, the re-grade fans out over **every system template whose `RulesRevision != RegradedThroughRevision`** — which is exactly this boot's changes PLUS any template a prior boot changed but never finished re-grading. The watermark, not "this boot," is the gate.
+- `RegradedThroughRevision` advances to the re-graded revision **only when the fan-out reports FULL success.** `ReevaluateForTemplateForSystemAsync` now returns a `RegradeResult(Targeted, Regraded, FailedPages)`; the seed advances the watermark iff `FailedPages == 0`. A skipped page leaves the watermark behind, so the next boot re-fires the re-grade for that template until every page lands. The advance is written with `ExecuteUpdate` (not the tracked entity) because the shared fan-out clears the context's `ChangeTracker` per page, which would otherwise silently drop a tracked-property write. The deploy log now reports attempted-vs-succeeded (`re-graded {Regraded}/{Targeted} … {FailedPages} page(s) failed`) so a partial re-grade is visible.
+
+**Invariants.** #2 is restored and strengthened (the re-grade is now durable across an interrupted boot, not merely attempted once). #3's idempotency is preserved and re-stated in watermark terms: a boot where every system template has `RulesRevision == RegradedThroughRevision` bumps no revision and re-grades nothing. #4 still holds: the migration is **additive bookkeeping columns**, NOT a rule-content data migration — the rule rows are still reconciled only by the app-level convergence (no raw SQL on the rules, so ADR 0009 stays moot here). Tenant clones never converge, so their watermark stays `0/0` (invariant #1 untouched).
+
+**Cost.** One extra tiny `ExecuteUpdate` per changed template per boot, and a re-grade that may repeat once after a genuinely interrupted boot — negligible at MVP scale, and strictly the safe direction (an extra re-grade never produces a wrong verdict; a missed one can). See [#416](https://github.com/neboxdev/complidrop/issues/416).
+
 ## References
 
-- Tickets: #416 (this correction), #400 (additive predecessor), #397 (per-occurrence pin, same PR), #412 (rule natural-key unique index, deferred)
-- ADRs: 0028 (sample demo — excluded from re-grade), 0030 (verdict/inputs combined unit of work), 0033 (supersession / cross-count discipline), 0009 (no `AT TIME ZONE` — moot here, no raw SQL)
+- Tickets: #416 (this correction, incl. Amendment 2 durable watermark), #400 (additive predecessor), #397 (per-occurrence pin, same PR), #412 (rule natural-key unique index, deferred)
+- ADRs: 0028 (sample demo — excluded from re-grade), 0030 (verdict/inputs combined unit of work), 0033 (supersession / cross-count discipline), 0009 (no `AT TIME ZONE` — moot here, no raw SQL), 0016 (migrations auto-apply on deploy — how the Amendment 2 watermark columns reach prod)
+- Migration: `SeedRegradeRevisionWatermark` (additive — `ComplianceTemplate.RulesRevision` + `RegradedThroughRevision`, both `int NOT NULL DEFAULT 0`)
 - External: [TEMPLATE-REQUIREMENTS-REVIEW.md](../rule-engine/TEMPLATE-REQUIREMENTS-REVIEW.md) §4 (the corrected template set), [G1-COUNSEL-BRIEF.md](../rule-engine/G1-COUNSEL-BRIEF.md) §0 (go-live gate)
