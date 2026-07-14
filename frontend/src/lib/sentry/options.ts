@@ -8,16 +8,45 @@ import { scrubEvent, tagCorrelationId } from "./scrub";
  * `Sentry.init` call sites (`instrumentation-client.ts` + `instrumentation.ts`).
  *
  * Pure and env-injectable so `options.test.ts` can pin the gating without
- * touching the ambient process env.
+ * touching the ambient process env. The injectable parameter defaults to
+ * {@link RUNTIME_ENV}, NOT to `process.env` — see the comment there.
  */
 
 type Env = Record<string, string | undefined>;
+
+// Default env for the no-arg call sites (the three real `Sentry.init`s).
+//
+// Next.js inlines `NEXT_PUBLIC_*` vars into the BROWSER bundle only for
+// LITERAL `process.env.X` member expressions; an aliased read (`const env =
+// process.env; env.NEXT_PUBLIC_X` — which is exactly what a `env: Env =
+// process.env` default parameter is) is the documented "will NOT be inlined"
+// case (node_modules/next/dist/docs/01-app/02-guides/environment-variables.md,
+// "Bundling Environment Variables for the Browser"). With an aliased default,
+// every value below reached the client as `undefined`, so the browser
+// `Sentry.init` ran `{ dsn: undefined, enabled: false }` and captured nothing
+// in production even with the DSN configured (#356). Server/edge were
+// unaffected (their `process.env` is a real runtime object). So: every env var
+// is read here ONCE, at module scope, as a literal member expression — never
+// alias `process.env` for a `NEXT_PUBLIC_*` (or `NODE_ENV`) read in
+// client-reachable code.
+//
+// (`./build.ts` keeps its aliased `process.env` default deliberately:
+// SENTRY_AUTH_TOKEN / SENTRY_ORG / SENTRY_PROJECT are build-time-only vars
+// read by `next.config.ts` inside the real Node build process and are never
+// bundled for the browser.)
+const RUNTIME_ENV: Env = {
+  NEXT_PUBLIC_SENTRY_DSN: process.env.NEXT_PUBLIC_SENTRY_DSN,
+  NEXT_PUBLIC_SENTRY_ENVIRONMENT: process.env.NEXT_PUBLIC_SENTRY_ENVIRONMENT,
+  NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE:
+    process.env.NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE,
+  NODE_ENV: process.env.NODE_ENV,
+};
 
 /**
  * The public DSN, or `undefined` when unset/blank. DSNs are not secrets (they
  * ship in the client bundle by design); absence is the signal to no-op.
  */
-export function getDsn(env: Env = process.env): string | undefined {
+export function getDsn(env: Env = RUNTIME_ENV): string | undefined {
   const dsn = env.NEXT_PUBLIC_SENTRY_DSN?.trim();
   return dsn ? dsn : undefined;
 }
@@ -28,7 +57,7 @@ export function getDsn(env: Env = process.env): string | undefined {
  * PostHog gated on its key): a Development build, or a production build with no
  * DSN, captures nothing. Both `enabled: false` and `dsn: undefined` enforce it.
  */
-export function sentryEnabled(env: Env = process.env): boolean {
+export function sentryEnabled(env: Env = RUNTIME_ENV): boolean {
   return Boolean(getDsn(env)) && env.NODE_ENV === "production";
 }
 
@@ -67,7 +96,7 @@ function beforeSendTransaction<T extends Event>(event: T): T | null {
  * `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE`. Session Replay is NOT enabled here
  * (a COI on screen must never be recorded).
  */
-export function commonInitOptions(env: Env = process.env) {
+export function commonInitOptions(env: Env = RUNTIME_ENV) {
   return {
     dsn: getDsn(env),
     enabled: sentryEnabled(env),

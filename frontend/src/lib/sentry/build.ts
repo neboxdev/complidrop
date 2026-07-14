@@ -10,6 +10,12 @@ type Env = Record<string, string | undefined>;
  *
  * Pure + env-injectable so the degradation contract is unit-testable;
  * `next.config.ts` itself can't be unit-tested, so the token-gating lives here.
+ *
+ * The aliased `env = process.env` default is fine HERE (unlike `./options.ts`,
+ * which must read literally for Next's client-bundle inlining, see its
+ * RUNTIME_ENV): SENTRY_AUTH_TOKEN / SENTRY_ORG / SENTRY_PROJECT are not
+ * `NEXT_PUBLIC_*` vars — they're consumed only by `next.config.ts` inside the
+ * real Node build process and never bundled for the browser.
  */
 export function sentryBuildOptions(env: Env = process.env) {
   const hasAuthToken = Boolean(env.SENTRY_AUTH_TOKEN);

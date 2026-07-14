@@ -4,7 +4,7 @@
  * conservative + env-tunable, and beforeSend must actually run the scrubber and
  * the correlationId tagger.
  */
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import type { ErrorEvent, Event, EventHint } from "@sentry/nextjs";
 import {
   commonInitOptions,
@@ -122,5 +122,35 @@ describe("commonInitOptions", () => {
 
     const result = opts.beforeSendTransaction(txn) as Event;
     expect(result.request?.cookies).toBeUndefined();
+  });
+});
+
+describe("no-arg default env (RUNTIME_ENV) — #356", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("captures the env at module load (literal-read snapshot), not at call time", async () => {
+    // Next inlines only LITERAL `process.env.NEXT_PUBLIC_*` member expressions
+    // into the client bundle; an aliased `env = process.env` default parameter
+    // ships un-inlined and undefined to the browser (#356). The no-arg default
+    // must therefore be a module-scoped snapshot of literal reads. Pin the
+    // snapshot semantic: stub the env, load a fresh module copy, UNSTUB, then
+    // call — the load-time values must still be in effect. (The inlining itself
+    // is a build-time property, proven by grepping the built client chunks —
+    // it cannot be asserted from vitest.)
+    vi.stubEnv("NEXT_PUBLIC_SENTRY_DSN", DSN);
+    vi.stubEnv("NODE_ENV", "production");
+    vi.resetModules();
+    const fresh = await import("./options");
+    vi.unstubAllEnvs();
+
+    expect(fresh.getDsn()).toBe(DSN);
+    expect(fresh.sentryEnabled()).toBe(true);
+    const opts = fresh.commonInitOptions();
+    expect(opts.dsn).toBe(DSN);
+    expect(opts.enabled).toBe(true);
+    expect(opts.environment).toBe("production");
   });
 });
