@@ -67,6 +67,11 @@ confirmation · ✅ confirmed. **Gate:** launch-blocking unless marked *(refine 
 dollar minimums), CLM-1..CLM-6 (copy/privacy). *Refine-later:* TPL-B4..B8.
 `TRR` = [TEMPLATE-REQUIREMENTS-REVIEW.md](TEMPLATE-REQUIREMENTS-REVIEW.md).
 
+**What sign-off unlocks (the two switches, both merged & inert today):**
+- Rule engine → set `RuleEngine:Enabled=true` (+ `EnabledRuleSets`) after RE-1..RE-5.
+- Template corrections → set `TemplateCorrections__Enabled=true` after TPL-A1..A4 +
+  TPL-B1..B3 — full runbook in §B.3.
+
 ---
 
 # Part A — Regulatory rule engine
@@ -173,8 +178,12 @@ of the operative statutory text in the research dossier.
 tuple engine, live in production since #192 (June 2026). Unlike the rule engine,
 this surface is already on. What is **gated** is the set of *corrections* the
 template review recommends (new dollar minimums, rule removals, the liquor rule):
-those are built but held (draft PR #413 + a planned migration) and must not deploy
-until TPL-A1..A4 and TPL-B1..B3 are confirmed.
+those are **merged into the codebase but disabled at runtime** behind the config
+flag **`TemplateCorrections:Enabled` (default `false`)** — the same inert pattern
+as `RuleEngine:Enabled` (PR #413, merged 2026-07-14; ADR 0036 Amendment 3). With
+the flag off, the deployed product is behaviorally identical to the pre-correction
+prod (pinned by test). The flag must NOT be flipped until TPL-A1..A4 and
+TPL-B1..B3 are confirmed.
 
 **Why an attorney AND a broker.** The rule engine was a pure legal (UPL) question.
 The templates add a second axis: the *dollar minimums* ($1M GL, $1M liquor, $1.5M
@@ -218,15 +227,34 @@ TPL-A3 needs an attorney to bless shipping them as editable suggestions.
   *checks* liquor liability create any assumed-duty exposure for venues or for
   CompliDrop? Attorney item; folds into the same engagement.
 
-### B.3 What is *built and gated* on this confirmation
+### B.3 What is *merged and disabled* pending this confirmation
 
-Draft PR #413 (held) ships the two additive, review-validated changes (Caterer
-liquor $1M, Security GL $1M) plus the extraction field, sample-COI line, and UI
-preset. A planned **data migration** (system-template rows only; tenant clones
-untouched) would apply the value changes and rule removals the additive seeder
-cannot: Photographer GL $500k→$1M, Transport auto $1M→$1.5M, and removing the
-phantom Security `certification`, Photographer `license`+E&O, and Transport
-`equals CDL` rules. **Neither deploys until this gate clears.**
+The full five-template correction is **merged** (PR #413, 2026-07-14) and **inert
+behind `TemplateCorrections:Enabled = false`**. The seeder holds two template
+sets — `LegacyTemplates` (byte-exact the pre-correction prod set) and
+`CorrectedTemplates` (the review's §4 set: Caterer + liquor $1M; Security + GL
+$1M, minus the phantom `certification` rule; Transport auto $1M→$1.5M, minus the
+`equals CDL` rule; Photographer GL $500k→$1M, minus E&O + the non-existent TX
+license) — and converges the live system templates to whichever the flag selects
+(ADR 0036; tenant clones never touched; durable watermarked cross-org re-grade;
+sample-demo docs excluded). Flag **off** = byte-level no-op vs prod, pinned by
+test. The gated UI (the liquor add-requirement option and the additional-insured
+nudge) is hidden the same way, driven by `features.correctedChecklists` on
+`/api/auth/me`. Deliberately **live** regardless of the flag: the extraction
+improvements (liquor field + GL pinned to the ACORD "EACH OCCURRENCE" cell) and
+the sample-COI liquor line — they read documents and assert no defaults.
+
+**Flip runbook (after this gate clears):**
+1. Attorney + broker sign off TPL-A1..A4 / TPL-B1..B3 in §0.
+2. Set `TemplateCorrections__Enabled=true` in the Railway environment; redeploy.
+3. Boot log prints `Template corrections: ENABLED`; the seed converges the five
+   system templates and re-grades affected documents across orgs (watch the
+   `re-graded {n}/{m}` log lines; an interrupted re-grade self-heals next boot).
+4. Clear + re-create the sample demo in showcase orgs (old samples keep their
+   verdict; the generator already emits liquor, so re-created ones pass).
+5. Post-stability cleanup: collapse `LegacyTemplates` + the flag (ADR 0036 Am. 3).
+The flag is reversible — setting it back to `false` converges to the legacy set
+and re-grades again.
 
 ---
 
