@@ -1,6 +1,6 @@
 # 0036. System templates converge to their seed definition (add / update / delete), tenant clones never
 
-- **Status:** accepted (amended 2026-07-13 — see [Amendment 1](#amendment-1-2026-07-13--re-grade-on-any-rule-set-change-fk-safe-rule-deletes) and [Amendment 2](#amendment-2-2026-07-13--durable-re-grade-via-a-revision-watermark))
+- **Status:** accepted (amended 2026-07-13 — see [Amendment 1](#amendment-1-2026-07-13--re-grade-on-any-rule-set-change-fk-safe-rule-deletes) and [Amendment 2](#amendment-2-2026-07-13--durable-re-grade-via-a-revision-watermark); amended 2026-07-14 — see [Amendment 3](#amendment-3-2026-07-14--template-set-selection-is-config-gated-pending-the-legal-sign-off))
 - **Date:** 2026-07-10
 - **Deciders:** Ruben G. (founder), autonomous session
 
@@ -89,6 +89,22 @@ A re-review of #416 found the convergence path re-graded **best-effort** and gat
 **Invariants.** #2 is restored and strengthened (the re-grade is now durable across an interrupted boot, not merely attempted once). #3's idempotency is preserved and re-stated in watermark terms: a boot where every system template has `RulesRevision == RegradedThroughRevision` bumps no revision and re-grades nothing. #4 still holds: the migration is **additive bookkeeping columns**, NOT a rule-content data migration — the rule rows are still reconciled only by the app-level convergence (no raw SQL on the rules, so ADR 0009 stays moot here). Tenant clones never converge, so their watermark stays `0/0` (invariant #1 untouched).
 
 **Cost.** One extra tiny `ExecuteUpdate` per changed template per boot, and a re-grade that may repeat once after a genuinely interrupted boot — negligible at MVP scale, and strictly the safe direction (an extra re-grade never produces a wrong verdict; a missed one can). See [#416](https://github.com/neboxdev/complidrop/issues/416).
+
+## Amendment 3 (2026-07-14) — template-SET selection is config-gated pending the legal sign-off
+
+The §4 correction is a legally-gated behavior change: it rewrites live customer verdicts and adds a liquor-liability requirement whose framing awaits the [G1-COUNSEL-BRIEF.md](../rule-engine/G1-COUNSEL-BRIEF.md) §0 attorney/broker sign-off, months out. The founder decision (2026-07-14): everything MERGES now, but the gated behavior stays completely invisible until the sign-off — via a server config flag, mirroring the inert rule engine (`RuleEngine:Enabled`).
+
+**The mechanism.** `TemplateCorrections:Enabled` (default **false**; `TemplateCorrectionsSettings`, bound in Program.cs). The seed file now carries TWO template-set definitions and `EnsureAsync` converges the live system rows to the flag-selected one:
+
+- **OFF (the default, prod today):** converge to `LegacyTemplates` — byte-exact the set main's insert-only seeder installed. Against a main-seeded production database, convergence finds nothing to add / update / delete, changes no description, bumps no `RulesRevision`, and re-grades nothing — a **byte-level no-op**, pinned at row-identity level by test (every rule and template keeps its Id). Merging the branch therefore deploys zero user-visible change. The frontend half rides `/api/auth/me`: an additive `features.correctedChecklists` (false) hides the gated rules-page surfaces (the liquor "+ Add a requirement" menu option and the additional-insured nudge). The liquor **catalog entry and extraction stay live** deliberately — an existing liquor rule still renders + edits (FP-085), and the sample generator's liquor line is simply ungraded, so pre-flip samples stay valid across a flip.
+- **ON (the deferred rollout):** the next boot converges prod to the §4 corrected set and fires the durable watermarked cross-org re-grade (Amendments 1–2), and the gated UI appears. Flip-only: one config value in prod.
+- **Reversible:** flipping back converges to the legacy set through the SAME convergence + watermark machinery — the delete arm removes the corrected set's extra rules FK-safely (dependent checks in the same unit of work), values/messages/descriptions restore, and documents re-grade to the legacy verdicts. No bespoke rollback path exists or is needed.
+
+**Invariants unchanged.** #1–#4 hold verbatim against whichever set is selected; the flag chooses the convergence *target*, never the machinery. Idempotency (#3) now reads: a boot whose system templates already match the *selected* set makes no change and re-grades nothing.
+
+**Test posture.** The shared integration-test hosts pin the flag ON (`CustomWebApplicationFactory`) so the fixture world exercises the corrected set — also a shared-database correctness requirement, since secondary hosts booting the fixture DB flag-OFF would converge it back to legacy mid-suite. The flag-OFF world is pinned by the dedicated merge-safety no-op test, the flip-on / flip-back transition tests, and an isolated-container end-to-end test (flag-off boot seeds legacy + reports the me feature off).
+
+**Expected end state.** After the sign-off lands and the ON flip has been stable, the flag and `LegacyTemplates` are removed in a reviewed PR (collapsing back to one set) — the gate is scaffolding for the merged-but-invisible window, not a permanent product surface. See [#416](https://github.com/neboxdev/complidrop/issues/416).
 
 ## References
 

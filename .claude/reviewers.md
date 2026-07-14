@@ -43,6 +43,15 @@ Both are defined in this repo's `.claude/agents/`.
   (ADR 0025); per-recipient dedupe key and suppression skips (ADR 0031).
 - `Database:AutoMigrate` stays ON in Development — the dev Neon branch is throwaway
   and the startup environment banner is the guard (#271).
+- The corrected system-checklist set + its cross-org re-grade (`CorrectedTemplates` in
+  the seed), the liquor "+ Add a requirement" menu option, and the additional-insured
+  nudge are behind `TemplateCorrections:Enabled` (default OFF) pending the
+  G1-COUNSEL-BRIEF §0 attorney/broker sign-off — deliberate merged-but-invisible code,
+  not dead code, same posture as `RuleEngine:Enabled` (ADR 0036 Amendment 3). The
+  flag-off `LegacyTemplates` set is byte-exact main's pre-#416 definitions ON PURPOSE
+  (the merge-safety no-op) — do not flag its outdated floors/messages, and do not
+  "fix" them: any edit there rewrites prod rows before the sign-off. Test hosts pin
+  the flag ON; prod default stays OFF.
 
 ## Sensitive areas (`careful-review` label ⇒ autonomous sessions stop before merge)
 
