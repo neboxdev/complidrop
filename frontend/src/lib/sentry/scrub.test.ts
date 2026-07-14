@@ -467,6 +467,49 @@ describe("scrubEvent — transaction name, trace data, header URLs (#356 re-revi
   });
 });
 
+describe("scrubEvent — dashed portal token quoted in free text (#356 re-review)", () => {
+  // Portal capability tokens are base64url, so they CAN contain `-` — and
+  // redactString's opaque-token net deliberately excludes `-` (GUID
+  // preservation), splitting this token into sub-32 segments that all survive.
+  // Only sanitizeUrl's deterministic /portal/{token} path redaction removes it,
+  // so these tests discriminate the sanitizeUrl routing of the free-text
+  // surfaces (breadcrumb.message / event.message / exception.value) from the
+  // previous bare-redactString scrubbing.
+  const DASHED_TOKEN = "AbCd-EfGh-IjKl-MnOp-QrSt-Uv12";
+  const PORTAL_URL = `https://www.complidrop.com/portal/${DASHED_TOKEN}`;
+
+  it("survives bare redactString (why these surfaces must route via sanitizeUrl)", () => {
+    expect(redactString(`GET ${PORTAL_URL} failed`)).toContain(DASHED_TOKEN);
+  });
+
+  it("is redacted from a console breadcrumb message", () => {
+    const e = {
+      breadcrumbs: [{ category: "console", message: `GET ${PORTAL_URL} 500` }],
+    } as unknown as Event;
+    const message = String(scrubEvent(e).breadcrumbs?.[0]?.message);
+    expect(message).toContain(`/portal/${REDACTED}`);
+    expect(message).not.toContain(DASHED_TOKEN);
+  });
+
+  it("is redacted from an exception value", () => {
+    const e = {
+      exception: {
+        values: [{ type: "Error", value: `fetch to ${PORTAL_URL} failed` }],
+      },
+    } as unknown as Event;
+    const value = String(scrubEvent(e).exception?.values?.[0]?.value);
+    expect(value).toContain(`/portal/${REDACTED}`);
+    expect(value).not.toContain(DASHED_TOKEN);
+  });
+
+  it("is redacted from event.message", () => {
+    const e = { message: `Upload via ${PORTAL_URL} failed` } as unknown as Event;
+    const message = String(scrubEvent(e).message);
+    expect(message).toContain(`/portal/${REDACTED}`);
+    expect(message).not.toContain(DASHED_TOKEN);
+  });
+});
+
 describe("tagCorrelationId", () => {
   it("copies the ApiError correlationId onto an event tag", () => {
     const event: Event = {};

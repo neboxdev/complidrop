@@ -205,7 +205,12 @@ function scrubDataRecord(data: Record<string, unknown>): Record<string, unknown>
 
 function scrubBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb {
   const out: Breadcrumb = { ...breadcrumb };
-  if (typeof out.message === "string") out.message = redactString(out.message);
+  // sanitizeUrl, not bare redactString: a breadcrumb message can quote a
+  // /portal/{token} URL (e.g. an auto-captured console line), and a DASHED
+  // base64url portal token slips through redactString's opaque-token net
+  // (`-` is excluded for GUID preservation). sanitizeUrl chains redactString,
+  // so the existing free-text redaction is preserved (#356).
+  if (typeof out.message === "string") out.message = sanitizeUrl(out.message);
   if (isPlainRecord(out.data)) out.data = scrubDataRecord(out.data);
   return out;
 }
@@ -264,8 +269,12 @@ export function scrubEvent<T extends Event>(event: T): T {
   }
 
   // --- free-text surfaces --------------------------------------------------
+  // Free text can QUOTE a /portal/{token} URL, and a dashed base64url portal
+  // token escapes redactString's opaque-token net (`-` is excluded to keep
+  // GUIDs). sanitizeUrl chains redactString, so these surfaces keep the full
+  // free-text net PLUS the deterministic portal-path redaction (#356).
   if (typeof event.message === "string") {
-    event.message = redactString(event.message);
+    event.message = sanitizeUrl(event.message);
   }
   // transaction: the event's transaction NAME. The App Router instrumentation
   // names it `parameterizedPathname ?? pathname` — falling back to the RAW
@@ -292,7 +301,9 @@ export function scrubEvent<T extends Event>(event: T): T {
   }
   if (event.exception?.values) {
     for (const ex of event.exception.values) {
-      if (typeof ex.value === "string") ex.value = redactString(ex.value);
+      // sanitizeUrl for the same reason as event.message above: an error
+      // message quoting a portal URL must lose the token even when dashed.
+      if (typeof ex.value === "string") ex.value = sanitizeUrl(ex.value);
       // Scrub captured local variables and source context. On the Node runtime
       // the default localVariablesIntegration + contextLinesIntegration populate
       // frame.vars / context_line / pre_context / post_context, which CAN hold a
