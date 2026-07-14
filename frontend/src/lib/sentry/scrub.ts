@@ -226,12 +226,26 @@ export function scrubEvent<T extends Event>(event: T): T {
     if (req.headers) {
       for (const name of Object.keys(req.headers)) {
         // Drop sensitive-named headers (cookie, authorization, x-portal-token);
-        // value-redact the survivors so a credential in a benign-named header
-        // (e.g. a custom header echoing a JWT) can't slip through.
+        // URL-sanitize the survivors (sanitizeUrl chains the free-text net, so
+        // credential redaction is preserved) so that neither a credential in a
+        // benign-named header (e.g. a custom header echoing a JWT) nor a
+        // portal-token URL in a URL-valued header (e.g. Referer:
+        // …/portal/{token}) can slip through. Running a non-URL header value
+        // through sanitizeUrl is harmless — it just redacts it. The server
+        // runtime can attach ARRAY-valued headers despite the string-only SDK
+        // type (Node repeats multi-value headers), so sanitize each element
+        // rather than skipping non-strings wholesale.
         if (keyIsSensitive(name)) {
           delete req.headers[name];
-        } else if (typeof req.headers[name] === "string") {
-          req.headers[name] = redactPiiText(req.headers[name]);
+        } else {
+          const value: unknown = req.headers[name];
+          if (typeof value === "string") {
+            req.headers[name] = sanitizeUrl(value);
+          } else if (Array.isArray(value)) {
+            req.headers[name] = value.map((item) =>
+              typeof item === "string" ? sanitizeUrl(item) : item,
+            ) as unknown as string;
+          }
         }
       }
     }
