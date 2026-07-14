@@ -20,6 +20,7 @@ import {
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PageTip } from "@/components/onboarding/PageTip";
 import { TIP_IDS } from "@/lib/onboarding";
+import { useMe } from "@/hooks/useAuth";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -92,8 +93,21 @@ const ADDITIONAL_INSURED = findRequirementType({
   operator: "contains",
 });
 
+// Requirement types whose "+ Add a requirement" MENU entry is gated behind the server's
+// TemplateCorrections flag (`me.features.correctedChecklists`, #416 / ADR 0036 Amendment 3) —
+// hidden until the G1 legal/insurance sign-off flips it. Deliberately a MENU-only cut: the entries
+// stay in the REQUIREMENT_TYPES catalog itself so `findRequirementType` still resolves them, and an
+// EXISTING rule (authored while the flag was on, or after a future flip) keeps rendering its
+// curated sentence + Edit pencil instead of degrading to the raw-token FP-085 fallback.
+const CORRECTIONS_GATED_MENU_KEYS: ReadonlyArray<string> = ["liquor_liability"];
+
 export default function RulesPage() {
   const qc = useQueryClient();
+  // The #416 corrected-checklist surfaces (liquor add-menu option, additional-insured nudge) are
+  // gated on the server flag carried by the me-payload (ADR 0036 Amendment 3). Strict `=== true`
+  // so a loading/undefined me defaults to HIDDEN — the safe (flag-off, prod-identical) posture.
+  const { data: me } = useMe();
+  const correctedChecklistsEnabled = me?.features.correctedChecklists === true;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // On phones the editor renders ~2 screens below the rail, so tapping a checklist
   // looked like nothing happened (#319 FP-080). Scroll the editor into view on
@@ -340,6 +354,7 @@ export default function RulesPage() {
             <ChecklistEditor
               detail={detail.data}
               vendorCount={all.find((t) => t.id === detail.data!.id)?.vendorCount ?? 0}
+              correctedChecklistsEnabled={correctedChecklistsEnabled}
               onAddRequirement={(rule) =>
                 upsertRule.mutate({
                   templateId: detail.data!.id,
@@ -494,6 +509,7 @@ function NewChecklistForm({
 function ChecklistEditor({
   detail,
   vendorCount,
+  correctedChecklistsEnabled,
   onAddRequirement,
   onEditRequirement,
   onRemoveRequirement,
@@ -503,6 +519,8 @@ function ChecklistEditor({
 }: {
   detail: TemplateDetail;
   vendorCount: number;
+  /** Server flag (#416): gates the liquor add-menu option + the additional-insured nudge. */
+  correctedChecklistsEnabled: boolean;
   onAddRequirement: (rule: RulePayload) => void;
   onEditRequirement: (ruleId: string, rule: RulePayload, sortOrder: number) => void;
   onRemoveRequirement: (ruleId: string) => void;
@@ -584,13 +602,25 @@ function ChecklistEditor({
             </ul>
           )}
 
-          {!readOnly && <AddRequirement onAdd={onAddRequirement} existingRules={rules} />}
+          {!readOnly && (
+            <AddRequirement
+              onAdd={onAddRequirement}
+              existingRules={rules}
+              correctedChecklistsEnabled={correctedChecklistsEnabled}
+            />
+          )}
         </CardContent>
       </Card>
 
-      {!readOnly && governsCoi && ADDITIONAL_INSURED != null && !hasAdditionalInsured && (
-        <AdditionalInsuredNudge type={ADDITIONAL_INSURED} onAdd={onAddRequirement} />
-      )}
+      {/* The nudge is additionally gated on the #416 server flag (ADR 0036 Amendment 3): it ships
+          merged but stays invisible until the G1 legal sign-off flips correctedChecklists on. */}
+      {correctedChecklistsEnabled &&
+        !readOnly &&
+        governsCoi &&
+        ADDITIONAL_INSURED != null &&
+        !hasAdditionalInsured && (
+          <AdditionalInsuredNudge type={ADDITIONAL_INSURED} onAdd={onAddRequirement} />
+        )}
 
       {rules.length > 0 && <ComplianceSummary name={detail.name} rules={rules} />}
 
@@ -792,9 +822,12 @@ function buildPayload(type: RequirementType, rawValue: string): RulePayload {
 function AddRequirement({
   onAdd,
   existingRules,
+  correctedChecklistsEnabled,
 }: {
   onAdd: (rule: RulePayload) => void;
   existingRules: TemplateRule[];
+  /** Server flag (#416): while false, CORRECTIONS_GATED_MENU_KEYS entries are hidden from the menu. */
+  correctedChecklistsEnabled: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [picked, setPicked] = useState<RequirementType | null>(null);
@@ -807,6 +840,11 @@ function AddRequirement({
     existingRules.some(
       (r) => r.documentType === t.documentType && r.fieldName === t.fieldName && r.operator === t.operator,
     );
+
+  // MENU-only flag cut (#416 — see CORRECTIONS_GATED_MENU_KEYS): a gated entry disappears from the
+  // picker while the flag is off, but the catalog keeps it so an existing rule still renders + edits.
+  const isVisible = (t: RequirementType) =>
+    correctedChecklistsEnabled || !CORRECTIONS_GATED_MENU_KEYS.includes(t.key);
 
   if (!open) {
     return (
@@ -846,7 +884,7 @@ function AddRequirement({
         <div key={group}>
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{group}</p>
           <div className="mt-1 space-y-1">
-            {REQUIREMENT_TYPES.filter((t) => t.group === group).map((t) =>
+            {REQUIREMENT_TYPES.filter((t) => t.group === group && isVisible(t)).map((t) =>
               isAdded(t) ? (
                 <div
                   key={t.key}

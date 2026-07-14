@@ -19,6 +19,15 @@ export type Me = {
   /** True once the user has finished (or skipped) the first-run onboarding (#191).
    * Server-persisted so the welcome modal fires exactly once, across devices. */
   hasCompletedOnboarding: boolean;
+  /** Server-evaluated feature flags the UI gates on (#416, ADR 0036 Amendment 3).
+   * `correctedChecklists` mirrors the backend `TemplateCorrections:Enabled` flag — while false
+   * (the prod default, pending the G1 legal/insurance sign-off), the rules page hides the liquor
+   * "+ Add a requirement" menu option and the additional-insured nudge. Carried on every me-shaped
+   * payload (me / register / login / complete-onboarding / organization), so the session cache
+   * always holds it. */
+  features: {
+    correctedChecklists: boolean;
+  };
 };
 
 export type UseMeOptions = {
