@@ -883,10 +883,311 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
         }
     }
 
+    // ---- the legal gate (#416, ADR 0036 Amendment 3): flag-off no-op, flip-on, flip-back ----
+
+    [Fact]
+    public async Task Flag_off_EnsureAsync_is_a_byte_level_no_op_against_a_main_seeded_database()
+    {
+        // THE merge-safety property (ADR 0036 Amendment 3). Production today was seeded by main's
+        // insert-only seeder and runs with TemplateCorrections:Enabled=false (the default), so the
+        // deploy that merges this branch boots the convergent seeder with the flag OFF against the
+        // legacy rows. Because LegacyTemplates is byte-exact main's set, that boot must find NOTHING
+        // to do: no rule add / update / delete, no description change, no RulesRevision bump, no
+        // re-grade — the merged correction is completely invisible until the legal sign-off flips
+        // the flag. This test recreates a main-seeded database (wipe + seed flag-OFF from empty —
+        // equivalent: the same rows main's seeder inserted, watermarks at 0/0 exactly as the
+        // Amendment-2 migration's DEFAULT 0 leaves prod), asserts the seeded content IS main's set
+        // (independent hand-pinned restatement), then runs EnsureAsync flag-OFF again and asserts
+        // ZERO writes at ROW IDENTITY level: every rule keeps its Id (not deleted-and-reinserted),
+        // every template keeps Id + CreatedAt + description, both watermark columns stay 0, and the
+        // reevaluator spy saw nothing.
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            await ResetToLegacySeededStateAsync(conn, tx);
+
+            // The flag-off world is byte-exact main's set: natural keys, values, MESSAGES, sort
+            // orders, and descriptions (the §4 exact-set test's legacy twin — full-tuple, so a
+            // "harmless" message tweak to LegacyTemplates fails here before it can rewrite prod).
+            var expected = new Dictionary<string, (string Description, (string DocumentType, string? FieldName, string Operator, string? ExpectedValue, string? ErrorMessage, int SortOrder)[] Rules)>
+            {
+                ["Caterer"] = ("Typical insurance for a food & beverage caterer.",
+                [
+                    ("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000.", 1),
+                    ("coi", "expiration_date", "required", null, "Expiration date is required.", 2),
+                    ("coi", "workers_comp_limit", "required", null, "Workers comp coverage is required.", 3),
+                ]),
+                ["Event Rental Company"] = ("Coverage for table, tent, and equipment rental vendors.",
+                [
+                    ("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000.", 1),
+                    ("coi", "expiration_date", "required", null, "Expiration date is required.", 2),
+                ]),
+                ["Security Service"] = ("Licensing for event security and guard services.",
+                [
+                    ("license", "license_number", "required", null, "License number is required.", 1),
+                    ("license", "expiration_date", "required", null, "License expiration date is required.", 2),
+                    ("certification", "expiration_date", "required", null, "Certification expiration date is required.", 3),
+                ]),
+                ["Transportation / Shuttle"] = ("Auto coverage and a CDL for shuttle and transport vendors.",
+                [
+                    ("coi", "auto_liability_limit", "min_value", "1000000", "Auto liability must be at least $1,000,000.", 1),
+                    ("license", "license_type", "equals", "CDL", "Driver must hold a CDL.", 2),
+                    ("license", "expiration_date", "required", null, "License expiration date is required.", 3),
+                ]),
+                ["Photographer / Videographer"] = ("General + professional (E&O) coverage for photo and video vendors.",
+                [
+                    ("coi", "general_liability_limit", "min_value", "500000", "General liability must be at least $500,000.", 1),
+                    ("coi", "professional_liability_limit", "min_value", "1000000", "Professional liability (E&O) must be at least $1,000,000.", 2),
+                    ("license", "expiration_date", "required", null, "Professional license expiration date is required.", 3),
+                ]),
+            };
+            await using (var read = TxContext(conn))
+            {
+                await read.Database.UseTransactionAsync(tx);
+                var seeded = await read.ComplianceTemplates.IgnoreQueryFilters()
+                    .Where(t => t.IsSystemTemplate).Include(t => t.Rules).ToListAsync();
+                seeded.Should().HaveCount(expected.Count, "the legacy set installs the same five templates");
+                foreach (var tpl in seeded)
+                {
+                    var (description, rules) = expected[tpl.Name];
+                    tpl.Description.Should().Be(description, $"'{tpl.Name}' must carry main's description verbatim");
+                    tpl.Rules.Select(r => (r.DocumentType, r.FieldName, r.Operator, r.ExpectedValue, r.ErrorMessage, r.SortOrder))
+                        .Should().BeEquivalentTo(rules, $"the legacy '{tpl.Name}' template must be byte-exact main's rule set");
+                }
+            }
+
+            // Row-identity snapshots: rule Ids + full content, template Ids + CreatedAt + watermarks.
+            var rulesBefore = await ReadAllAsync(conn, tx, SystemRuleSnapshotSql);
+            var templatesBefore = await ReadAllAsync(conn, tx, SystemTemplateSnapshotSql);
+            rulesBefore.Should().HaveCount(14, "sanity: the legacy set carries 14 rules across the five templates (3+2+3+3+3)");
+
+            var spy = new RecordingComplianceCheckService();
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: false, spy);
+            }
+
+            (await ReadAllAsync(conn, tx, SystemRuleSnapshotSql)).Should().Equal(rulesBefore,
+                "a flag-off boot against a main-seeded database must not add, update, delete, or reinsert a single rule row");
+            (await ReadAllAsync(conn, tx, SystemTemplateSnapshotSql)).Should().Equal(templatesBefore,
+                "a flag-off boot must not touch a template row — no description change, no revision bump");
+            (await ScalarAsync(conn, tx,
+                "SELECT count(*) FROM \"ComplianceTemplates\" WHERE \"IsSystemTemplate\" = true " +
+                "AND (\"RulesRevision\" <> 0 OR \"RegradedThroughRevision\" <> 0)"))
+                .Should().Be(0, "the watermarks stay at the migration default 0/0 — nothing to re-grade, ever");
+            spy.RegradedTemplateIds.Should().BeEmpty("a flag-off no-op boot must trigger ZERO re-grades");
+        }
+        finally
+        {
+            await tx.RollbackAsync(); // restore the shared (flag-ON) system seed for the rest of the collection
+        }
+    }
+
+    [Fact]
+    public async Task Flipping_the_flag_on_converges_a_legacy_seeded_database_to_the_corrected_set_and_regrades()
+    {
+        // The deferred rollout (ADR 0036 Amendment 3): months from now, after the G1 sign-off, the
+        // founder flips TemplateCorrections:Enabled=true and the NEXT BOOT applies the full #416
+        // correction to the prod rows main seeded — spot-checked here by the three §4 headline
+        // changes (Caterer gains the liquor rule, Photographer's GL floor rises to $1M, Transport's
+        // unmeetable CDL rule is deleted), with the revision bumped and the re-grade fired for the
+        // changed templates. (The per-arm convergence mechanics — add / update / delete / FK-safety /
+        // watermark durability — are pinned by the flag-ON tests above; this test pins the
+        // legacy→corrected TRANSITION end to end.)
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            await ResetToLegacySeededStateAsync(conn, tx);
+            (await ScalarAsync(conn, tx, CatererLiquorCountSql)).Should().Be(0, "precondition: the legacy Caterer has no liquor rule");
+            (await ScalarStringAsync(conn, tx, RuleValueSql("Photographer / Videographer", "general_liability_limit")))
+                .Should().Be("500000", "precondition: the legacy Photographer GL floor is $500k");
+            (await ScalarAsync(conn, tx, RuleCountSql("Transportation / Shuttle", "license", "license_type", "equals")))
+                .Should().Be(1, "precondition: the legacy Transport set carries the CDL rule");
+
+            var catererId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Caterer"));
+            var photographerId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Photographer / Videographer"));
+            var transportId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Transportation / Shuttle"));
+
+            var spy = new RecordingComplianceCheckService();
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: true, spy);
+            }
+
+            (await ScalarAsync(conn, tx, CatererLiquorCountSql)).Should().Be(1, "the flip-on back-fills the Caterer liquor rule");
+            (await ScalarStringAsync(conn, tx, CatererLiquorExpectedValueSql)).Should().Be("1000000", "at the §4 $1M floor");
+            (await ScalarStringAsync(conn, tx, RuleValueSql("Photographer / Videographer", "general_liability_limit")))
+                .Should().Be("1000000", "the flip-on raises the Photographer GL floor to the corrected $1M");
+            (await ScalarAsync(conn, tx, RuleCountSql("Transportation / Shuttle", "license", "license_type", "equals")))
+                .Should().Be(0, "the flip-on deletes the unmeetable CDL rule");
+
+            foreach (var (id, label) in new[] { (catererId, "Caterer"), (photographerId, "Photographer"), (transportId, "Transport") })
+            {
+                (await RulesRevisionAsync(conn, tx, id)).Should().Be(1, $"the {label} rule-set change bumps RulesRevision");
+                (await RegradedThroughRevisionAsync(conn, tx, id)).Should().Be(1, $"the {label} watermark advances after the (spy-reported-successful) re-grade");
+                spy.RegradedTemplateIds.Should().Contain(id, $"the flip-on must re-grade the changed {label} template across orgs");
+            }
+        }
+        finally
+        {
+            await tx.RollbackAsync(); // restore the shared system seed for the rest of the collection
+        }
+    }
+
+    [Fact]
+    public async Task Flipping_the_flag_back_off_converges_to_the_legacy_set_FK_safely_and_regrades()
+    {
+        // Reversibility (ADR 0036 Amendment 3): the flag is a two-way switch, not a ratchet — if the
+        // sign-off stalls or a broker objects after a flip, flipping back must walk prod to the
+        // legacy set through the SAME convergence machinery, with no bespoke rollback path. The
+        // hard part is FK safety in the delete direction: a document graded under the corrected set
+        // holds ComplianceCheck rows referencing the liquor rule (ON DELETE RESTRICT), so the
+        // flip-back's delete arm must remove those checks in the same unit of work or the whole
+        // reversal rolls back with Postgres 23503 on every boot. And the re-grade direction flips
+        // too: a no-liquor caterer COI graded NonCompliant under §4 must return to Compliant once
+        // the legacy set (no liquor rule) governs again.
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+        try
+        {
+            var now = new DateTime(2026, 7, 14, 12, 0, 0, DateTimeKind.Utc);
+            var orgId = Guid.NewGuid();
+            var vendorId = Guid.NewGuid();
+            var docId = Guid.NewGuid();
+
+            // The fixture state IS the corrected §4 set (flag-ON host). Grade a real no-liquor COI
+            // against the system Caterer so a check row references the liquor rule.
+            var catererId = await ScalarGuidAsync(conn, tx, SystemTemplateIdSql("Caterer"));
+            var liquorRuleId = await ScalarGuidAsync(conn, tx,
+                "SELECT cr.\"Id\" FROM \"ComplianceRules\" cr JOIN \"ComplianceTemplates\" ct ON ct.\"Id\" = cr.\"ComplianceTemplateId\" " +
+                "WHERE ct.\"IsSystemTemplate\" = true AND ct.\"Name\" = 'Caterer' AND cr.\"FieldName\" = 'liquor_liability_limit'");
+
+            await using (var seed = TxContext(conn))
+            {
+                await seed.Database.UseTransactionAsync(tx);
+                seed.Organizations.Add(new Organization { Id = orgId, Name = "Flip-Back Org", CreatedAt = now, UpdatedAt = now });
+                seed.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = orgId, Name = "No-Liquor Caterer", ComplianceTemplateId = catererId, CreatedAt = now, UpdatedAt = now });
+                seed.Documents.Add(NoLiquorCatererDoc(docId, orgId, vendorId, now, isSample: false));
+                await seed.SaveChangesAsync();
+            }
+
+            var gradeUser = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = orgId };
+            await using (var appDbForGrade = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseNpgsql(conn).Options, gradeUser))
+            await using (var sysDbForGrade = TxContext(conn))
+            {
+                await appDbForGrade.Database.UseTransactionAsync(tx);
+                await sysDbForGrade.Database.UseTransactionAsync(tx);
+                await new ComplianceCheckService(appDbForGrade, sysDbForGrade, new FixedTimeProvider(now), NullLogger<ComplianceCheckService>.Instance)
+                    .EvaluateForSystemAsync(docId, default);
+            }
+            (await ReadStatusAsync(conn, tx, docId)).Should().Be(ComplianceStatus.NonCompliant,
+                "precondition: under the corrected set the no-liquor COI fails the liquor rule");
+            (await ScalarAsync(conn, tx, $"SELECT count(*) FROM \"ComplianceChecks\" WHERE \"ComplianceRuleId\" = '{liquorRuleId}'"))
+                .Should().Be(1, "precondition: a real check row references the liquor rule — this is what makes the flip-back FK bite");
+
+            // Flip back with the REAL cross-org reevaluator (production shape) — must not 23503.
+            var reevalUser = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = orgId };
+            await using var appDbForEval = new AppDbContext(
+                new DbContextOptionsBuilder<AppDbContext>().UseNpgsql(conn).Options, reevalUser);
+            await appDbForEval.Database.UseTransactionAsync(tx);
+            await using var sysDbForEval = TxContext(conn);
+            await sysDbForEval.Database.UseTransactionAsync(tx);
+            var reevaluator = new ComplianceCheckService(
+                appDbForEval, sysDbForEval, new FixedTimeProvider(now), NullLogger<ComplianceCheckService>.Instance);
+
+            await using (var run = TxContext(conn))
+            {
+                await run.Database.UseTransactionAsync(tx);
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: false, reevaluator);
+            }
+
+            // The liquor rule and its dependent check are gone (deleted in one unit of work), the
+            // legacy values / rules / description are restored, and the doc re-graded to the legacy
+            // verdict — the fully-reversible round trip.
+            (await ScalarAsync(conn, tx, CatererLiquorCountSql)).Should().Be(0, "the flip-back deletes the liquor rule");
+            (await ScalarAsync(conn, tx, $"SELECT count(*) FROM \"ComplianceChecks\" WHERE \"ComplianceRuleId\" = '{liquorRuleId}'"))
+                .Should().Be(0, "the liquor rule's dependent check rows go with it — FK-safe, no 23503");
+            (await ScalarStringAsync(conn, tx, RuleValueSql("Photographer / Videographer", "general_liability_limit")))
+                .Should().Be("500000", "the flip-back restores the legacy Photographer GL floor");
+            (await ScalarAsync(conn, tx, RuleCountSql("Transportation / Shuttle", "license", "license_type", "equals")))
+                .Should().Be(1, "the flip-back re-adds the legacy Transport CDL rule");
+            (await ScalarStringAsync(conn, tx,
+                "SELECT \"Description\" FROM \"ComplianceTemplates\" WHERE \"IsSystemTemplate\" = true AND \"Name\" = 'Caterer'"))
+                .Should().Be("Typical insurance for a food & beverage caterer.", "the flip-back restores the legacy description");
+            (await ReadStatusAsync(conn, tx, docId)).Should().Be(ComplianceStatus.Compliant,
+                "with the liquor rule gone the no-liquor COI re-grades Compliant — the re-grade runs in the reverse direction too");
+            (await RulesRevisionAsync(conn, tx, catererId)).Should().Be(1, "the flip-back is a rule-set change and bumps the revision");
+            (await RegradedThroughRevisionAsync(conn, tx, catererId)).Should().Be(1, "the fully-successful reverse re-grade advances the watermark");
+        }
+        finally
+        {
+            await tx.RollbackAsync(); // restore the shared (flag-ON) system seed for the rest of the collection
+        }
+    }
+
     // ---- helpers ----
 
     private static SystemDbContext TxContext(NpgsqlConnection conn) =>
         new(new DbContextOptionsBuilder<SystemDbContext>().UseNpgsql(conn).Options);
+
+    /// <summary>
+    /// Recreates "a production database seeded by main's insert-only seeder" inside the caller's
+    /// rolled-back transaction: wipe the fixture's (flag-ON, corrected) system templates entirely,
+    /// then run the seeder with the flag OFF against the emptied state. From empty, convergence
+    /// inserts the LegacyTemplates whole — the same rows (natural keys, values, messages, sort
+    /// orders, descriptions) main's seeder installed — with fresh watermarks at 0/0, exactly what a
+    /// main-seeded prod database carries after the Amendment-2 watermark migration's DEFAULT 0.
+    /// Dependent ComplianceChecks go first (ON DELETE RESTRICT); no vendors reference the templates
+    /// at this point (Respawn wiped tenant data before the test began, and Vendor→Template is
+    /// SET NULL regardless).
+    /// </summary>
+    private static async Task ResetToLegacySeededStateAsync(NpgsqlConnection conn, NpgsqlTransaction tx)
+    {
+        await ExecAsync(conn, tx, """
+            DELETE FROM "ComplianceChecks" cc USING "ComplianceRules" cr, "ComplianceTemplates" ct
+            WHERE cc."ComplianceRuleId" = cr."Id" AND cr."ComplianceTemplateId" = ct."Id" AND ct."IsSystemTemplate" = true;
+            DELETE FROM "ComplianceRules" cr USING "ComplianceTemplates" ct
+            WHERE cr."ComplianceTemplateId" = ct."Id" AND ct."IsSystemTemplate" = true;
+            DELETE FROM "ComplianceTemplates" WHERE "IsSystemTemplate" = true;
+            """);
+        await using var seed = TxContext(conn);
+        await seed.Database.UseTransactionAsync(tx);
+        await ComplianceTemplateSeed.EnsureAsync(seed, useCorrectedTemplates: false);
+    }
+
+    // Row-identity snapshots for the flag-off no-op proof: rule Ids + full content (a byte-level
+    // no-op keeps every Id — content-only comparison would still pass if convergence deleted and
+    // reinserted identical rows), and template Ids + CreatedAt + description + both watermarks.
+    private const string SystemRuleSnapshotSql =
+        "SELECT ct.\"Name\" || '|' || cr.\"Id\"::text || '|' || cr.\"DocumentType\" || '|' || COALESCE(cr.\"FieldName\", '<null>') " +
+        "|| '|' || cr.\"Operator\" || '|' || COALESCE(cr.\"ExpectedValue\", '<null>') || '|' || COALESCE(cr.\"ErrorMessage\", '<null>') " +
+        "|| '|' || cr.\"SortOrder\"::text " +
+        "FROM \"ComplianceRules\" cr JOIN \"ComplianceTemplates\" ct ON ct.\"Id\" = cr.\"ComplianceTemplateId\" " +
+        "WHERE ct.\"IsSystemTemplate\" = true ORDER BY ct.\"Name\", cr.\"SortOrder\", cr.\"Id\"";
+
+    private const string SystemTemplateSnapshotSql =
+        "SELECT \"Name\" || '|' || \"Id\"::text || '|' || \"CreatedAt\"::text || '|' || COALESCE(\"Description\", '<null>') " +
+        "|| '|' || \"RulesRevision\"::text || '|' || \"RegradedThroughRevision\"::text " +
+        "FROM \"ComplianceTemplates\" WHERE \"IsSystemTemplate\" = true ORDER BY \"Name\"";
+
+    private static async Task<List<string>> ReadAllAsync(NpgsqlConnection conn, NpgsqlTransaction tx, string sql)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = sql;
+        var rows = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            rows.Add(reader.GetString(0));
+        return rows;
+    }
 
     private static string SystemTemplateIdSql(string name) =>
         $"SELECT \"Id\" FROM \"ComplianceTemplates\" WHERE \"IsSystemTemplate\" = true AND \"Name\" = '{name}'";
