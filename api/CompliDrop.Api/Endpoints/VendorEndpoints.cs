@@ -79,10 +79,15 @@ public static class VendorEndpoints
     private static VendorCoverage ComputeCoverage(
         bool hasTemplate, List<string> requiredTypes, List<DocCoverageInfo> docs, DateTime today)
     {
-        if (!hasTemplate || requiredTypes.Count == 0) return new VendorCoverage("NoRequirements", []);
+        if (!hasTemplate || requiredTypes.Count == 0) return new VendorCoverage("NoRequirements", [], null);
 
         var missing = new List<string>();
         var actionNeeded = false;
+        // The earliest expiration among the covered required docs (#399). Coverage as a WHOLE lapses
+        // the moment its first-to-expire required doc does, so the nearest expiry is the honest
+        // "covered through" horizon for the vendor. A covered doc with NO expiration doesn't constrain
+        // it (nothing to show), so it's left out of the min — null here means "Covered, no dated docs".
+        DateTime? coveredThrough = null;
         foreach (var type in requiredTypes)
         {
             var latest = docs
@@ -96,11 +101,16 @@ public static class VendorEndpoints
             // not-yet-graded (Pending) leave a required type uncovered.
             var effective = ComplianceStatusDeriver.Effective(latest.ComplianceStatus, latest.ExpirationDate, today);
             var covered = effective is Entities.ComplianceStatus.Compliant or Entities.ComplianceStatus.ExpiringSoon;
-            if (!covered) actionNeeded = true;
+            if (!covered) { actionNeeded = true; continue; }
+            if (latest.ExpirationDate is DateTime exp && (coveredThrough is null || exp < coveredThrough))
+                coveredThrough = exp;
         }
 
-        if (missing.Count > 0) return new VendorCoverage("Missing", [.. missing]);
-        return new VendorCoverage(actionNeeded ? "ActionNeeded" : "Covered", []);
+        if (missing.Count > 0) return new VendorCoverage("Missing", [.. missing], null);
+        // "covered through {date}" is display-only honesty on the Covered verdict (#399) — the set of
+        // statuses that read Covered is UNCHANGED. Only the fully-covered case carries the horizon.
+        if (actionNeeded) return new VendorCoverage("ActionNeeded", [], null);
+        return new VendorCoverage("Covered", [], coveredThrough);
     }
 
     /// <summary>Short, lower-case noun for a document type, for "Missing: insurance, license" copy.</summary>

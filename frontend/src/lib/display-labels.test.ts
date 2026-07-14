@@ -58,6 +58,8 @@ describe("fieldLabel (#188)", () => {
     expect(fieldLabel("general_liability_limit")).toBe("General liability limit");
     expect(fieldLabel("policy_number")).toBe("Policy number");
     expect(fieldLabel("expiration_date")).toBe("Expiration date");
+    // #400: liquor liability is a graded field now — it gets a curated label.
+    expect(fieldLabel("liquor_liability_limit")).toBe("Liquor liability limit");
   });
   it("is case-insensitive on the lookup", () => {
     expect(fieldLabel("General_Liability_Limit")).toBe("General liability limit");
@@ -181,6 +183,9 @@ describe("formatCheckValue (#193)", () => {
   it("formats money-ish fields as whole-dollar USD", () => {
     expect(formatCheckValue("general_liability_limit", "1000000")).toBe("$1,000,000");
     expect(formatCheckValue("auto_liability_limit", "500000")).toBe("$500,000");
+    // #400: the MONEY_FIELD regex matches "liquor_liability_limit" (liabilit|limit), so
+    // its value formats as currency automatically — no separate rule needed.
+    expect(formatCheckValue("liquor_liability_limit", "1000000")).toBe("$1,000,000");
     // Already-formatted input is normalized, not double-formatted.
     expect(formatCheckValue("umbrella_limit", "$1,000,000")).toBe("$1,000,000");
   });

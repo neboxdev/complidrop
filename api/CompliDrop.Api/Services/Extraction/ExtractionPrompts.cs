@@ -2,7 +2,7 @@ namespace CompliDrop.Api.Services.Extraction;
 
 public static class ExtractionPrompts
 {
-    public const string Version = "v2-2026-06-12-eo-addl-insured";
+    public const string Version = "v2-2026-07-13-gl-each-occurrence";
 
     public const string SystemPrompt = """
 You extract structured data from a compliance document (Certificate of Insurance, license, permit, certification, or similar).
@@ -24,8 +24,8 @@ DOCUMENT TYPES
 FIELDS TO EXTRACT WHEN PRESENT
 COI:           policyholder_name, insurer_name, policy_number, effective_date, expiration_date,
                general_liability_limit, workers_comp_limit, auto_liability_limit, umbrella_limit,
-               professional_liability_limit, certificate_holder, description_of_operations,
-               additional_insured
+               professional_liability_limit, liquor_liability_limit, certificate_holder,
+               description_of_operations, additional_insured
 License:       holder_name, license_number, license_type, issuing_authority, issue_date,
                expiration_date, state
 Permit:        permit_number, permit_type, issuing_authority, issue_date, expiration_date,
@@ -38,8 +38,18 @@ For every document, always extract any date that looks like an expiration or ren
 FORMATTING RULES
 - Dates: YYYY-MM-DD
 - Currency: plain integer, no currency symbol, no commas (e.g. "1000000" not "$1,000,000")
+- general_liability_limit: read the Commercial General Liability "EACH OCCURRENCE" limit —
+  the per-occurrence cell on ACORD 25. Do NOT use the "GENERAL AGGREGATE",
+  "PRODUCTS-COMP/OP AGG", or "DAMAGE TO RENTED PREMISES" figures: the aggregate is
+  usually 2x the per-occurrence limit, so reading it would overstate the coverage a
+  single event actually has. When only an aggregate is shown and no each-occurrence
+  figure, omit the field rather than substitute the aggregate
 - professional_liability_limit: the Professional Liability / Errors & Omissions (E&O)
   per-occurrence or per-claim limit, when that coverage line appears on the certificate
+- liquor_liability_limit: the Liquor Liability / Liquor Legal Liability per-occurrence or
+  aggregate limit, when that coverage line appears on the certificate (a caterer, bar-service,
+  or beverage vendor that serves or sells alcohol). This is a DISTINCT coverage line — do not
+  copy the general_liability_limit value into it
 - additional_insured: emit the NAMES of the additional-insured parties as text — they
   usually appear in the description-of-operations box ("X is named as additional insured")
   or an attached endorsement. If the certificate marks additional-insured AFFIRMATIVELY

@@ -26,6 +26,26 @@ public class SampleCertificateGeneratorTests
     }
 
     [Fact]
+    public void Machine_readable_echo_emits_the_liquor_line_the_Caterer_checklist_grades()
+    {
+        // ADR 0028: the sample COI must grade Compliant against the seeded Caterer checklist, which since
+        // #400 REQUIRES liquor liability. The demo's Compliant verdict hinges on the generator emitting a
+        // liquor line in its machine-readable echo — the plain "field: value" text OCR + the LLM read to
+        // fill liquor_liability_limit. Before #416 nothing read the generated output, so dropping that line
+        // would ship a NonCompliant demo with a green suite (SampleCertificateGeneratorTests only checked
+        // byte length + %PDF-). Pin the emission here: removing the liquor line from MachineReadableFieldEcho
+        // fails this test (ContainSingle finds none), and lowering its value fails the Contain check.
+        var echo = SampleCertificateGenerator.MachineReadableFieldEcho(new DateTime(2027, 6, 1));
+
+        var liquorLine = echo.Should()
+            .ContainSingle(l => l.StartsWith("Liquor Liability Limit:", StringComparison.Ordinal),
+                "the generated sample must echo the liquor field the Caterer checklist grades")
+            .Which;
+        liquorLine.Should().Contain(SampleCertificateGenerator.LiquorLiabilityEachOccurrence,
+            "the echoed liquor line must carry the generator's each-occurrence limit");
+    }
+
+    [Fact]
     public void Extraction_prompt_emits_the_fields_the_Caterer_checklist_grades()
     {
         // The sample reaching "Compliant" via the REAL pipeline (ADR 0028) hinges on the LLM emitting
@@ -36,5 +56,7 @@ public class SampleCertificateGeneratorTests
         ExtractionPrompts.SystemPrompt.Should().Contain("general_liability_limit");
         ExtractionPrompts.SystemPrompt.Should().Contain("workers_comp_limit");
         ExtractionPrompts.SystemPrompt.Should().Contain("expiration_date");
+        // #400: the Caterer checklist now grades liquor liability too, so the prompt must emit the key.
+        ExtractionPrompts.SystemPrompt.Should().Contain("liquor_liability_limit");
     }
 }

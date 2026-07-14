@@ -81,7 +81,7 @@ if (ghAvailable) {
   }
 }
 
-// --- WORKLOG.md tail (committed human narrative via /worklog) ----------
+// --- WORKLOG.md tail (committed human narrative, if the file exists) ----
 if (existsSync("WORKLOG.md")) {
   try {
     const content = readFileSync("WORKLOG.md", "utf8");

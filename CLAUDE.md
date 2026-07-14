@@ -35,8 +35,11 @@ cd api/CompliDrop.Api && dotnet watch run
 # Frontend (port 3000)
 cd frontend && npm run dev
 
-# Tests
+# Tests — backend
 cd api && dotnet test CompliDrop.Api.Tests/CompliDrop.Api.Tests.csproj
+
+# Tests — frontend (vitest)
+cd frontend && npm test
 
 # Migrations
 cd api/CompliDrop.Api && dotnet ef migrations add <Name> --context AppDbContext
@@ -80,24 +83,21 @@ See [ADR 0016](docs/adr/0016-apply-ef-migrations-on-startup.md) and [#226](https
 
 ## Workflow & record-keeping
 
-Substantive changes flow through four record layers:
+Substantive changes flow through three record layers:
 
 1. **Tickets** — GitHub Issues (or `docs/tickets/` when `gh` is unavailable). Every non-trivial change starts with a ticket. Typos and trivial fixes excepted.
 2. **Conventional Commits** — durable shipped record. Always reference the issue: `feat(extraction): retry on Gemini 5xx (#42)`.
 3. **ADRs** (`docs/adr/`) — architectural decisions worth preserving. Append-only; supersede via new ADR.
-4. **CHANGELOG.md** — auto-generated from commits via `git-cliff`.
 
-Features begin with `/plan`, run through PM review (6 reviewers including a CompliDrop-specific legal-compliance reviewer), then `/breakdown` into tickets. No jumping straight from idea to code.
+The workflow mechanics live in the machine-level claude-kit (`~/.claude/skills/` — start, review, plan, breakdown, ticket, tickets, epic-review, adr, pm-review) with this repo's overlay in [.claude/reviewers.md](.claude/reviewers.md): extra reviewer personas (compliance-claims for code, legal-compliance for specs), the do-NOT-flag list, sensitive areas, commit scopes, and scale numbers. **A code change that alters a reviewers.md fact updates reviewers.md in the same PR.**
+
+Features: `/plan` (interview → spec → automatic PM-panel review) → human spec approval → `/breakdown` (epic + ordered tickets) → `/start` (autonomous pipeline). No jumping straight from idea to code.
+
+**Autonomy contract** (full text: `~/.claude/skills/start/SKILL.md`): sessions proceed and merge on their own — the plan is posted as a ticket comment, the merge is decided by a deterministic gate (tests + CI + findings ledger). Sessions stop only for seven enumerated exceptions: destructive migrations/data deletion, auth/billing/payments in scope, secrets/prod config, force-push, unresolvable test failures, unfixable findings, genuine ticket ambiguity. Tickets labeled `careful-review` (map: reviewers.md § Sensitive areas) are implemented and reviewed autonomously but merged by a human.
+
+**Review contract** (full text: `~/.claude/skills/review/references/findings-contract.md`): every bug finding is adversarially verified by 3 independent Opus verifiers (reviewer agents are pinned to Opus — never the premium session model). **Every CONFIRMED bug gets fixed regardless of severity**; refuted findings are reported with their refutations, never silently dropped; split verdicts get a personal code read whose ruling is recorded in the PR body. Suggestions: **≥99% implemented in the same PR** — deferral only for data-semantics/ADR-worthy changes or session-budget exhaustion (never for bugs), discard only against a written rule, cited. "Listed in the PR body but not fixed" is not a valid outcome.
 
 Tests are mandatory after implementation — unit tests for pure logic (xUnit), integration tests using `WebApplicationFactory` for boundaries (Postgres, Azure Blob, Document AI, Gemini, Stripe webhook, Resend). Frontend tests use Jest/Vitest.
-
-Multi-agent code review runs on every ticket before PR (`/start <n>` Phase 4). **Every bug the reviewers find gets fixed regardless of severity.** Reviewer **suggestions** are triaged three ways before the PR opens — but the first option is the **overwhelming default, target ≥99%**:
-
-1. **Implement in the same PR** — the strong default. Polish, missing test edges, small refactors, ADRs, mid-sized cleanups all land here. Even non-trivial changes are absorbed unless an exception in (2) applies.
-2. **Defer to a follow-up ticket** — **rare**. Permitted only when **(a)** the suggestion strictly requires its own ADR / spec conversation (data-semantics or public-API contract change, or the reviewer explicitly flagged it as deferred-to-later), or **(b)** the 5-hour Claude session budget is approaching its cap with bugs and core suggestions still pending — in which case never defer a `bug`-kind finding. "Bigger refactor" alone is NOT sufficient. The new ticket gets the reviewer's reasoning copied in; the PR body lists the spawned ticket id(s) AND the deferral reason (necessity vs. budget).
-3. **Discard** — only when the suggestion contradicts a project rule (this file, an existing ADR, the ticket's Non-goals). The PR body lists discards with the rule cited.
-
-"Listed in the PR body but not auto-fixed" is no longer a valid outcome. When unsure between implement and defer, **implement**.
 
 Never silently diverge from a ticket's acceptance criteria — update the ticket first.
 
@@ -107,7 +107,7 @@ Bug-fix and latent-issue tickets are indexed in one rolling epic — **[#48 Bug 
 
 - **How a ticket joins**: apply the `bug` label. Any GitHub issue with `bug` (open or closed) is auto-listed in the epic body by `.github/workflows/bugfix-epic-sync.yml` (event-triggered + daily cron).
 - **What counts as `bug`**: a defect, a latent fragility (race/TZ/multi-instance assumption), a correctness/semantic decision needed to resolve wrong behavior, a contract ambiguity producing wrong client behavior. Not a feature, refactor, or test scaffolding.
-- **When deferring a review finding to its own ticket** (per the three-way triage above), apply the `bug` label so the workflow picks it up.
+- **When deferring a review finding to its own ticket**, apply the `bug` label only when the finding itself is defect-class (a bug-kind finding, race, contract ambiguity) — a deferred pure suggestion (refactor, polish) stays `task`.
 - **Crossing off**: closing the ticket (a merged PR with `Closes #N` does this) flips the checkbox to `[x]` on the next workflow run. Re-opening unticks it.
 - **Dual epic membership is fine**: a `bug` ticket can also be listed in another epic (e.g. a launch-blocker tracked in #1). The rolling epic is a discovery index, not an ownership claim.
 
@@ -120,16 +120,16 @@ Other epics today:
 
 ## Slash commands
 
+All defined in the machine-level claude-kit (`~/.claude/skills/`); this repo only adds the overlay (reviewers.md + two personas).
+
 | Command | Purpose |
 |---|---|
-| `/plan <feature>` | Interview → spec → 6-reviewer PM review → approval |
-| `/pm-review` | Re-run PM reviewers on an existing spec |
+| `/plan <feature>` | Interview → spec → automatic PM-panel review (5 core + legal-compliance) → human approval |
+| `/pm-review [path]` | PM panel on an existing spec/proposal, no interview |
 | `/breakdown` | Approved spec → epic + 5–12 ordered child tickets |
-| `/start <n>` | Pick up ticket → implement → tests → 5-agent review → fix bugs → PR |
-| `/review` | Diagnostic 5-agent review on the current branch (no auto-fix) |
-| `/epic-review <n>` | Consolidated review across an epic after merge |
-| `/ticket <description>` | Single ticket creator outside `/breakdown` |
+| `/start <n> [<n> …]` | Autonomous pipeline: implement → tests → verified review → fix everything → PR → gated auto-merge. Multiple numbers = batch mode (fresh subagent per ticket) |
+| `/review` | Diagnostic verified review on the current branch (6 code personas incl. compliance-claims, 3 verifiers per bug; no fixes) |
+| `/epic-review <n>` | Post-merge verified review across an epic; findings become tickets |
+| `/ticket <description>` | Single ticket with duplicate check and label decision trees |
 | `/tickets` | List/triage open work |
 | `/adr <title>` | Scaffold a new ADR |
-| `/changelog` | Regenerate `CHANGELOG.md` via git-cliff |
-| `/worklog` | Free-form narrative entry |

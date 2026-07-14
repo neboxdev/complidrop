@@ -37,4 +37,14 @@
     <InternalsVisibleTo Include="CompliDrop.Api.Tests" />
   </ItemGroup>
 
+  <!-- Regulatory rule data (SCHEMA §1): the versioned JSON rule files are compiled into the assembly as
+       embedded resources so they travel with the API and are loaded/validated via EmbeddedRuleData. The
+       Remove guards keep the Web SDK's default Content/None globs from also claiming these .json files
+       (which would be a duplicate-item build error). -->
+  <ItemGroup>
+    <EmbeddedResource Include="RuleData\**\*.json" />
+    <Content Remove="RuleData\**\*.json" />
+    <None Remove="RuleData\**\*.json" />
+  </ItemGroup>
+
 </Project>

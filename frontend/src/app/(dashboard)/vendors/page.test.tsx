@@ -30,7 +30,7 @@ const VENDORS = [
     complianceTemplateName: "Default COI",
     documentCount: 3,
     activePortalLinks: 1,
-    coverage: { status: "Covered", missingTypes: [] },
+    coverage: { status: "Covered", missingTypes: [], coveredThrough: null },
   },
 ];
 
@@ -50,7 +50,7 @@ describe("VendorsPage — coverage Status column (#319 FP-074)", () => {
             documentCount: 2,
             activePortalLinks: 0,
             isSample: false,
-            coverage: { status: "Missing", missingTypes: ["insurance", "license"] },
+            coverage: { status: "Missing", missingTypes: ["insurance", "license"], coveredThrough: null },
           },
           {
             id: "v_ok",
@@ -63,7 +63,7 @@ describe("VendorsPage — coverage Status column (#319 FP-074)", () => {
             documentCount: 3,
             activePortalLinks: 0,
             isSample: false,
-            coverage: { status: "Covered", missingTypes: [] },
+            coverage: { status: "Covered", missingTypes: [], coveredThrough: null },
           },
         ]),
       ),
@@ -98,7 +98,7 @@ describe("VendorsPage — sample badge (#238)", () => {
             documentCount: 1,
             activePortalLinks: 0,
             isSample: true,
-            coverage: { status: "Covered", missingTypes: [] },
+            coverage: { status: "Covered", missingTypes: [], coveredThrough: null },
           },
           {
             id: "v_real",
@@ -111,7 +111,7 @@ describe("VendorsPage — sample badge (#238)", () => {
             documentCount: 0,
             activePortalLinks: 0,
             isSample: false,
-            coverage: { status: "NoRequirements", missingTypes: [] },
+            coverage: { status: "NoRequirements", missingTypes: [], coveredThrough: null },
           },
         ]),
       ),
@@ -136,19 +136,19 @@ describe("VendorsPage — dead contact email badge (#340)", () => {
             id: "v_bounced", name: "Bounce LLC", contactEmail: "dead@bounce.test",
             contactPhone: null, category: null, complianceTemplateId: null, complianceTemplateName: null,
             documentCount: 0, activePortalLinks: 0, isSample: false,
-            coverage: { status: "NoRequirements", missingTypes: [] }, contactEmailStatus: "bounced",
+            coverage: { status: "NoRequirements", missingTypes: [], coveredThrough: null }, contactEmailStatus: "bounced",
           },
           {
             id: "v_spam", name: "Spam LLC", contactEmail: "spam@x.test",
             contactPhone: null, category: null, complianceTemplateId: null, complianceTemplateName: null,
             documentCount: 0, activePortalLinks: 0, isSample: false,
-            coverage: { status: "NoRequirements", missingTypes: [] }, contactEmailStatus: "complained",
+            coverage: { status: "NoRequirements", missingTypes: [], coveredThrough: null }, contactEmailStatus: "complained",
           },
           {
             id: "v_ok", name: "Fine LLC", contactEmail: "ok@x.test",
             contactPhone: null, category: null, complianceTemplateId: null, complianceTemplateName: null,
             documentCount: 0, activePortalLinks: 0, isSample: false,
-            coverage: { status: "NoRequirements", missingTypes: [] }, contactEmailStatus: null,
+            coverage: { status: "NoRequirements", missingTypes: [], coveredThrough: null }, contactEmailStatus: null,
           },
         ]),
       ),
@@ -442,7 +442,7 @@ function makeVendorRow(i: number) {
     complianceTemplateName: null,
     documentCount: 0,
     activePortalLinks: 0,
-    coverage: { status: "NoRequirements", missingTypes: [] },
+    coverage: { status: "NoRequirements", missingTypes: [], coveredThrough: null },
   };
 }
 

@@ -1,0 +1,222 @@
+// Texas regulatory obligations — TRANSPORTATION / SHUTTLE (intrastate for-hire). Encoded from
+// docs/rules-research/texas/transportation.md (verified 2026-07-07). The Texas intrastate track: TxDMV
+// registration and the $500k/$5M intrastate insurance tiers attach when operatesIntrastate = true —
+// NOT when "operatesInterstate = false": the 643.002 exemption excuses only carriers operating
+// EXCLUSIVELY in interstate commerce, so a MIXED carrier (both true) owes BOTH layers (CONF-23, v1.2).
+// The Texas CDL implements the federal CDL floor (satisfiesFederal), so the federal CDL is not double-
+// emitted. The intrastate medical certificate is 'probable' (DPS primary sources were down) and defers to
+// the verified federal medical-examiner-certificate in production.
+// KNOWN SCOPE PROXY (recorded, CONF-24): applicability encodes only the passenger-capacity prong of the
+// 548.001 CMV definition; the weight (>26,000 lb), hazmat, school-bus and household-goods prongs have no
+// frozen fact and are out of v1 scope — a heavy (>26,000 lb) vehicle seating 15 or fewer is NOT covered
+// by these gates. Documented in SCHEMA v1 KNOWN LIMITATIONS.
+{
+  "schemaVersion": 1,
+  "localObligations": [
+    "Municipal for-hire / limousine / shuttle & airport ground-transportation permits (vehicles at or below 15 passengers AND under 26,000 lb)",
+    "State vehicle inspection / registration, IFTA fuel tax, IRP apportioned plates"
+  ],
+  "rules": [
+    {
+      "id": "tx-transportation-txdmv-motor-carrier-registration",
+      "obligationRef": "OBL-TX-TRANSPORTATION-001",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["transportation"],
+      "category": "license",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "operatesIntrastate", "op": "eq", "value": true },
+              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 }
+            ]
+          },
+          "obligation": {
+            "name": "TxDMV motor carrier registration (certificate of registration)",
+            "documentType": "license",
+            "documentSubType": "txdmv-motor-carrier",
+            "authority": "Texas Department of Motor Vehicles (TxDMV) — Motor Carrier Division",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Transp. Code 643.051, 643.002, 548.001; 43 TAC ch. 218",
+            "url": "https://texas.public.law/statutes/tex._transp._code_section_643.051",
+            "effectiveDateOfText": "TxDMV Motor Carrier Handbook (May 2025); statute current as displayed",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires an intrastate for-hire motor carrier operating a vehicle designed to transport more than 15 passengers, including the driver (16+), to hold a TxDMV certificate of registration and carry an insurance cab card (Tex. Transp. Code 643.051; 548.001). Some charter operators qualify for a non-expiring certificate; scheduled operators renew annually or biennially.",
+          "userAction": "For an intrastate Texas shuttle seating 16 or more (including the driver), ask for its TxDMV certificate of registration / cab card.",
+          "notes": "KNOWN CADENCE LIMITATION (recorded, CONF-25): charter-bus operators may lawfully hold a NON-EXPIRING certificate, but the charter/scheduled split is a service-type determination with no frozen fact, so the cadence is encoded as renewal - a lawful non-expiring certificate with no printed expiry reads NeedsDocumentInfo (never a wrong verdict, but never Satisfied) pending the charter-definition confirm (dossier Open question 4). Documented in SCHEMA v1 KNOWN LIMITATIONS. Gate is operatesIntrastate=true (v1.2): 643.002 exempts only EXCLUSIVELY-interstate carriers, so a mixed carrier owes this registration too (CONF-23)."
+        }
+      ]
+    },
+    {
+      "id": "tx-transportation-intrastate-insurance-27plus",
+      "obligationRef": "OBL-TX-TRANSPORTATION-002",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["transportation"],
+      "category": "insurance",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "operatesIntrastate", "op": "eq", "value": true },
+              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 27 }
+            ]
+          },
+          "obligation": {
+            "name": "Texas intrastate passenger liability insurance - $5,000,000 (27+ seats)",
+            "documentType": "coi",
+            "documentSubType": "tx-intrastate-passenger-liability",
+            "authority": "Texas Department of Motor Vehicles (TxDMV) — Motor Carrier Division",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "insuranceMinimums": { "kind": "combined-single-limit", "coverageLine": "auto-liability", "perOccurrence": 5000000, "currency": "USD" },
+          "citation": {
+            "section": "43 TAC 218.16(a); Tex. Transp. Code 643.101",
+            "url": "https://www.txdmv.gov/sites/default/files/body-files/Chapter-218-Adopt-2024.pdf",
+            "effectiveDateOfText": "43 TAC 218.16(a), 2024 amendment adopted 12/12/2024",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires an intrastate for-hire carrier whose vehicle is designed to transport 27 or more people, including the driver, to maintain at least $5,000,000 of public-liability insurance, filed on Form E with TxDMV (43 TAC 218.16(a)). A Texas intrastate certificate does not satisfy the separate, higher federal floor for interstate operation.",
+          "userAction": "For an intrastate Texas vehicle seating 27 or more (including the driver), ask for a certificate of insurance showing at least $5,000,000 of public-liability coverage."
+        }
+      ]
+    },
+    {
+      "id": "tx-transportation-intrastate-insurance-16to26",
+      "obligationRef": "OBL-TX-TRANSPORTATION-002",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["transportation"],
+      "category": "insurance",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "operatesIntrastate", "op": "eq", "value": true },
+              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 },
+              { "fact": "maxPassengerSeatingCapacity", "op": "lte", "value": 26 }
+            ]
+          },
+          "obligation": {
+            "name": "Texas intrastate passenger liability insurance - $500,000 (16-26 seats)",
+            "documentType": "coi",
+            "documentSubType": "tx-intrastate-passenger-liability",
+            "authority": "Texas Department of Motor Vehicles (TxDMV) — Motor Carrier Division",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "insuranceMinimums": { "kind": "combined-single-limit", "coverageLine": "auto-liability", "perOccurrence": 500000, "currency": "USD" },
+          "citation": {
+            "section": "43 TAC 218.16(a); Tex. Transp. Code 643.101",
+            "url": "https://www.txdmv.gov/sites/default/files/body-files/Chapter-218-Adopt-2024.pdf",
+            "effectiveDateOfText": "43 TAC 218.16(a), 2024 amendment adopted 12/12/2024",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires an intrastate for-hire carrier whose vehicle is designed to transport more than 15 but fewer than 27 people, including the driver (16-26), to maintain at least $500,000 of public-liability insurance, filed on Form E with TxDMV (43 TAC 218.16(a)). The same vehicle operating interstate is subject to the higher $5,000,000 federal floor.",
+          "userAction": "For an intrastate Texas vehicle seating 16 to 26 (including the driver), ask for a certificate of insurance showing at least $500,000 of public-liability coverage."
+        }
+      ]
+    },
+    {
+      "id": "tx-transportation-cdl-passenger-endorsement",
+      "obligationRef": "OBL-TX-TRANSPORTATION-003",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["transportation"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 }
+            ]
+          },
+          "obligation": {
+            "name": "Texas Commercial Driver's License with Passenger (P) endorsement",
+            "documentType": "certification",
+            "documentSubType": "tx-cdl-passenger",
+            "authority": "Texas Department of Public Safety (DPS)",
+            "perWorker": true
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 96, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Transp. Code 522.011, 522.003, 522.051 (49 CFR 383.5 floor)",
+            "url": "https://texas.public.law/statutes/tex._transp._code_section_522.051",
+            "effectiveDateOfText": "current as displayed",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires the driver of a commercial motor vehicle - a vehicle designed to transport 16 or more passengers, including the driver - to hold a Texas Commercial Driver's License with a Passenger (P) endorsement (Tex. Transp. Code 522.003, 522.011). An original Texas CDL expires about eight years after the driver's next birthday (522.051). The Texas CDL implements the federal CDL requirement, so it is tracked once.",
+          "userAction": "For any 16+-passenger vehicle, ask each Texas driver for a CDL showing the Passenger (P) endorsement.",
+          "satisfiesFederal": ["fed-transportation-cdl-passenger-endorsement"]
+        }
+      ]
+    },
+    {
+      "id": "tx-transportation-intrastate-medical-certificate",
+      "obligationRef": "OBL-TX-TRANSPORTATION-004",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["transportation"],
+      "category": "worker-certification",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "probable",
+          "applicability": {
+            "all": [
+              { "fact": "operatesVehiclesForHire", "op": "eq", "value": true },
+              { "fact": "operatesIntrastate", "op": "eq", "value": true },
+              { "fact": "maxPassengerSeatingCapacity", "op": "gte", "value": 16 }
+            ]
+          },
+          "obligation": {
+            "name": "Intrastate driver medical examiner's certificate (Texas adoption)",
+            "documentType": "certification",
+            "documentSubType": "dot-medical-certificate",
+            "authority": "Texas DPS (adopting FMCSA Part 391)",
+            "perWorker": true
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Transp. Code ch. 644; 37 TAC ch. 4; 49 CFR 391.45(b)",
+            "url": "https://www.govinfo.gov/content/pkg/CFR-2024-title49-vol5/xml/CFR-2024-title49-vol5-sec391-45.xml",
+            "effectiveDateOfText": "federal text current (2024 GPO edition); TX-adoption sections NOT read live (DPS/SPA unreachable) - why this rule is 'probable'",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas adopts the federal physical-qualification standard for intrastate commercial motor vehicle drivers, requiring a current medical examiner's certificate (maximum 24 months), with limited Texas intrastate variances (Tex. Transp. Code ch. 644; 37 TAC ch. 4; 49 CFR 391.45(b)).",
+          "userAction": "For intrastate Texas CDL drivers, ask for each driver's current medical examiner's certificate (valid up to 24 months).",
+          "satisfiesFederal": ["fed-transportation-medical-examiner-certificate"],
+          "notes": "Held at 'probable' because the DPS primary sources (dps.texas.gov, 37 TAC ch. 4) could not be fetched live; the 24-month cadence and med-card obligation are federally verified. In production (verified-only) this rule is filtered out and the verified federal medical-examiner-certificate covers the driver."
+        }
+      ]
+    }
+  ]
+}

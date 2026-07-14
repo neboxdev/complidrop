@@ -1,0 +1,197 @@
+// Texas regulatory obligations — VENUE-ORG (the event venue itself). Encoded from
+// docs/rules-research/texas/venue-org.md (verified 2026-07-07). These are the customer's OWN obligations,
+// scoped to entityTypes venue-org. The WC-elective status finding is carried in the DWC-005 rule's framing;
+// the 406.005 employee coverage-notice duty (which reaches EVERY employer, not just non-subscribers) is its
+// own rule (SPLIT-3, v1.2); the food-establishment permit is 'probable'. The sales & use tax permit
+// (OBL-TX-VENUE-004, canonical here in the dossier) lives in us-tx/cross-cutting.json so its multi-entity
+// scope cannot leak this file's venue-only local pointers (CONF-17). The venue's CFM / food-handler worker
+// credentials live in us-tx/caterer.json, whose two TFER rules are scoped to venue-org as well (UNVER-0).
+{
+  "schemaVersion": 1,
+  "localObligations": [
+    "Certificate of occupancy (city building / permitting dept)",
+    "Fire-marshal inspection / assembly permit / occupant-load posting (local)",
+    "Retail food establishment permit (city / county health dept)",
+    "Temporary food event permit for one-off food events (city / county health dept)",
+    "Certified Food Manager local registration (some city / county jurisdictions)",
+    "Local alcohol certifications on the TABC application (city / county sign-offs)",
+    "Noise / amplified-sound, special-event, parking / valet & sign permits (municipal)"
+  ],
+  "rules": [
+    {
+      "id": "tx-venue-dwc005-nonsubscriber-notice",
+      "obligationRef": "OBL-TX-VENUE-002",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["venue-org"],
+      "category": "filing",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": {
+            "all": [
+              { "fact": "carriesWorkersComp", "op": "eq", "value": false },
+              { "fact": "employeeCount", "op": "gte", "value": 1 }
+            ]
+          },
+          "obligation": {
+            "name": "Non-subscriber notice to DWC (Form DWC-005)",
+            "documentType": "other",
+            "documentSubType": "dwc-005",
+            "authority": "TDI Division of Workers' Compensation (DWC)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "fixed-annual", "anchor": "fixedDate", "fixedDate": { "month": 4, "day": 30 }, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Labor Code 406.004; 28 TAC 110.101; DWC Form-005",
+            "url": "https://www.tdi.texas.gov/forms/dwc/dwc005nocovst.pdf",
+            "effectiveDateOfText": "Form-005 Rev. 01/25; current as displayed 2026-07-07",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Workers' compensation is elective for private Texas employers, but a venue that chooses not to carry coverage (a non-subscriber) with non-exempt employees must file the DWC Form-005 non-subscriber notice - within 30 days of its first hire and again each year between February 1 and April 30 (Tex. Labor Code 406.004; the annual window is stated on the form). Separately, EVERY employer - subscriber or not - owes the 406.005 employee coverage-notice duty, tracked as its own obligation.",
+          "userAction": "If the venue does not carry workers' compensation, confirm it files the annual DWC Form-005 non-subscriber notice (by April 30 each year).",
+          "notes": "Annual filing window opens February 1 and closes April 30; the fixed date models the April 30 deadline. Applicability requires carriesWorkersComp = false (the 406.004 non-subscriber election is what triggers the FORM) AND employeeCount >= 1. The employeeCount leaf approximates the form's 'one or more employees who are NOT EXEMPT from workers' compensation coverage' - exempt classes (certain domestic, farm/ranch workers) are not modeled, which is implausible as a venue's entire workforce (UNVER-2). The 406.005 posting duty is NOT folded here - it reaches every employer and is encoded as tx-venue-wc-coverage-notice (SPLIT-3 corrected the earlier note that wrongly projected 406.004's non-subscriber gate onto 406.005)."
+        }
+      ]
+    },
+    {
+      "id": "tx-venue-wc-coverage-notice",
+      "obligationRef": "OBL-TX-VENUE-003",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["venue-org"],
+      "category": "filing",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "employeeCount", "op": "gte", "value": 1 },
+          "obligation": {
+            "name": "Employee notice of workers' compensation coverage status (posted + at hire)",
+            "documentType": "other",
+            "documentSubType": "tx-wc-coverage-notice",
+            "authority": "TDI Division of Workers' Compensation (DWC)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "one-time", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Labor Code 406.005",
+            "url": "https://www.tdi.texas.gov/wc/act/documents/act81.pdf",
+            "effectiveDateOfText": "Acts 1993, 73rd Leg., ch. 269; amended Acts 2005, 79th Leg., ch. 265, eff. Sept. 1, 2005",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires EVERY employer - whether or not it carries workers' compensation - to tell employees its coverage status: notify each new employee at hire, post the DWC-prescribed coverage-status notice at conspicuous workplace locations (revised whenever the status changes), and notify employees within 15 days when coverage is obtained, terminated, or cancelled (Tex. Labor Code 406.005).",
+          "userAction": "Confirm the venue posts the DWC 'Notice to Employees Concerning Workers' Compensation in Texas' (Notice 6 or Notice 10, matching its coverage status) and gives new hires the coverage notice.",
+          "notes": "Encoded per the dossier ('encodable as a notice on file'): a standing maintain-and-post duty, tracked as a one-time evidence item (the posted notice on record) - there is no periodic filing to the state. The hire-time and 15-day change notices are event-driven and stated in the rationale, not separately tracked. Added in the Pass-5 review (SPLIT-3): the duty reaches every employer with employees, so it cannot live behind the DWC-005 rule's carriesWorkersComp=false gate."
+        }
+      ]
+    },
+    {
+      "id": "tx-venue-franchise-tax-report",
+      "obligationRef": "OBL-TX-VENUE-005",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["venue-org"],
+      "category": "filing",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2024-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "isFranchiseTaxableEntity", "op": "eq", "value": true },
+          "obligation": {
+            "name": "Texas franchise tax annual report",
+            "documentType": "other",
+            "documentSubType": "tx-franchise-report",
+            "authority": "Texas Comptroller of Public Accounts",
+            "perWorker": false
+          },
+          "cadence": { "kind": "fixed-annual", "anchor": "fixedDate", "fixedDate": { "month": 5, "day": 15 }, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Tax Code ch. 171",
+            "url": "https://comptroller.texas.gov/taxes/franchise/",
+            "effectiveDateOfText": "current as displayed 2026-07-07 (report years 2024-2027)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires every taxable entity (LLC, corporation, LP, etc. - not sole proprietorships or natural-person partnerships) to file an annual franchise tax report by May 15; entities at or below the no-tax-due threshold ($2,470,000 for 2024-25, $2,650,000 for 2026-27) owe no tax but must still file the Public or Ownership Information Report (Tex. Tax Code ch. 171).",
+          "userAction": "If the venue is an LLC, corporation, or other taxable entity, confirm it files the Texas franchise tax report (and information report) by May 15 each year.",
+          "notes": "validFrom 2024-01-01: this version describes the 2024+ regime (No-Tax-Due Report eliminated, PIR/OIR-only filing, current thresholds) - it must not assert that content for earlier evaluation dates (UNVER-3)."
+        }
+      ]
+    },
+    {
+      "id": "tx-venue-tabc-retail-permit",
+      "obligationRef": "OBL-TX-VENUE-006",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["venue-org"],
+      "category": "permit",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2021-09-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "servesOrSellsAlcohol", "op": "eq", "value": true },
+          "obligation": {
+            "name": "TABC retail alcohol permit (Mixed Beverage or Wine & Malt Beverage)",
+            "documentType": "license",
+            "documentSubType": "tabc-retail-permit",
+            "authority": "Texas Alcoholic Beverage Commission (TABC)",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "periodMonths": 24, "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Alcoholic Beverage Code chs. 25, 28; 11.09",
+            "url": "https://www.tabc.texas.gov/faqs/tabc-license-permit-faqs/",
+            "effectiveDateOfText": "current as displayed 2026-07-07 (two-year term via HB 1545, 2019)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires a venue that sells or serves alcohol for on-premise consumption to hold the appropriate TABC retail permit - a Mixed Beverage Permit (MB) for distilled spirits, or a Wine and Malt Beverage Retailer's Permit (BG) for beer and wine only. A venue holds one or the other; each expires on its second anniversary (Tex. Alcoholic Beverage Code 11.09).",
+          "userAction": "If the venue serves or sells alcohol, ask for its current TABC permit (MB for spirits, or BG for beer and wine), renewed every two years.",
+          "notes": "The frozen fact set has no distilled-spirits vs beer/wine distinction, so a single TABC retail-permit obligation represents both the MB (OBL-TX-VENUE-006) and BG (OBL-TX-VENUE-007) alternatives. validFrom 2021-09-01: HB 1545's consolidated permits + 2-year terms phased in on renewals from Sept 1, 2021 (UNVER-3)."
+        }
+      ]
+    },
+    {
+      "id": "tx-venue-food-establishment-permit",
+      "obligationRef": "OBL-TX-VENUE-008",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["venue-org"],
+      "category": "permit",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "probable",
+          "applicability": { "fact": "preparesOrServesFood", "op": "eq", "value": true },
+          "obligation": {
+            "name": "Retail food establishment permit (venue)",
+            "documentType": "license",
+            "documentSubType": "tx-food-establishment",
+            "authority": "Texas DSHS or the local city / county health authority",
+            "perWorker": false
+          },
+          "cadence": { "kind": "renewal", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Health & Safety Code ch. 437; 25 TAC ch. 228",
+            "url": "https://www.dshs.texas.gov/retail-food-establishments/statutes-laws-retail-food-establishments",
+            "effectiveDateOfText": "TFER 2021 edition (current ruleset)",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "A venue that prepares, stores, or serves food to the public must hold a retail food establishment permit from the health authority with jurisdiction - usually the local city or county health department, with the state DSHS as the fallback where no local authority exists (Tex. Health & Safety Code ch. 437; Texas Food Establishment Rules). Check your local health department.",
+          "userAction": "If the venue prepares or serves food itself, ask for its retail food establishment permit (usually issued locally).",
+          "notes": "Held at 'probable' because no primary operative sentence could be fetched (DSHS pages returned 403). The reliable finding is that this permit is usually LOCAL; the renewal term (annual vs biennial) varies by authority, so no fixed periodMonths is encoded."
+        }
+      ]
+    }
+  ]
+}

@@ -233,6 +233,26 @@ public sealed class AuthEndpointsTests(IntegrationTestFixture fixture) : Integra
     }
 
     [Fact]
+    public async Task Me_reports_the_corrected_checklists_feature_flag()
+    {
+        // The additive features object (#416, ADR 0036 Amendment 3) is how the SPA learns whether
+        // the gated rules-page surfaces (the liquor add-menu option, the additional-insured nudge)
+        // may render. The shared test host pins TemplateCorrections:Enabled=true (see
+        // CustomWebApplicationFactory), so the flag surfaces TRUE here; the flag-OFF value is
+        // pinned end-to-end by TemplateCorrectionsFlagTests against an ISOLATED database — booting
+        // a flag-off host on the shared fixture DB would converge its system templates back to the
+        // legacy set and corrupt later seed-dependent tests.
+        var auth = await RegisterAndLoginAsync();
+
+        var resp = await auth.Client.GetAsync("/api/auth/me");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("data").GetProperty("features").GetProperty("correctedChecklists").GetBoolean()
+            .Should().BeTrue("features.correctedChecklists must mirror TemplateCorrections:Enabled (true on the test host)");
+    }
+
+    [Fact]
     public async Task Logout_clears_cookies_so_me_is_then_unauthorized()
     {
         var auth = await RegisterAndLoginAsync();

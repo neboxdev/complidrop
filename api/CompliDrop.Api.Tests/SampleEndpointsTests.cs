@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -238,9 +239,10 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
     [Fact]
     public async Task Sample_certificate_fields_pass_the_seeded_Caterer_checklist()
     {
-        // Pins ADR 0028's contract independent of the LLM: a document carrying the three fields the
-        // generated sample COI is built to yield — GL ≥ $1M, a future expiration, workers-comp present
-        // — evaluated against the REAL seeded Caterer template, grades to Compliant.
+        // Pins ADR 0028's contract independent of the LLM: a document carrying the four fields the
+        // generated sample COI is built to yield — GL ≥ $1M, a future expiration, workers-comp present,
+        // and liquor-liability ≥ $1M (#400) — evaluated against the REAL seeded Caterer template,
+        // grades to Compliant.
         var orgId = Guid.NewGuid();
         var vendorId = Guid.NewGuid();
         var docId = Guid.NewGuid();
@@ -272,7 +274,16 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
                 GeneralLiabilityLimit = 2_000_000m,
                 ExpirationDate = now.AddYears(1),
                 ExtractionFields = JsonSerializer.SerializeToDocument(
-                    new Dictionary<string, object> { ["workers_comp_limit"] = "1000000" }),
+                    new Dictionary<string, object>
+                    {
+                        ["workers_comp_limit"] = "1000000",
+                        // #400: the Caterer checklist now also grades liquor liability (bar / alcohol
+                        // service). DERIVE the injected value from the generator's own liquor constant
+                        // (#416, Finding 3) instead of hardcoding "1000000": lower the generator's liquor
+                        // line below the Caterer floor and this test injects that lower value and grades
+                        // NonCompliant, failing loudly — tying the compliance contract to generator output.
+                        ["liquor_liability_limit"] = SampleLiquorLimitValue(),
+                    }),
                 IsSample = true,
                 CreatedAt = now,
                 UpdatedAt = now,
@@ -288,6 +299,28 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
             .EvaluateForSystemAsync(docId, default);
 
         status.Should().Be(ComplianceStatus.Compliant);
+    }
+
+    [Fact]
+    public async Task Generated_sample_liquor_limit_meets_the_seeded_Caterer_liquor_threshold()
+    {
+        // Anti-drift tie (#416, Finding 3): the sample's Compliant verdict (ADR 0028) requires the
+        // GENERATOR's liquor each-occurrence figure to MEET the SEEDED Caterer liquor min_value. Those two
+        // numbers live in different files (SampleCertificateGenerator vs ComplianceTemplateSeed) and nothing
+        // else pins them together, so lowering the generator constant — or raising the seeded floor — below
+        // the other would silently ship a NonCompliant demo. Read the live seeded threshold and compare it
+        // to the generator's actual emitted value (numeric — the formats differ: "$1,000,000" vs "1000000").
+        await using var db = CreateSystemDb();
+        var caterer = await db.ComplianceTemplates.IgnoreQueryFilters().Include(t => t.Rules)
+            .FirstAsync(t => t.IsSystemTemplate && t.Name == ComplianceTemplateSeed.SampleVendorTemplateName);
+        var liquorRule = caterer.Rules.Single(r =>
+            r.FieldName == "liquor_liability_limit" && r.Operator == "min_value");
+
+        var seedThreshold = decimal.Parse(liquorRule.ExpectedValue!, CultureInfo.InvariantCulture);
+        var generatorLiquor = ParseMoney(SampleCertificateGenerator.LiquorLiabilityEachOccurrence);
+
+        generatorLiquor.Should().BeGreaterThanOrEqualTo(seedThreshold,
+            "the generated sample's liquor limit must clear the seeded Caterer liquor floor, or the one-click demo grades NonCompliant");
     }
 
     // ---- starter-template editability (the #238 templates AC) ----
@@ -331,7 +364,8 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
         clone.IsSystemTemplate.Should().BeFalse();
         clone.OrganizationId.Should().Be(auth.OrgId);
         clone.Rules.Select(r => r.FieldName)
-            .Should().BeEquivalentTo(["general_liability_limit", "expiration_date", "workers_comp_limit"]);
+            .Should().BeEquivalentTo(
+                ["general_liability_limit", "expiration_date", "workers_comp_limit", "liquor_liability_limit"]);
 
         // Editable: the org can rename/update its clone (a system template would 4xx here).
         (await auth.Client.PutAsJsonAsync($"/api/compliance/templates/{cloneId}",
@@ -457,6 +491,15 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
 
     private static Guid DocumentId(JsonElement body) =>
         body.GetProperty("data").GetProperty("documentId").GetGuid();
+
+    // The generator's liquor each-occurrence figure as the plain numeric string the extraction pipeline
+    // yields ("$1,000,000" → "1000000"), so the compliance test DERIVES the injected liquor value from
+    // generator output rather than hardcoding it (#416, Finding 3).
+    private static string SampleLiquorLimitValue() =>
+        ParseMoney(SampleCertificateGenerator.LiquorLiabilityEachOccurrence).ToString(CultureInfo.InvariantCulture);
+
+    private static decimal ParseMoney(string money) =>
+        decimal.Parse(money.Replace("$", "").Replace(",", ""), CultureInfo.InvariantCulture);
 
     private static string? Str(JsonElement e, string prop) =>
         e.TryGetProperty(prop, out var v) && v.ValueKind != JsonValueKind.Null ? v.GetString() : null;

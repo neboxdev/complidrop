@@ -83,7 +83,10 @@ describe("DocumentDetailPage — not-checked explainer (#316 FP-063)", () => {
 
     renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_nochk" } });
 
-    expect(await screen.findByText(/doesn't have a requirements checklist yet/i)).toBeInTheDocument();
+    // Pin the vendor-name + space boundary so the JSX whitespace regression (#358) can't return.
+    expect(
+      await screen.findByText(/Bob's Flowers doesn't have a requirements checklist yet/i),
+    ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /set up bob's flowers requirements/i })).toHaveAttribute(
       "href",
       "/vendors/v9",
@@ -2254,5 +2257,38 @@ describe("DocumentDetailPage — humanized processing error (#193)", () => {
         .getAttribute("href")
         ?.startsWith("mailto:"),
     ).toBe(true);
+  });
+});
+
+describe("DocumentDetailPage — compliance verdict is a today-snapshot (#399)", () => {
+  it("clarifies that the compliance verdict is current as of today, next to the expiration", async () => {
+    // The product can't yet check its own "coverage dates include the event" requirement, so the
+    // verdict must not read as a promise about a future date. The Compliance cell carries an honest
+    // "current as of today" clarifier pointing the reader at the expiration date to check coverage
+    // against the date they actually need it. Copy honesty only — no verdict logic changes.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_compliant",
+            extractionStatus: "Completed",
+            complianceStatus: "Compliant",
+            vendorId: "v2",
+            vendorName: "Caterer Co",
+            expirationDate: "2026-09-30T00:00:00Z",
+            complianceChecks: [],
+          }),
+        ),
+      ),
+      http.get(url("/api/vendors"), () => jsonOk([])),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_compliant" } });
+
+    // The verdict badge still says "Compliant" (verdict semantics unchanged)…
+    expect(await screen.findByTestId("compliance-status")).toHaveTextContent(/compliant/i);
+    // …but it's now framed as a today-snapshot that the reader should check against their own date.
+    expect(screen.getByText(/current as of today/i)).toBeInTheDocument();
+    expect(screen.getByText(/check the expiration date against the date you need coverage/i)).toBeInTheDocument();
   });
 });

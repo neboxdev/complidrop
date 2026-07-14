@@ -13,6 +13,8 @@ internal static class ModelConfiguration
             e.Property(o => o.Industry).HasMaxLength(100);
             e.Property(o => o.CompanySize).HasMaxLength(20);
             e.Property(o => o.TimeZone).HasMaxLength(64).HasDefaultValue("America/New_York");
+            e.Property(o => o.State).HasMaxLength(10);
+            e.Property(o => o.RegulatoryFactsJson).HasColumnType("jsonb");
         });
 
         builder.Entity<User>(e =>
@@ -62,6 +64,8 @@ internal static class ModelConfiguration
             e.Property(v => v.ContactEmail).HasMaxLength(256);
             e.Property(v => v.ContactPhone).HasMaxLength(50);
             e.Property(v => v.Category).HasMaxLength(100);
+            e.Property(v => v.EntityType).HasMaxLength(50);
+            e.Property(v => v.RegulatoryFactsJson).HasColumnType("jsonb");
             e.HasIndex(v => new { v.OrganizationId, v.Name });
             e.HasOne(v => v.Organization).WithMany(o => o.Vendors)
                 .HasForeignKey(v => v.OrganizationId).OnDelete(DeleteBehavior.Cascade);
@@ -162,6 +166,11 @@ internal static class ModelConfiguration
         {
             e.Property(ct => ct.Name).HasMaxLength(200);
             e.Property(ct => ct.Description).HasMaxLength(500);
+            // Seed re-grade durability watermark (#416, ADR 0036 Amendment 2). Store-side default 0 so the
+            // additive migration back-fills every existing row (and the system seed) at 0/0 — an already-
+            // caught-up state that triggers no re-grade on the first boot after deploy.
+            e.Property(ct => ct.RulesRevision).HasDefaultValue(0);
+            e.Property(ct => ct.RegradedThroughRevision).HasDefaultValue(0);
             e.HasOne(ct => ct.Organization).WithMany(o => o.ComplianceTemplates)
                 .HasForeignKey(ct => ct.OrganizationId).OnDelete(DeleteBehavior.Cascade);
             // Recurrence guard for #251: the system-template seed is idempotent BY NAME, but nothing

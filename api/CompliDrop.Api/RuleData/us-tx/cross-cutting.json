@@ -1,0 +1,42 @@
+// Texas CROSS-CUTTING regulatory obligations — rules whose dossier entry is canonical on one entity but
+// whose legal trigger reaches several entity types (CONF-17). Kept in their own file so a shared rule does
+// not leak another entity's file-level localObligations pointers into the CompletenessNotice (CC-7 scoping).
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "tx-venue-sales-use-tax-permit",
+      "obligationRef": "OBL-TX-VENUE-004",
+      "jurisdiction": "us-tx",
+      "entityTypes": ["venue-org", "event-rental", "caterer"],
+      "category": "permit",
+      "basis": "regulatory",
+      "versions": [
+        {
+          "version": 1,
+          "validFrom": "2020-01-01",
+          "validTo": null,
+          "confidence": "verified",
+          "applicability": { "fact": "sellsTaxableGoodsOrServices", "op": "eq", "value": true },
+          "obligation": {
+            "name": "Texas sales and use tax permit",
+            "documentType": "license",
+            "documentSubType": "tx-sales-use-tax",
+            "authority": "Texas Comptroller of Public Accounts",
+            "perWorker": false
+          },
+          "cadence": { "kind": "one-time", "anchor": "documentExpiration", "gracePeriodDays": 0 },
+          "citation": {
+            "section": "Tex. Tax Code 151.201-151.203",
+            "url": "https://comptroller.texas.gov/taxes/sales/faq/permit.php",
+            "effectiveDateOfText": "current as displayed 2026-07-07",
+            "verifiedDate": "2026-07-07"
+          },
+          "rationale": "Texas law requires a person who sells, leases, or rents taxable goods or sells taxable services in Texas to hold a Texas sales and use tax permit from the Comptroller (Tex. Tax Code 151.201-151.203). There is no fee and no fixed expiration - the permit stays valid while the holder is actively engaged in business as a seller.",
+          "userAction": "If this business sells, leases, or rents taxable goods or services (event rentals and catering typically do), confirm it holds a Texas sales and use tax permit (one-time, no renewal).",
+          "notes": "Scoped to venue-org PLUS event-rental and caterer (CONF-17): this is the dossier's cross-cutting canonical entry (venue-org.md OBL-TX-VENUE-004), and the event-rental dossier states outright that renting tables/chairs/tents/inflatables is a taxable activity requiring the permit. The sellsTaxableGoodsOrServices gate still decides applicability per entity. Lives in its own file (no localObligations) so it cannot leak the venue file's local pointers into other entities' reports."
+        }
+      ]
+    }
+  ]
+}
