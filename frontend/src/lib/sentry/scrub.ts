@@ -253,6 +253,17 @@ export function scrubEvent<T extends Event>(event: T): T {
   if (typeof event.message === "string") {
     event.message = redactString(event.message);
   }
+  // transaction: the event's transaction NAME. The App Router instrumentation
+  // names it `parameterizedPathname ?? pathname` — falling back to the RAW
+  // pathname whenever route parameterization fails — and the initial pageload
+  // transaction is always named from raw window.location.pathname (only client
+  // navigations are parameterized). Scope data then copies the name onto error
+  // events unconditionally, so `/portal/{token}` can arrive here verbatim on
+  // BOTH error and transaction events. sanitizeUrl's deterministic path
+  // redaction removes the token regardless of its charset.
+  if (typeof event.transaction === "string") {
+    event.transaction = sanitizeUrl(event.transaction);
+  }
   // logentry: populated by a parameterized captureMessage — its interpolated
   // params are exactly the dynamic data most likely to carry an email / id.
   if (event.logentry) {
@@ -316,6 +327,14 @@ export function scrubEvent<T extends Event>(event: T): T {
       0,
       new WeakSet(),
     ) as typeof event.contexts;
+    // The trace context's `data` bag is root-span data (`url` / `http.url` …).
+    // Give its URL-valued keys the same path sanitization breadcrumb/span data
+    // gets: the mild net above is entropy-blind by design, so a
+    // `/portal/{token}` URL would otherwise ride through it intact.
+    const trace = event.contexts.trace;
+    if (trace && isPlainRecord(trace.data)) {
+      trace.data = scrubDataRecord(trace.data);
+    }
   }
   if (event.tags) {
     event.tags = redactDeep(
