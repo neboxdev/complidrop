@@ -1,7 +1,7 @@
 import type { Breadcrumb, Event, EventHint } from "@sentry/nextjs";
 
 /**
- * PII / secret scrubber for Sentry events (ADR 0036).
+ * PII / secret scrubber for Sentry events (ADR 0037).
  *
  * CompliDrop handles certificates of insurance, vendor and user data, email
  * addresses, public vendor-portal tokens, and httpOnly auth cookies
@@ -16,7 +16,7 @@ import type { Breadcrumb, Event, EventHint } from "@sentry/nextjs";
  * portal token, an email, and document field text, and asserting every one is
  * removed or redacted.
  *
- * Boundary (see ADR 0036 "Negative"): we control what our own code attaches to
+ * Boundary (see ADR 0037 "Negative"): we control what our own code attaches to
  * Sentry and never hand it raw document field values. The vectors this scrubber
  * closes are the ones the SDK can populate automatically — request bodies,
  * fetch/xhr breadcrumbs (URLs + bodies), headers, cookies, the error message —

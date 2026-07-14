@@ -8,7 +8,7 @@
 // conservative sample rates all live in the shared commonInitOptions so the
 // browser, server, and edge runtimes can never drift. Session Replay is
 // deliberately NOT enabled — a certificate of insurance on screen must never be
-// recorded. See ADR 0036.
+// recorded. See ADR 0037.
 import * as Sentry from "@sentry/nextjs";
 import { commonInitOptions } from "./lib/sentry/options";
 

@@ -1,5 +1,5 @@
 /**
- * Pins the App Router global error boundary (ADR 0036):
+ * Pins the App Router global error boundary (ADR 0037):
  *   1. It reports the technical error to Sentry.
  *   2. The user-facing copy follows the #77 / #254 error-copy policy — it shows
  *      GENERIC_FALLBACK_MESSAGE and NEVER the raw error message / HTTP jargon.

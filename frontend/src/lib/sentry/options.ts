@@ -3,7 +3,7 @@ import { scrubEvent, tagCorrelationId } from "./scrub";
 
 /**
  * Shared `Sentry.init` options for the browser, Node-server, and Edge runtimes
- * (ADR 0036). One source of truth so the PII scrubber, the dev/no-DSN no-op
+ * (ADR 0037). One source of truth so the PII scrubber, the dev/no-DSN no-op
  * gating, and the conservative sample rates can never drift between the three
  * `Sentry.init` call sites (`instrumentation-client.ts` + `instrumentation.ts`).
  *
@@ -78,7 +78,7 @@ export function commonInitOptions(env: Env = process.env) {
     sendDefaultPii: false as const,
     // SDK-level cap on long string fields (the SDK sets no default). Bounds
     // payload size and is a second line of defence behind the scrubber's own
-    // per-string cap for the beforeSend regex passes (ADR 0036).
+    // per-string cap for the beforeSend regex passes (ADR 0037).
     maxValueLength: 8192,
     tracesSampleRate: sampleRate(env.NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE, 0),
     beforeSend,

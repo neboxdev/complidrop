@@ -1,5 +1,5 @@
 /**
- * Pins the Sentry PII / secret scrubber (ADR 0036). CompliDrop handles COIs,
+ * Pins the Sentry PII / secret scrubber (ADR 0037). CompliDrop handles COIs,
  * vendor/user data, emails, public portal tokens, and JWT auth cookies — none
  * of which may leave the browser/server in a Sentry event. These tests feed the
  * scrubber events carrying each of those vectors and assert every one is

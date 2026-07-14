@@ -1,5 +1,5 @@
 /**
- * Pins the source-map graceful-degradation contract (ADR 0036): a build with no
+ * Pins the source-map graceful-degradation contract (ADR 0037): a build with no
  * SENTRY_AUTH_TOKEN must disable upload and still succeed; a build with the token
  * uploads. next.config.ts isn't unit-testable, so the token-gating lives in this
  * pure helper.

@@ -4,7 +4,7 @@ import * as Sentry from "@sentry/nextjs";
 import { useEffect } from "react";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 
-// App Router global error boundary (ADR 0036). Catches render crashes that
+// App Router global error boundary (ADR 0037). Catches render crashes that
 // escape every nested boundary — including a crash in the root layout — so it
 // must render its own <html>/<body> and cannot depend on the app's CSS having
 // loaded (hence inline styles for the critical fallback). Two jobs:

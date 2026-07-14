@@ -1,5 +1,5 @@
 /**
- * Pins the shared Sentry init-option gating (ADR 0036): Sentry must be a
+ * Pins the shared Sentry init-option gating (ADR 0037): Sentry must be a
  * no-op in Development and whenever the DSN is unset, sample rates must stay
  * conservative + env-tunable, and beforeSend must actually run the scrubber and
  * the correlationId tagger.

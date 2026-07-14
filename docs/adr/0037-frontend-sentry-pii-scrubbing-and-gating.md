@@ -1,4 +1,4 @@
-# 0036. Frontend Sentry: PII scrubbing, sampling, and dev gating
+# 0037. Frontend Sentry: PII scrubbing, sampling, and dev gating
 
 - **Status:** accepted
 - **Date:** 2026-06-25

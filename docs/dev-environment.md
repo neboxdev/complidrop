@@ -59,7 +59,7 @@ skipped with a warning instead of delivered. **Do not add a Resend key to dev se
 
 ### Frontend telemetry is silent in dev too
 
-The frontend's Sentry error monitoring ([ADR 0036](adr/0036-frontend-sentry-pii-scrubbing-and-gating.md))
+The frontend's Sentry error monitoring ([ADR 0037](adr/0037-frontend-sentry-pii-scrubbing-and-gating.md))
 follows the same isolated-by-default posture: it is a no-op unless `NEXT_PUBLIC_SENTRY_DSN` is set
 **and** `NODE_ENV=production`. Leave `NEXT_PUBLIC_SENTRY_DSN` unset in dev (the `next dev` server is
 `development` anyway, so even a stray DSN captures nothing). PostHog is likewise gated on

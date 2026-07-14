@@ -5,7 +5,7 @@
 // instrumentation.md.
 //
 // Both runtimes initialise from the SAME shared, PII-scrubbed options
-// (ADR 0036). Next compiles this file once per runtime and resolves
+// (ADR 0037). Next compiles this file once per runtime and resolves
 // `@sentry/nextjs` to the matching node / edge build, so one call site serves
 // both. commonInitOptions makes init a no-op when NEXT_PUBLIC_SENTRY_DSN is
 // unset or NODE_ENV !== production.

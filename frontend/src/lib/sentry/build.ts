@@ -1,7 +1,7 @@
 type Env = Record<string, string | undefined>;
 
 /**
- * Build-time options for `withSentryConfig` (ADR 0036).
+ * Build-time options for `withSentryConfig` (ADR 0037).
  *
  * GRACEFUL DEGRADATION: source-map upload (and the plugin's logs) are gated on
  * `SENTRY_AUTH_TOKEN`. Local builds and any CI job without the secret (the
