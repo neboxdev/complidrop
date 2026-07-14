@@ -6,7 +6,7 @@ const nextConfig: NextConfig = {
   /* config options here */
 };
 
-// Wrap with Sentry's build-time plugin (ADR 0036). This injects the
+// Wrap with Sentry's build-time plugin (ADR 0037). This injects the
 // instrumentation hooks and, when credentials are present, uploads source maps
 // so production stack traces are readable. The token-gated graceful-degradation
 // logic lives in `sentryBuildOptions` so it stays unit-testable (build.test.ts).
