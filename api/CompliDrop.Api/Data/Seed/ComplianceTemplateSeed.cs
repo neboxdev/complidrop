@@ -16,11 +16,13 @@ public static class ComplianceTemplateSeed
 
     /// <summary>
     /// Name of the system venue-type checklist the sample-certificate demo (#238) assigns to its
-    /// sample vendor. The generated sample COI is built to PASS exactly this checklist's rules
-    /// (GL ≥ $1M each-occurrence, expiration date present, workers-comp coverage present, and
-    /// liquor liability ≥ $1M — the Caterer checklist now covers bar / alcohol service, #400), so
-    /// the demo lands a fresh org on a real "Compliant" verdict. Kept here as the single source so
-    /// the seed below and the sample-seed endpoint can never drift on the name.
+    /// sample vendor. The generated sample COI is built to PASS this checklist's rules under BOTH
+    /// gated rule sets (GL ≥ $1M each-occurrence, expiration date present, workers-comp coverage
+    /// present, plus a liquor-liability line ≥ $1M that the corrected #400/#416 set requires and
+    /// the legacy set simply never grades — see <see cref="Configuration.TemplateCorrectionsSettings"/>),
+    /// so the demo lands a fresh org on a real "Compliant" verdict whichever way the flag is set,
+    /// and a pre-flip sample stays valid across a flip. Kept here as the single source so the seed
+    /// below and the sample-seed endpoint can never drift on the name.
     /// </summary>
     internal const string SampleVendorTemplateName = "Caterer";
 
@@ -29,9 +31,21 @@ public static class ComplianceTemplateSeed
     /// (<see cref="InternalsVisibleToAttribute"/>) so harness assertions can pin the exact count
     /// without re-declaring a brittle hand-mirror constant — adding a template here forces the
     /// test to be updated (or, if the count is read indirectly, doesn't break it at all).
+    /// Set-independent: both gated sets install the SAME five template names (the
+    /// TemplateCorrections flag selects rule CONTENT, never the roster — a name that existed in
+    /// only one set would strand or duplicate a live template on a flip).
     /// </summary>
-    internal static int TemplateCount => Templates.Length;
+    internal static int TemplateCount => CorrectedTemplates.Length;
 
+    /// <param name="useCorrectedTemplates">
+    /// Selects WHICH rule set the system templates converge to this boot — the legal gate
+    /// (#416, ADR 0036 Amendment 3), wired from <c>TemplateCorrections:Enabled</c> (default false).
+    /// False = <see cref="LegacyTemplates"/> (the pre-#416 set, byte-exact what main's insert-only
+    /// seeder installed, so a flag-off boot against a main-seeded production database is a byte-level
+    /// no-op); true = <see cref="CorrectedTemplates"/> (the gated §4 correction). Required — every
+    /// caller names the world it runs in; a defaulted value could silently flip a legally-gated
+    /// behavior. See the selection point in the body.
+    /// </param>
     /// <param name="reevaluator">
     /// When supplied, documents graded against a system template whose re-grade WATERMARK is behind
     /// (<see cref="ComplianceTemplate.RulesRevision"/> != <see cref="ComplianceTemplate.RegradedThroughRevision"/>)
@@ -54,6 +68,7 @@ public static class ComplianceTemplateSeed
     /// </param>
     public static async Task EnsureAsync(
         SystemDbContext db,
+        bool useCorrectedTemplates,
         IComplianceCheckService? reevaluator = null,
         ILogger? logger = null,
         CancellationToken ct = default)
@@ -106,11 +121,30 @@ public static class ComplianceTemplateSeed
         // pre-existing documents to re-grade (no vendor could have been assigned a template that did not exist
         // yet), so its watermark is already caught up.
 
+        // ============================== THE LEGAL GATE (#416, ADR 0036 Amendment 3) ==============================
+        // Which rule set is the truth this boot converges to. The §4 corrected set (CorrectedTemplates)
+        // is gated on the attorney/broker sign-off (docs/rule-engine/G1-COUNSEL-BRIEF.md §0) via
+        // TemplateCorrections:Enabled, default OFF:
+        //
+        //   - OFF (production today): converge to LegacyTemplates — byte-exact the set main's insert-only
+        //     seeder installed. Against a main-seeded production database this pass therefore finds NOTHING
+        //     to add / update / delete, changes no description, bumps no RulesRevision, and re-grades
+        //     nothing — a byte-level no-op, which is the merge-safety property that lets the correction
+        //     merge without deploying the legally-gated behavior (pinned by the flag-off no-op test in
+        //     ComplianceTemplateSeedTests).
+        //   - ON (the deferred rollout): converge to the §4 corrected set and fire the durable watermarked
+        //     cross-org re-grade below.
+        //
+        // The flag is REVERSIBLE in both directions: the same convergence machinery walks the live rows to
+        // whichever set is selected (a flip-back deletes the corrected set's extra rules FK-safely, restores
+        // the legacy values/messages, and re-grades via the watermark — no bespoke rollback path).
+        var templates = useCorrectedTemplates ? CorrectedTemplates : LegacyTemplates;
+
         // Ids of live system-template rules this pass REMOVES. Their dependent ComplianceCheck rows must be
         // deleted in the SAME unit of work as the rule removals (the FK-safety block before SaveChanges).
         var removedRuleIds = new List<Guid>();
 
-        foreach (var tpl in Templates)
+        foreach (var tpl in templates)
         {
             if (byName.TryGetValue(tpl.Name, out var live))
             {
@@ -305,9 +339,11 @@ public static class ComplianceTemplateSeed
     // real certificate/document carries were removed (Security's certification expiry,
     // Photographer's photographer-license expiry and E&O, Transportation's CDL-for-every-driver
     // check), and two floors were raised to their federal/insurance minimum (Photographer GL
-    // $500k → $1M, Transportation auto $1M → $1.5M). EnsureAsync CONVERGES the live system rows
-    // to exactly this definition on boot and re-grades the affected documents (ADR 0036).
-    private static readonly TemplateSeed[] Templates =
+    // $500k → $1M, Transportation auto $1M → $1.5M). When TemplateCorrections:Enabled is true,
+    // EnsureAsync CONVERGES the live system rows to exactly this definition on boot and re-grades
+    // the affected documents (ADR 0036); until the G1 sign-off flips that flag, the LegacyTemplates
+    // set below stays active instead (ADR 0036 Amendment 3 — see the selection point in EnsureAsync).
+    private static readonly TemplateSeed[] CorrectedTemplates =
     [
         new(SampleVendorTemplateName,
             "Typical insurance for a food & beverage caterer, including bar / alcohol service.",
@@ -366,6 +402,59 @@ public static class ComplianceTemplateSeed
                 // real photographer document carries, so they were permanent false "Missing"s.
                 new("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000 per occurrence.", 1),
                 new("coi", "expiration_date", "required", null, "Expiration date is required.", 2)
+            ])
+    ];
+
+    // The LEGACY (pre-#416) set — BYTE-EXACT the template definitions main's insert-only seeder
+    // installed (verified against `git show origin/main:api/CompliDrop.Api/Data/Seed/
+    // ComplianceTemplateSeed.cs`). Active while TemplateCorrections:Enabled is false (the default),
+    // so a merged-but-unflipped deploy converges to EXACTLY what is already in the production
+    // database and touches nothing (ADR 0036 Amendment 3 — the merge-safety property).
+    //
+    // DO NOT EDIT these definitions. Any difference from main's set — a message, a sort order, a
+    // description character — would make the flag-off boot "correct" live production rows and
+    // re-grade customer verdicts BEFORE the legal sign-off, the exact thing the gate exists to
+    // prevent. The set is retired wholesale (with the flag) after the G1 sign-off + flip have been
+    // stable; it is never maintained.
+    private static readonly TemplateSeed[] LegacyTemplates =
+    [
+        new(SampleVendorTemplateName,
+            "Typical insurance for a food & beverage caterer.",
+            [
+                new("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000.", 1),
+                new("coi", "expiration_date", "required", null, "Expiration date is required.", 2),
+                new("coi", "workers_comp_limit", "required", null, "Workers comp coverage is required.", 3)
+            ]),
+        new("Event Rental Company",
+            "Coverage for table, tent, and equipment rental vendors.",
+            [
+                // The "names your venue as additional insured" requirement is intentionally
+                // NOT seeded: a venue names ITSELF, so the value is per-tenant — the user adds
+                // it (with their own venue name) after cloning. A one-size placeholder reads
+                // nonsensically. (#192 review.)
+                new("coi", "general_liability_limit", "min_value", "1000000", "General liability must be at least $1,000,000.", 1),
+                new("coi", "expiration_date", "required", null, "Expiration date is required.", 2)
+            ]),
+        new("Security Service",
+            "Licensing for event security and guard services.",
+            [
+                new("license", "license_number", "required", null, "License number is required.", 1),
+                new("license", "expiration_date", "required", null, "License expiration date is required.", 2),
+                new("certification", "expiration_date", "required", null, "Certification expiration date is required.", 3)
+            ]),
+        new("Transportation / Shuttle",
+            "Auto coverage and a CDL for shuttle and transport vendors.",
+            [
+                new("coi", "auto_liability_limit", "min_value", "1000000", "Auto liability must be at least $1,000,000.", 1),
+                new("license", "license_type", "equals", "CDL", "Driver must hold a CDL.", 2),
+                new("license", "expiration_date", "required", null, "License expiration date is required.", 3)
+            ]),
+        new("Photographer / Videographer",
+            "General + professional (E&O) coverage for photo and video vendors.",
+            [
+                new("coi", "general_liability_limit", "min_value", "500000", "General liability must be at least $500,000.", 1),
+                new("coi", "professional_liability_limit", "min_value", "1000000", "Professional liability (E&O) must be at least $1,000,000.", 2),
+                new("license", "expiration_date", "required", null, "Professional license expiration date is required.", 3)
             ])
     ];
 }

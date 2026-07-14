@@ -24,6 +24,13 @@ namespace CompliDrop.Api.Tests;
 /// The system templates are shared across the integration collection (Respawn ignores the
 /// ComplianceTemplates / ComplianceRules tables — see IntegrationTestFixture), so every test that MUTATES
 /// them does so only inside a rolled-back transaction, exactly like SystemTemplateDedupTests.
+///
+/// FLAG WORLDS (#416, ADR 0036 Amendment 3): the §4 corrected set is gated behind
+/// <c>TemplateCorrections:Enabled</c> (prod default OFF). The shared fixture host boots with the flag ON
+/// (see CustomWebApplicationFactory), so the fixture-seeded state IS the corrected set and the convergence
+/// tests below pass <c>useCorrectedTemplates: true</c> explicitly. The flag-OFF world — the merge-safety
+/// no-op against a main-seeded database, the flip-on convergence, and the flip-back reversal — is pinned
+/// by the dedicated tests in the "legal gate" section.
 /// </summary>
 public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
@@ -107,7 +114,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run1 = TxContext(conn))
             {
                 await run1.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run1);
+                await ComplianceTemplateSeed.EnsureAsync(run1, useCorrectedTemplates: true);
             }
 
             (await ScalarAsync(conn, tx, CatererLiquorCountSql)).Should().Be(1, "the reconcile back-fills the missing liquor rule");
@@ -126,7 +133,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run2 = TxContext(conn))
             {
                 await run2.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run2);
+                await ComplianceTemplateSeed.EnsureAsync(run2, useCorrectedTemplates: true);
             }
 
             (await ScalarAsync(conn, tx, CatererLiquorCountSql)).Should().Be(1, "a repeat reconcile adds no duplicate liquor rule");
@@ -234,7 +241,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run = TxContext(conn))
             {
                 await run.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run, reevaluator);
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: true, reevaluator);
             }
 
             (await ScalarAsync(conn, tx, CatererLiquorCountSql))
@@ -358,7 +365,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run = TxContext(conn))
             {
                 await run.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: true, spy);
             }
 
             (await ScalarStringAsync(conn, tx, RuleValueSql("Photographer / Videographer", "general_liability_limit")))
@@ -404,7 +411,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run = TxContext(conn))
             {
                 await run.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: true, spy);
             }
 
             (await ScalarAsync(conn, tx, RuleCountSql("Security Service", "certification", "expiration_date", "required"))).Should().Be(0, "convergence deletes the stale certification rule");
@@ -502,7 +509,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run = TxContext(conn))
             {
                 await run.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run, reevaluator); // must NOT throw 23503
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: true, reevaluator); // must NOT throw 23503
             }
 
             // The E&O rule and its check rows are gone (the rule delete itself proves the checks went with
@@ -542,7 +549,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run = TxContext(conn))
             {
                 await run.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: true, spy);
             }
 
             (await ScalarAsync(conn, tx, RuleCountSql("Security Service", "coi", "expiration_date", "required"))).Should().Be(1, "convergence back-fills the missing COI expiration rule");
@@ -575,7 +582,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run = TxContext(conn))
             {
                 await run.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: true, spy);
             }
 
             (await ScalarStringAsync(conn, tx,
@@ -616,7 +623,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run = TxContext(conn))
             {
                 await run.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: true, spy);
             }
 
             (await ScalarStringAsync(conn, tx,
@@ -654,7 +661,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run = TxContext(conn))
             {
                 await run.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: true, spy);
             }
 
             spy.RegradedTemplateIds.Should().BeEmpty("an already-converged boot re-grades nothing");
@@ -728,7 +735,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run = TxContext(conn))
             {
                 await run.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run, failing);
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: true, failing);
             }
 
             // Convergence committed: the liquor rule is back and the revision bumped 0 → 1...
@@ -752,7 +759,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run2 = TxContext(conn))
             {
                 await run2.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run2, reevaluator);
+                await ComplianceTemplateSeed.EnsureAsync(run2, useCorrectedTemplates: true, reevaluator);
             }
 
             // No rule changed this boot (idempotent convergence), yet the doc HEALS — because the watermark was
@@ -803,7 +810,7 @@ public sealed class ComplianceTemplateSeedTests(IntegrationTestFixture fixture) 
             await using (var run = TxContext(conn))
             {
                 await run.Database.UseTransactionAsync(tx);
-                await ComplianceTemplateSeed.EnsureAsync(run, spy);
+                await ComplianceTemplateSeed.EnsureAsync(run, useCorrectedTemplates: true, spy);
             }
 
             // The tenant rules are byte-for-byte what the venue authored — untouched by convergence.

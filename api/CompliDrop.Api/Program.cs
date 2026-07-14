@@ -55,6 +55,13 @@ builder.Services.AddOptions<RuleEngineSettings>().Bind(builder.Configuration.Get
 builder.Services.AddSingleton(sp =>
     CompliDrop.Api.RuleEngine.RegulatoryRuleCatalog.Create(sp.GetRequiredService<IOptions<RuleEngineSettings>>().Value));
 
+// Template-corrections gate (#416, ADR 0036 Amendment 3): default OFF, same inert-until-cleared
+// posture as the rule engine above. Gates the corrected §4 system-checklist set + its cross-org
+// re-grade (ComplianceTemplateSeed) AND the /api/auth/me `features.correctedChecklists` flag the
+// SPA hides the gated UI behind, pending the G1-COUNSEL-BRIEF §0 attorney/broker sign-off. With
+// the flag off the deployed product must stay behaviorally identical to pre-#416 production.
+builder.Services.AddOptions<TemplateCorrectionsSettings>().Bind(builder.Configuration.GetSection(TemplateCorrectionsSettings.SectionName));
+
 // ============================================================
 // Logging — Serilog JSON sink
 // ============================================================
@@ -464,6 +471,15 @@ using (var scope = app.Services.CreateScope())
         ruleCatalog.RuleSet.Rules.Count,
         string.Join(", ", ruleCatalog.EnabledRuleSets));
 
+    // Template-corrections gate (#416, ADR 0036 Amendment 3): one boot line, mirroring the rule
+    // engine's, so every deploy names which system-checklist set this boot converges to. Disabled
+    // (the default) = the legacy pre-#416 set; stays off until the G1-COUNSEL-BRIEF §0
+    // attorney/broker sign-off clears the corrected set.
+    var templateCorrections = app.Services.GetRequiredService<IOptions<TemplateCorrectionsSettings>>().Value;
+    logger.LogInformation(
+        "Template corrections: {State} (corrected system-checklist set + cross-org re-grade; gated on the G1 legal/insurance sign-off).",
+        templateCorrections.Enabled ? "ENABLED" : "disabled");
+
     // Seed: best-effort system compliance templates, after the schema is guaranteed current.
     var sysDb = scope.ServiceProvider.GetRequiredService<SystemDbContext>();
 
@@ -474,8 +490,10 @@ using (var scope = app.Services.CreateScope())
             // Pass the compliance-check service so a rule back-filled onto a shared system template
             // this boot re-grades the documents graded against it across every org (#400) — the
             // resolved service shares this scope's SystemDbContext, the same instance the seed uses.
+            // The TemplateCorrections flag selects WHICH rule set the seed converges to (legacy vs
+            // the gated §4 corrected set — ADR 0036 Amendment 3, see the boot line above).
             var reevaluator = scope.ServiceProvider.GetRequiredService<IComplianceCheckService>();
-            await ComplianceTemplateSeed.EnsureAsync(sysDb, reevaluator, logger);
+            await ComplianceTemplateSeed.EnsureAsync(sysDb, templateCorrections.Enabled, reevaluator, logger);
             logger.LogInformation("Seed: system compliance templates ensured.");
         }
         else

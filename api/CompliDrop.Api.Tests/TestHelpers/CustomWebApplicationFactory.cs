@@ -44,6 +44,18 @@ public sealed class CustomWebApplicationFactory(
                 ["Cookies:Secure"] = "false",
                 ["Cookies:SameSite"] = "Lax",
                 ["RateLimiting:Enabled"] = "false",
+                // Template corrections ON in the test hosts (#416, ADR 0036 Amendment 3 — prod
+                // default is OFF). Two reasons:
+                //  1. The shared-fixture world runs the gated §4 corrected checklist set so every
+                //     seed-dependent suite exercises the flag-ON behavior; the prod flag-OFF no-op
+                //     posture is pinned explicitly by ComplianceTemplateSeedTests' flag-off
+                //     merge-safety test and the isolated-DB TemplateCorrectionsFlagTests instead.
+                //  2. Correctness of the SHARED test database: several tests boot a SECOND host
+                //     against Fixture.ConnectionString and every boot re-runs the seed — a host
+                //     booting flag-OFF would CONVERGE the shared system templates back to the
+                //     legacy set mid-suite (the flag is reversible by design) and corrupt every
+                //     later seed-dependent test. Only override this against an isolated database.
+                ["TemplateCorrections:Enabled"] = "true",
                 // Stripe webhook signature verification + plan resolution. SecretKey is
                 // explicitly emptied — without this, a developer with `Stripe:SecretKey` in
                 // user-secrets would have it leak into the test host (configuration ordering:
