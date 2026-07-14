@@ -368,6 +368,105 @@ describe("scrubEvent — review-hardening vectors (#356)", () => {
   });
 });
 
+describe("scrubEvent — transaction name, trace data, header URLs (#356 re-review)", () => {
+  // 17 chars: deliberately NOT caught by the opaque-token net (32+), nor by the
+  // email/JWT/Bearer/SSN patterns — ONLY sanitizeUrl's deterministic
+  // /portal/{token} path redaction removes it, so these tests discriminate the
+  // sanitizeUrl call sites from the pre-existing redactPiiText/redactString ones.
+  const PORTAL_TOKEN = "PORTALTOKEN123abc";
+
+  it("sanitizes the portal token out of an error event's transaction name", () => {
+    // The App Router instrumentation names the transaction
+    // `parameterizedPathname ?? pathname` (raw pathname when parameterization
+    // fails) and scope data copies it onto error events unconditionally.
+    const e = {
+      transaction: `/portal/${PORTAL_TOKEN}`,
+      exception: { values: [{ type: "Error", value: "boom" }] },
+    } as unknown as Event;
+    const out = scrubEvent(e);
+    expect(out.transaction).toBe(`/portal/${REDACTED}`);
+    expect(out.transaction).not.toContain(PORTAL_TOKEN);
+  });
+
+  it("sanitizes the portal token out of a pageload transaction event's name", () => {
+    // The INITIAL pageload transaction is named from raw
+    // window.location.pathname (only client navigations are parameterized), so
+    // with a non-zero traces rate the raw /portal/{token} would ship as the name.
+    const e = {
+      type: "transaction",
+      transaction: `/portal/${PORTAL_TOKEN}`,
+    } as unknown as Event;
+    const out = scrubEvent(e);
+    expect(out.transaction).toBe(`/portal/${REDACTED}`);
+    expect(out.transaction).not.toContain(PORTAL_TOKEN);
+  });
+
+  it("leaves a parameterized transaction name intact", () => {
+    const e = { transaction: "/documents/[id]" } as unknown as Event;
+    expect(scrubEvent(e).transaction).toBe("/documents/[id]");
+  });
+
+  it("path-sanitizes URL-valued keys in contexts.trace.data (mild net alone is entropy-blind)", () => {
+    const e = {
+      type: "transaction",
+      contexts: {
+        trace: {
+          trace_id: "0123456789abcdef0123456789abcdef",
+          span_id: "abcdef0123456789",
+          data: {
+            url: `https://www.complidrop.com/portal/${PORTAL_TOKEN}?email=v@x.com`,
+            "http.status_code": 200,
+          },
+        },
+      },
+    } as unknown as Event;
+    const trace = (scrubEvent(e).contexts?.trace ?? {}) as Record<string, unknown>;
+    const data = trace.data as Record<string, unknown>;
+    expect(String(data.url)).toContain(`/portal/${REDACTED}`);
+    expect(String(data.url)).not.toContain(PORTAL_TOKEN);
+    expect(String(data.url)).not.toContain("v@x.com");
+    expect(data["http.status_code"]).toBe(200); // benign diagnostic kept
+    // Trace identifiers survive — the reason trace data gets the URL-key
+    // treatment instead of the aggressive free-text net.
+    expect(trace.trace_id).toBe("0123456789abcdef0123456789abcdef");
+  });
+
+  it("sanitizes a portal-token URL in a benign-named header value (Referer)", () => {
+    const e = {
+      request: {
+        headers: {
+          referer: `https://www.complidrop.com/portal/${PORTAL_TOKEN}`,
+          "content-type": "application/json",
+        },
+      },
+    } as unknown as Event;
+    const headers = scrubEvent(e).request?.headers ?? {};
+    expect(String(headers.referer)).toContain(`/portal/${REDACTED}`);
+    expect(String(headers.referer)).not.toContain(PORTAL_TOKEN);
+    expect(headers["content-type"]).toBe("application/json");
+  });
+
+  it("sanitizes each element of an array-valued header (not skipped as non-string)", () => {
+    const e = {
+      request: {
+        headers: {
+          // Node repeats multi-value headers as arrays despite the SDK's
+          // string-only header type.
+          "x-original-referer": [
+            `https://www.complidrop.com/portal/${PORTAL_TOKEN}`,
+            "owner@acme.com",
+          ],
+        },
+      },
+    } as unknown as Event;
+    const headers = scrubEvent(e).request?.headers ?? {};
+    const values = headers["x-original-referer"] as unknown as string[];
+    expect(values[0]).toContain(`/portal/${REDACTED}`);
+    expect(values[0]).not.toContain(PORTAL_TOKEN);
+    expect(values[1]).toBe("[redacted-email]");
+  });
+});
+
 describe("tagCorrelationId", () => {
   it("copies the ApiError correlationId onto an event tag", () => {
     const event: Event = {};
