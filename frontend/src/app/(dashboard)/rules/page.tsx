@@ -4,7 +4,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Check, Pencil, Plus, RotateCw, Trash2, X } from "lucide-react";
+import { AlertTriangle, Check, Pencil, Plus, RotateCw, ShieldCheck, Trash2, X } from "lucide-react";
 import { api, friendly, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import {
   REQUIREMENT_GROUPS,
@@ -20,6 +20,7 @@ import {
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PageTip } from "@/components/onboarding/PageTip";
 import { TIP_IDS } from "@/lib/onboarding";
+import { useMe } from "@/hooks/useAuth";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -76,8 +77,40 @@ type RulePayload = {
   errorMessage: string;
 };
 
+// The catalog entry for the additional-insured requirement (#400). This requirement is
+// deliberately NOT seeded onto the suggested checklists — a venue names ITSELF, so the value is
+// per-tenant — so a venue that clones (say) the Caterer checklist gets GL / expiration / workers'
+// comp / liquor but no additional-insured check. The nudge below points them at it with their own
+// venue name, replacing seeding it with a one-size-fits-nobody placeholder.
+//
+// Kept OPTIONAL (no non-null assertion): every other findRequirementType call site handles
+// `RequirementType | undefined`, and a force-unwrap here meant a renamed/removed catalog entry
+// would turn a localized nudge into a whole-page crash (ChecklistEditor dereferencing undefined).
+// The nudge simply doesn't render when the entry is absent — see the guarded call site below.
+const ADDITIONAL_INSURED = findRequirementType({
+  documentType: "coi",
+  fieldName: "additional_insured",
+  operator: "contains",
+});
+
+// Requirement types whose "+ Add a requirement" MENU entry is gated behind the server's
+// TemplateCorrections flag (`me.features.correctedChecklists`, #416 / ADR 0036 Amendment 3) —
+// hidden until the G1 legal/insurance sign-off flips it. Deliberately a MENU-only cut: the entries
+// stay in the REQUIREMENT_TYPES catalog itself so `findRequirementType` still resolves them, and an
+// EXISTING rule (authored while the flag was on, or after a future flip) keeps rendering its
+// curated sentence + Edit pencil instead of degrading to the raw-token FP-085 fallback.
+const CORRECTIONS_GATED_MENU_KEYS: ReadonlyArray<string> = ["liquor_liability"];
+
 export default function RulesPage() {
   const qc = useQueryClient();
+  // The #416 corrected-checklist surfaces (liquor add-menu option, additional-insured nudge) are
+  // gated on the server flag carried by the me-payload (ADR 0036 Amendment 3). Strict `=== true`
+  // so a loading/undefined me defaults to HIDDEN — the safe (flag-off, prod-identical) posture.
+  const { data: me } = useMe();
+  // Optional-chain THROUGH features, not just me: during a rolling deploy a fresh JS bundle can
+  // receive a me-payload from an old backend instance that predates the additive `features` field.
+  // The gate must fall back to hidden (the safe default), never crash the page (pass-3 review).
+  const correctedChecklistsEnabled = me?.features?.correctedChecklists === true;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // On phones the editor renders ~2 screens below the rail, so tapping a checklist
   // looked like nothing happened (#319 FP-080). Scroll the editor into view on
@@ -324,6 +357,7 @@ export default function RulesPage() {
             <ChecklistEditor
               detail={detail.data}
               vendorCount={all.find((t) => t.id === detail.data!.id)?.vendorCount ?? 0}
+              correctedChecklistsEnabled={correctedChecklistsEnabled}
               onAddRequirement={(rule) =>
                 upsertRule.mutate({
                   templateId: detail.data!.id,
@@ -478,6 +512,7 @@ function NewChecklistForm({
 function ChecklistEditor({
   detail,
   vendorCount,
+  correctedChecklistsEnabled,
   onAddRequirement,
   onEditRequirement,
   onRemoveRequirement,
@@ -487,6 +522,8 @@ function ChecklistEditor({
 }: {
   detail: TemplateDetail;
   vendorCount: number;
+  /** Server flag (#416): gates the liquor add-menu option + the additional-insured nudge. */
+  correctedChecklistsEnabled: boolean;
   onAddRequirement: (rule: RulePayload) => void;
   onEditRequirement: (ruleId: string, rule: RulePayload, sortOrder: number) => void;
   onRemoveRequirement: (ruleId: string) => void;
@@ -496,6 +533,20 @@ function ChecklistEditor({
 }) {
   const readOnly = detail.isSystemTemplate;
   const rules = [...detail.rules].sort((a, b) => a.sortOrder - b.sortOrder);
+  // Nudge the additional-insured requirement (#400) only on an EDITABLE checklist that already
+  // governs certificates of insurance but hasn't added the (deliberately-unseeded) additional-
+  // insured check yet — so a venue that cloned a suggested checklist is reminded to name itself.
+  const governsCoi = rules.some((r) => r.documentType === "coi");
+  // Guarded on the catalog entry existing (ADDITIONAL_INSURED is now optional): a
+  // renamed/removed entry degrades to "no nudge", never a crash dereferencing undefined.
+  const hasAdditionalInsured =
+    ADDITIONAL_INSURED != null &&
+    rules.some(
+      (r) =>
+        r.documentType === ADDITIONAL_INSURED.documentType &&
+        r.fieldName === ADDITIONAL_INSURED.fieldName &&
+        r.operator === ADDITIONAL_INSURED.operator,
+    );
 
   return (
     <div className="space-y-4">
@@ -554,9 +605,25 @@ function ChecklistEditor({
             </ul>
           )}
 
-          {!readOnly && <AddRequirement onAdd={onAddRequirement} existingRules={rules} />}
+          {!readOnly && (
+            <AddRequirement
+              onAdd={onAddRequirement}
+              existingRules={rules}
+              correctedChecklistsEnabled={correctedChecklistsEnabled}
+            />
+          )}
         </CardContent>
       </Card>
+
+      {/* The nudge is additionally gated on the #416 server flag (ADR 0036 Amendment 3): it ships
+          merged but stays invisible until the G1 legal sign-off flips correctedChecklists on. */}
+      {correctedChecklistsEnabled &&
+        !readOnly &&
+        governsCoi &&
+        ADDITIONAL_INSURED != null &&
+        !hasAdditionalInsured && (
+          <AdditionalInsuredNudge type={ADDITIONAL_INSURED} onAdd={onAddRequirement} />
+        )}
 
       {rules.length > 0 && <ComplianceSummary name={detail.name} rules={rules} />}
 
@@ -581,6 +648,60 @@ function ChecklistEditor({
           )}
         </p>
       )}
+    </div>
+  );
+}
+
+// The additional-insured nudge (#400). Hoisted to module scope per the react-hooks/static-components
+// rule. "Add it now" expands the SAME value form the add-requirement menu uses, pre-set to the
+// additional-insured requirement, so the venue types its exact legal name and the rule is created
+// through the existing onAdd path. Self-dismisses once the requirement is on the checklist.
+function AdditionalInsuredNudge({
+  type,
+  onAdd,
+}: {
+  type: RequirementType;
+  onAdd: (rule: RulePayload) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (expanded) {
+    return (
+      <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-4">
+        <RequirementValueForm
+          type={type}
+          initialValue={null}
+          submitLabel="Add requirement"
+          onSubmit={(payload) => {
+            onAdd(payload);
+            setExpanded(false);
+          }}
+          onCancel={() => setExpanded(false)}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-sky-200 bg-sky-50/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-start gap-2.5">
+        <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-sky-600" aria-hidden="true" />
+        <div className="min-w-0 text-sm">
+          <p className="font-medium text-sky-900">Add your additional-insured requirement</p>
+          <p className="mt-0.5 text-slate-600">
+            Most venues require vendors to name them as an additional insured on the certificate.
+            Enter your venue&apos;s exact legal name and we&apos;ll check every certificate for it.
+          </p>
+        </div>
+      </div>
+      <Button
+        size="sm"
+        variant="outline"
+        className="shrink-0 self-start sm:self-auto"
+        onClick={() => setExpanded(true)}
+      >
+        <Plus className="mr-1 h-4 w-4" /> Add it now
+      </Button>
     </div>
   );
 }
@@ -704,9 +825,12 @@ function buildPayload(type: RequirementType, rawValue: string): RulePayload {
 function AddRequirement({
   onAdd,
   existingRules,
+  correctedChecklistsEnabled,
 }: {
   onAdd: (rule: RulePayload) => void;
   existingRules: TemplateRule[];
+  /** Server flag (#416): while false, CORRECTIONS_GATED_MENU_KEYS entries are hidden from the menu. */
+  correctedChecklistsEnabled: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [picked, setPicked] = useState<RequirementType | null>(null);
@@ -719,6 +843,11 @@ function AddRequirement({
     existingRules.some(
       (r) => r.documentType === t.documentType && r.fieldName === t.fieldName && r.operator === t.operator,
     );
+
+  // MENU-only flag cut (#416 — see CORRECTIONS_GATED_MENU_KEYS): a gated entry disappears from the
+  // picker while the flag is off, but the catalog keeps it so an existing rule still renders + edits.
+  const isVisible = (t: RequirementType) =>
+    correctedChecklistsEnabled || !CORRECTIONS_GATED_MENU_KEYS.includes(t.key);
 
   if (!open) {
     return (
@@ -758,7 +887,7 @@ function AddRequirement({
         <div key={group}>
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{group}</p>
           <div className="mt-1 space-y-1">
-            {REQUIREMENT_TYPES.filter((t) => t.group === group).map((t) =>
+            {REQUIREMENT_TYPES.filter((t) => t.group === group && isVisible(t)).map((t) =>
               isAdded(t) ? (
                 <div
                   key={t.key}

@@ -12,6 +12,9 @@ on:
       # src/lib/requirements-extraction-contract.test.ts) reads this backend file, so a
       # prompt-side edit (e.g. removing a field the catalog offers) must run frontend tests.
       - "api/CompliDrop.Api/Services/Extraction/ExtractionPrompts.cs"
+      # The same test's reverse direction (seeded rule fields ⊆ catalog, #400) reads the system
+      # template seed, so a seeded-rule edit that orphans a field must run frontend tests too.
+      - "api/CompliDrop.Api/Data/Seed/ComplianceTemplateSeed.cs"
   pull_request:
     paths:
       - "frontend/**"
@@ -19,6 +22,7 @@ on:
       # Root .editorconfig also carries the frontend's TS/TSX indent rules.
       - ".editorconfig"
       - "api/CompliDrop.Api/Services/Extraction/ExtractionPrompts.cs"
+      - "api/CompliDrop.Api/Data/Seed/ComplianceTemplateSeed.cs"
 
 jobs:
   build:

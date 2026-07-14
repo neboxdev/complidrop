@@ -22,9 +22,16 @@ import {
   jsonOk,
   jsonError,
   authedMe,
+  makeMe,
   toastSuccess,
   toastError,
 } from "@/test";
+
+// The #416 gated world (ADR 0036 Amendment 3): the server flag that reveals the corrected-checklist
+// surfaces — the liquor "+ Add a requirement" menu option and the additional-insured nudge. The
+// default `authedMe` fixture carries the flag OFF (the production posture pending the G1 legal
+// sign-off), so tests exercising the gated surfaces arrange this explicitly.
+const correctedChecklistsMe = makeMe({ features: { correctedChecklists: true } });
 
 const EDITABLE = {
   id: "t_user_01",
@@ -509,5 +516,237 @@ describe("RulesPage — FP-081 / FP-082 / FP-083 (Batch E #319)", () => {
     // One truthful sentence PER document type — the engine scopes rules per type.
     expect(await screen.findByText(/each certificate of insurance must prove/i)).toBeInTheDocument();
     expect(screen.getByText(/each license must prove/i)).toBeInTheDocument();
+  });
+});
+
+describe("RulesPage — additional-insured nudge (#400)", () => {
+  // The additional-insured requirement is deliberately UNSEEDED (a venue names itself, a per-tenant
+  // value). The nudge reminds an editable COI checklist to add it — see AdditionalInsuredNudge.
+  const DETAIL_WITH_AI = {
+    ...DETAIL,
+    rules: [
+      ...DETAIL.rules,
+      {
+        id: "r_ai_01",
+        documentType: "coi",
+        fieldName: "additional_insured",
+        operator: "contains",
+        expectedValue: "Riverside Event Hall",
+        errorMessage: "Not named",
+        sortOrder: 2,
+      },
+    ],
+  };
+
+  const LICENSE_ONLY_DETAIL = {
+    ...DETAIL,
+    rules: [
+      {
+        id: "r_lic_01",
+        documentType: "license",
+        fieldName: "license_number",
+        operator: "required",
+        expectedValue: null,
+        errorMessage: null,
+        sortOrder: 1,
+      },
+    ],
+  };
+
+  // A SYSTEM (suggested, read-only) checklist that governs COI and lacks the additional-insured
+  // rule — the exact shape the nudge gate must suppress via its `!readOnly` clause.
+  const SYSTEM_COI_SUMMARY = {
+    id: "t_sys_coi",
+    name: "Caterer",
+    description: "Suggested",
+    isSystemTemplate: true,
+    ruleCount: 1,
+    vendorCount: 0,
+  };
+
+  const SYSTEM_COI_DETAIL = {
+    id: "t_sys_coi",
+    name: "Caterer",
+    description: "Suggested",
+    isSystemTemplate: true,
+    rules: [DETAIL.rules[0]], // coi general_liability, no additional_insured
+  };
+
+  // These all arrange the #416 flag ON (correctedChecklistsMe): the nudge is additionally gated on
+  // the server flag, so the flag-OFF world is pinned separately (the TemplateCorrections gate
+  // describe below) and the ABSENCE assertions here stay attributable to their own clause
+  // (already-added / no-COI / read-only) rather than passing vacuously via the flag.
+  it("shows the nudge on an editable COI checklist that lacks the additional-insured requirement", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL)),
+    );
+    renderWithProviders(<RulesPage />, { auth: correctedChecklistsMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    expect(await screen.findByText(/add your additional-insured requirement/i)).toBeInTheDocument();
+    expect(screen.getByText(/exact legal name/i)).toBeInTheDocument();
+  });
+
+  it("hides the nudge once the additional-insured requirement is on the checklist", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL_WITH_AI)),
+    );
+    renderWithProviders(<RulesPage />, { auth: correctedChecklistsMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    // Wait for the editor to load (the add-requirement control only renders on an editable
+    // checklist), then assert the nudge is absent because the requirement is already present.
+    await screen.findByRole("button", { name: /add a requirement/i });
+    expect(screen.queryByText(/add your additional-insured requirement/i)).toBeNull();
+  });
+
+  it("does not nag a licenses-only checklist that governs no certificates of insurance", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(LICENSE_ONLY_DETAIL)),
+    );
+    renderWithProviders(<RulesPage />, { auth: correctedChecklistsMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    await screen.findByRole("button", { name: /add a requirement/i });
+    expect(screen.queryByText(/add your additional-insured requirement/i)).toBeNull();
+  });
+
+  it("does not nudge on a read-only system checklist preview — the nudge would POST to a read-only template", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([SYSTEM_COI_SUMMARY])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(SYSTEM_COI_DETAIL)),
+    );
+    renderWithProviders(<RulesPage />, { auth: correctedChecklistsMe });
+    // Preview the suggested (system) checklist from the rail.
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    // The read-only editor renders (a system template shows "A suggested starting point" and no
+    // add-requirement control). The nudge is gated on !readOnly, so it must be absent — otherwise
+    // "Add it now" would POST a rule to a read-only system template (line 169 blocks that).
+    await screen.findByText(/a suggested starting point/i);
+    expect(screen.queryByText(/add your additional-insured requirement/i)).toBeNull();
+  });
+
+  it("'Add it now' adds the additional-insured requirement with the typed venue name", async () => {
+    let body: Record<string, unknown> | undefined;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL)),
+      http.post(url("/api/compliance/templates/:id/rules"), async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return jsonOk({ id: "r_ai_new" });
+      }),
+    );
+    renderWithProviders(<RulesPage />, { auth: correctedChecklistsMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    fireEvent.click(await screen.findByRole("button", { name: /add it now/i }));
+    fireEvent.change(screen.getByLabelText(/name to look for/i), {
+      target: { value: "Riverside Event Hall" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^add requirement$/i }));
+
+    await waitFor(() => expect(body).toBeDefined());
+    expect(body).toMatchObject({
+      documentType: "coi",
+      fieldName: "additional_insured",
+      operator: "contains",
+      expectedValue: "Riverside Event Hall",
+    });
+  });
+});
+
+describe("RulesPage — TemplateCorrections gate (#416, ADR 0036 Amendment 3)", () => {
+  // The corrected-checklist surfaces ship merged but INVISIBLE until the server flips
+  // TemplateCorrections:Enabled after the G1 legal/insurance sign-off. `authedMe` carries the
+  // flag OFF (the prod default); `correctedChecklistsMe` is the flipped world. The cut is
+  // deliberately MENU + NUDGE only: the liquor catalog entry itself stays live so an existing
+  // rule keeps its curated sentence + Edit (the FP-085 contract, pinned below).
+  const DETAIL_WITH_LIQUOR = {
+    ...DETAIL,
+    rules: [
+      ...DETAIL.rules,
+      {
+        id: "r_liquor_01",
+        documentType: "coi",
+        fieldName: "liquor_liability_limit",
+        operator: "min_value",
+        expectedValue: "1000000",
+        errorMessage: "Liquor liability too low",
+        sortOrder: 2,
+      },
+    ],
+  };
+
+  it("hides the liquor option from the add-requirement menu while the flag is off", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk({ ...DETAIL, rules: [] })),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    await screen.findByRole("heading", { name: /caterer/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /add a requirement/i }));
+
+    // The menu is open (its ungated Insurance siblings render) but the gated liquor entry is not
+    // offered — a venue can't author the legally-gated requirement before the sign-off.
+    expect(screen.getByRole("button", { name: /general liability — minimum coverage/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /liquor liability/i })).toBeNull();
+    expect(screen.queryByText(/liquor/i)).toBeNull();
+  });
+
+  it("offers the liquor option in the add-requirement menu when the flag is on", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk({ ...DETAIL, rules: [] })),
+    );
+    renderWithProviders(<RulesPage />, { auth: correctedChecklistsMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    await screen.findByRole("heading", { name: /caterer/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /add a requirement/i }));
+
+    expect(screen.getByRole("button", { name: /liquor liability — minimum coverage/i })).toBeInTheDocument();
+  });
+
+  it("hides the additional-insured nudge while the flag is off, even on a COI checklist lacking the requirement", async () => {
+    // DETAIL governs COIs and has no additional-insured rule — every PRE-flag clause of the nudge
+    // gate is satisfied, so an absence here is attributable ONLY to the flag.
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL)),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    await screen.findByRole("button", { name: /add a requirement/i });
+    expect(screen.queryByText(/add your additional-insured requirement/i)).toBeNull();
+  });
+
+  it("still renders an existing liquor rule as its curated sentence with an Edit pencil while the flag is off (FP-085 cut)", async () => {
+    // A liquor rule can exist under a flag-off UI (authored while the flag was on, or after a
+    // future flip-back). The catalog entry deliberately survives the menu cut, so the rule keeps
+    // its curated sentence and Edit path instead of degrading to the raw-token FP-085 fallback.
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL_WITH_LIQUOR)),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    expect(
+      await screen.findByText("Carries at least $1,000,000 in liquor liability coverage"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: /edit requirement: carries at least \$1,000,000 in liquor liability coverage/i,
+      }),
+    ).toBeInTheDocument();
+    // And never the raw machine tokens.
+    expect(screen.queryByText(/liquor_liability_limit|min_value/)).toBeNull();
   });
 });
