@@ -160,6 +160,22 @@ export const REQUIREMENT_TYPES: RequirementType[] = [
     sentence: (v) => `Carries at least ${moneyFromStored(v)} in umbrella / excess coverage`,
     errorMessage: (v) => `Umbrella / excess coverage is below the ${moneyFromStored(v)} you require.`,
   },
+  // Gives the seeded "Caterer" liquor-liability rule a real catalog home (#400) — bar / alcohol
+  // service (dram-shop / social-host) exposure that general liability excludes. Without this the
+  // graded seed rule rendered as a context-free raw-token fallback with no Edit or re-add path
+  // (the FP-085 defect class already fixed for the Security Service certification rule below).
+  {
+    key: "liquor_liability",
+    group: "Insurance",
+    menuLabel: "Liquor liability — minimum coverage",
+    documentType: "coi",
+    fieldName: "liquor_liability_limit",
+    operator: "min_value",
+    valueKind: "money",
+    valueLabel: "Minimum coverage amount",
+    sentence: (v) => `Carries at least ${moneyFromStored(v)} in liquor liability coverage`,
+    errorMessage: (v) => `Liquor liability is below the ${moneyFromStored(v)} you require.`,
+  },
   {
     key: "workers_comp",
     group: "Insurance",

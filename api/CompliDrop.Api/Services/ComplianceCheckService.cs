@@ -45,6 +45,45 @@ public interface IComplianceCheckService
     /// round-trip multiplication this batching exists to remove (#293).
     /// </summary>
     Task ReevaluateForVendorsAsync(IReadOnlyList<Guid> vendorIds, CancellationToken ct);
+
+    /// <summary>
+    /// Re-evaluates every document whose vendor is assigned the given SYSTEM template — ACROSS ALL
+    /// ORGS, against <see cref="SystemDbContext"/> (no tenant filter). The seed-time counterpart to
+    /// the tenant-filtered <see cref="ReevaluateForTemplateAsync"/>: when the startup reconcile
+    /// back-fills a rule onto a SHARED system template, the documents graded against it in every org
+    /// must be re-graded, or a document persisted <see cref="ComplianceStatus.Compliant"/> under the
+    /// OLD rule set silently stays Compliant despite failing the new rule — a false-Compliant verdict
+    /// (#400). Vendors can be assigned a system template directly (the #238 sample vendor is), and
+    /// the seed is the only path that mutates system-template rules (endpoint rule edits are blocked
+    /// on system templates), so nothing else heals this. EXCLUDES sample-demo documents
+    /// (<see cref="Document.IsSample"/>): a pre-#400 sample COI was generated + extracted before
+    /// <c>liquor_liability_limit</c> existed, so re-grading it here (this fan-out never re-extracts)
+    /// would flip a genuinely-<see cref="ComplianceStatus.Compliant"/> demo artifact to
+    /// <see cref="ComplianceStatus.NonCompliant"/> on the next deploy and break the ADR 0028
+    /// one-click-demo contract — it is left untouched (Compliant) and self-heals on clear + recreate.
+    /// Only THIS seed/system fan-out skips samples; the tenant-filtered re-grades
+    /// (<see cref="ReevaluateForTemplateAsync"/> / <see cref="ReevaluateForVendorAsync"/>) still touch
+    /// them on a user-initiated Check-again / rule edit / reassignment. Same batched, best-effort
+    /// machinery as the endpoint fan-out (ADR 0030: each page commits verdict + checks in ONE unit of
+    /// work). Returns a <see cref="RegradeResult"/> (targeted / regraded / failed-page counts, sample docs
+    /// excluded) so the seed can tell a FULLY-successful fan-out from one that caught-and-skipped a page —
+    /// only the former may advance the template's re-grade watermark (#416, ADR 0036 Amendment 2).
+    /// </summary>
+    Task<RegradeResult> ReevaluateForTemplateForSystemAsync(Guid templateId, CancellationToken ct);
+}
+
+/// <summary>
+/// Outcome of a batched re-grade fan-out. <see cref="Targeted"/> is how many documents the predicate
+/// selected; <see cref="Regraded"/> how many were actually re-evaluated and committed; <see cref="FailedPages"/>
+/// how many pages had their <c>SaveChanges</c> caught-and-skipped (the fan-out is best-effort — a failed page is
+/// logged, not thrown, so a shared system-rule mutation that already committed can't be un-done by a re-grade
+/// hiccup). <see cref="AllSucceeded"/> is the durability signal the seed keys on: only a fan-out that skipped NO
+/// page may advance a system template's <c>RegradedThroughRevision</c>, so an interrupted or partially-failed
+/// re-grade re-fires on the next boot until every document catches up (#416, ADR 0036 Amendment 2).
+/// </summary>
+public readonly record struct RegradeResult(int Targeted, int Regraded, int FailedPages)
+{
+    public bool AllSucceeded => FailedPages == 0;
 }
 
 public class ComplianceCheckService(
@@ -70,7 +109,30 @@ public class ComplianceCheckService(
     public Task ReevaluateForTemplateAsync(Guid templateId, CancellationToken ct) =>
         // Tenant-filtered db: only the caller org's documents are touched. The vendor → template
         // link is the join; a doc with no vendor (or a vendor on another template) is excluded.
-        ReevaluateWhereAsync(d => d.Vendor != null && d.Vendor.ComplianceTemplateId == templateId, ct);
+        ReevaluateWhereAsync(db, d => d.Vendor != null && d.Vendor.ComplianceTemplateId == templateId, ct);
+
+    public Task<RegradeResult> ReevaluateForTemplateForSystemAsync(Guid templateId, CancellationToken ct) =>
+        // System context (no tenant filter): re-grade the template's documents across EVERY org.
+        // Same vendor→template predicate as the tenant path above, evaluated against SystemDbContext —
+        // the seed-time fan-out used after the startup reconcile back-fills a rule onto a shared system
+        // template (#400). The Vendor soft-delete filter still applies (SystemDbContext keeps it), so a
+        // deleted vendor's documents are excluded, exactly as on the tenant path.
+        //
+        // ...but EXCLUDE sample-demo documents (!d.IsSample) on THIS seed/system path ONLY. The
+        // one-click sample (ADR 0028, #238) attaches its sample vendor DIRECTLY to the system Caterer
+        // template, and existing sample COIs were generated + extracted BEFORE liquor_liability_limit
+        // existed — so their persisted ExtractionFields carry no such field. This fan-out only re-runs
+        // rule EVALUATION (never re-extraction), so including a pre-#400 sample would flip a genuinely-
+        // Compliant demo artifact to NonCompliant on the very next deploy — a NEW user-visible
+        // regression, for every org holding a sample (incl. the protected "Garden Hall" demo), that the
+        // ticket never asked for and no user action caused. A sample is a labelled, plan-limit-excluded
+        // demo artifact, not a compliance decision about a real vendor: leaving it untouched is
+        // do-no-harm (it was Compliant and stays Compliant), and it self-heals — SampleCertificateGenerator
+        // now emits a liquor-liability line, so clear + recreate regenerates a genuinely-Compliant sample.
+        // Scoped to the seed fan-out ONLY: a user-initiated Check-again / rule edit / reassignment (the
+        // tenant-filtered ReevaluateForTemplateAsync / ReevaluateForVendorAsync[s]) still re-grades a
+        // sample exactly as before.
+        ReevaluateWhereAsync(sysDb, d => d.Vendor != null && d.Vendor.ComplianceTemplateId == templateId && !d.IsSample, ct);
 
     public Task ReevaluateForVendorAsync(Guid vendorId, CancellationToken ct) =>
         // Delegates to the plural so there is a single vendor-membership predicate to maintain.
@@ -82,35 +144,51 @@ public class ComplianceCheckService(
         // Array so Npgsql translates the membership test to `= ANY(@ids)` — one parameter — instead
         // of an IN-list that grows a parameter per vendor.
         var ids = vendorIds.ToArray();
-        return ReevaluateWhereAsync(d => d.VendorId != null && ids.Contains(d.VendorId.Value), ct);
+        return ReevaluateWhereAsync(db, d => d.VendorId != null && ids.Contains(d.VendorId.Value), ct);
     }
 
     // Best-effort fan-out, batched per page (#293). The triggering mutation (rule edit / checklist
-    // assignment / template delete) has already committed before this runs, so a page that fails to
-    // persist is logged and skipped — those documents keep their prior verdict until the nightly
-    // sweep or a manual "Check again", never a 500 that, on the rule-create path, would duplicate the
-    // rule on retry. Cancellation still propagates (a shutdown isn't a per-page failure).
+    // assignment / template delete / seed convergence) has already committed before this runs, so a page
+    // that fails to persist is logged and SKIPPED rather than thrown — never a 500 that, on the rule-create
+    // path, would duplicate the rule on retry. Those documents keep their prior verdict until something
+    // re-fires the re-grade. Cancellation still propagates (a shutdown isn't a per-page failure).
     //
-    // Granularity note: a page commits as a unit (one SaveChanges), so one document that fails to
-    // persist forfeits the re-grade of its WHOLE page (≤ PageSize), not just itself — coarser than
-    // the old per-document loop. Accepted trade-off of batching the writes, and bounded: the one
-    // known write-path failure (oversize check text → 22001) is clamped at the source (#272), so a
-    // realistic page rarely fails, and the sweep heals any page that does.
-    private async Task ReevaluateWhereAsync(Expression<Func<Document, bool>> predicate, CancellationToken ct)
+    // How a skipped page is HEALED depends on the caller — and it is NOT the nightly sweep:
+    // ComplianceSweepBackgroundService only does date-transition ExecuteUpdates (Compliant→Expired etc.);
+    // it never re-runs rule EVALUATION, so it cannot heal a stale rule-verdict. Instead:
+    //   * Tenant-path callers (rule edit / reassignment / Check-again) recover on the next user-initiated
+    //     re-grade of the same document.
+    //   * The SEED/system caller (ReevaluateForTemplateForSystemAsync) recovers DURABLY: this method reports
+    //     FailedPages via the returned RegradeResult, the seed holds that template's re-grade watermark back
+    //     when any page failed, and the next boot re-fires the re-grade until every page lands (#416, ADR
+    //     0036 Amendment 2). That watermark — not the sweep — is what stops a stale verdict surviving an
+    //     interrupted boot.
+    //
+    // Granularity note: a page commits as a unit (one SaveChanges), so one document that fails to persist
+    // forfeits the re-grade of its WHOLE page (≤ PageSize), not just itself — coarser than the old
+    // per-document loop. Accepted trade-off of batching the writes, and bounded: the one known write-path
+    // failure (oversize check text → 22001) is clamped at the source (#272), so a realistic page rarely
+    // fails. Parameterized on the DbContext so the SAME batched fan-out serves both the tenant-filtered path
+    // (AppDbContext — the global query filter scopes it to the caller org) and the cross-org seed path
+    // (SystemDbContext — no tenant filter, #400). Returns a RegradeResult (targeted / actually-regraded /
+    // failed-page counts) so the seed can distinguish a fully-successful fan-out from a partial one.
+    private async Task<RegradeResult> ReevaluateWhereAsync(DbContext context, Expression<Func<Document, bool>> predicate, CancellationToken ct)
     {
         // Snapshot the affected ids first — a cheap key-only projection (no ExtractionFields, no
         // joins) — then re-grade them a page at a time.
-        var docIds = await db.Documents.Where(predicate).Select(d => d.Id).ToListAsync(ct);
-        if (docIds.Count == 0) return;
+        var docIds = await context.Set<Document>().Where(predicate).Select(d => d.Id).ToListAsync(ct);
+        if (docIds.Count == 0) return new RegradeResult(0, 0, 0);
 
         var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
 
+        var regraded = 0;
+        var failedPages = 0;
         foreach (var page in docIds.Chunk(reevaluationPageSize))
         {
             ct.ThrowIfCancellationRequested();
             try
             {
-                var docs = await db.Documents
+                var docs = await context.Set<Document>()
                     .Where(d => page.Contains(d.Id))
                     .Include(d => d.Vendor)
                         .ThenInclude(v => v!.ComplianceTemplate)
@@ -122,10 +200,12 @@ public class ComplianceCheckService(
                     .AsSplitQuery()
                     .ToListAsync(ct);
 
-                await ApplyEvaluationsAsync(docs, nowUtc, ct);
+                await ApplyEvaluationsAsync(context, docs, nowUtc, ct);
+                regraded += docs.Count;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                failedPages++;
                 logger.LogError(ex, "Re-evaluation fan-out failed for a page of {Count} documents", page.Length);
             }
             finally
@@ -134,9 +214,10 @@ public class ComplianceCheckService(
                 // half-applied changes from a failed page so they can't ride along on the next page's
                 // SaveChanges. The triggering mutation already committed on this same context before
                 // the fan-out began, so clearing here cannot lose it.
-                db.ChangeTracker.Clear();
+                context.ChangeTracker.Clear();
             }
         }
+        return new RegradeResult(docIds.Count, regraded, failedPages);
     }
 
     // Applies one page of evaluations as a single round-trip group: one bulk load of the page's
@@ -145,7 +226,7 @@ public class ComplianceCheckService(
     // SaveChanges/transaction as the inserts AND on the audit-interceptor path; because
     // ComplianceCheck has no DeletedAt the interceptor leaves it a hard delete with no audit row,
     // exactly as the prior per-document RemoveRange did.
-    private async Task ApplyEvaluationsAsync(IReadOnlyList<Document> docs, DateTime nowUtc, CancellationToken ct)
+    private async Task ApplyEvaluationsAsync(DbContext context, IReadOnlyList<Document> docs, DateTime nowUtc, CancellationToken ct)
     {
         if (docs.Count == 0) return;
 
@@ -153,26 +234,27 @@ public class ComplianceCheckService(
         foreach (var doc in docs)
             outcomes.Add((doc, ComputeOutcome(doc, nowUtc)));
 
-        // The id set is drawn from the tenant-filtered Documents query above, so this delete over the
-        // (filter-less) ComplianceChecks set cannot reach another org's rows.
+        // The id set is drawn from the Documents query above — tenant-filtered on AppDbContext, or
+        // cross-org BY DESIGN on SystemDbContext (#400) — so this delete over the ComplianceChecks
+        // set is scoped to exactly those documents' check rows, never a broader sweep.
         var clearIds = outcomes.Where(o => o.Outcome.ClearExistingChecks).Select(o => o.Doc.Id).ToArray();
         if (clearIds.Length > 0)
         {
-            var existing = await db.ComplianceChecks
+            var existing = await context.Set<ComplianceCheck>()
                 .Where(c => clearIds.Contains(c.DocumentId))
                 .ToListAsync(ct);
-            db.ComplianceChecks.RemoveRange(existing);
+            context.Set<ComplianceCheck>().RemoveRange(existing);
         }
 
         foreach (var (doc, outcome) in outcomes)
         {
             if (outcome.NewChecks.Count > 0)
-                db.ComplianceChecks.AddRange(outcome.NewChecks);
+                context.Set<ComplianceCheck>().AddRange(outcome.NewChecks);
             doc.ComplianceStatus = outcome.Status;
             doc.UpdatedAt = nowUtc;
         }
 
-        await db.SaveChangesAsync(ct);
+        await context.SaveChangesAsync(ct);
     }
 
     public async Task ApplyEvaluationAsync(DbContext context, Document doc, CancellationToken ct)

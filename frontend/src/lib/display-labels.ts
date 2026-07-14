@@ -53,6 +53,7 @@ const FIELD_LABELS: Readonly<Record<string, string>> = {
   auto_liability_limit: "Auto liability limit",
   umbrella_limit: "Umbrella limit",
   professional_liability_limit: "Professional liability limit",
+  liquor_liability_limit: "Liquor liability limit",
   certificate_holder: "Certificate holder",
   description_of_operations: "Description of operations",
   additional_insured: "Additional insured",

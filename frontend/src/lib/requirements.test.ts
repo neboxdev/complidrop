@@ -90,6 +90,21 @@ describe("requirementSentence (#192)", () => {
     ).toBe("Carries at least $1,000,000 in general liability insurance");
   });
 
+  it("renders the seeded liquor-liability rule as a curated money sentence (#400)", () => {
+    // The Caterer system checklist seeds a graded `liquor_liability_limit` min_value rule
+    // (#400). Without a catalog home it rendered the raw-number fallback ("Liquor liability
+    // limit must be at least 1000000") — this pins the curated "$1,000,000" sentence, exactly
+    // as general_liability above (the FP-085 defect class, fixed for the seeded cert rule too).
+    expect(
+      requirementSentence({
+        documentType: "coi",
+        fieldName: "liquor_liability_limit",
+        operator: "min_value",
+        expectedValue: "1000000",
+      }),
+    ).toBe("Carries at least $1,000,000 in liquor liability coverage");
+  });
+
   it("renders the not-expired rule honestly (no future-date promise)", () => {
     expect(
       requirementSentence({

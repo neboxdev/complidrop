@@ -70,6 +70,7 @@ public static class AuthEndpoints
         IOptions<CookieSettings> cookieOpts,
         IOptions<JwtSettings> jwtOpts,
         IOptions<FrontendSettings> frontendOpts,
+        IOptions<TemplateCorrectionsSettings> templateCorrectionsOpts,
         IEmailService emailService,
         ILogger<EmailVerificationToken> logger,
         IAuditLogger audit,
@@ -173,7 +174,7 @@ public static class AuthEndpoints
 
         return Results.Ok(new
         {
-            data = ToMeResponse(user, org, "free"),
+            data = ToMeResponse(user, org, "free", templateCorrectionsOpts.Value),
             error = (object?)null
         });
     }
@@ -185,6 +186,7 @@ public static class AuthEndpoints
         ITokenService tokens,
         IOptions<CookieSettings> cookieOpts,
         IOptions<JwtSettings> jwtOpts,
+        IOptions<TemplateCorrectionsSettings> templateCorrectionsOpts,
         IAuditLogger audit,
         HttpContext http)
     {
@@ -237,7 +239,7 @@ public static class AuthEndpoints
             organizationIdOverride: user.OrganizationId,
             userIdOverride: user.Id);
 
-        return Results.Ok(new { data = ToMeResponse(user, org, plan), error = (object?)null });
+        return Results.Ok(new { data = ToMeResponse(user, org, plan, templateCorrectionsOpts.Value), error = (object?)null });
     }
 
     private static IResult Logout(
@@ -303,7 +305,8 @@ public static class AuthEndpoints
 
     private static async Task<IResult> Me(
         HttpContext http,
-        SystemDbContext db)
+        SystemDbContext db,
+        IOptions<TemplateCorrectionsSettings> templateCorrectionsOpts)
     {
         var userIdStr = http.User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!Guid.TryParse(userIdStr, out var userId))
@@ -314,7 +317,7 @@ public static class AuthEndpoints
 
         var org = await db.Organizations.FirstAsync(o => o.Id == user.OrganizationId);
         var sub = await db.Subscriptions.FirstOrDefaultAsync(s => s.OrganizationId == user.OrganizationId);
-        return Results.Ok(new { data = ToMeResponse(user, org, sub?.Plan ?? "free"), error = (object?)null });
+        return Results.Ok(new { data = ToMeResponse(user, org, sub?.Plan ?? "free", templateCorrectionsOpts.Value), error = (object?)null });
     }
 
     /// <summary>
@@ -326,7 +329,8 @@ public static class AuthEndpoints
     /// </summary>
     private static async Task<IResult> CompleteOnboarding(
         HttpContext http,
-        AppDbContext db)
+        AppDbContext db,
+        IOptions<TemplateCorrectionsSettings> templateCorrectionsOpts)
     {
         var userIdStr = http.User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!Guid.TryParse(userIdStr, out var userId))
@@ -347,7 +351,7 @@ public static class AuthEndpoints
         }
 
         var sub = await db.Subscriptions.FirstOrDefaultAsync();
-        return Results.Ok(new { data = ToMeResponse(user, org, sub?.Plan ?? "free"), error = (object?)null });
+        return Results.Ok(new { data = ToMeResponse(user, org, sub?.Plan ?? "free", templateCorrectionsOpts.Value), error = (object?)null });
     }
 
     /// <summary>
@@ -491,7 +495,8 @@ public static class AuthEndpoints
     private static async Task<IResult> UpdateOrganization(
         UpdateOrganizationRequest req,
         HttpContext http,
-        AppDbContext db)
+        AppDbContext db,
+        IOptions<TemplateCorrectionsSettings> templateCorrectionsOpts)
     {
         var userIdStr = http.User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!Guid.TryParse(userIdStr, out var userId))
@@ -520,7 +525,7 @@ public static class AuthEndpoints
         var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
         if (user is null) return Error(401, "auth.unauthorized", "Not authenticated.");
         var sub = await db.Subscriptions.FirstOrDefaultAsync();
-        return Results.Ok(new { data = ToMeResponse(user, org, sub?.Plan ?? "free"), error = (object?)null });
+        return Results.Ok(new { data = ToMeResponse(user, org, sub?.Plan ?? "free", templateCorrectionsOpts.Value), error = (object?)null });
     }
 
     // Null guard kept: the previous catch-all also tolerated null input; TimeZones.TryFind
@@ -1109,10 +1114,17 @@ public static class AuthEndpoints
             CookieAuthSetup.BuildHintCookieOptions(cookieCfg, TimeSpan.FromDays(jwt.RefreshExpiryDays)));
     }
 
-    private static AuthMeResponse ToMeResponse(User user, Organization org, string plan) =>
+    // The features object is ADDITIVE (#416, ADR 0036 Amendment 3): correctedChecklists mirrors the
+    // TemplateCorrections:Enabled server flag so the SPA can hide the gated rules-page surfaces
+    // (liquor add-menu option, additional-insured nudge) until the G1 legal sign-off flips it. It
+    // rides EVERY me-shaped payload (me / register / login / complete-onboarding / organization)
+    // because the frontend writes each of those into the same session cache — a payload missing the
+    // field would poison the cache the rules page reads. No existing field, cookie, or token changes.
+    private static AuthMeResponse ToMeResponse(User user, Organization org, string plan, TemplateCorrectionsSettings templateCorrections) =>
         new(user.Id, user.OrganizationId, user.Email, user.FullName, user.Role, plan, org.Name, org.TimeZone,
             EmailVerified: user.EmailVerifiedAt is not null,
-            HasCompletedOnboarding: user.HasCompletedOnboarding);
+            HasCompletedOnboarding: user.HasCompletedOnboarding,
+            Features: new AuthFeatures(CorrectedChecklists: templateCorrections.Enabled));
 
     private static bool IsValidEmail(string? email) =>
         !string.IsNullOrWhiteSpace(email)

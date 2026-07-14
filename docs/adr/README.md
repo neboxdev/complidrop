@@ -43,3 +43,4 @@ Use `/adr <title>` to scaffold a new one.
 - [0033](0033-document-supersession-expired-liability.md) — Document supersession — latest cert per (vendor, type) for the Expired liability
 - [0034](0034-dev-environment-isolation-and-boot-banner.md) — Dev/prod environment isolation, surfaced by a redacted startup banner
 - [0035](0035-standing-cleanup-tooling-gates.md) — Standing cleanup-tooling gates (`dotnet format` + knip)
+- [0036](0036-system-template-seed-convergence.md) — System templates converge to their seed (add/update/delete), tenant clones never; re-grade on change
