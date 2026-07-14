@@ -107,7 +107,10 @@ export default function RulesPage() {
   // gated on the server flag carried by the me-payload (ADR 0036 Amendment 3). Strict `=== true`
   // so a loading/undefined me defaults to HIDDEN — the safe (flag-off, prod-identical) posture.
   const { data: me } = useMe();
-  const correctedChecklistsEnabled = me?.features.correctedChecklists === true;
+  // Optional-chain THROUGH features, not just me: during a rolling deploy a fresh JS bundle can
+  // receive a me-payload from an old backend instance that predates the additive `features` field.
+  // The gate must fall back to hidden (the safe default), never crash the page (pass-3 review).
+  const correctedChecklistsEnabled = me?.features?.correctedChecklists === true;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // On phones the editor renders ~2 screens below the rail, so tapping a checklist
   // looked like nothing happened (#319 FP-080). Scroll the editor into view on
