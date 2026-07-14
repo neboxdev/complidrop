@@ -9,6 +9,13 @@ export type VendorCoverage = {
   status: "NoRequirements" | "Missing" | "ActionNeeded" | "Covered";
   /** Short type nouns ("insurance", "license") for the "Missing: …" label; only set when Missing. */
   missingTypes: string[];
+  /**
+   * Display-only "covered through {date}" horizon (#399): the nearest expiration (UTC-midnight ISO
+   * date) among this vendor's covered docs — the date coverage as a whole lapses, so a manager can
+   * eyeball it against an event date. `Covered` still means "current as of today", not "covered on a
+   * future date". `null` for any non-Covered status, or when Covered with only undated docs.
+   */
+  coveredThrough: string | null;
 };
 
 export type VendorSummary = {

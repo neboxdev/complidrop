@@ -18,6 +18,15 @@ customer. It is written to be uncomfortable rather than reassuring.
 ## 2. Open human gates (nothing here can be closed by code)
 
 ### G1 — Counsel must review the user-facing framing. **Blocking for customer exposure.**
+
+> **Status 2026-07-10: non-attorney research COMPLETE; attorney validation PENDING — the gate stays
+> open.** At the founder's direction (counsel not yet affordable; feature deferred to a later phase),
+> a full legal-research memorandum was prepared: [../G1-LEGAL-RESEARCH.md](../G1-LEGAL-RESEARCH.md)
+> — Texas UPL safe harbor (Tex. Gov't Code §81.101(c), verified live with screenshot evidence in
+> [evidence/g1/](evidence/g1/)), negligent-misrepresentation and DTPA analysis, draft disclaimer +
+> Terms rider, UI/marketing rules, and per-authority verification tiers. Only a licensed attorney
+> can close this gate (memo §VII lists the validation items); the flags stay OFF until then.
+
 This feature changes what the product asserts. Today CompliDrop reads a document
 against **a checklist the customer defined**. This engine tells the customer
 **which laws apply to them**. That is a materially larger reliance and

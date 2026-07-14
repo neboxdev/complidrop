@@ -120,7 +120,8 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             documentType, fieldName, @operator = op, expectedValue, errorMessage = "required", sortOrder = 1,
         });
 
-    private async Task SeedVendorDocAsync(Guid orgId, Guid vendorId, string documentType, ComplianceStatus status)
+    private async Task SeedVendorDocAsync(
+        Guid orgId, Guid vendorId, string documentType, ComplianceStatus status, DateTime? expirationDate = null)
     {
         await using var db = CreateSystemDb();
         var now = DateTime.UtcNow;
@@ -136,6 +137,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             ContentType = "application/pdf",
             DocumentType = documentType,
             ComplianceStatus = status,
+            ExpirationDate = expirationDate,
             ExtractionStatus = ExtractionStatus.Completed,
             CreatedAt = now,
             UpdatedAt = now,
@@ -184,6 +186,97 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         CoverageFor(list, actionV).GetProperty("status").GetString().Should().Be("ActionNeeded");
         CoverageFor(list, expiringV).GetProperty("status").GetString().Should().Be("Covered");
         CoverageFor(list, noReqV).GetProperty("status").GetString().Should().Be("NoRequirements");
+    }
+
+    [Fact]
+    public async Task Covered_vendor_surfaces_the_nearest_expiration_as_its_covered_through_horizon()
+    {
+        // #399: "Covered" means current AS OF TODAY, not covered on a future event date. The rollup
+        // surfaces the nearest expiration among the covered required docs — the date coverage as a
+        // whole lapses — so a venue manager can eyeball it against their event. This is display-only:
+        // it must NOT change which statuses count as Covered (pinned by the assertions below).
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        // Two required document types → "covered through" is the MIN expiry across them.
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        (await AddRuleAsync(auth.Client, template, "license", "license_number", "required")).EnsureSuccessStatusCode();
+
+        var today = DateTime.UtcNow.Date;
+        var nearExpiry = today.AddDays(90);
+        var farExpiry = today.AddDays(200);
+
+        // Dated-covered vendor: both required docs compliant, license expires FIRST (day 90).
+        var datedV = await CreateVendorAsync(auth.Client, "Dated LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, datedV, template)).EnsureSuccessStatusCode();
+        await SeedVendorDocAsync(auth.OrgId, datedV, "coi", ComplianceStatus.Compliant, farExpiry);
+        await SeedVendorDocAsync(auth.OrgId, datedV, "license", ComplianceStatus.Compliant, nearExpiry);
+
+        // Undated-covered vendor: covered, but its docs carry no expiration → no horizon to show.
+        var undatedV = await CreateVendorAsync(auth.Client, "Undated LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, undatedV, template)).EnsureSuccessStatusCode();
+        await SeedVendorDocAsync(auth.OrgId, undatedV, "coi", ComplianceStatus.Compliant, expirationDate: null);
+        await SeedVendorDocAsync(auth.OrgId, undatedV, "license", ComplianceStatus.Compliant, expirationDate: null);
+
+        var list = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+
+        // Covered membership UNCHANGED: both vendors read Covered exactly as before.
+        var dated = CoverageFor(list, datedV);
+        dated.GetProperty("status").GetString().Should().Be("Covered");
+        // The horizon is the NEAREST expiry (license, day 90) — not the later coi (day 200).
+        dated.GetProperty("coveredThrough").GetDateTime().Date.Should().Be(nearExpiry);
+
+        var undated = CoverageFor(list, undatedV);
+        undated.GetProperty("status").GetString().Should().Be("Covered");
+        undated.GetProperty("coveredThrough").ValueKind.Should().Be(JsonValueKind.Null,
+            "a Covered vendor whose docs have no expiration has no 'covered through' date to show");
+
+        // A non-Covered vendor never carries a horizon (it's meaningless there).
+        var missingV = await CreateVendorAsync(auth.Client, "Gaps LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, missingV, template)).EnsureSuccessStatusCode();
+        var list2 = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+        var missing = CoverageFor(list2, missingV);
+        missing.GetProperty("status").GetString().Should().Be("Missing");
+        missing.GetProperty("coveredThrough").ValueKind.Should().Be(JsonValueKind.Null);
+    }
+
+    [Fact]
+    public async Task Covered_vendor_with_a_mix_of_dated_and_undated_docs_keeps_the_dated_horizon()
+    {
+        // #399 regression guard: a Covered vendor whose required docs MIX a dated covered doc with an
+        // undated covered doc must surface the dated doc's expiry as its "covered through" horizon — the
+        // undated doc is SKIPPED, never allowed to reset/null the accumulated horizon. This is the common
+        // production shape (a COI that carries an expiry + a business license that doesn't). The all-dated
+        // (min taken) and all-undated (null) cases are pinned by the test above, but NEITHER exercises a
+        // dated horizon SURVIVING the presence of an undated covered doc — so a fold that nulled the
+        // horizon on encountering an undated doc would pass both yet corrupt this case.
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        // coi is added FIRST (processed first → sets the horizon); license SECOND is covered by an
+        // UNDATED doc that must not null the horizon already set by the coi.
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        (await AddRuleAsync(auth.Client, template, "license", "license_number", "required")).EnsureSuccessStatusCode();
+
+        var today = DateTime.UtcNow.Date;
+        var datedExpiry = today.AddDays(120);
+
+        var mixedV = await CreateVendorAsync(auth.Client, "Mixed LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, mixedV, template)).EnsureSuccessStatusCode();
+        // Dated covered doc (coi, day 120) + undated covered doc (license, no expiration).
+        await SeedVendorDocAsync(auth.OrgId, mixedV, "coi", ComplianceStatus.Compliant, datedExpiry);
+        await SeedVendorDocAsync(auth.OrgId, mixedV, "license", ComplianceStatus.Compliant, expirationDate: null);
+
+        var list = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+
+        var mixed = CoverageFor(list, mixedV);
+        // Still Covered — both required types are covered…
+        mixed.GetProperty("status").GetString().Should().Be("Covered");
+        // …and the horizon is the DATED doc's expiry: the undated license was skipped, not allowed to
+        // null the accumulated horizon. A regression that reset coveredThrough on the undated doc would
+        // yield JSON null here and fail this assertion.
+        mixed.GetProperty("coveredThrough").GetDateTime().Date.Should().Be(datedExpiry);
     }
 
     [Fact]

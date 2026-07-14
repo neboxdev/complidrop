@@ -781,6 +781,10 @@ export default function DocumentDetailPage() {
         <SummaryCell
           label="Compliance"
           value={<ComplianceBadge status={doc.complianceStatus} data-testid="compliance-status" />}
+          // #399: this verdict is a snapshot as of today, not a promise about a future date. Event
+          // work is date-anchored, so point the reader at the expiration date (adjacent cell) to
+          // check coverage against the date they actually need it.
+          hint="Current as of today — check the expiration date against the date you need coverage."
         />
         <SummaryCell label="Expires" value={formatCalendarDate(doc.expirationDate)} />
         <SummaryCell

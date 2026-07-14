@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
+import { formatCalendarDate } from "@/lib/dates";
 import type { VendorCoverage } from "@/hooks/useVendors";
 
 /**
@@ -21,7 +22,16 @@ export function VendorCoverageBadge({
 }) {
   switch (coverage.status) {
     case "Covered":
-      return <Badge className="bg-emerald-100 text-emerald-800 border-transparent">Covered</Badge>;
+      // "Covered" is current as of today, not a promise about a future date (#399). Surfacing the
+      // nearest expiration lets a venue manager eyeball coverage against their event date. A Covered
+      // vendor with only undated docs has no horizon to show, so we fall back to the bare label.
+      return (
+        <Badge className="bg-emerald-100 text-emerald-800 border-transparent">
+          {coverage.coveredThrough
+            ? `Covered through ${formatCalendarDate(coverage.coveredThrough)}`
+            : "Covered"}
+        </Badge>
+      );
     case "ActionNeeded":
       return <Badge className="bg-rose-100 text-rose-700 border-transparent">Action needed</Badge>;
     case "Missing":

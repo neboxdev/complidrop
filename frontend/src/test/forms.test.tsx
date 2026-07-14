@@ -113,7 +113,7 @@ describe("form labels wired via htmlFor + id (#76)", () => {
           portalLinks: [],
           createdAt: "2026-01-01T00:00:00Z",
           updatedAt: "2026-05-26T00:00:00Z",
-          coverage: { status: "NoRequirements", missingTypes: [] },
+          coverage: { status: "NoRequirements", missingTypes: [], coveredThrough: null },
         }),
       ),
       http.get(url("/api/compliance/templates"), () => jsonOk([])),

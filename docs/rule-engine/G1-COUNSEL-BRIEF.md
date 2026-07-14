@@ -115,6 +115,14 @@ its statute in about a minute.
 
 ## 5. What to read (in order, ~45 minutes)
 
+> **UPDATE 2026-07-10:** a full non-attorney legal-research memorandum now exists at
+> [G1-LEGAL-RESEARCH.md](G1-LEGAL-RESEARCH.md) — questions presented, verified Texas authorities
+> (statutes read live; pivotal cases verified against opinion text), competitor-practice survey,
+> a complete draft disclaimer + Terms rider, UI/marketing rules, and a per-authority verification
+> appendix. **Counsel: start there** — your engagement is validation of that memo (its §VII lists
+> the specific open items), which should take ~1–2 hours instead of a research project.
+
+
 1. This brief.
 2. [`RULES-REVIEW.md`](../../RULES-REVIEW.md) — the rule inventory with sources
    and confidence, and the sign-off record.
