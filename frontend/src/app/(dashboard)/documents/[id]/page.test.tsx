@@ -2292,3 +2292,172 @@ describe("DocumentDetailPage — compliance verdict is a today-snapshot (#399)",
     expect(screen.getByText(/check the expiration date against the date you need coverage/i)).toBeInTheDocument();
   });
 });
+
+describe("DocumentDetailPage — pending edits vs. 'Read again' (#363)", () => {
+  // The bug: `edits` was cleared ONLY in saveFields.onSuccess, so a value typed
+  // before a re-read survived it and the next Save silently PUT the stale value
+  // back over the fresh extraction AND the verdict recomputed from it in the same
+  // transaction (ADR 0030). The inputs were also uncontrolled (`defaultValue`) and
+  // keyed on `f.id` — and reextract KEEPS the DocumentField rows — so React never
+  // remounted them and the stale text stayed on screen as if the re-read had
+  // produced it. Every payload below reuses field id "f1" on purpose: that shared
+  // id is the precondition for the display half of the bug.
+  //
+  // No fake timers here — reextract.onSuccess invalidates the detail query, which
+  // drives the refetch deterministically. The Pending→Completed polling transition
+  // itself is already pinned by the "#36 AC #2" block above.
+  const withValue = (value: string, overrides = {}) =>
+    makeDocumentDetail({
+      id: "d_363",
+      extractionStatus: "Completed",
+      complianceStatus: "Compliant",
+      fields: [
+        {
+          id: "f1",
+          fieldName: "expiration_date",
+          fieldValue: value,
+          fieldType: "date",
+          confidence: 0.95,
+          isManuallyEdited: false,
+          originalValue: null,
+        },
+      ],
+      ...overrides,
+    });
+
+  const confirmReadAgain = async () => {
+    fireEvent.click(screen.getByRole("button", { name: /read again/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /read again/i }));
+  };
+
+  it("shows the FRESH re-read value, not the stale typed one, and leaves nothing pending to save", async () => {
+    const seq = sequencedJsonOk(withValue("2026-11-01"), withValue("2027-03-15"));
+    server.use(
+      http.get(url("/api/documents/:id"), () => seq()),
+      http.post(url("/api/documents/:id/reextract"), () => jsonOk<void>(undefined)),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_363" } });
+
+    // Type a correction, then re-read the file and confirm the discard warning.
+    const input = await screen.findByDisplayValue("2026-11-01");
+    fireEvent.change(input, { target: { value: "2025-01-01" } });
+    expect(screen.getByRole("button", { name: /save changes/i })).not.toBeDisabled();
+    await confirmReadAgain();
+
+    // The re-read landed: the input must track the SERVER's fresh value. Before the
+    // fix this still read "2025-01-01" — the uncontrolled DOM value the user typed.
+    await waitFor(() => expect(screen.getByLabelText(/expiration date/i)).toHaveValue("2027-03-15"));
+    expect(screen.queryByDisplayValue("2025-01-01")).toBeNull();
+    // …and the discarded edit is genuinely gone, not merely hidden: nothing pending.
+    expect(screen.getByRole("button", { name: /save changes/i })).toBeDisabled();
+  });
+
+  it("does not smuggle the discarded edit into a LATER save of a different field", async () => {
+    // The data-corruption assertion. After a re-read the user edits some other
+    // field and saves; the stale pre-re-read value must not ride along in that PUT
+    // and overwrite the fresh extraction + its verdict.
+    let putBody: unknown = null;
+    const twoFields = (expiration: string) =>
+      makeDocumentDetail({
+        id: "d_363b",
+        extractionStatus: "Completed",
+        complianceStatus: "Compliant",
+        fields: [
+          {
+            id: "f1",
+            fieldName: "expiration_date",
+            fieldValue: expiration,
+            fieldType: "date",
+            confidence: 0.95,
+            isManuallyEdited: false,
+            originalValue: null,
+          },
+          {
+            id: "f2",
+            fieldName: "policy_number",
+            fieldValue: "POL-1",
+            fieldType: "string",
+            confidence: 0.9,
+            isManuallyEdited: false,
+            originalValue: null,
+          },
+        ],
+      });
+    const seq = sequencedJsonOk(twoFields("2026-11-01"), twoFields("2027-03-15"));
+    server.use(
+      http.get(url("/api/documents/:id"), () => seq()),
+      http.post(url("/api/documents/:id/reextract"), () => jsonOk<void>(undefined)),
+      http.put(url("/api/documents/:id/fields"), async ({ request }) => {
+        putBody = await request.json();
+        return jsonOk<void>(undefined);
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_363b" } });
+
+    fireEvent.change(await screen.findByDisplayValue("2026-11-01"), {
+      target: { value: "2025-01-01" },
+    });
+    await confirmReadAgain();
+    await waitFor(() => expect(screen.getByLabelText(/expiration date/i)).toHaveValue("2027-03-15"));
+
+    // Now edit an unrelated field and save.
+    fireEvent.change(screen.getByLabelText(/policy number/i), { target: { value: "POL-2" } });
+    const save = screen.getByRole("button", { name: /save changes/i });
+    await waitFor(() => expect(save).not.toBeDisabled());
+    fireEvent.click(save);
+
+    await waitFor(() => expect(putBody).not.toBeNull());
+    const sent = (putBody as { fields: { fieldName: string; fieldValue: string }[] }).fields;
+    expect(sent).toEqual([{ fieldName: "policy_number", fieldValue: "POL-2" }]);
+    // Explicitly: the discarded expiration edit is absent from the wire.
+    expect(JSON.stringify(putBody)).not.toContain("2025-01-01");
+    expect(sent.some((f) => f.fieldName === "expiration_date")).toBe(false);
+  });
+
+  it("KEEPS the pending edit when the re-read request itself fails", async () => {
+    // Why the clear lives in onSuccess and not onMutate: a reextract that never
+    // got queued must not cost the user their unsaved correction for nothing.
+    server.use(
+      http.get(url("/api/documents/:id"), () => jsonOk(withValue("2026-11-01"))),
+      http.post(url("/api/documents/:id/reextract"), () =>
+        jsonError("extraction.queue_failed", "Couldn't queue that re-read. Try again.", {
+          status: 500,
+        }),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_363" } });
+
+    fireEvent.change(await screen.findByDisplayValue("2026-11-01"), {
+      target: { value: "2025-01-01" },
+    });
+    await confirmReadAgain();
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    expect(screen.getByLabelText(/expiration date/i)).toHaveValue("2025-01-01");
+    expect(screen.getByRole("button", { name: /save changes/i })).not.toBeDisabled();
+  });
+
+  it("KEEPS the pending edit across 'Check again' (a re-grade never touches field values)", async () => {
+    // Guards the opposite over-correction: recheck re-runs compliance only, so
+    // clearing edits there would throw away work for no reason.
+    server.use(
+      http.get(url("/api/documents/:id"), () => jsonOk(withValue("2026-11-01"))),
+      http.post(url("/api/compliance/check/:id"), () => jsonOk<void>(undefined)),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_363" } });
+
+    fireEvent.change(await screen.findByDisplayValue("2026-11-01"), {
+      target: { value: "2025-01-01" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /check again/i }));
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Re-checking compliance…"));
+    expect(screen.getByLabelText(/expiration date/i)).toHaveValue("2025-01-01");
+    expect(screen.getByRole("button", { name: /save changes/i })).not.toBeDisabled();
+  });
+});

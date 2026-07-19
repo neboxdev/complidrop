@@ -412,6 +412,14 @@ export default function DocumentDetailPage() {
   const reextract = useMutation({
     mutationFn: () => api.post<void>(`/api/documents/${params.id}/reextract`),
     onSuccess: () => {
+      // Drop pending edits: the re-read is now queued, so the confirm dialog's
+      // promise ("replaces the N values you changed") has come true. Without this
+      // the stale pre-re-read value survived in `edits` and the next Save silently
+      // PUT it back over the fresh extraction — and over the compliance verdict
+      // recomputed from it in the same transaction (ADR 0030). Cleared in
+      // onSuccess, NOT onMutate: a reextract POST that fails must not cost the
+      // user their unsaved corrections for nothing. (#363)
+      setEdits({});
       qc.invalidateQueries({ queryKey: ["documents", params.id] });
       toast.success("Reading the file again…");
     },
@@ -505,10 +513,20 @@ export default function DocumentDetailPage() {
   const saveFields = useMutation({
     mutationFn: (fields: { fieldName: string; fieldValue: string }[]) =>
       api.put<void>(`/api/documents/${params.id}/fields`, { fields }),
-    onSuccess: () => {
-      setEdits({});
-      qc.invalidateQueries({ queryKey: ["documents", params.id] });
+    onSuccess: async () => {
       toast.success("Fields updated");
+      // Clear the pending edits only AFTER the refetch settles. The inputs are
+      // controlled now (#363), so dropping `edits` first would fall back to the
+      // still-cached PRE-save server values and flash the user's just-saved text
+      // away until the fresh payload lands. `finally` so a failed refetch can't
+      // strand the edits (and leave Save wrongly enabled). Returning the promise
+      // also keeps the mutation pending — Save stays disabled — until the saved
+      // values are actually on screen.
+      try {
+        await qc.invalidateQueries({ queryKey: ["documents", params.id] });
+      } finally {
+        setEdits({});
+      }
     },
     onError: (err) => {
       // Same shape as reextract above — see that comment for the
@@ -856,10 +874,14 @@ export default function DocumentDetailPage() {
                       <label htmlFor={`manual-${mf.name}`} className="text-xs font-medium tracking-wide text-slate-500">
                         {mf.label}
                       </label>
+                      {/* Controlled for the same reason as the extracted-field inputs
+                          below — these rows have no server value to fall back to, so
+                          they bind to `edits` alone and reset with it. (#363) */}
                       <Input
                         id={`manual-${mf.name}`}
                         type={mf.type}
                         placeholder={mf.placeholder}
+                        value={edits[mf.name] ?? ""}
                         onChange={(e) => setEdits((prev) => ({ ...prev, [mf.name]: e.target.value }))}
                       />
                     </div>
@@ -874,9 +896,16 @@ export default function DocumentDetailPage() {
                   {/* a11y: scope id to the field row so screen readers
                       announce each input with its field-name context (#76). */}
                   <label htmlFor={`docfield-${f.id}`} className="text-xs font-medium tracking-wide text-slate-500">{fieldLabel(f.fieldName)}</label>
+                  {/* Controlled, not defaultValue: reextract KEEPS the DocumentField
+                      rows, so `key={f.id}` is stable and React never remounts these
+                      inputs. Uncontrolled, a stale typed value stayed on screen after
+                      a re-read as if the fresh extraction had produced it. Binding to
+                      `edits[...] ?? server value` makes the display follow the server
+                      the moment polling lands the new values (and makes the reextract
+                      edit-clear above visible instead of silent). (#363) */}
                   <Input
                     id={`docfield-${f.id}`}
-                    defaultValue={f.fieldValue ?? ""}
+                    value={edits[f.fieldName] ?? f.fieldValue ?? ""}
                     className={fieldBorderClass(f.confidence)}
                     onChange={(e) => setEdits((prev) => ({ ...prev, [f.fieldName]: e.target.value }))}
                   />
