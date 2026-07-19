@@ -418,7 +418,21 @@ export default function DocumentDetailPage() {
       // PUT it back over the fresh extraction — and over the compliance verdict
       // recomputed from it in the same transaction (ADR 0030). Cleared in
       // onSuccess, NOT onMutate: a reextract POST that fails must not cost the
-      // user their unsaved corrections for nothing. (#363)
+      // user their unsaved corrections for nothing.
+      //
+      // Note the pre-fix failure was INVISIBLE, not merely confusing:
+      // ExtractionWorker.PersistSuccess RemoveRange-s the DocumentField rows and
+      // re-adds them with fresh Guids, so the re-read remounts these inputs and
+      // they DISPLAY the new values — while `edits` still held the stale one that
+      // Save would send.
+      //
+      // Scope limit (accepted, #363 review): this is trigger-scoped — it discards
+      // edits only for a re-read THIS page fired. A re-extraction started
+      // elsewhere (a second tab, a backend requeue) still leaves the overlay
+      // winning over the newer server value. Closing that needs per-field
+      // base-value reconciliation — tracked in #418 rather than widened here,
+      // because the naive version (clear on every →Completed transition) would
+      // also throw away edits typed during a first-upload extraction.
       setEdits({});
       qc.invalidateQueries({ queryKey: ["documents", params.id] });
       toast.success("Reading the file again…");
@@ -513,19 +527,29 @@ export default function DocumentDetailPage() {
   const saveFields = useMutation({
     mutationFn: (fields: { fieldName: string; fieldValue: string }[]) =>
       api.put<void>(`/api/documents/${params.id}/fields`, { fields }),
-    onSuccess: async () => {
+    onSuccess: async (_data, saved) => {
       toast.success("Fields updated");
-      // Clear the pending edits only AFTER the refetch settles. The inputs are
-      // controlled now (#363), so dropping `edits` first would fall back to the
-      // still-cached PRE-save server values and flash the user's just-saved text
-      // away until the fresh payload lands. `finally` so a failed refetch can't
-      // strand the edits (and leave Save wrongly enabled). Returning the promise
-      // also keeps the mutation pending — Save stays disabled — until the saved
-      // values are actually on screen.
+      // Drop ONLY the field names this PUT actually persisted — not the whole
+      // map. The inputs stay editable while the mutation is in flight, so a
+      // whole-map reset silently discards anything typed into another field
+      // between the click and this callback (and the controlled input visibly
+      // snaps back to the server value). Keying off the mutation's own
+      // variables makes the clear exactly as wide as what was saved. (#363
+      // review — the pre-#363 code had the same over-clear on a shorter fuse.)
+      //
+      // Cleared only AFTER the refetch settles: the inputs are controlled now,
+      // so dropping the keys first would fall back to the still-cached PRE-save
+      // values and flash the user's just-saved text away until the fresh payload
+      // lands. `finally` so a failed refetch can't strand them (leaving Save
+      // wrongly enabled). Awaiting also keeps the mutation pending — Save stays
+      // disabled — until the saved values are actually on screen.
+      const savedNames = new Set(saved.map((f) => f.fieldName));
       try {
         await qc.invalidateQueries({ queryKey: ["documents", params.id] });
       } finally {
-        setEdits({});
+        setEdits((prev) =>
+          Object.fromEntries(Object.entries(prev).filter(([name]) => !savedNames.has(name))),
+        );
       }
     },
     onError: (err) => {
@@ -896,13 +920,16 @@ export default function DocumentDetailPage() {
                   {/* a11y: scope id to the field row so screen readers
                       announce each input with its field-name context (#76). */}
                   <label htmlFor={`docfield-${f.id}`} className="text-xs font-medium tracking-wide text-slate-500">{fieldLabel(f.fieldName)}</label>
-                  {/* Controlled, not defaultValue: reextract KEEPS the DocumentField
-                      rows, so `key={f.id}` is stable and React never remounts these
-                      inputs. Uncontrolled, a stale typed value stayed on screen after
-                      a re-read as if the fresh extraction had produced it. Binding to
-                      `edits[...] ?? server value` makes the display follow the server
-                      the moment polling lands the new values (and makes the reextract
-                      edit-clear above visible instead of silent). (#363) */}
+                  {/* Controlled, not defaultValue: the value on screen must be exactly
+                      the value a Save would send. Uncontrolled, the two could diverge
+                      silently — `edits` is what gets PUT, but the DOM held whatever the
+                      user last typed OR whatever a remount pulled from the server,
+                      depending on whether `f.id` happened to change. (Re-extraction
+                      replaces the rows with new Guids, so it DOES remount; an in-place
+                      refetch — a poll, or the post-save invalidate — does NOT.) Binding
+                      to `edits[...] ?? server value` collapses that to one source of
+                      truth: the overlay wins while an edit is pending, the server shows
+                      through the moment it's cleared. (#363) */}
                   <Input
                     id={`docfield-${f.id}`}
                     value={edits[f.fieldName] ?? f.fieldValue ?? ""}
