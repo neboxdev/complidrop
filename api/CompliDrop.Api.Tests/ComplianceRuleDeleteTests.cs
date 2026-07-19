@@ -376,10 +376,12 @@ public sealed class ComplianceRuleDeleteTests(IntegrationTestFixture fixture) : 
         // #364's central semantic change, pinned. Pre-#364 the re-evaluation ran INSIDE the delete's
         // transaction, so anything it threw rolled the whole delete back and the rule survived. Now
         // the transaction commits first and the fan-out runs after it, so a catastrophic re-grade
-        // failure can no longer resurrect a rule the user deleted. (The real service never throws
-        // out of the fan-out — ReevaluateWhereAsync catches and skips a failed page — so this
-        // exercises a deliberately worse-than-production double; the response status is incidental,
-        // the committed state is the contract.)
+        // failure can no longer resurrect a rule the user deleted.
+        //
+        // The RESPONSE is pinned too: PostCommitRegrade.RunAsync swallows the failure, so the caller
+        // sees the 200 its committed delete earned. Without that the user gets a 500 for a rule that
+        // IS gone, retries, and is met with a 404 — and the shape is production-reachable (the
+        // fan-out's snapshot query and its cancellation both sit outside the per-page catch).
         await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
             builder.ConfigureTestServices(services =>
             {
@@ -416,8 +418,10 @@ public sealed class ComplianceRuleDeleteTests(IntegrationTestFixture fixture) : 
             await db.SaveChangesAsync();
         }
 
-        await client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}");
+        var resp = await client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}");
 
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "the delete committed — a failing post-commit re-grade must not report it as a server error");
         await using var verify = CreateSystemDb();
         (await verify.ComplianceRules.AnyAsync(r => r.Id == s.RuleAId)).Should().BeFalse(
             "the delete committed before the fan-out ran — a failing re-grade must not roll it back");
@@ -465,6 +469,39 @@ public sealed class ComplianceRuleDeleteTests(IntegrationTestFixture fixture) : 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         await using var db = CreateSystemDb();
         (await db.ComplianceRules.AnyAsync(r => r.Id == s.RuleAId)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Deleting_a_never_evaluated_rule_still_regrades_the_templates_documents()
+    {
+        // Pins the EMPTY-documentIds branch of ReevaluateForTemplateOrDocumentsAsync by its EFFECT.
+        // With no ComplianceCheck rows for the rule, DELETE … RETURNING yields nothing and
+        // affectedDocIds is empty — and that branch must delegate to the full template fan-out, NOT
+        // short-circuit. Its sibling ReevaluateForVendorsAsync returns Task.CompletedTask on an empty
+        // list, so "return early when the id list is empty" is exactly the copy-paste regression that
+        // would slip through here: the rule set changed for every document on the checklist whether
+        // or not any of them had been graded against the deleted rule yet.
+        var auth = await RegisterAndLoginAsync();
+        var s = await SeedAsync(auth.OrgId);
+
+        // Never evaluated ⇒ no check rows anywhere for rule A. The document carries a deliberately
+        // stale verdict; with rule A gone the surviving 'required' rule passes, so it must read
+        // Compliant afterwards.
+        await using (var db = CreateSystemDb())
+        {
+            await db.Documents.Where(d => d.Id == s.DocId)
+                .ExecuteUpdateAsync(u => u.SetProperty(d => d.ComplianceStatus, ComplianceStatus.NonCompliant));
+            (await db.ComplianceChecks.CountAsync(c => c.ComplianceRuleId == s.RuleAId)).Should().Be(0,
+                "arrange: the rule must have no check rows, so affectedDocIds comes back empty");
+        }
+
+        var resp = await auth.Client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.SingleAsync(d => d.Id == s.DocId)).ComplianceStatus
+            .Should().Be(ComplianceStatus.Compliant,
+                "an empty affectedDocIds must still fan out over template membership, not short-circuit");
     }
 
     [Fact]

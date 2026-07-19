@@ -101,6 +101,7 @@ public static class ComplianceEndpoints
         IComplianceCheckService checker,
         IAuditLogger audit,
         IHostApplicationLifetime lifetime,
+        ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         var template = await db.ComplianceTemplates.FirstOrDefaultAsync(t => t.Id == id && !t.IsSystemTemplate, ct);
@@ -153,10 +154,14 @@ public static class ComplianceEndpoints
         // are cleared, so each evaluation takes the no-governing-rules path. One batched pass over
         // the whole vendor set rather than a per-vendor loop, so deleting a checklist shared by a
         // large vendor base doesn't pin the request thread with hundreds of serial round-trips (#293).
-        // Not the request's ct, for the reason spelled out in DeleteRule (#364): the template delete
-        // and the assignment clearing have already committed, so a client disconnect must not leave
-        // half the vendor base holding verdicts computed against a checklist that no longer exists.
-        await checker.ReevaluateForVendorsAsync(vendorIds, lifetime.ApplicationStopping);
+        // Routed through PostCommitRegrade.RunAsync (#364) — see there for the token and
+        // failure-swallowing rationale: the template delete and the assignment clearing have already
+        // committed, so neither a client disconnect nor a fan-out failure may leave half the vendor
+        // base holding verdicts computed against a checklist that no longer exists — or 500 a delete
+        // that landed.
+        await PostCommitRegrade.RunAsync(
+            token => checker.ReevaluateForVendorsAsync(vendorIds, token),
+            lifetime, loggerFactory, "template delete");
 
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }
@@ -168,6 +173,7 @@ public static class ComplianceEndpoints
         IComplianceCheckService checker,
         IAuditLogger audit,
         IHostApplicationLifetime lifetime,
+        ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         var template = await db.ComplianceTemplates.Include(t => t.Rules)
@@ -220,12 +226,13 @@ public static class ComplianceEndpoints
         // Re-evaluation fan-out (#257): a rule add/edit changes the verdict for every document whose
         // vendor uses this template. Without this, the rules page saves and the documents keep their
         // stale Compliant/NonCompliant badge until something else happens to re-trigger evaluation.
-        // Not the request's ct, for the reason spelled out in DeleteRule (#364): the rule has already
-        // committed, so a client disconnect must not truncate the re-grade that keeps the persisted
-        // verdicts consistent with it. Worse here than on the delete path — an edit can TIGHTEN a
-        // requirement, so a document left on its pre-edit verdict is a false Compliant, not merely a
-        // stale-strict one.
-        await checker.ReevaluateForTemplateAsync(template.Id, lifetime.ApplicationStopping);
+        // Routed through PostCommitRegrade.RunAsync (#364) — see there for the token and
+        // failure-swallowing rationale. It matters MORE here than on the delete path: an edit can
+        // TIGHTEN a requirement, so a document left on its pre-edit verdict is a genuine false
+        // Compliant, not merely a stale-strict one.
+        await PostCommitRegrade.RunAsync(
+            token => checker.ReevaluateForTemplateAsync(template.Id, token),
+            lifetime, loggerFactory, "rule upsert");
 
         await audit.LogAsync("complianceRule.upserted", nameof(ComplianceRule), rule.Id);
         return Results.Ok(new { data = new { id = rule.Id }, error = (object?)null });
@@ -238,6 +245,7 @@ public static class ComplianceEndpoints
         IComplianceCheckService checker,
         IAuditLogger audit,
         IHostApplicationLifetime lifetime,
+        ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         // Resolve through the tenant-filtered template set, excluding system templates —
@@ -319,15 +327,8 @@ public static class ComplianceEndpoints
         // drop a verdict correction. Foreign ids (possible only via the #273 cross-org
         // assignment state) are filtered out by the tenant filter, exactly as EvaluateAsync did.
         //
-        // TOKEN: deliberately NOT the request's ct. The delete has already committed, so there is
-        // nothing left to roll back, and a client disconnect or proxy timeout mid-fan-out would
-        // otherwise abort the re-grade partway (ReevaluateWhereAsync rethrows cancellation — the
-        // per-page catch excludes OperationCanceledException), stranding an arbitrary suffix of
-        // the population on pre-delete verdicts with no automatic healer. ApplicationStopping
-        // keeps a real shutdown able to interrupt while making the work immune to the caller
-        // hanging up — which matters most in exactly the large-vendor-base case this ticket is
-        // about, where the fan-out runs for seconds and users trained by the old timeouts click
-        // away.
+        // Token handling and failure swallowing live in PostCommitRegrade.RunAsync — read its doc
+        // comment for why this must not ride the request's ct and must not 500 a committed delete.
         //
         // FAILURE POSTURE: the fan-out is still best-effort per page (a page whose SaveChanges
         // fails is logged and skipped), so a persistence failure leaves the rule deleted with
@@ -340,8 +341,9 @@ public static class ComplianceEndpoints
         // this: ComplianceSweepBackgroundService only does date-transition ExecuteUpdates and
         // never re-runs rule evaluation. The healers are the next user-initiated re-grade of the
         // document — "Check again", another rule edit, or a checklist reassignment.
-        await checker.ReevaluateForTemplateOrDocumentsAsync(
-            template.Id, affectedDocIds, lifetime.ApplicationStopping);
+        await PostCommitRegrade.RunAsync(
+            token => checker.ReevaluateForTemplateOrDocumentsAsync(template.Id, affectedDocIds, token),
+            lifetime, loggerFactory, "rule delete");
 
         return Results.Ok(new { data = new { id = ruleId }, error = (object?)null });
     }

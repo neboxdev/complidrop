@@ -212,6 +212,8 @@ public static class VendorEndpoints
         VendorUpsertRequest req,
         AppDbContext db,
         IComplianceCheckService checker,
+        IHostApplicationLifetime lifetime,
+        ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         // Same guard as CreateVendor: a blank name renders an invisible, unclickable row
@@ -235,8 +237,16 @@ public static class VendorEndpoints
         // re-grade this vendor's documents — the vendor page's amber hint promises exactly that.
         // Portal-first onboarding (upload, THEN assign a checklist) otherwise leaves docs stuck at
         // "Awaiting review" forever. Only fan out when the assignment actually changed.
+        //
+        // Routed through PostCommitRegrade.RunAsync (#364) like the three checklist-mutation fan-outs
+        // in ComplianceEndpoints — same post-commit shape, same two hazards. This is the TIGHTEN case
+        // and so the worst of the four: reassigning a vendor from a lax checklist to a stricter one
+        // and then aborting the request left an arbitrary suffix of that vendor's documents on their
+        // pre-reassignment Compliant verdict — a genuine false Compliant, with no automatic healer.
         if (templateChanged)
-            await checker.ReevaluateForVendorAsync(id, ct);
+            await PostCommitRegrade.RunAsync(
+                token => checker.ReevaluateForVendorAsync(id, token),
+                lifetime, loggerFactory, "vendor checklist reassignment");
 
         // Interceptor records "vendor.updated" — no explicit duplicate (#318 FP-043).
         return Results.Ok(new { data = new { id }, error = (object?)null });
