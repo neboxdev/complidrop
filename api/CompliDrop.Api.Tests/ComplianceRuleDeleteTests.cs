@@ -122,6 +122,140 @@ public sealed class ComplianceRuleDeleteTests(IntegrationTestFixture fixture) : 
     }
 
     [Fact]
+    public async Task Deleting_a_rule_regrades_a_document_that_was_never_evaluated_against_it()
+    {
+        // #364 discriminator. Pre-#364 the re-eval list was the DELETE … RETURNING snapshot of
+        // documents that held a check row for THIS rule, so a document on the same checklist that
+        // had never been evaluated carried no check row, never made the list, and kept whatever
+        // stale verdict was stored. The batched post-commit fan-out is scoped to TEMPLATE
+        // MEMBERSHIP instead (the same population UpsertRule re-grades), so it lands.
+        var auth = await RegisterAndLoginAsync();
+        var s = await SeedAsync(auth.OrgId);
+
+        // Only the seeded document is evaluated — so rule A does have a check row and the
+        // cleanup path is genuinely exercised.
+        (await auth.Client.PostAsync($"/api/compliance/check/{s.DocId}", null)).EnsureSuccessStatusCode();
+
+        Guid neverEvaluated;
+        await using (var db = CreateSystemDb())
+        {
+            var seeded = await db.Documents.SingleAsync(d => d.Id == s.DocId);
+            neverEvaluated = Guid.NewGuid();
+            db.Documents.Add(new Document
+            {
+                Id = neverEvaluated, OrganizationId = auth.OrgId, VendorId = seeded.VendorId,
+                OriginalFileName = "never.pdf", BlobStorageUrl = "blob://never", FileSizeBytes = 1,
+                ContentType = "application/pdf", DocumentType = "coi",
+                GeneralLiabilityLimit = 1_000_000m, ExpirationDate = DateTime.UtcNow.AddYears(1),
+                // Deliberately stale: with rule A gone the remaining 'required' rule passes, so the
+                // correct verdict is Compliant. A missed re-grade leaves this NonCompliant.
+                ComplianceStatus = ComplianceStatus.NonCompliant,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+            (await db.ComplianceChecks.CountAsync(c => c.DocumentId == neverEvaluated)).Should().Be(0,
+                "arrange: this document must hold no check row, or it would ride the old snapshot");
+        }
+
+        var resp = await auth.Client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db2 = CreateSystemDb();
+        (await db2.Documents.SingleAsync(d => d.Id == neverEvaluated)).ComplianceStatus
+            .Should().Be(ComplianceStatus.Compliant,
+                "the fan-out is scoped to the template, so a never-evaluated document on it is re-graded too");
+        (await db2.ComplianceChecks.CountAsync(c => c.DocumentId == neverEvaluated)).Should().Be(1,
+            "the re-grade writes the surviving rule's check row");
+    }
+
+    [Fact]
+    public async Task Deleting_a_rule_regrades_a_document_whose_type_no_rule_governs()
+    {
+        // #364, the applicable-rules-empty branch: a non-COI document on a COI-only checklist has
+        // zero governing rules and must read Pending, never a vacuous Compliant (#257). It also
+        // never held a check row for the deleted rule, so pre-#364 it was outside the snapshot and
+        // an over-claiming stored verdict survived the delete untouched.
+        var auth = await RegisterAndLoginAsync();
+        var s = await SeedAsync(auth.OrgId);
+        (await auth.Client.PostAsync($"/api/compliance/check/{s.DocId}", null)).EnsureSuccessStatusCode();
+
+        Guid licenseDoc;
+        await using (var db = CreateSystemDb())
+        {
+            var seeded = await db.Documents.SingleAsync(d => d.Id == s.DocId);
+            licenseDoc = Guid.NewGuid();
+            db.Documents.Add(new Document
+            {
+                Id = licenseDoc, OrganizationId = auth.OrgId, VendorId = seeded.VendorId,
+                OriginalFileName = "license.pdf", BlobStorageUrl = "blob://license", FileSizeBytes = 1,
+                ContentType = "application/pdf", DocumentType = "license",
+                ExpirationDate = DateTime.UtcNow.AddYears(1),
+                ComplianceStatus = ComplianceStatus.Compliant,
+                CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var resp = await auth.Client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db2 = CreateSystemDb();
+        (await db2.Documents.SingleAsync(d => d.Id == licenseDoc)).ComplianceStatus
+            .Should().Be(ComplianceStatus.Pending,
+                "no rule governs a 'license' on this COI-only checklist — the stale Compliant must not survive");
+    }
+
+    [Fact]
+    public async Task Deleting_a_rule_cleans_checks_on_a_document_whose_vendor_left_the_template()
+    {
+        // #364 scope pin. The fan-out re-grades template members only, so a document that still
+        // holds a check row against this rule while its vendor no longer uses the template is NOT
+        // re-graded. That is verdict-neutral by construction: Expired is the ONLY evaluation
+        // branch that preserves check rows across a re-grade (ClearExistingChecks:false), so such
+        // a document is Expired — a date-driven verdict a rule deletion cannot change. What must
+        // still hold is that its orphaned check row is cleaned up by the transaction (the FK is
+        // ON DELETE RESTRICT, so a leftover row would 500 the delete outright).
+        var auth = await RegisterAndLoginAsync();
+        var s = await SeedAsync(auth.OrgId);
+
+        Guid strayDoc;
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            var unassignedVendor = Guid.NewGuid();
+            db.Vendors.Add(new Vendor
+            {
+                Id = unassignedVendor, OrganizationId = auth.OrgId, Name = "Left the checklist",
+                ComplianceTemplateId = null, CreatedAt = now, UpdatedAt = now
+            });
+            strayDoc = Guid.NewGuid();
+            db.Documents.Add(new Document
+            {
+                Id = strayDoc, OrganizationId = auth.OrgId, VendorId = unassignedVendor,
+                OriginalFileName = "stray.pdf", BlobStorageUrl = "blob://stray", FileSizeBytes = 1,
+                ContentType = "application/pdf", DocumentType = "coi",
+                GeneralLiabilityLimit = 1_000_000m, ExpirationDate = now.AddDays(-10),
+                ComplianceStatus = ComplianceStatus.Expired,
+                CreatedAt = now, UpdatedAt = now
+            });
+            db.ComplianceChecks.Add(new ComplianceCheck
+            {
+                Id = Guid.NewGuid(), DocumentId = strayDoc, ComplianceRuleId = s.RuleAId,
+                IsPassed = false, CheckedAt = now
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var resp = await auth.Client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK, "the orphaned check row must not restrict the delete");
+        await using var db2 = CreateSystemDb();
+        (await db2.ComplianceChecks.AnyAsync(c => c.ComplianceRuleId == s.RuleAId)).Should().BeFalse();
+        (await db2.Documents.SingleAsync(d => d.Id == strayDoc)).ComplianceStatus
+            .Should().Be(ComplianceStatus.Expired, "an expired verdict is date-driven — deleting a rule cannot change it");
+    }
+
+    [Fact]
     public async Task Foreign_org_checks_against_the_rule_are_cleaned_without_touching_the_foreign_document()
     {
         // Simulates the #273 state: another org's document carries a check row against

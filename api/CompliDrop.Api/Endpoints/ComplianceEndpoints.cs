@@ -245,36 +245,25 @@ public static class ComplianceEndpoints
 
         // ComplianceCheck → ComplianceRule is ON DELETE RESTRICT, so the dependent check
         // rows must go with the rule (#269: the rules-page trash button 500'd forever once
-        // any document had been evaluated against the rule). Everything — check cleanup,
-        // rule delete, and the re-evaluation of affected documents — runs in ONE
-        // transaction: a failure (or client abort) mid-re-eval rolls the whole delete back
-        // for a clean retry, instead of leaving documents stuck on verdicts computed
-        // against a rule that no longer exists. EvaluateAsync enlists because it uses this
-        // same request-scoped AppDbContext. Re-eval on rule EDITS / assignment changes
-        // stays #257's scope.
+        // any document had been evaluated against the rule). Check cleanup and rule delete
+        // stay in ONE transaction, so the FK-restrict conflict caught below is a clean
+        // all-or-nothing retry. The re-evaluation of affected documents runs AFTER the
+        // commit, batched — see the fan-out below (#364).
         try
         {
             await using var tx = await db.Database.BeginTransactionAsync(ct);
 
-            // Single DELETE … RETURNING so the affected-document snapshot and the check
-            // cleanup are one atomic statement — a separate SELECT-then-DELETE leaves a
-            // window where a concurrent evaluation's check row is deleted without its
-            // document making the re-eval list. No timestamptz involved (ADR 0009 n/a).
-            var affectedDocIds = (await db.Database
-                .SqlQuery<Guid>($"""
-                    DELETE FROM "ComplianceChecks" WHERE "ComplianceRuleId" = {ruleId} RETURNING "DocumentId"
-                    """)
-                .ToListAsync(ct))
-                .Distinct()
-                .ToList();
+            // One statement, and no snapshot of the affected document ids: the post-commit
+            // fan-out derives its own (superset) work list from template membership, so the
+            // old DELETE … RETURNING — which existed to make the snapshot and the cleanup
+            // atomic against a concurrent evaluation — no longer has a consumer. No
+            // timestamptz involved (ADR 0009 n/a).
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                DELETE FROM "ComplianceChecks" WHERE "ComplianceRuleId" = {ruleId}
+                """, ct);
 
             db.ComplianceRules.Remove(rule);
             await db.SaveChangesAsync(ct);
-
-            // EvaluateAsync is tenant-filtered, so a foreign document id (possible only via
-            // a cross-org template assignment, see #273) resolves to nothing and is skipped.
-            foreach (var docId in affectedDocIds)
-                await checker.EvaluateAsync(docId, ct);
 
             await tx.CommitAsync(ct);
         }
@@ -291,6 +280,39 @@ public static class ComplianceEndpoints
         // connection that cannot join this transaction (see #269 review). Worst case is a
         // missing audit row on a post-commit crash, the same shape as every other endpoint.
         await audit.LogAsync("complianceRule.deleted", nameof(ComplianceRule), ruleId);
+
+        // Re-evaluation fan-out (#364): batched and AFTER the commit, mirroring UpsertRule — a
+        // rule delete is the twin of a rule edit and must re-grade the same population. Pre-#364
+        // this was a per-document EvaluateAsync loop INSIDE the transaction above: ~4 serial
+        // round-trips per affected document, all on one never-cleared change tracker (so every
+        // SaveChanges re-ran DetectChanges and the audit interceptor's full Entries() scan —
+        // quadratic), while holding the rule + check locks the whole time. On a checklist shared
+        // by a large vendor base that turned one trash-button click into thousands of serial
+        // round-trips and timed the request out, so the delete never landed at all.
+        //
+        // SCOPE: template membership (every document whose vendor uses this checklist), not the
+        // old "documents that held a check row for THIS rule" snapshot. That is a superset in
+        // every realistic state — nothing needing a re-grade is missed — and it is exactly the
+        // population UpsertRule already re-grades. The reverse gap (a document holding a check
+        // row for this rule whose vendor has since LEFT the template) is verdict-neutral:
+        // Expired is the only evaluation branch that preserves check rows across a re-grade
+        // (ClearExistingChecks:false), so such a document is Expired, and Expired is date-driven
+        // — it cannot change because a rule disappeared. Its orphaned check row is deleted by
+        // the transaction above either way.
+        //
+        // FAILURE POSTURE: the fan-out is best-effort per page (a page whose SaveChanges fails
+        // is logged and skipped), so an interrupted re-grade now leaves the rule deleted with
+        // some documents still on their previous verdict, where the old in-transaction loop
+        // rolled the delete back. That is the posture UpsertRule and DeleteTemplate already
+        // ship, and it is the SAFE direction here: deleting a requirement can only loosen a
+        // checklist, so a verdict left stale is stale-STRICT (a NonCompliant that should now
+        // read Compliant), never a false Compliant — with one bounded exception, deleting the
+        // LAST applicable rule, where a stale Compliant should have become Pending. Note the
+        // nightly sweep does NOT heal this: ComplianceSweepBackgroundService only does
+        // date-transition ExecuteUpdates and never re-runs rule evaluation. The healers are the
+        // next user-initiated re-grade of the document — "Check again", another rule edit, or a
+        // checklist reassignment.
+        await checker.ReevaluateForTemplateAsync(template.Id, ct);
 
         return Results.Ok(new { data = new { id = ruleId }, error = (object?)null });
     }
