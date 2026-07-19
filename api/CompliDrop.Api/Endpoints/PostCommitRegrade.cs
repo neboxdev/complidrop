@@ -54,17 +54,8 @@ internal static class PostCommitRegrade
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.ApplicationStopping);
         cts.CancelAfter(Timeout);
-        try
-        {
-            await fanout(cts.Token);
-        }
-        catch (Exception ex)
-        {
-            loggerFactory.CreateLogger(nameof(PostCommitRegrade)).LogError(
-                ex,
-                "Post-commit compliance re-grade fan-out failed after {Operation}; the mutation is committed "
-                    + "and affected documents keep their previous verdict until the next re-grade",
-                operation);
-        }
+        await fanout(cts.Token);
+        _ = loggerFactory;
+        _ = operation;
     }
 }
