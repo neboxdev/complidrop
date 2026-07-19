@@ -38,6 +38,9 @@ public sealed class RecordingComplianceCheckService : IComplianceCheckService
     public Task ReevaluateForTemplateAsync(Guid templateId, CancellationToken ct) =>
         throw new InvalidOperationException("The seed never calls the tenant-filtered ReevaluateForTemplateAsync.");
 
+    public Task ReevaluateForTemplateOrDocumentsAsync(Guid templateId, IReadOnlyList<Guid> documentIds, CancellationToken ct) =>
+        throw new InvalidOperationException("The seed never calls ReevaluateForTemplateOrDocumentsAsync.");
+
     public Task ReevaluateForVendorAsync(Guid vendorId, CancellationToken ct) =>
         throw new InvalidOperationException("The seed never calls ReevaluateForVendorAsync.");
 

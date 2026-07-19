@@ -1,9 +1,15 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace CompliDrop.Api.Tests;
 
@@ -206,15 +212,80 @@ public sealed class ComplianceRuleDeleteTests(IntegrationTestFixture fixture) : 
     }
 
     [Fact]
-    public async Task Deleting_a_rule_cleans_checks_on_a_document_whose_vendor_left_the_template()
+    public async Task Deleting_a_rule_regrades_a_document_whose_vendor_was_soft_deleted()
     {
-        // #364 scope pin. The fan-out re-grades template members only, so a document that still
-        // holds a check row against this rule while its vendor no longer uses the template is NOT
-        // re-graded. That is verdict-neutral by construction: Expired is the ONLY evaluation
-        // branch that preserves check rows across a re-grade (ClearExistingChecks:false), so such
-        // a document is Expired — a date-driven verdict a rule deletion cannot change. What must
-        // still hold is that its orphaned check row is cleaned up by the transaction (the FK is
-        // ON DELETE RESTRICT, so a leftover row would 500 the delete outright).
+        // #364 review counterexample — the case that falsifies "template membership is a superset".
+        // DeleteVendor soft-deletes with NO re-grade (VendorEndpoints), so a deleted vendor's
+        // documents keep a Compliant verdict AND their check rows while the Vendor soft-delete query
+        // filter makes d.Vendor read null — which drops them out of the template-membership
+        // predicate. The pre-#364 per-document loop healed them to Pending as a side effect of
+        // iterating the deleted rule's check rows; the fan-out therefore takes the check-row holders
+        // as a UNION with template membership so the batched path stays a strict superset. Without
+        // that union this document stays on a vacuous Compliant that no rule governs (#257).
+        var auth = await RegisterAndLoginAsync();
+        var s = await SeedAsync(auth.OrgId, twoRules: false);
+
+        Guid orphanedDoc;
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            var doomedVendor = Guid.NewGuid();
+            db.Vendors.Add(new Vendor
+            {
+                Id = doomedVendor, OrganizationId = auth.OrgId, Name = "Soon deleted",
+                ComplianceTemplateId = s.TemplateId, CreatedAt = now, UpdatedAt = now
+            });
+            orphanedDoc = Guid.NewGuid();
+            db.Documents.Add(new Document
+            {
+                Id = orphanedDoc, OrganizationId = auth.OrgId, VendorId = doomedVendor,
+                OriginalFileName = "orphan.pdf", BlobStorageUrl = "blob://orphan", FileSizeBytes = 1,
+                ContentType = "application/pdf", DocumentType = "coi",
+                // Passes the 2M rule, so it was legitimately Compliant while the rule existed.
+                GeneralLiabilityLimit = 3_000_000m, ExpirationDate = now.AddYears(1),
+                ComplianceStatus = ComplianceStatus.Compliant,
+                CreatedAt = now, UpdatedAt = now
+            });
+            db.ComplianceChecks.Add(new ComplianceCheck
+            {
+                Id = Guid.NewGuid(), DocumentId = orphanedDoc, ComplianceRuleId = s.RuleAId,
+                IsPassed = true, CheckedAt = now
+            });
+            await db.SaveChangesAsync();
+        }
+
+        // Soft-delete the vendor through the real endpoint, so the no-re-grade behaviour under test
+        // is production's, not a hand-built row state.
+        (await auth.Client.DeleteAsync($"/api/vendors/{(await VendorIdOfAsync(orphanedDoc))}"))
+            .EnsureSuccessStatusCode();
+
+        var resp = await auth.Client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db2 = CreateSystemDb();
+        (await db2.Documents.SingleAsync(d => d.Id == orphanedDoc)).ComplianceStatus
+            .Should().Be(ComplianceStatus.Pending,
+                "its vendor is gone and the rule it was graded against is gone — a Compliant verdict here would be vacuous");
+        (await db2.ComplianceChecks.CountAsync(c => c.DocumentId == orphanedDoc)).Should().Be(0,
+            "the orphaned check rows must be shed with the re-grade");
+    }
+
+    /// <summary>Reads a document's VendorId through the system context (no tenant filter).</summary>
+    private async Task<Guid> VendorIdOfAsync(Guid documentId)
+    {
+        await using var db = CreateSystemDb();
+        return (await db.Documents.SingleAsync(d => d.Id == documentId)).VendorId!.Value;
+    }
+
+    [Fact]
+    public async Task Deleting_a_rule_keeps_the_expired_verdict_on_a_document_whose_vendor_left_the_template()
+    {
+        // Companion to the soft-deleted-vendor case: a document that holds a check row for this rule
+        // while its vendor sits on NO template is re-graded through the same union, and its verdict
+        // is date-driven — Expired is the one branch that preserves check rows across a re-grade
+        // (ClearExistingChecks:false), and a rule deletion cannot change it. What must also hold is
+        // that its orphaned check row is cleaned up by the transaction (the FK is ON DELETE RESTRICT,
+        // so a leftover row would 500 the delete outright).
         var auth = await RegisterAndLoginAsync();
         var s = await SeedAsync(auth.OrgId);
 
@@ -297,6 +368,61 @@ public sealed class ComplianceRuleDeleteTests(IntegrationTestFixture fixture) : 
         var foreign = await db2.Documents.SingleAsync(d => d.Id == foreignDocId);
         foreign.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant,
             "the tenant-filtered re-eval must not rewrite another org's verdict");
+    }
+
+    [Fact]
+    public async Task The_rule_delete_survives_a_failing_re_evaluation_fan_out()
+    {
+        // #364's central semantic change, pinned. Pre-#364 the re-evaluation ran INSIDE the delete's
+        // transaction, so anything it threw rolled the whole delete back and the rule survived. Now
+        // the transaction commits first and the fan-out runs after it, so a catastrophic re-grade
+        // failure can no longer resurrect a rule the user deleted. (The real service never throws
+        // out of the fan-out — ReevaluateWhereAsync catches and skips a failed page — so this
+        // exercises a deliberately worse-than-production double; the response status is incidental,
+        // the committed state is the contract.)
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IComplianceCheckService>();
+                services.AddScoped<IComplianceCheckService, ThrowingComplianceCheckService>();
+            }));
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+
+        var email = $"user-{Guid.NewGuid():N}@example.com";
+        var reg = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            email,
+            password = "Password1234",
+            fullName = "Test User",
+            companyName = "Test Co",
+            industry = (string?)null,
+            companySize = (string?)null,
+            timeZone = "America/New_York",
+        });
+        reg.EnsureSuccessStatusCode();
+        var orgId = (await reg.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("organizationId").GetGuid();
+        var s = await SeedAsync(orgId);
+
+        // Plant a check row directly (the throwing double makes POST /check unusable), so the
+        // cleanup + FK-restrict path is genuinely exercised before the fan-out blows up.
+        await using (var db = CreateSystemDb())
+        {
+            db.ComplianceChecks.Add(new ComplianceCheck
+            {
+                Id = Guid.NewGuid(), DocumentId = s.DocId, ComplianceRuleId = s.RuleAId,
+                IsPassed = false, CheckedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}");
+
+        await using var verify = CreateSystemDb();
+        (await verify.ComplianceRules.AnyAsync(r => r.Id == s.RuleAId)).Should().BeFalse(
+            "the delete committed before the fan-out ran — a failing re-grade must not roll it back");
+        (await verify.ComplianceChecks.AnyAsync(c => c.ComplianceRuleId == s.RuleAId)).Should().BeFalse(
+            "the check cleanup committed in the same transaction as the rule delete");
     }
 
     [Fact]

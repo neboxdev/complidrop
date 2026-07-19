@@ -100,6 +100,7 @@ public static class ComplianceEndpoints
         AppDbContext db,
         IComplianceCheckService checker,
         IAuditLogger audit,
+        IHostApplicationLifetime lifetime,
         CancellationToken ct)
     {
         var template = await db.ComplianceTemplates.FirstOrDefaultAsync(t => t.Id == id && !t.IsSystemTemplate, ct);
@@ -152,7 +153,10 @@ public static class ComplianceEndpoints
         // are cleared, so each evaluation takes the no-governing-rules path. One batched pass over
         // the whole vendor set rather than a per-vendor loop, so deleting a checklist shared by a
         // large vendor base doesn't pin the request thread with hundreds of serial round-trips (#293).
-        await checker.ReevaluateForVendorsAsync(vendorIds, ct);
+        // Not the request's ct, for the reason spelled out in DeleteRule (#364): the template delete
+        // and the assignment clearing have already committed, so a client disconnect must not leave
+        // half the vendor base holding verdicts computed against a checklist that no longer exists.
+        await checker.ReevaluateForVendorsAsync(vendorIds, lifetime.ApplicationStopping);
 
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }
@@ -163,6 +167,7 @@ public static class ComplianceEndpoints
         AppDbContext db,
         IComplianceCheckService checker,
         IAuditLogger audit,
+        IHostApplicationLifetime lifetime,
         CancellationToken ct)
     {
         var template = await db.ComplianceTemplates.Include(t => t.Rules)
@@ -215,7 +220,12 @@ public static class ComplianceEndpoints
         // Re-evaluation fan-out (#257): a rule add/edit changes the verdict for every document whose
         // vendor uses this template. Without this, the rules page saves and the documents keep their
         // stale Compliant/NonCompliant badge until something else happens to re-trigger evaluation.
-        await checker.ReevaluateForTemplateAsync(template.Id, ct);
+        // Not the request's ct, for the reason spelled out in DeleteRule (#364): the rule has already
+        // committed, so a client disconnect must not truncate the re-grade that keeps the persisted
+        // verdicts consistent with it. Worse here than on the delete path — an edit can TIGHTEN a
+        // requirement, so a document left on its pre-edit verdict is a false Compliant, not merely a
+        // stale-strict one.
+        await checker.ReevaluateForTemplateAsync(template.Id, lifetime.ApplicationStopping);
 
         await audit.LogAsync("complianceRule.upserted", nameof(ComplianceRule), rule.Id);
         return Results.Ok(new { data = new { id = rule.Id }, error = (object?)null });
@@ -227,6 +237,7 @@ public static class ComplianceEndpoints
         AppDbContext db,
         IComplianceCheckService checker,
         IAuditLogger audit,
+        IHostApplicationLifetime lifetime,
         CancellationToken ct)
     {
         // Resolve through the tenant-filtered template set, excluding system templates —
@@ -249,18 +260,24 @@ public static class ComplianceEndpoints
         // stay in ONE transaction, so the FK-restrict conflict caught below is a clean
         // all-or-nothing retry. The re-evaluation of affected documents runs AFTER the
         // commit, batched — see the fan-out below (#364).
+        List<Guid> affectedDocIds;
         try
         {
             await using var tx = await db.Database.BeginTransactionAsync(ct);
 
-            // One statement, and no snapshot of the affected document ids: the post-commit
-            // fan-out derives its own (superset) work list from template membership, so the
-            // old DELETE … RETURNING — which existed to make the snapshot and the cleanup
-            // atomic against a concurrent evaluation — no longer has a consumer. No
-            // timestamptz involved (ADR 0009 n/a).
-            await db.Database.ExecuteSqlInterpolatedAsync($"""
-                DELETE FROM "ComplianceChecks" WHERE "ComplianceRuleId" = {ruleId}
-                """, ct);
+            // Single DELETE … RETURNING so the affected-document snapshot and the check
+            // cleanup are one atomic statement — a separate SELECT-then-DELETE leaves a
+            // window where a concurrent evaluation's check row is deleted without its
+            // document making the re-eval list. No timestamptz involved (ADR 0009 n/a).
+            // The snapshot feeds the post-commit fan-out below; see there for why template
+            // membership alone would NOT cover every document these rows belong to (#364).
+            affectedDocIds = (await db.Database
+                .SqlQuery<Guid>($"""
+                    DELETE FROM "ComplianceChecks" WHERE "ComplianceRuleId" = {ruleId} RETURNING "DocumentId"
+                    """)
+                .ToListAsync(ct))
+                .Distinct()
+                .ToList();
 
             db.ComplianceRules.Remove(rule);
             await db.SaveChangesAsync(ct);
@@ -290,29 +307,41 @@ public static class ComplianceEndpoints
         // by a large vendor base that turned one trash-button click into thousands of serial
         // round-trips and timed the request out, so the delete never landed at all.
         //
-        // SCOPE: template membership (every document whose vendor uses this checklist), not the
-        // old "documents that held a check row for THIS rule" snapshot. That is a superset in
-        // every realistic state — nothing needing a re-grade is missed — and it is exactly the
-        // population UpsertRule already re-grades. The reverse gap (a document holding a check
-        // row for this rule whose vendor has since LEFT the template) is verdict-neutral:
-        // Expired is the only evaluation branch that preserves check rows across a re-grade
-        // (ClearExistingChecks:false), so such a document is Expired, and Expired is date-driven
-        // — it cannot change because a rule disappeared. Its orphaned check row is deleted by
-        // the transaction above either way.
+        // SCOPE = template membership UNION the deleted rule's check-row holders, which is what
+        // makes this a STRICT SUPERSET of the loop it replaces. Membership alone is not: the
+        // predicate joins through d.Vendor, which carries the Vendor soft-delete query filter, so
+        // a document whose vendor was soft-deleted reads Vendor == null and drops out of it. That
+        // state is reachable and NOT self-correcting — DeleteVendor soft-deletes with no re-grade
+        // at all, leaving those documents on a Compliant verdict graded against rules that no
+        // longer govern them (the vacuous-Compliant class #257 exists to prevent). The old loop
+        // healed them to Pending as a side effect of iterating the deleted rule's check rows;
+        // passing affectedDocIds keeps that heal instead of letting a performance fix quietly
+        // drop a verdict correction. Foreign ids (possible only via the #273 cross-org
+        // assignment state) are filtered out by the tenant filter, exactly as EvaluateAsync did.
         //
-        // FAILURE POSTURE: the fan-out is best-effort per page (a page whose SaveChanges fails
-        // is logged and skipped), so an interrupted re-grade now leaves the rule deleted with
-        // some documents still on their previous verdict, where the old in-transaction loop
-        // rolled the delete back. That is the posture UpsertRule and DeleteTemplate already
-        // ship, and it is the SAFE direction here: deleting a requirement can only loosen a
-        // checklist, so a verdict left stale is stale-STRICT (a NonCompliant that should now
-        // read Compliant), never a false Compliant — with one bounded exception, deleting the
-        // LAST applicable rule, where a stale Compliant should have become Pending. Note the
-        // nightly sweep does NOT heal this: ComplianceSweepBackgroundService only does
-        // date-transition ExecuteUpdates and never re-runs rule evaluation. The healers are the
-        // next user-initiated re-grade of the document — "Check again", another rule edit, or a
-        // checklist reassignment.
-        await checker.ReevaluateForTemplateAsync(template.Id, ct);
+        // TOKEN: deliberately NOT the request's ct. The delete has already committed, so there is
+        // nothing left to roll back, and a client disconnect or proxy timeout mid-fan-out would
+        // otherwise abort the re-grade partway (ReevaluateWhereAsync rethrows cancellation — the
+        // per-page catch excludes OperationCanceledException), stranding an arbitrary suffix of
+        // the population on pre-delete verdicts with no automatic healer. ApplicationStopping
+        // keeps a real shutdown able to interrupt while making the work immune to the caller
+        // hanging up — which matters most in exactly the large-vendor-base case this ticket is
+        // about, where the fan-out runs for seconds and users trained by the old timeouts click
+        // away.
+        //
+        // FAILURE POSTURE: the fan-out is still best-effort per page (a page whose SaveChanges
+        // fails is logged and skipped), so a persistence failure leaves the rule deleted with
+        // that page's documents on their previous verdict, where the old in-transaction loop
+        // rolled the delete back. That is the posture UpsertRule and DeleteTemplate already ship,
+        // and it is the SAFE direction here: deleting a requirement can only loosen a checklist,
+        // so a verdict left stale is stale-STRICT (a NonCompliant that should now read Compliant),
+        // never a false Compliant — with one bounded exception, deleting the LAST applicable rule,
+        // where a stale Compliant should have become Pending. The nightly sweep does NOT heal
+        // this: ComplianceSweepBackgroundService only does date-transition ExecuteUpdates and
+        // never re-runs rule evaluation. The healers are the next user-initiated re-grade of the
+        // document — "Check again", another rule edit, or a checklist reassignment.
+        await checker.ReevaluateForTemplateOrDocumentsAsync(
+            template.Id, affectedDocIds, lifetime.ApplicationStopping);
 
         return Results.Ok(new { data = new { id = ruleId }, error = (object?)null });
     }
