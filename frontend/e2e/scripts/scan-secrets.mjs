@@ -86,6 +86,16 @@ const PATTERNS = [
  * Today the list is empty; if a future test legitimately renders a
  * SSN/EIN for a redaction assertion, add the path here with a
  * one-line comment.
+ *
+ * NEVER allowlist an aggregate report file (`results.json`, the HTML
+ * report) — those carry EVERY test's runtime data, so muting one
+ * blinds the gate wholesale rather than carving out one fixture. When
+ * a report file trips the scan, fix whatever put the string in the
+ * report. Precedent: #356, where Playwright's CI-default
+ * `captureGitInfo.diff` embedded the branch's source diff (and its
+ * synthetic SSN test fixtures) into `results.json`; the fix was
+ * `captureGitInfo: { diff: false }`, not an allowlist entry. See ADR
+ * 0010 §Artifact hygiene, Amendment 1.
  */
 const ALLOWLISTED_FILES = /** @type {ReadonlyArray<string>} */ ([]);
 
@@ -157,9 +167,19 @@ if (findings.length > 0) {
     "If a finding is a false-positive (e.g. a fixture SSN that's intentional),",
   );
   console.error(
-    "add the file to ALLOWLISTED_FILES in frontend/e2e/scripts/scan-secrets.mjs",
+    "add the FIXTURE FILE to ALLOWLISTED_FILES in frontend/e2e/scripts/scan-secrets.mjs",
   );
   console.error("with a one-line comment.");
+  console.error("");
+  console.error(
+    "Do NOT allowlist an aggregate report (results.json / the HTML report):",
+  );
+  console.error(
+    "those carry every test's runtime data, so muting one blinds the whole gate.",
+  );
+  console.error(
+    "Fix what put the string in the report instead — see ADR 0010 Amendment 1.",
+  );
   process.exit(1);
 }
 

@@ -44,3 +44,4 @@ Use `/adr <title>` to scaffold a new one.
 - [0034](0034-dev-environment-isolation-and-boot-banner.md) — Dev/prod environment isolation, surfaced by a redacted startup banner
 - [0035](0035-standing-cleanup-tooling-gates.md) — Standing cleanup-tooling gates (`dotnet format` + knip)
 - [0036](0036-system-template-seed-convergence.md) — System templates converge to their seed (add/update/delete), tenant clones never; re-grade on change
+- [0037](0037-frontend-sentry-pii-scrubbing-and-gating.md) — Frontend Sentry: PII scrubbing, dev/no-DSN no-op gating, source-map degradation (renumbered from a colliding 0036)

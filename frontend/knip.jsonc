@@ -17,15 +17,13 @@
   // `scripts`. So those are never mis-reported as dead.
 
   "ignoreDependencies": [
-    // Installed but not yet wired into the frontend (no sentry.*.config / instrumentation,
-    // no import anywhere). The privacy policy advertises "Sentry — error monitoring", which
-    // is satisfied today by the BACKEND SDK (Sentry.AspNetCore). Whether to wire frontend
-    // error monitoring or drop this SDK is a product/legal decision, not mechanical cleanup
-    // — left out of this pass and flagged in the PR. Ignored so the gate stays green
-    // without pre-empting that call.
-    "@sentry/nextjs",
     // Next.js-provided guard package (the `client-only` / `server-only` pair) imported by
     // src/lib/api.ts. Resolved transitively via next; never a direct dependency.
+    //
+    // NOTE: `@sentry/nextjs` used to be ignored here (installed but unwired). It was wired
+    // into the frontend in #356 (ADR 0037 — client/server/edge instrumentation + scrubber),
+    // so it's now a genuinely-used direct dependency and the ignore was removed. This
+    // supersedes the "kept-but-ignored" sub-decision in ADR 0035.
     "client-only"
   ],
 

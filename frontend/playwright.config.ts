@@ -51,6 +51,30 @@ export default defineConfig({
   // upload as a belt-and-suspenders check.
   outputDir: "./test-results",
 
+  // Do NOT embed the commit diff in the report (#356). Playwright's
+  // `captureGitInfo.diff` defaults to TRUE whenever it detects CI, which
+  // writes the branch's entire source diff into `config.metadata` inside
+  // `test-results/results.json`. Two problems, both real:
+  //
+  //   1. It defeats the secret-scan gate below. `scan-secrets.mjs` walks
+  //      `test-results/` looking for secret-SHAPED strings in RUNTIME
+  //      artifacts (traces, network logs). With the diff embedded, the gate
+  //      also scans the PR's own source — so any PR that legitimately adds a
+  //      secret-shaped TEST FIXTURE fails a gate that has nothing to say
+  //      about runtime leakage. #356 hit exactly this: three synthetic
+  //      `123-45-6789` fixtures proving the Sentry SSN scrubber works tripped
+  //      the SSN pattern via the diff, with no actual leak. Security-hardening
+  //      PRs add such fixtures by their nature, so this recurs by design.
+  //   2. Artifact hygiene (ADR 0010): uploaded artifacts should carry the
+  //      diagnostic minimum. The diff adds no signal a reviewer can't get from
+  //      the PR itself.
+  //
+  // `commit` info is left at its default (on in CI) — it's small, useful in
+  // the report, and carries no source text. Pinned by
+  // `src/test/playwright-config.test.ts` so a Playwright upgrade or a
+  // careless edit can't silently re-enable it.
+  captureGitInfo: { diff: false },
+
   use: {
     baseURL: BASE_URL,
     // `retain-on-failure` produces trace.zip ONLY for failed tests.
