@@ -2459,8 +2459,17 @@ describe("DocumentDetailPage — pending edits vs. 'Read again' (#363)", () => {
     // React reuses the inputs rather than remounting them — the pending overlay
     // has to survive that and stay on screen, because the value displayed must
     // always be the value a Save would send.
+    //
+    // The refetch deliberately returns a DIFFERENT server value under the same
+    // field id, so (b) is a real contest between overlay and server rather than a
+    // tautology against byte-identical data. The doc-level `expirationDate` moves
+    // with it purely as an observable landing signal for the second payload.
+    const seq = sequencedJsonOk(
+      withValue("2026-11-01", "f1", { expirationDate: "2026-11-01T00:00:00Z" }),
+      withValue("2029-09-09", "f1", { expirationDate: "2029-09-09T00:00:00Z" }),
+    );
     server.use(
-      http.get(url("/api/documents/:id"), () => jsonOk(withValue("2026-11-01"))),
+      http.get(url("/api/documents/:id"), () => seq()),
       http.post(url("/api/compliance/check/:id"), () => jsonOk<void>(undefined)),
     );
 
@@ -2472,6 +2481,15 @@ describe("DocumentDetailPage — pending edits vs. 'Read again' (#363)", () => {
     fireEvent.click(screen.getByRole("button", { name: /check again/i }));
 
     await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Re-checking compliance…"));
+    // Wait for the SECOND payload to actually render (the Expires cell is fed
+    // straight from the server field), so the assertion below can't pass merely
+    // because the refetch hadn't landed yet.
+    const expectedExpires = new Date("2029-09-09T00:00:00Z").toLocaleDateString(undefined, {
+      timeZone: "UTC",
+    });
+    await waitFor(() => expect(screen.getByText(expectedExpires)).toBeInTheDocument());
+
+    // Server moved underneath the overlay; the pending edit still wins on screen.
     expect(screen.getByLabelText(/expiration date/i)).toHaveValue("2025-01-01");
     expect(screen.getByRole("button", { name: /save changes/i })).not.toBeDisabled();
   });
@@ -2542,6 +2560,76 @@ describe("DocumentDetailPage — pending edits vs. 'Read again' (#363)", () => {
       expect(screen.getByRole("button", { name: /save changes/i })).not.toBeDisabled(),
     );
     expect(screen.getByLabelText(/policy number/i)).toHaveValue("POL-2");
+  });
+
+  it("does not discard a re-edit of the SAME field made while its save is in flight", async () => {
+    // #363 review round 2 (CONFIRMED): clearing by field NAME still ate the newer
+    // value when the user corrected the very field being saved. The overlay entry
+    // may only be dropped if it still holds exactly what this PUT persisted.
+    let releaseSave: (() => void) | null = null;
+    const savePut = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    server.use(
+      http.get(url("/api/documents/:id"), () => jsonOk(withValue("2026-11-01"))),
+      http.put(url("/api/documents/:id/fields"), async () => {
+        await savePut;
+        return jsonOk<void>(undefined);
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_363" } });
+
+    // Save "2027-05-05"…
+    fireEvent.change(await screen.findByDisplayValue("2026-11-01"), {
+      target: { value: "2027-05-05" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /save changes/i })).toBeDisabled());
+
+    // …then correct THAT SAME field again before the request settles.
+    fireEvent.change(screen.getByLabelText(/expiration date/i), {
+      target: { value: "2027-06-06" },
+    });
+    releaseSave!();
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Fields updated"));
+    // The newer correction survives — it was never what the PUT sent. Clearing by
+    // name alone reverted this to the persisted "2027-05-05" and disabled Save.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /save changes/i })).not.toBeDisabled(),
+    );
+    expect(screen.getByLabelText(/expiration date/i)).toHaveValue("2027-06-06");
+  });
+
+  it("keeps the saved values on screen when the post-save refetch fails", async () => {
+    // invalidateQueries resolves even when the refetch errors, so a blind clear
+    // would drop the overlay while the cache still held PRE-save data — rendering
+    // a value that contradicts the database, with Save disabled so the user
+    // couldn't re-apply it. The overlay stays until fresh data actually lands.
+    let getCalls = 0;
+    server.use(
+      http.get(url("/api/documents/:id"), () => {
+        getCalls += 1;
+        return getCalls === 1
+          ? jsonOk(withValue("2026-11-01"))
+          : jsonError("server.error", "Something went wrong. Try again.", { status: 500 });
+      }),
+      http.put(url("/api/documents/:id/fields"), () => jsonOk<void>(undefined)),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_363" } });
+
+    fireEvent.change(await screen.findByDisplayValue("2026-11-01"), {
+      target: { value: "2027-05-05" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Fields updated"));
+    await waitFor(() => expect(getCalls).toBeGreaterThanOrEqual(2));
+    // The PUT succeeded, so "2027-05-05" IS what the database holds — keep showing
+    // it rather than the stale cached "2026-11-01".
+    expect(screen.getByLabelText(/expiration date/i)).toHaveValue("2027-05-05");
   });
 
   it("renders typed values in the manual-entry grid and clears it on a re-read", async () => {

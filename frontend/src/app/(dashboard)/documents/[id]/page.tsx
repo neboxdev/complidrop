@@ -529,28 +529,38 @@ export default function DocumentDetailPage() {
       api.put<void>(`/api/documents/${params.id}/fields`, { fields }),
     onSuccess: async (_data, saved) => {
       toast.success("Fields updated");
-      // Drop ONLY the field names this PUT actually persisted — not the whole
-      // map. The inputs stay editable while the mutation is in flight, so a
-      // whole-map reset silently discards anything typed into another field
-      // between the click and this callback (and the controlled input visibly
-      // snaps back to the server value). Keying off the mutation's own
-      // variables makes the clear exactly as wide as what was saved. (#363
-      // review — the pre-#363 code had the same over-clear on a shorter fuse.)
+      // Drop an overlay entry only if it STILL holds the exact value this PUT
+      // persisted. The inputs stay editable while the mutation is in flight, so
+      // anything typed between the click and this callback is newer than what was
+      // saved — clearing by field name alone silently discarded a re-edit of the
+      // very field being saved, and the controlled input snapped back to the
+      // older, persisted value with Save disabled so it couldn't be re-applied.
+      // Matching on (name, value) makes the clear exactly as wide as what this
+      // request actually wrote. (#363 review rounds 1-2; the pre-#363 code reset
+      // the whole map on a shorter fuse.)
       //
-      // Cleared only AFTER the refetch settles: the inputs are controlled now,
-      // so dropping the keys first would fall back to the still-cached PRE-save
+      // Cleared only AFTER the refetch settles: the inputs are controlled now, so
+      // dropping the keys first would fall back to the still-cached PRE-save
       // values and flash the user's just-saved text away until the fresh payload
-      // lands. `finally` so a failed refetch can't strand them (leaving Save
-      // wrongly enabled). Awaiting also keeps the mutation pending — Save stays
-      // disabled — until the saved values are actually on screen.
-      const savedNames = new Set(saved.map((f) => f.fieldName));
-      try {
-        await qc.invalidateQueries({ queryKey: ["documents", params.id] });
-      } finally {
-        setEdits((prev) =>
-          Object.fromEntries(Object.entries(prev).filter(([name]) => !savedNames.has(name))),
-        );
-      }
+      // lands. Awaiting also keeps the mutation pending — Save stays disabled —
+      // until the saved values are actually on screen.
+      //
+      // And only if that refetch SUCCEEDED. invalidateQueries resolves even when
+      // the refetch fails (query-core swallows it unless throwOnError), so a
+      // blind clear would leave the cache holding PRE-save data: the input would
+      // render a value that contradicts the database, with Save disabled so the
+      // user couldn't re-apply it. Keeping the overlay on failure shows what IS
+      // persisted and leaves the (idempotent) re-save available.
+      const savedPairs = new Map(saved.map((f) => [f.fieldName, f.fieldValue]));
+      await qc.invalidateQueries({ queryKey: ["documents", params.id] });
+      if (qc.getQueryState(["documents", params.id])?.status === "error") return;
+      setEdits((prev) =>
+        Object.fromEntries(
+          Object.entries(prev).filter(
+            ([name, value]) => !(savedPairs.has(name) && savedPairs.get(name) === value),
+          ),
+        ),
+      );
     },
     onError: (err) => {
       // Same shape as reextract above — see that comment for the
