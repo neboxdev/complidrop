@@ -145,7 +145,11 @@ public static class BillingEndpoints
             .FirstOrDefaultAsync(s => s.OrganizationId == currentUser.OrganizationId.Value, ct);
         if (sub is null) return Error(404, "billing.not_found", "Subscription not found.");
 
-        var docCount = await db.Documents.CountAsync(d => d.OrganizationId == sub.OrganizationId && d.DeletedAt == null, ct);
+        // Mirrors the enforcement gates' population (!d.IsSample) so the Settings tile reports the
+        // number the plan limit actually enforces (#238 / ADR 0028). Counting the sample here made a
+        // 4-real-document org on DocumentLimit=5 read "5/5" and fire the frontend over-limit warning
+        // purely because of the demo row — upgrade pressure a document early (#367).
+        var docCount = await db.Documents.CountAsync(d => d.OrganizationId == sub.OrganizationId && d.DeletedAt == null && !d.IsSample, ct);
         return Results.Ok(new
         {
             data = new

@@ -252,6 +252,15 @@ public class ReminderBackgroundService(
                             .AsNoTracking()
                             .Where(d => d.OrganizationId == org.Id
                                         && d.DeletedAt == null
+                                        // #367: never remind on the sample-demo document (#238 / ADR 0028).
+                                        // Its expiry sits ~1 year out, so it would hit the 60/30/14/7 rungs
+                                        // and mail the fictional sample-vendor@example.com — an RFC 2606
+                                        // reserved domain that accepts no mail, so every send is a
+                                        // guaranteed hard bounce that suppresses the address and paints a
+                                        // "bounced" alarm badge on a vendor that doesn't exist, at real
+                                        // send cost. Excluded at the document (not vendor) level so the row
+                                        // never enters the send loop at all.
+                                        && !d.IsSample
                                         && d.ExpirationDate >= targetStart
                                         && d.ExpirationDate < targetEnd)
                             // #327: don't remind on a SUPERSEDED cert — if a newer document exists for the

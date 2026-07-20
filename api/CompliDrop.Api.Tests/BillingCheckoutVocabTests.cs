@@ -331,4 +331,57 @@ public sealed class BillingCheckoutVocabTests(IntegrationTestFixture fixture) : 
         body.GetProperty("data").GetProperty("cancelAtPeriodEnd").GetBoolean()
             .Should().BeTrue("the subscription endpoint must surface cancelAtPeriodEnd for the billing card");
     }
+
+    [Fact]
+    public async Task Subscription_documentsUsed_counts_real_documents_only_not_the_sample_demo()
+    {
+        // #367: documentsUsed feeds the Settings "x / limit" tile and the frontend's over-limit
+        // warning, so it must report the population the plan gates actually ENFORCE — which
+        // excludes the sample-demo document (#238 / ADR 0028). Counting the sample made a
+        // 4-real-document org on DocumentLimit=5 read "5/5" and show the over-limit warning with a
+        // free slot still available. Revert the BillingEndpoints exclusion and this reads 3.
+        var auth = await RegisterAndLoginAsync();
+        await SeedDocumentAsync(auth.OrgId, isSample: false);
+        await SeedDocumentAsync(auth.OrgId, isSample: false);
+        await SeedDocumentAsync(auth.OrgId, isSample: true);
+
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>("/api/billing/subscription");
+
+        body.GetProperty("data").GetProperty("documentsUsed").GetInt32()
+            .Should().Be(2, "the sample-demo row occupies no paid slot, so the tile must not count it");
+    }
+
+    [Fact]
+    public async Task Subscription_documentsUsed_still_excludes_soft_deleted_documents()
+    {
+        // Guards the #367 edit against clobbering the pre-existing DeletedAt predicate: the count
+        // must exclude BOTH soft-deleted and sample rows, not trade one filter for the other.
+        var auth = await RegisterAndLoginAsync();
+        await SeedDocumentAsync(auth.OrgId, isSample: false);
+        await SeedDocumentAsync(auth.OrgId, isSample: false, deletedAt: DateTime.UtcNow);
+
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>("/api/billing/subscription");
+
+        body.GetProperty("data").GetProperty("documentsUsed").GetInt32().Should().Be(1);
+    }
+
+    private async Task SeedDocumentAsync(Guid orgId, bool isSample, DateTime? deletedAt = null)
+    {
+        await using var db = CreateSystemDb();
+        db.Documents.Add(new Document
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            OriginalFileName = "seed.pdf",
+            BlobStorageUrl = "blob://seed",
+            FileSizeBytes = 1,
+            ContentType = "application/pdf",
+            DocumentType = "coi",
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+            DeletedAt = deletedAt,
+            IsSample = isSample,
+        });
+        await db.SaveChangesAsync();
+    }
 }

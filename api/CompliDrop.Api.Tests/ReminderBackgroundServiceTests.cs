@@ -82,7 +82,8 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         bool internalEmailVerified = false,
         string? vendorEmail = "vendor@example.com",
         string? orgName = null,
-        DateTime? overrideExpirationUtc = null)
+        DateTime? overrideExpirationUtc = null,
+        bool documentIsSample = false)
     {
         var orgId = Guid.NewGuid();
         var reminderId = Guid.NewGuid();
@@ -136,6 +137,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             ExpirationDate = expiration,
             CreatedAt = now,
             UpdatedAt = now,
+            IsSample = documentIsSample,
         });
         db.Reminders.Add(new Reminder
         {
@@ -168,6 +170,64 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         Email.Sends.Should().ContainSingle()
             .Which.ToEmail.Should().Be("owner@example.com");
         (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+    }
+
+    // ───────── #367: the sample-demo document never generates a reminder ─────────
+
+    [Fact]
+    public async Task A_sample_demo_document_on_a_rung_sends_no_reminder()
+    {
+        // #367: the sample COI (#238 / ADR 0028) expires ~1 year out, so it reaches the 60/30/14/7
+        // rungs like any real document. Its vendor is the fictional sample-vendor@example.com — an
+        // RFC 2606 reserved domain that accepts no mail — so every send is a guaranteed hard bounce
+        // that writes an EmailSuppression, a reminder.recipient_suppressed feed event and a
+        // "bounced" alarm badge on a vendor that does not exist, at real Resend cost. The worker
+        // must drop the row before the send loop. Revert the ReminderBackgroundService exclusion
+        // and this sends one mail and writes one log row.
+        var seed = await SeedReminderAsync(
+            NyEightAm, notifyInternal: false, notifyVendor: true,
+            vendorEmail: "sample-vendor@example.com", documentIsSample: true);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().BeEmpty("a fictional demo vendor must never be emailed");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId))
+            .Should().Be(0, "no send means no reminder-log row for the sample document");
+    }
+
+    [Fact]
+    public async Task A_sample_document_does_not_suppress_a_real_documents_reminder_in_the_same_org()
+    {
+        // The exclusion is per-DOCUMENT, not a whole-org or whole-vendor mute: an org that seeded
+        // the demo must still get reminders for its real certificates. Guards against a fix that
+        // filtered too broadly (e.g. dropping every document belonging to a sample vendor's org).
+        var seed = await SeedReminderAsync(NyEightAm, documentIsSample: true, internalEmailVerified: true);
+        var realDocId = Guid.NewGuid();
+        await using (var db = CreateSystemDb())
+        {
+            db.Documents.Add(new Document
+            {
+                Id = realDocId,
+                OrganizationId = seed.OrgId,
+                VendorId = seed.VendorId,
+                OriginalFileName = "real-policy.pdf",
+                BlobStorageUrl = "blob://real-policy",
+                FileSizeBytes = 1024,
+                ContentType = "application/pdf",
+                ExpirationDate = ExpirationForOrgWindow(NyTz, NyEightAm, 30),
+                CreatedAt = NyEightAm.UtcDateTime,
+                UpdatedAt = NyEightAm.UtcDateTime,
+                IsSample = false,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().ContainSingle("the real document still expires and still needs its reminder")
+            .Which.ToEmail.Should().Be("owner@example.com");
+        (await LogCountAsync(seed.ReminderId, realDocId)).Should().Be(1);
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(0, "but the sample row stays silent");
     }
 
     // ───────── #340: bounce / complaint suppression ─────────
