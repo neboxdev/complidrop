@@ -101,6 +101,24 @@ export default function DocumentsPage() {
   // there's no vendor dropdown, so it's only ever set by an inbound link.
   const vendorId = searchParams.get("vendor") || undefined;
 
+  // A navigation we've dispatched but that hasn't come back through
+  // `searchParams` yet: `{ from: the URL we computed it against, to: the URL we
+  // asked for }`. `router.replace` commits in a transition, so between two
+  // quick filter changes the URL we can READ is still the pre-navigation one.
+  // Composing the second change on top of that stale string would silently drop
+  // the first (pick a status, then a type fast enough, and the status is gone).
+  // The old state-based version got this right for free — four independent
+  // state cells can't clobber each other — so this ref is what keeps deriving
+  // from the URL from regressing it.
+  const pendingNav = useRef<{ from: string; to: string } | null>(null);
+  const currentQuery = searchParams.toString();
+  useEffect(() => {
+    // Our navigation landed (or something else moved the URL) — stop composing.
+    if (pendingNav.current && currentQuery === pendingNav.current.to) {
+      pendingNav.current = null;
+    }
+  }, [currentQuery]);
+
   // The ONE writer. Patches the live query string rather than rebuilding it
   // from scratch, so a param this page doesn't model (today: none besides the
   // filters, but `?vendor=` is exactly that from this control's perspective)
@@ -108,16 +126,28 @@ export default function DocumentsPage() {
   // dropdown doesn't stack a history entry per keystroke.
   const writeFilters = useCallback(
     (patch: Record<string, string>) => {
-      const sp = new URLSearchParams(searchParams.toString());
+      const live = searchParams.toString();
+      // Compose on our own in-flight target only while the URL still reads as
+      // the one we computed that target from; the moment anything else moves
+      // the URL, that external value wins.
+      const base = pendingNav.current?.from === live ? pendingNav.current.to : live;
+      const sp = new URLSearchParams(base);
       for (const [key, value] of Object.entries(patch)) {
         if (value) sp.set(key, value);
         else sp.delete(key);
       }
       const qs = sp.toString();
+      pendingNav.current = { from: live, to: qs };
       router.replace(qs ? `/documents?${qs}` : "/documents", { scroll: false });
     },
     [router, searchParams],
   );
+
+  // Clear every filter at once, including params with no control of their own.
+  const clearFilters = useCallback(() => {
+    pendingNav.current = { from: searchParams.toString(), to: "" };
+    router.replace("/documents", { scroll: false });
+  }, [router, searchParams]);
 
   // The search box is the one filter with local state: it must echo every
   // keystroke, but only the debounced value belongs in the URL (and in a
@@ -521,7 +551,12 @@ export default function DocumentsPage() {
               // now-empty URL; nothing re-adds a param afterwards, which is the
               // #370 fix — the old mirror effect used to re-run against the
               // pre-navigation snapshot and resurrect `?vendor=`.
-              router.replace("/documents", { scroll: false });
+              //
+              // Goes through `clearFilters` rather than a bare `router.replace`
+              // so this navigation is recorded as in-flight too: a dropdown
+              // touched before the clear lands must compose on the CLEARED url,
+              // not resurrect the filters from the stale one.
+              clearFilters();
               // The search DRAFT is the one piece of state the URL can't clear:
               // if the user typed within the last 300ms, `search` is still ""
               // (the debounce hasn't written yet), so the URL-sync above sees no

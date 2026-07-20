@@ -188,6 +188,54 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     expect(screen.queryByRole("button", { name: /^clear$/i })).toBeNull();
   });
 
+  it("two filter changes inside one navigation window both survive (#370)", async () => {
+    // Deriving from the URL introduces a clobber risk the old four-state-cells
+    // version did not have: `router.replace` commits in a transition, so the
+    // second change reads a query string that does not yet contain the first.
+    // Composing it on that stale string silently drops the first filter.
+    server.use(
+      http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))),
+    );
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, pathname: "/documents" });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    // No await between them — the deferred commit cannot have landed.
+    fireEvent.change(screen.getByLabelText(/filter by compliance status/i), {
+      target: { value: "Expired" },
+    });
+    fireEvent.change(screen.getByLabelText(/filter by document type/i), {
+      target: { value: "permit" },
+    });
+
+    await waitFor(() => expect(navState.searchParams.get("type")).toBe("permit"));
+    expect(navState.searchParams.get("status")).toBe("Expired");
+    expect(screen.getByLabelText(/filter by compliance status/i)).toHaveValue("Expired");
+    expect(screen.getByLabelText(/filter by document type/i)).toHaveValue("permit");
+  });
+
+  it("a filter touched before Clear lands does not resurrect the cleared filters (#370)", async () => {
+    // Same window, opposite direction: Clear is also an in-flight navigation,
+    // so a dropdown touched immediately after must compose on the CLEARED url.
+    server.use(
+      http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))),
+    );
+    renderWithProviders(<DocumentsPage />, {
+      auth: authedMe,
+      searchParams: { vendor: "v1", status: "Expired" },
+      pathname: "/documents",
+    });
+    await waitFor(() => expect(screen.getByText(/no documents match your filters/i)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /^clear$/i }));
+    fireEvent.change(screen.getByLabelText(/filter by document type/i), {
+      target: { value: "permit" },
+    });
+
+    await waitFor(() => expect(navState.searchParams.get("type")).toBe("permit"));
+    expect(navState.searchParams.get("vendor")).toBeNull();
+    expect(navState.searchParams.get("status")).toBeNull();
+  });
+
   it("a URL-driven filter change resets pagination to page 1 (#370)", async () => {
     // The page-1 reset used to live in each dropdown's onChange, so a filter
     // that arrived from the URL — Back, a deep link, the sidebar — left the
