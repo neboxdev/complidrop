@@ -166,6 +166,13 @@ Per-file `vi.mock("sonner", …)` still works as an escape hatch (Vitest's per-f
 Two-tier setup, documented here once so it doesn't get re-litigated.
 
 - **Default (setup-file mock + harness options).** `vitest.setup.ts` mocks `next/navigation` once against the mutable `navState`. Most tests use this — they drive routing through `renderWithProviders({ router, params, searchParams, pathname })` and assert on the returned spies (or `navState.router.push.mock.calls`). `notFound()` and `redirect()` throw a `NEXT_NOT_FOUND` / `NEXT_REDIRECT` sentinel so component code after them cannot silently keep running.
+
+  **`push` / `replace` actually navigate (#370).** They remain assertable spies, but they also apply the href to `navState` — so `useSearchParams()` / `usePathname()` return the NEW value afterwards and subscribed components re-render (both hooks read through `useSyncExternalStore`). Two properties this buys, both load-bearing:
+
+  - The commit is **deferred by a macrotask**, mirroring the real App Router's transition. A component that calls `replace` in an event handler re-renders at least once with the OLD query string still readable. Do not "fix" this into a synchronous apply: #370's scenario A lived exactly in that window, and a synchronous mock lets the bug pass its own regression test (verified, not assumed).
+  - Injecting your own spy (`renderWithProviders({ router: { replace } })`) **overrides** the live behavior for that field, because `setNavigationState` merges the router field-by-field. Use that when you want to assert a navigation was requested without the URL actually moving.
+
+  To simulate a URL change the page did NOT initiate — a same-route sidebar click, Back, an external deep link — call `setNavigationState({ searchParams, pathname })` mid-test; it notifies subscribers, so mounted components re-render against the new URL.
 - **Per-file `vi.mock("next/navigation", ...)`** (escape hatch). Required when the test needs a hoisted spy on `useSearchParams` or wants to capture the call site at module load (see `register-form.test.tsx` for the canonical example). Vitest's per-file mock registry overrides the setup-file mock within the file's own module scope — file-level mocks always win.
 
 Pick the default unless you have a specific reason to escape it.
@@ -211,7 +218,7 @@ Only if every test would otherwise have to redeclare it. The bar is high: a defa
 ## Lifecycle (what `vitest.setup.ts` does)
 
 - Pins `NEXT_PUBLIC_API_URL` before any module reads it.
-- Mocks `next/navigation` once, sourced from the mutable `navState`.
+- Mocks `next/navigation` once, sourced from the mutable `navState`; `useSearchParams` / `usePathname` subscribe via `useSyncExternalStore` so a `push`/`replace` re-renders them.
 - `server.listen({ onUnhandledRequest: "error" })` so missed handlers fail loudly.
 - After every test: RTL cleanup, `server.resetHandlers()`, `resetNavigation()` (rebuilds every spy in `navState`, including `notFound` / `redirect`).
 - After the suite: `server.close()`.

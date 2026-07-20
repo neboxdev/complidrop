@@ -51,10 +51,84 @@ export type NavigationState = {
   redirect: Mock;
 };
 
+/**
+ * Subscribers to `navState` changes — the bridge that lets a `router.push` /
+ * `router.replace` actually re-render a component reading `useSearchParams()`
+ * or `usePathname()`. `vitest.setup.ts` wires those two hooks through
+ * `useSyncExternalStore(subscribeNavigation, …)`.
+ */
+const navSubscribers = new Set<() => void>();
+
+export function subscribeNavigation(onChange: () => void): () => void {
+  navSubscribers.add(onChange);
+  return () => {
+    navSubscribers.delete(onChange);
+  };
+}
+
+function notifyNavigation(): void {
+  for (const notify of [...navSubscribers]) notify();
+}
+
+/**
+ * Apply a navigation href to `navState`, the way the real App Router does.
+ *
+ * Without this, `router.replace` was an inert spy and `useSearchParams()`
+ * returned the same object forever — so any bug about the URL and component
+ * state disagreeing (#370) was literally inexpressible in a test: the mock
+ * could not represent "the URL changed". Tests that only care that a
+ * navigation was REQUESTED still inject their own `replace` spy, which
+ * overrides this (see `setNavigationState`'s field-by-field merge).
+ *
+ * **The commit is DEFERRED on purpose.** The real App Router routes
+ * `push`/`replace` through a transition, so the new `useSearchParams()` value
+ * lands in a LATER commit — a component that calls `replace` from an event
+ * handler re-renders at least once with the OLD query string still readable.
+ * That one-commit lag is not an implementation detail to paper over; it is
+ * precisely the window #370's scenario A lived in (an effect re-running
+ * against the pre-navigation snapshot and re-dispatching the param the click
+ * had just cleared). A synchronous mock closes that window and would let the
+ * bug pass its own regression test — verified: with a synchronous apply, the
+ * scenario-A test passes against the UNFIXED page.
+ *
+ * `searchParams` is rebuilt as a NEW object on every navigation because
+ * `useSyncExternalStore` compares snapshots by reference — mutating the
+ * existing instance in place would not re-render.
+ */
+function applyNavigation(href: unknown): void {
+  if (typeof href !== "string") return;
+  // Absolute URLs (rare in-app, but `router.replace(new URL(...).toString())`
+  // is legal) parse via URL; relative ones are split by hand because the
+  // WHATWG parser demands a base.
+  let pathname: string;
+  let query: string;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(href)) {
+    const parsed = new URL(href);
+    pathname = parsed.pathname;
+    query = parsed.search.replace(/^\?/, "");
+  } else {
+    const [beforeHash] = href.split("#");
+    const queryAt = beforeHash.indexOf("?");
+    pathname = queryAt === -1 ? beforeHash : beforeHash.slice(0, queryAt);
+    query = queryAt === -1 ? "" : beforeHash.slice(queryAt + 1);
+  }
+  // Deferred to a macrotask so the calling component's own synchronous
+  // re-render (and its effects) run FIRST against the pre-navigation URL —
+  // see the transition note above.
+  setTimeout(() => {
+    // A hash-only or query-only href ("?page=2") leaves the path alone.
+    if (pathname) navState.pathname = pathname;
+    navState.searchParams = new URLSearchParams(query);
+    notifyNavigation();
+  }, 0);
+}
+
 function makeRouter(): RouterMock {
   return {
-    push: vi.fn(),
-    replace: vi.fn(),
+    // push/replace are live: they're still assertable spies, but they also
+    // move `navState` so subscribed components re-render against the new URL.
+    push: vi.fn(applyNavigation),
+    replace: vi.fn(applyNavigation),
     back: vi.fn(),
     forward: vi.fn(),
     refresh: vi.fn(),
@@ -140,4 +214,7 @@ export function setNavigationState(patch: {
         : new URLSearchParams(patch.searchParams);
   }
   if (patch.pathname !== undefined) navState.pathname = patch.pathname;
+  // Re-render anything already mounted — this helper is usable mid-test to
+  // simulate an external URL change (e.g. the #370 same-route sidebar click).
+  notifyNavigation();
 }

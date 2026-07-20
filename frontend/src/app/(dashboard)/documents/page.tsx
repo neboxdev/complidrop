@@ -74,43 +74,76 @@ export default function DocumentsPage() {
   // --- list controls (#187) ---
   const router = useRouter();
   const searchParams = useSearchParams();
-  // Filters are URL-addressable (FP-041): seed from the query string so a deep
-  // link lands pre-filtered (the dashboard's "Non-compliant" card -> ?status=
-  // NonCompliant, a vendor's "Docs N" -> ?vendor=<id>), and the active filters
-  // are mirrored back (replace, not push) so the view is shareable and a Back
-  // from a detail page re-seeds it. (In-page changes use replace, so they don't
-  // stack history entries.)
+  // Filters are URL-addressable (FP-041), and the URL is their SINGLE SOURCE OF
+  // TRUTH (#370): a deep link lands pre-filtered (the dashboard's
+  // "Non-compliant" card -> ?status=NonCompliant, a vendor's "Docs N" ->
+  // ?vendor=<id>), the view is shareable, and Back re-seeds it.
+  //
+  // These used to be four `useState` cells mirrored back into the URL by an
+  // effect. That was a feedback loop — the effect's input (`searchParams`)
+  // lagged its own output by a commit — with two live defects:
+  //   A. Clear reset state and replaced to "/documents", but the effect re-ran
+  //      against the pre-navigation snapshot and re-added `?vendor=`, so the
+  //      vendor filter survived the click meant to clear it.
+  //   B. Clicking "Documents" in the sidebar while filtered is a same-route
+  //      nav: no remount, so the `useState` initializers didn't re-run. The
+  //      list stayed filtered under a bare URL, and the next filter change
+  //      wrote that stale residue back.
+  // Deriving instead of mirroring makes both structurally impossible — there
+  // is no second copy to fall out of sync, and nothing writes state->URL
+  // except an explicit user action.
   const [page, setPage] = useState(1);
-  const [searchInput, setSearchInput] = useState(() => searchParams.get("search") ?? "");
-  const [search, setSearch] = useState(() => searchParams.get("search") ?? ""); // debounced value sent to the server
-  const [status, setStatus] = useState(() => searchParams.get("status") ?? "");
-  const [typeFilter, setTypeFilter] = useState(() => searchParams.get("type") ?? "");
-  const [expiresWithin, setExpiresWithin] = useState(() => searchParams.get("expiresWithin") ?? "");
+  const search = searchParams.get("search") ?? "";
+  const status = searchParams.get("status") ?? "";
+  const typeFilter = searchParams.get("type") ?? "";
+  const expiresWithin = searchParams.get("expiresWithin") ?? "";
   // ?vendor=<id> is honored for deep-linking (FP-071's "Documents from {vendor}");
-  // there's no vendor dropdown, so it's read-only from the URL.
+  // there's no vendor dropdown, so it's only ever set by an inbound link.
   const vendorId = searchParams.get("vendor") || undefined;
 
-  // Debounce the search box so we don't fire a request per keystroke. The
-  // page-1 reset lives in the input's onChange (an event handler) — NOT here —
-  // so this effect only ever syncs the debounced value. Resetting page in this
-  // effect would also fire on mount (~300ms later) and clobber any page the user
-  // had navigated to in the meantime. (#187 review — test-quality reviewer)
-  useEffect(() => {
-    const t = setTimeout(() => setSearch(searchInput), 300);
-    return () => clearTimeout(t);
-  }, [searchInput]);
+  // The ONE writer. Patches the live query string rather than rebuilding it
+  // from scratch, so a param this page doesn't model (today: none besides the
+  // filters, but `?vendor=` is exactly that from this control's perspective)
+  // survives an unrelated filter change. `replace`, not `push`, so tweaking a
+  // dropdown doesn't stack a history entry per keystroke.
+  const writeFilters = useCallback(
+    (patch: Record<string, string>) => {
+      const sp = new URLSearchParams(searchParams.toString());
+      for (const [key, value] of Object.entries(patch)) {
+        if (value) sp.set(key, value);
+        else sp.delete(key);
+      }
+      const qs = sp.toString();
+      router.replace(qs ? `/documents?${qs}` : "/documents", { scroll: false });
+    },
+    [router, searchParams],
+  );
 
-  // Mirror the active filters into the URL (replace — no history spam per change). (FP-041)
+  // The search box is the one filter with local state: it must echo every
+  // keystroke, but only the debounced value belongs in the URL (and in a
+  // request). `searchInput` is therefore a draft of `search`, not a second
+  // source of truth.
+  const [searchInput, setSearchInput] = useState(search);
+  // Re-seed the box when the URL's search changes underneath us — a same-route
+  // sidebar click, Back, or Clear. Adjusting state during render (rather than
+  // in an effect) is React's supported path for "derive from a changing input":
+  // it re-renders before paint, so the box never flashes the stale text.
+  const [lastUrlSearch, setLastUrlSearch] = useState(search);
+  if (search !== lastUrlSearch) {
+    setLastUrlSearch(search);
+    setSearchInput(search);
+  }
+
+  // Debounce the search box so we don't fire a request per keystroke, then
+  // write THROUGH to the URL. The `searchInput === search` bail is what keeps
+  // this from looping: the write updates `search`, which re-runs the effect,
+  // which then does nothing. (The page-1 reset lives in the input's onChange —
+  // see #187 review — so a mount-time settle can't clobber the user's page.)
   useEffect(() => {
-    const sp = new URLSearchParams();
-    if (search) sp.set("search", search);
-    if (status) sp.set("status", status);
-    if (typeFilter) sp.set("type", typeFilter);
-    if (expiresWithin) sp.set("expiresWithin", expiresWithin);
-    if (vendorId) sp.set("vendor", vendorId);
-    const qs = sp.toString();
-    router.replace(qs ? `/documents?${qs}` : "/documents", { scroll: false });
-  }, [search, status, typeFilter, expiresWithin, vendorId, router]);
+    if (searchInput === search) return;
+    const t = setTimeout(() => writeFilters({ search: searchInput }), 300);
+    return () => clearTimeout(t);
+  }, [searchInput, search, writeFilters]);
 
   const params: DocumentListParams = {
     page,
@@ -132,6 +165,22 @@ export default function DocumentsPage() {
   const serverPageSize = docs.data?.pageSize ?? PAGE_SIZE;
   const totalPages = Math.max(1, Math.ceil(total / serverPageSize));
 
+  // Any filter change returns to page 1 so the new results are visible. This
+  // keys off the filter values themselves rather than living in each dropdown's
+  // onChange (#370): filters now arrive from the URL, so they also change on a
+  // Back, a deep link, or a same-route nav — routes the handler-based reset
+  // never saw, which stranded the user on a page that no longer exists in the
+  // new result set.
+  // JSON.stringify, not join(sep): `search` is free text, so any separator
+  // character could appear inside a value and let two different filter sets
+  // produce the same key (search "a b" vs search "a" plus a "b" filter).
+  const filterKey = JSON.stringify([search, status, typeFilter, expiresWithin, vendorId ?? ""]);
+  const [lastFilterKey, setLastFilterKey] = useState(filterKey);
+  const filtersJustChanged = filterKey !== lastFilterKey;
+  if (filtersJustChanged) {
+    setLastFilterKey(filterKey);
+    setPage(1);
+  }
   // Self-heal if `page` fell out of range — e.g. another tab/user (or a backend
   // mutation) shrank the result set while we sat on the last page. Setting state
   // during render is React's supported "adjust state when derived data changes"
@@ -140,13 +189,13 @@ export default function DocumentsPage() {
   // converges — once page == totalPages the guard is false. The delete onSuccess
   // below still decrements as a same-session fast path so we skip the empty
   // fetch. (#187 review — correctness reviewer)
-  if (page > totalPages) setPage(totalPages);
+  //
+  // `else if` so the two adjustments can't fight over one render: on a filter
+  // change `totalPages` is still derived from the PREVIOUS filter's response,
+  // and letting it queue a second setPage after the reset would clamp the user
+  // to the old result set's last page instead of page 1. (#370)
+  else if (page > totalPages) setPage(totalPages);
 
-  // Any filter dropdown change returns to page 1 so the new results are visible.
-  const onFilterChange = (setter: (v: string) => void) => (value: string) => {
-    setter(value);
-    setPage(1);
-  };
   const hasActiveFilters = Boolean(search || status || typeFilter || expiresWithin || vendorId);
 
   // Drop stages the files; the vendor + document-type step below must be
@@ -425,7 +474,7 @@ export default function DocumentsPage() {
           aria-label="Filter by compliance status"
           className={FILTER_SELECT_CLASS}
           value={status}
-          onChange={(e) => onFilterChange(setStatus)(e.target.value)}
+          onChange={(e) => writeFilters({ status: e.target.value })}
         >
           <option value="">All statuses</option>
           {STATUS_FILTER_VALUES.map((value) => (
@@ -438,7 +487,7 @@ export default function DocumentsPage() {
           aria-label="Filter by document type"
           className={FILTER_SELECT_CLASS}
           value={typeFilter}
-          onChange={(e) => onFilterChange(setTypeFilter)(e.target.value)}
+          onChange={(e) => writeFilters({ type: e.target.value })}
         >
           <option value="">All types</option>
           {DOCUMENT_TYPES.map((t) => (
@@ -451,7 +500,7 @@ export default function DocumentsPage() {
           aria-label="Filter by expiry"
           className={FILTER_SELECT_CLASS}
           value={expiresWithin}
-          onChange={(e) => onFilterChange(setExpiresWithin)(e.target.value)}
+          onChange={(e) => writeFilters({ expiresWithin: e.target.value })}
         >
           <option value="">Any expiry</option>
           {EXPIRY_FILTERS.map((x) => (
@@ -466,18 +515,19 @@ export default function DocumentsPage() {
             variant="ghost"
             size="sm"
             onClick={() => {
-              setSearchInput("");
-              setSearch("");
-              setStatus("");
-              setTypeFilter("");
-              setExpiresWithin("");
-              setPage(1);
-              // vendorId is read-only from the URL (no state setter), so resetting
-              // state alone leaves a ?vendor= deep link in place and the mirror
-              // effect just rewrites it — Clear would be a dead control. Drop the
-              // whole query string so the vendor filter is actually clearable; the
-              // mirror effect then reconciles against the now-empty state. (#317 review)
+              // Dropping the whole query string clears every filter at once,
+              // including the `?vendor=` deep link that has no dropdown of its
+              // own (#317 review). Page and the derived filters follow from the
+              // now-empty URL; nothing re-adds a param afterwards, which is the
+              // #370 fix — the old mirror effect used to re-run against the
+              // pre-navigation snapshot and resurrect `?vendor=`.
               router.replace("/documents", { scroll: false });
+              // The search DRAFT is the one piece of state the URL can't clear:
+              // if the user typed within the last 300ms, `search` is still ""
+              // (the debounce hasn't written yet), so the URL-sync above sees no
+              // change and the box would keep its text — with the pending timer
+              // then writing it straight back.
+              setSearchInput("");
             }}
           >
             Clear

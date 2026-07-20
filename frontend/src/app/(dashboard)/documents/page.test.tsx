@@ -31,6 +31,8 @@ import {
   makeFile,
   toastError,
   toastInfo,
+  navState,
+  setNavigationState,
 } from "@/test";
 
 afterEach(() => {
@@ -70,7 +72,25 @@ describe("DocumentsPage — URL-addressable filters (#317 FP-041)", () => {
     await waitFor(() => expect(requestedUrl).toContain("vendorId=v_123"));
   });
 
-  it("mirrors the active filters back into the URL so the view is shareable", async () => {
+  it("writes a filter change into the URL so the view is shareable", async () => {
+    const replaceSpy = vi.fn();
+    server.use(http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))));
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, router: { replace: replaceSpy } });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText(/filter by compliance status/i), {
+      target: { value: "Expired" },
+    });
+
+    await waitFor(() => expect(replaceSpy).toHaveBeenCalled());
+    expect(replaceSpy.mock.calls.some(([href]) => String(href).includes("status=Expired"))).toBe(true);
+  });
+
+  it("does not navigate on mount — a deep-linked filter is already in the URL (#370)", async () => {
+    // The old mirror effect echoed every filter back on mount, so arriving at
+    // ?status=Expired immediately replaced to the identical URL. That echo was
+    // the loop: its input (searchParams) lagged its own output by a commit.
+    // Deriving from the URL means mount is a pure read.
     const replaceSpy = vi.fn();
     server.use(http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))));
     renderWithProviders(<DocumentsPage />, {
@@ -78,8 +98,171 @@ describe("DocumentsPage — URL-addressable filters (#317 FP-041)", () => {
       searchParams: { status: "Expired" },
       router: { replace: replaceSpy },
     });
-    await waitFor(() => expect(replaceSpy).toHaveBeenCalled());
-    expect(replaceSpy.mock.calls.some(([href]) => String(href).includes("status=Expired"))).toBe(true);
+    await waitFor(() => expect(screen.getByText(/no documents match your filters/i)).toBeInTheDocument());
+    // Give the 300ms search debounce room to misfire if it were going to.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(replaceSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
+  it("scenario A: Clear from ?vendor=&status= settles on a bare URL — no resurrected vendor filter", async () => {
+    // Against the pre-fix code the mirror effect re-ran after the handler's
+    // replace, reading the PRE-navigation searchParams snapshot, and dispatched
+    // "/documents?vendor=v1" — so the vendor filter survived the click meant to
+    // clear it and the list stayed filtered.
+    const requestedUrls: string[] = [];
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        requestedUrls.push(request.url);
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+    renderWithProviders(<DocumentsPage />, {
+      auth: authedMe,
+      searchParams: { vendor: "v1", status: "Expired" },
+      pathname: "/documents",
+    });
+    await waitFor(() => expect(requestedUrls.some((u) => u.includes("vendorId=v1"))).toBe(true));
+
+    // Everything from here on is what the click is answerable for.
+    const requestsBeforeClick = requestedUrls.length;
+    navState.router.replace.mockClear();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^clear$/i }));
+    await new Promise((r) => setTimeout(r, 400));
+
+    // The load-bearing assertion. Asserting only the FINAL url would not
+    // discriminate: the pre-fix page oscillates (bare -> ?vendor=v1 -> bare …)
+    // as each deferred navigation re-triggers the mirror effect, and it happens
+    // to settle empty. The defect is that the resurrection is DISPATCHED at all
+    // — the user sees the filter come back and the list refetch behind it.
+    const hrefsAfterClick = navState.router.replace.mock.calls.map(([href]) => String(href));
+    expect(hrefsAfterClick.filter((href) => href.includes("vendor="))).toEqual([]);
+
+    // No request issued after the click may re-apply the cleared filters.
+    const requestsAfterClick = requestedUrls.slice(requestsBeforeClick);
+    for (const requested of requestsAfterClick) {
+      const sp = new URL(requested).searchParams;
+      expect(sp.get("vendorId")).toBeNull();
+      expect(sp.get("status")).toBeNull();
+    }
+
+    // And the URL the user could copy is bare.
+    expect(navState.searchParams.toString()).toBe("");
+    expect(screen.queryByRole("button", { name: /^clear$/i })).toBeNull();
+  });
+
+  it("scenario B: a same-route nav to a bare /documents drops the filtered view (#370)", async () => {
+    // Clicking "Documents" in the sidebar while filtered does not remount the
+    // page, so the old useState initializers never re-ran: the list stayed
+    // filtered under a bare URL, and the next filter change wrote that stale
+    // residue back into the query string.
+    const requestedUrls: string[] = [];
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        requestedUrls.push(request.url);
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+    renderWithProviders(<DocumentsPage />, {
+      auth: authedMe,
+      searchParams: { status: "Expired" },
+      pathname: "/documents",
+    });
+    await waitFor(() => expect(requestedUrls.some((u) => u.includes("status=Expired"))).toBe(true));
+    expect(screen.getByLabelText(/filter by compliance status/i)).toHaveValue("Expired");
+
+    // The sidebar link: same route, bare URL, no remount.
+    setNavigationState({ searchParams: {}, pathname: "/documents" });
+
+    // The control follows the URL…
+    await waitFor(() =>
+      expect(screen.getByLabelText(/filter by compliance status/i)).toHaveValue(""),
+    );
+    // …and so does the list.
+    await waitFor(() => {
+      const last = requestedUrls[requestedUrls.length - 1];
+      expect(new URL(last).searchParams.get("status")).toBeNull();
+    });
+    expect(screen.queryByRole("button", { name: /^clear$/i })).toBeNull();
+  });
+
+  it("a URL-driven filter change resets pagination to page 1 (#370)", async () => {
+    // The page-1 reset used to live in each dropdown's onChange, so a filter
+    // that arrived from the URL — Back, a deep link, the sidebar — left the
+    // user stranded on a page the new result set may not have.
+    const requestedUrls: string[] = [];
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        requestedUrls.push(request.url);
+        const p = new URL(request.url).searchParams.get("page") ?? "1";
+        return jsonOk(
+          makeDocumentsResponse({
+            items: [makeDocument({ id: `d_${p}`, originalFileName: `row-p${p}.pdf` })],
+            total: 60,
+            page: Number(p),
+            pageSize: 25,
+          }),
+        );
+      }),
+    );
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, pathname: "/documents" });
+    await waitFor(() => expect(screen.getByText("row-p1.pdf")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+    await waitFor(() =>
+      expect(
+        new URL(requestedUrls[requestedUrls.length - 1]).searchParams.get("page"),
+      ).toBe("2"),
+    );
+
+    // A filter arriving from OUTSIDE the dropdowns (Back / deep link).
+    setNavigationState({ searchParams: { status: "Expired" }, pathname: "/documents" });
+
+    await waitFor(() => {
+      const sp = new URL(requestedUrls[requestedUrls.length - 1]).searchParams;
+      expect(sp.get("status")).toBe("Expired");
+      expect(sp.get("page")).toBe("1");
+    });
+  });
+
+  it("the search box round-trips through the URL and re-seeds when the URL changes", async () => {
+    server.use(http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))));
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, pathname: "/documents" });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText(/search documents/i), { target: { value: "acme" } });
+    // The debounced value is written THROUGH to the URL, not into a second
+    // state cell — that's what makes a searched view shareable.
+    await waitFor(() => expect(navState.searchParams.get("search")).toBe("acme"));
+    expect(screen.getByLabelText(/search documents/i)).toHaveValue("acme");
+
+    // An external URL change re-seeds the draft rather than leaving stale text
+    // in a box that no longer describes the list.
+    setNavigationState({ searchParams: {}, pathname: "/documents" });
+    await waitFor(() => expect(screen.getByLabelText(/search documents/i)).toHaveValue(""));
+  });
+
+  it("Clear also drops search text typed inside the debounce window", async () => {
+    // The draft is the one piece of state the URL cannot clear: within 300ms of
+    // typing, `search` is still "" so the URL-sync sees no change. Without an
+    // explicit reset the box keeps its text and the pending timer writes it
+    // straight back into the URL the click just cleared.
+    server.use(http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))));
+    renderWithProviders(<DocumentsPage />, {
+      auth: authedMe,
+      searchParams: { status: "Expired" },
+      pathname: "/documents",
+    });
+    await waitFor(() => expect(screen.getByText(/no documents match your filters/i)).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText(/search documents/i), { target: { value: "acme" } });
+    fireEvent.click(screen.getByRole("button", { name: /^clear$/i }));
+
+    expect(screen.getByLabelText(/search documents/i)).toHaveValue("");
+    await new Promise((r) => setTimeout(r, 400));
+    expect(navState.searchParams.toString()).toBe("");
   });
 
   it("Clear drops a ?vendor= deep link from the URL (regression: Clear was a dead control)", async () => {
