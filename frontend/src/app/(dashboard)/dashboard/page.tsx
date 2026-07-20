@@ -8,6 +8,7 @@ import { useMe, useCompleteOnboarding } from "@/hooks/useAuth";
 import { useDashboardStats, useExpiryPipeline, useRecentActivity, type ExpiryPipeline } from "@/hooks/useDashboard";
 import { actionLabel, relativeTime } from "@/lib/display-labels";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { isAuthError } from "@/lib/query-client";
 import { peekTourRestart, clearTourRestart } from "@/lib/onboarding";
 import { WelcomeModal } from "@/components/onboarding/WelcomeModal";
 import { GetStartedChecklist, useOnboardingChecklist } from "@/components/onboarding/GetStartedChecklist";
@@ -139,14 +140,18 @@ export default function DashboardPage() {
           {/* The pipeline is its OWN request, so it fails independently of stats.
               Rendering buckets requires loaded data — a failed or still-pending read
               shows an error or a skeleton, never `?? 0` zeros, which on this card
-              would read as "nothing is expired" over an org with expired COIs (#368). */}
+              would read as "nothing is expired" over an org with expired COIs (#368).
+              The `!isAuthError` guard routes an EXPIRED-SESSION 401 to the global
+              redirect (lib/query-client.ts) instead of this card, matching
+              documents/vendors; that case falls through to the skeleton, which claims
+              nothing. */}
           <section>
             <Card>
               <CardContent className="p-6">
                 <h2 className="text-base font-semibold text-slate-800 mb-4">When documents expire</h2>
                 {pipeline.isSuccess ? (
                   <PipelineBuckets data={pipeline.data} />
-                ) : pipeline.isError ? (
+                ) : pipeline.isError && !isAuthError(pipeline.error) ? (
                   <div className="space-y-2" role="alert">
                     <p className="text-sm text-slate-600">We couldn&apos;t load when your documents expire.</p>
                     {/* Server copy (already sanitized to friendly text by api.ts) or the
