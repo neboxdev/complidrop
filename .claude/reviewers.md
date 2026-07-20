@@ -36,6 +36,15 @@ Both are defined in this repo's `.claude/agents/`.
   nonCompliant / expiringSoon or future pipeline buckets (ADR 0033 + Amendment 1).
 - A normal document delete RETAINS its blob (ADR 0013); the sample-demo clear DELETES
   its blob (ADR 0028). Both directions are deliberate.
+- Two email validators coexist ON PURPOSE (#369): `Services/ContactEmail.IsWellFormed`
+  (vendor contact email — strict: dotted domain, no whitespace, ≤256) and
+  `AuthEndpoints.IsValidEmail` (account email — lax: `Contains('@')`). An account email
+  is PROVEN by the verification mail, so a typo self-corrects and over-strict signup
+  validation locks out a real customer; a vendor contact email is never proven and a
+  typo fails silently forever (reminders retry in place, ADR 0025). Different evidence,
+  different strictness — do not "unify" them. The pair that MUST agree is
+  `Services/ContactEmail.cs` ↔ `frontend/src/lib/contact-email.ts`; drift between
+  THOSE two is a real finding.
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).
