@@ -21,7 +21,7 @@ import { useVendors, useCreateVendor } from "@/hooks/useVendors";
 import { VendorCoverageBadge } from "@/components/VendorCoverageBadge";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
-import { CONTACT_EMAIL_ERROR, isMalformedContactEmail } from "@/lib/contact-email";
+import { CONTACT_EMAIL_ERROR, isMalformedContactEmail, trimContactEmail } from "@/lib/contact-email";
 import { isAuthError } from "@/lib/query-client";
 import { PageTip } from "@/components/onboarding/PageTip";
 import { TIP_IDS } from "@/lib/onboarding";
@@ -69,7 +69,6 @@ export default function VendorsPage() {
   // The email rule moved to lib/contact-email (#369) so this form and the detail edit
   // form share ONE definition — they had drifted, and the edit form had none at all.
   const trimmedName = name.trim();
-  const trimmedEmail = email.trim();
   const emailInvalid = isMalformedContactEmail(email);
   const duplicateName =
     trimmedName !== "" && all.some((v) => v.name.trim().toLowerCase() === trimmedName.toLowerCase());
@@ -96,7 +95,10 @@ export default function VendorsPage() {
               e.preventDefault();
               if (!trimmedName || emailInvalid) return;
               try {
-                await createVendor.mutateAsync({ name: trimmedName, contactEmail: trimmedEmail || null });
+                // Normalize through the SHARED helper, not a local `.trim() || null` — the two
+                // forms must agree on the transport rule as well as the predicate (#369), and
+                // the native trims differ from the server's stripping on U+0085 / U+FEFF.
+                await createVendor.mutateAsync({ name: trimmedName, contactEmail: trimContactEmail(email) });
                 toast.success("Vendor added");
                 setName("");
                 setEmail("");

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using CompliDrop.Api.Endpoints;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
@@ -824,18 +825,119 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     // only trimmed. A typo saved through the edit path returned 200 OK and then broke every
     // reminder send silently — sends retry in place (ADR 0025) and surface nothing to the operator.
     // The API is the authoritative gate because it is reachable without either form.
+    //
+    // The accept/reject corpus is NOT inlined here: it is loaded from the SHARED fixture
+    // docs/fixtures/contact-email-cases.json, the same file frontend/src/lib/contact-email.test.ts
+    // reads. The first review pass found hand-maintained parallel lists were already unequal at
+    // introduction AND that the two \s-based regexes genuinely disagreed on real input (.NET's \s
+    // includes U+0085 and excludes U+FEFF; JS's is the reverse). One list makes "the two
+    // implementations agree" mechanical instead of a comment nobody re-checks.
 
-    /// <summary>The two literals #369 reports, plus the structural neighbours they generalize to.</summary>
-    public static TheoryData<string> MalformedEmails() =>
-    [
-        "jane@acme,com",               // the reported typo: comma for dot, so the domain has no dot
-        "Jane Smith <jane@acme.com>",  // the reported paste; MailAddress ACCEPTS this, which is why we don't use it
-        "jane",
-        "jane@",
-        "@acme.com",
-        "jane@acme",
-        "jane doe@acme.com",
-    ];
+    private sealed record ContactEmailCases(
+        string[] Valid,
+        string[] Malformed,
+        PaddedCase[] PaddedValid,
+        string[] Blank);
+
+    private sealed record PaddedCase(string Raw, string Normalized);
+
+    private static readonly ContactEmailCases Cases = LoadContactEmailCases();
+
+    private static ContactEmailCases LoadContactEmailCases()
+    {
+        // Copied next to the test assembly by the csproj <None Include ... Link="SharedFixtures\">.
+        var path = Path.Combine(AppContext.BaseDirectory, "SharedFixtures", "contact-email-cases.json");
+        if (!File.Exists(path))
+            throw new FileNotFoundException(
+                $"Shared contact-email corpus not found at {path}. It is the single source both this " +
+                "suite and frontend/src/lib/contact-email.test.ts read (#369) — do not inline the " +
+                "cases here instead.", path);
+
+        var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        return JsonSerializer.Deserialize<ContactEmailCases>(File.ReadAllText(path), opts)
+               ?? throw new InvalidOperationException($"Could not parse {path}");
+    }
+
+    public static TheoryData<string> MalformedEmails()
+    {
+        var data = new TheoryData<string>();
+        foreach (var c in Cases.Malformed) data.Add(c);
+        return data;
+    }
+
+    public static TheoryData<string> ValidEmails()
+    {
+        var data = new TheoryData<string>();
+        foreach (var c in Cases.Valid) data.Add(c);
+        return data;
+    }
+
+    public static TheoryData<string, string> PaddedValidEmails()
+    {
+        var data = new TheoryData<string, string>();
+        foreach (var c in Cases.PaddedValid) data.Add(c.Raw, c.Normalized);
+        return data;
+    }
+
+    public static TheoryData<string> BlankEmails()
+    {
+        var data = new TheoryData<string>();
+        foreach (var c in Cases.Blank) data.Add(c);
+        return data;
+    }
+
+    /// <summary>Renders invisible code points so a failure message names the character.</summary>
+    private static string Show(string s) =>
+        string.Concat(s.Select(ch => ch is >= ' ' and <= '~' ? ch.ToString() : $"\\u{(int)ch:X4}"));
+
+    [Fact]
+    public void The_shared_corpus_loaded_and_is_non_trivial()
+    {
+        // Guards every theory below: a silently-missing or emptied fixture would make them all
+        // vacuously pass with zero cases.
+        Cases.Valid.Length.Should().BeGreaterThan(3);
+        Cases.Malformed.Length.Should().BeGreaterThan(10);
+        Cases.PaddedValid.Length.Should().BeGreaterThan(3);
+        Cases.Blank.Length.Should().BeGreaterThan(3);
+    }
+
+    [Theory]
+    [MemberData(nameof(MalformedEmails))]
+    public void The_predicate_rejects_every_malformed_case_in_the_shared_corpus(string bad)
+    {
+        // Unit-level mirror of the frontend's it.each over the SAME list — this is the assertion
+        // that actually pins cross-language agreement, including the code points the two engines'
+        // \s classes disagree about (U+0085, U+FEFF) and the C0 controls Postgres cannot store.
+        ContactEmail.IsWellFormed(bad).Should().BeFalse($"{Show(bad)} must be rejected");
+    }
+
+    [Theory]
+    [MemberData(nameof(ValidEmails))]
+    public void The_predicate_accepts_every_valid_case_in_the_shared_corpus(string good)
+    {
+        // Includes sample-vendor@example.com (#238 seeds it — rejecting it would break the
+        // one-click demo) and a non-ASCII address (the predicate must not become ASCII-only).
+        ContactEmail.IsWellFormed(good).Should().BeTrue($"{Show(good)} must be accepted");
+    }
+
+    [Theory]
+    [MemberData(nameof(PaddedValidEmails))]
+    public void Normalization_strips_the_same_edges_the_frontend_strips(string raw, string normalized)
+    {
+        // The BOM/NEL rows are the ones .NET Trim() and JS .trim() disagree on. Both sides strip
+        // via the shared explicit character class instead, so these must agree exactly.
+        ContactEmail.Normalize(raw).Should().Be(normalized, $"{Show(raw)} normalizes to its bare address");
+        ContactEmail.IsWellFormed(raw).Should().BeTrue($"{Show(raw)} is valid once stripped");
+    }
+
+    [Theory]
+    [MemberData(nameof(BlankEmails))]
+    public void Blank_normalizes_to_null_and_stays_valid(string blank)
+    {
+        // Load-bearing: a vendor with no contact email is a supported state.
+        ContactEmail.Normalize(blank).Should().BeNull($"{Show(blank)} is absent, not empty string");
+        ContactEmail.IsWellFormed(blank).Should().BeTrue($"{Show(blank)} must not become a 400");
+    }
 
     [Theory]
     [MemberData(nameof(MalformedEmails))]
@@ -852,7 +954,9 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             complianceTemplateId = (Guid?)null,
         });
 
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"'{bad}' is not a usable address");
+        // Specifically a 400, not a 500: the NUL case reaches Postgres as SQLSTATE 22021 without
+        // the control-character exclusion, exactly like an over-length value without the cap.
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"{Show(bad)} is not a usable address");
         (await ErrorCode(resp)).Should().Be("validation.contactEmail");
 
         await using var db = CreateSystemDb();
@@ -877,7 +981,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             complianceTemplateId = (Guid?)null,
         });
 
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"'{bad}' is not a usable address");
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"{Show(bad)} is not a usable address");
         (await ErrorCode(resp)).Should().Be("validation.contactEmail");
 
         await using var db = CreateSystemDb();
@@ -888,8 +992,8 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     [Fact]
     public async Task A_blank_contact_email_stays_acceptable_on_both_write_paths()
     {
-        // Load-bearing: a vendor with no contact email is a supported state. If the format gate
-        // turned blank into a 400, every such vendor would become unsaveable.
+        // Load-bearing at the HTTP level too: if the format gate turned blank into a 400, every
+        // vendor without a contact email would become unsaveable.
         var auth = await RegisterAndLoginAsync();
 
         foreach (var blank in new[] { null, "", "   " })
@@ -981,9 +1085,93 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     [Fact]
     public void The_seeded_sample_vendor_address_satisfies_the_validator()
     {
-        // #238 seeds this address on the sample vendor (SampleEndpoints.SampleVendorEmail, private).
-        // If the new predicate rejected it, the sample demo would be unsaveable through the very
-        // form it ships in — and the one-click demo is a cold org's first success.
-        ContactEmail.IsWellFormed("sample-vendor@example.com").Should().BeTrue();
+        // #238 seeds this address on the sample vendor. Referenced through the constant (made
+        // internal for this) rather than a copied literal: a copy would still pass if the seed
+        // were changed to something the validator rejects, i.e. it could not detect the
+        // regression it is named for.
+        ContactEmail.IsWellFormed(SampleEndpoints.SampleVendorEmail).Should().BeTrue();
+    }
+
+    // ---- #369: vendors whose STORED address is already malformed --------------------------------
+    // These rows exist: they are what the previously-unguarded edit path wrote. The deliberate
+    // decision (recorded in .claude/reviewers.md and the PR body) is BLOCK-UNTIL-FIXED — the update
+    // gate validates the submitted address whether or not this request changed it, so the operator
+    // must correct a field that is genuinely broken before other edits land. Rationale: the address
+    // is actively failing (no reminder can reach it), the detail form surfaces the reason inline on
+    // load with Save disabled, and the fix is one edit. The alternative (validate only on change)
+    // would let a known-dead address persist indefinitely behind unrelated saves.
+
+    [Fact]
+    public async Task A_vendor_whose_stored_address_is_already_malformed_must_fix_it_before_other_edits_land()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Legacy Vendor", "ops@acme.test");
+
+        // Simulate the pre-fix row: write a malformed address straight to the DB, bypassing the
+        // new gate (this is exactly what the unguarded edit path used to persist).
+        await using (var seed = CreateSystemDb())
+        {
+            var v = await seed.Vendors.IgnoreQueryFilters().SingleAsync(x => x.Id == vendorId);
+            v.ContactEmail = "Jane Smith <jane@acme.com>";
+            await seed.SaveChangesAsync();
+        }
+
+        // Renaming while echoing the stored bad address is refused — the gate does not care that
+        // this request didn't introduce the typo.
+        var blocked = await auth.Client.PutAsJsonAsync($"/api/vendors/{vendorId}", new
+        {
+            name = "Legacy Vendor Renamed",
+            contactEmail = "Jane Smith <jane@acme.com>",
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = (Guid?)null,
+        });
+        blocked.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(blocked)).Should().Be("validation.contactEmail");
+
+        // Correcting the address in the same save is the intended escape hatch, and it lands.
+        var fixedUp = await auth.Client.PutAsJsonAsync($"/api/vendors/{vendorId}", new
+        {
+            name = "Legacy Vendor Renamed",
+            contactEmail = "jane@acme.com",
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = (Guid?)null,
+        });
+        fixedUp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var after = await db.Vendors.SingleAsync(v => v.Id == vendorId);
+        after.ContactEmail.Should().Be("jane@acme.com");
+        after.Name.Should().Be("Legacy Vendor Renamed");
+    }
+
+    [Fact]
+    public async Task Clearing_a_legacy_malformed_address_is_also_accepted()
+    {
+        // The other escape hatch: an operator who doesn't know the right address can blank the
+        // field rather than being stuck. Blank is a supported state, so this must not 400.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Legacy Vendor", "ops@acme.test");
+
+        await using (var seed = CreateSystemDb())
+        {
+            var v = await seed.Vendors.IgnoreQueryFilters().SingleAsync(x => x.Id == vendorId);
+            v.ContactEmail = "jane@acme,com";
+            await seed.SaveChangesAsync();
+        }
+
+        var cleared = await auth.Client.PutAsJsonAsync($"/api/vendors/{vendorId}", new
+        {
+            name = "Legacy Vendor",
+            contactEmail = (string?)null,
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = (Guid?)null,
+        });
+
+        cleared.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.Vendors.SingleAsync(v => v.Id == vendorId)).ContactEmail.Should().BeNull();
     }
 }

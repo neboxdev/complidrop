@@ -39,6 +39,13 @@
     <!-- SYNTHETIC rule-engine JSON fixtures, copied next to the test assembly so RuleSetLoader
          directory/file loading is discoverable via AppContext.BaseDirectory. -->
     <None Update="RuleEngineFixtures\**\*.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The SHARED contact-email corpus (#369). Lives at the repo root because the frontend suite
+         reads the SAME file — driving both sides from one list is what keeps Services/ContactEmail.cs
+         and frontend/src/lib/contact-email.ts from drifting (hand-maintained parallel lists were
+         already unequal when they were introduced). Linked in rather than duplicated. -->
+    <None Include="..\..\docs\fixtures\contact-email-cases.json"
+          Link="SharedFixtures\contact-email-cases.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

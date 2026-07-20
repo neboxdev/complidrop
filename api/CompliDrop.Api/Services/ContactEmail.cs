@@ -8,7 +8,9 @@ namespace CompliDrop.Api.Services;
 /// Mirrors <c>frontend/src/lib/contact-email.ts</c>. The client guard exists to explain the problem
 /// inline while the user types; THIS is the authoritative check, because <c>/api/vendors</c> is
 /// reachable without either form. The two files must agree — if they drift, one side silently accepts
-/// what the other rejects, which is the exact class of bug #369 reports.
+/// what the other rejects, which is the exact class of bug #369 reports. The shared corpus in
+/// <c>docs/fixtures/contact-email-cases.json</c> drives BOTH test suites so that agreement is
+/// mechanically pinned rather than asserted in a comment.
 /// </para>
 /// <para>
 /// Deliberately NOT unified with <c>AuthEndpoints.IsValidEmail</c>, which stays laxer
@@ -30,22 +32,62 @@ public static partial class ContactEmail
     public const int MaxLength = 256;
 
     /// <summary>
-    /// Non-empty local part, a single <c>@</c>, and a dotted domain — no whitespace anywhere.
-    /// <c>\z</c> (not <c>$</c>) so a trailing newline can't slip through: .NET's <c>$</c> also matches
-    /// before a final <c>\n</c>, which would diverge from the JS mirror's <c>$</c>.
+    /// Blank-or-invisible code points, spelled out EXPLICITLY rather than as <c>\s</c>.
+    /// <para>
+    /// This is the fix for the review's confirmed drift: .NET's <c>\s</c> is
+    /// <c>[\f\n\r\t\v\x85\p{Z}]</c> while JS's <c>\s</c> excludes U+0085 and includes U+FEFF, and
+    /// <c>Trim()</c> vs <c>.trim()</c> diverge on those same two code points. Relying on either
+    /// engine's <c>\s</c> made the mirrors disagree on real input: a pasted BOM was REJECTED by the
+    /// client and ACCEPTED by the server, which then stored an unsendable address — precisely the
+    /// silent reminder failure #369 exists to prevent.
+    /// </para>
+    /// <para>
+    /// It also closes a second confirmed bug: <c>\s</c> does not cover the C0 controls, so a NUL
+    /// reached <c>SaveChangesAsync</c> and raised Postgres 22021 (<c>varchar</c> cannot store 0x00),
+    /// surfacing as a 500 — the same 400-instead-of-500 outcome the length cap guarantees.
+    /// </para>
+    /// <para>
+    /// Ranges (identical text in the JS mirror): C0 + space; DEL + C1 (incl. U+0085 NEL) + NBSP;
+    /// Ogham space; the en-quad..ZWJ block (incl. U+200B ZWSP); line/paragraph separators; narrow and
+    /// medium spaces; word joiner; ideographic space; ZWNBSP/BOM. Deliberately NOT a general-category
+    /// class like <c>\p{C}</c> — those resolve against each runtime's Unicode tables, which is the
+    /// same engine-dependence in a new costume. Non-ASCII LETTERS stay legal (<c>josé@empresa.es</c>).
+    /// </para>
     /// </summary>
-    [GeneratedRegex(@"^[^\s@]+@[^\s@]+\.[^\s@]+\z")]
+    private const string Blank =
+        @"\u0000-\u0020\u007F-\u00A0\u1680\u2000-\u200D\u2028\u2029\u202F\u205F\u2060\u3000\uFEFF";
+
+    /// <summary>Leading/trailing runs of <see cref="Blank"/>, stripped by <see cref="Normalize"/>.</summary>
+    [GeneratedRegex("^[" + Blank + "]+|[" + Blank + "]+\\z")]
+    private static partial Regex BlankEdges();
+
+    /// <summary>
+    /// Non-empty local part, a single <c>@</c>, and a dotted domain — no blank-or-invisible character
+    /// anywhere. <c>\z</c> (not <c>$</c>) so a trailing newline can't slip through: .NET's <c>$</c>
+    /// also matches before a final <c>\n</c>. (JS's <c>$</c> without <c>/m</c> does not, so the mirror
+    /// uses <c>$</c> and the two agree.)
+    /// </summary>
+    [GeneratedRegex("^[^" + Blank + "@]+@[^" + Blank + "@]+\\.[^" + Blank + "@]+\\z")]
     private static partial Regex WellFormed();
 
     /// <summary>
-    /// Normalizes on write: trim; blank → null. Trimming is required so the stored value round-trips
-    /// EXACTLY against the per-(org, email) suppression key, which the Resend webhook stores
-    /// <c>Trim()</c>'d (#340) — a padded address is otherwise sent and logged verbatim while the
-    /// suppression lookup misses, so reminders keep firing into a dead mailbox. Casing is preserved
-    /// (every comparison site is already case-insensitive), matching the vendor's chosen display form.
+    /// Normalizes on write: strip blank-or-invisible edges; empty → null. Stripping is required so the
+    /// stored value round-trips EXACTLY against the per-(org, email) suppression key, which the Resend
+    /// webhook stores <c>Trim()</c>'d (#340) — a padded address is otherwise sent and logged verbatim
+    /// while the suppression lookup misses, so reminders keep firing into a dead mailbox. Casing is
+    /// preserved (every comparison site is already case-insensitive).
+    /// <para>
+    /// Uses <see cref="BlankEdges"/> rather than <c>string.Trim()</c> so the JS mirror can strip the
+    /// IDENTICAL set — <c>.trim()</c> and <c>Trim()</c> disagree on U+0085 and U+FEFF, which would
+    /// otherwise reintroduce the drift one layer down from the regex.
+    /// </para>
     /// </summary>
-    public static string? Normalize(string? email) =>
-        string.IsNullOrWhiteSpace(email) ? null : email.Trim();
+    public static string? Normalize(string? email)
+    {
+        if (email is null) return null;
+        var stripped = BlankEdges().Replace(email, string.Empty);
+        return stripped.Length == 0 ? null : stripped;
+    }
 
     /// <summary>
     /// True when the address is absent or usable. Absent is VALID: a vendor with no contact email is a

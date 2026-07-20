@@ -630,3 +630,49 @@ describe("VendorDetailPage — contact email validation (#369)", () => {
     await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Vendor updated"));
   });
 });
+
+describe("VendorDetailPage — a vendor whose STORED email is already malformed (#369)", () => {
+  // These rows exist: they are what the previously-unguarded edit path wrote. The deliberate
+  // decision (recorded in .claude/reviewers.md and mirrored by the backend test
+  // `A_vendor_whose_stored_address_is_already_malformed_must_fix_it_before_other_edits_land`)
+  // is BLOCK-UNTIL-FIXED — the address is actively broken, so the page surfaces the reason on
+  // load rather than letting unrelated edits paper over a vendor no reminder can reach.
+  const LEGACY = { ...VENDOR_DETAIL, contactEmail: "Jane Smith <jane@acme.com>" };
+
+  function mount(vendor: VendorDetail) {
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(vendor)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+      http.get(url("/api/compliance/templates/:tid"), ({ params }) =>
+        jsonOk({ id: params.tid, name: "Checklist", isSystemTemplate: true, rules: [] }),
+      ),
+    );
+    return renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: vendor.id } });
+  }
+
+  it("explains the problem and disables Save on load, before the user touches anything", async () => {
+    mount(LEGACY);
+    expect(await screen.findByText(/enter a valid email address/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /save changes/i })).toBeDisabled();
+  });
+
+  it("lets the operator fix the address to unblock saving", async () => {
+    mount(LEGACY);
+    const input = await screen.findByLabelText(/^contact email$/i);
+    expect(screen.getByRole("button", { name: /save changes/i })).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: "jane@acme.com" } });
+
+    expect(screen.getByRole("button", { name: /save changes/i })).toBeEnabled();
+    expect(screen.queryByText(/enter a valid email address/i)).toBeNull();
+  });
+
+  it("also lets the operator clear the address, rather than trapping them behind an unknown one", async () => {
+    // The escape hatch for "I don't know their real address": blank is a supported state, so
+    // clearing must unblock Save too. Mirrored server-side by
+    // `Clearing_a_legacy_malformed_address_is_also_accepted`.
+    mount(LEGACY);
+    fireEvent.change(await screen.findByLabelText(/^contact email$/i), { target: { value: "" } });
+    expect(screen.getByRole("button", { name: /save changes/i })).toBeEnabled();
+  });
+});

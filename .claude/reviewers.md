@@ -37,14 +37,30 @@ Both are defined in this repo's `.claude/agents/`.
 - A normal document delete RETAINS its blob (ADR 0013); the sample-demo clear DELETES
   its blob (ADR 0028). Both directions are deliberate.
 - Two email validators coexist ON PURPOSE (#369): `Services/ContactEmail.IsWellFormed`
-  (vendor contact email — strict: dotted domain, no whitespace, ≤256) and
+  (vendor contact email — strict: dotted domain, no blank/invisible chars, ≤256) and
   `AuthEndpoints.IsValidEmail` (account email — lax: `Contains('@')`). An account email
   is PROVEN by the verification mail, so a typo self-corrects and over-strict signup
   validation locks out a real customer; a vendor contact email is never proven and a
   typo fails silently forever (reminders retry in place, ADR 0025). Different evidence,
   different strictness — do not "unify" them. The pair that MUST agree is
   `Services/ContactEmail.cs` ↔ `frontend/src/lib/contact-email.ts`; drift between
-  THOSE two is a real finding.
+  THOSE two is a real finding — and it is now pinned mechanically, since both test
+  suites are driven by the shared corpus `docs/fixtures/contact-email-cases.json`.
+  Add a case there, not to one suite.
+- Those two mirrors spell their blank-character class out as explicit `\uXXXX` ranges
+  instead of `\s`, and strip edges with that class instead of `Trim()`/`.trim()`. That
+  verbosity is DELIBERATE and load-bearing, not a style lapse: .NET's `\s` includes
+  U+0085 and excludes U+FEFF while JS's is the reverse, and the two native trims diverge
+  on the same pair — which made the mirrors genuinely disagree (a pasted BOM was rejected
+  client-side and ACCEPTED server-side, storing an unsendable address). `\s`, `\p{C}`, or
+  any general-category class re-introduces engine-dependence; do not "simplify" to one.
+- Vendor update is BLOCK-UNTIL-FIXED on a malformed contact email (#369): `UpdateVendor`
+  validates the submitted address whether or not that request changed it, so a vendor
+  whose STORED address is already malformed (written by the pre-#369 unguarded edit path)
+  must be corrected or cleared before unrelated edits land. Deliberate: the address is
+  actively failing, the detail form shows the reason inline on load with Save disabled,
+  and both correcting and clearing are accepted. Finding these rows without opening each
+  vendor is [#430](https://github.com/neboxdev/complidrop/issues/430), not a defect here.
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).
