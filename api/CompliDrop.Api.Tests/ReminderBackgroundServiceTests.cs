@@ -83,7 +83,8 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         string? vendorEmail = "vendor@example.com",
         string? orgName = null,
         DateTime? overrideExpirationUtc = null,
-        bool documentIsSample = false)
+        bool documentIsSample = false,
+        bool vendorIsSample = false)
     {
         var orgId = Guid.NewGuid();
         var reminderId = Guid.NewGuid();
@@ -110,6 +111,7 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             ContactEmail = vendorEmail,
             CreatedAt = now,
             UpdatedAt = now,
+            IsSample = vendorIsSample,
         });
         if (userId is { } uid)
         {
@@ -228,6 +230,43 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
             .Which.ToEmail.Should().Be("owner@example.com");
         (await LogCountAsync(seed.ReminderId, realDocId)).Should().Be(1);
         (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(0, "but the sample row stays silent");
+    }
+
+    [Fact]
+    public async Task A_real_document_assigned_to_the_sample_vendor_never_mails_the_fictional_address()
+    {
+        // The residual the document-level exclusion alone does NOT cover (#367 review): a user can
+        // assign a REAL document to the sample vendor from the vendor dropdown, and that document
+        // legitimately reaches the send loop — carrying the fictional sample-vendor@example.com with
+        // it. Sending would be the same guaranteed hard bounce the whole ticket exists to stop.
+        // The org's INTERNAL recipient must still be notified: the document and its expiry are real.
+        var seed = await SeedReminderAsync(
+            NyEightAm,
+            notifyInternal: true, internalEmail: "owner@example.com", internalEmailVerified: true,
+            notifyVendor: true, vendorEmail: "sample-vendor@example.com",
+            documentIsSample: false, vendorIsSample: true);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Select(s => s.ToEmail).Should().BeEquivalentTo(
+            new[] { "owner@example.com" },
+            "the real document still needs its internal reminder, but the sample vendor's fake address must be dropped");
+    }
+
+    [Fact]
+    public async Task A_real_vendors_address_is_still_mailed()
+    {
+        // Direction guard for the sample-vendor skip: it must key on IsSample, not silently mute
+        // every vendor recipient. Identical arrangement, vendorIsSample: false.
+        var seed = await SeedReminderAsync(
+            NyEightAm,
+            notifyInternal: false,
+            notifyVendor: true, vendorEmail: "real@vendor.test",
+            documentIsSample: false, vendorIsSample: false);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Select(s => s.ToEmail).Should().BeEquivalentTo(new[] { "real@vendor.test" });
     }
 
     // ───────── #340: bounce / complaint suppression ─────────

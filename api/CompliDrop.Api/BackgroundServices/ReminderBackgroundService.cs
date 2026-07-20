@@ -278,7 +278,17 @@ public class ReminderBackgroundService(
                         foreach (var doc in docs)
                         {
                             var recipients = new List<string>(reminderInternalUsers);
-                            if (reminder.NotifyVendor && !string.IsNullOrWhiteSpace(doc.Vendor?.ContactEmail))
+                            // #367: never mail the sample-demo VENDOR. Excluding sample documents from the
+                            // query above is not sufficient on its own — a user can assign a REAL document
+                            // to the sample vendor from the vendor dropdown, and that document legitimately
+                            // reaches this loop. Its vendor address is the fictional sample-vendor@example.com
+                            // (RFC 2606 reserved, accepts no mail), so sending is a guaranteed hard bounce
+                            // that suppresses the address and paints a "bounced" alarm badge on a vendor that
+                            // does not exist. The org's INTERNAL recipients still get this reminder — the
+                            // document is real and its expiry matters; only the fake address is dropped.
+                            if (reminder.NotifyVendor
+                                && doc.Vendor is { IsSample: false }
+                                && !string.IsNullOrWhiteSpace(doc.Vendor.ContactEmail))
                                 recipients.Add(doc.Vendor.ContactEmail);
                             // Distinct uses OrdinalIgnoreCase to match the dedupe HashSet below and the
                             // intent of "one mail per real recipient": a user email stored lowercased

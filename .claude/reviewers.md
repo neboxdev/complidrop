@@ -36,6 +36,14 @@ Both are defined in this repo's `.claude/agents/`.
   nonCompliant / expiringSoon or future pipeline buckets (ADR 0033 + Amendment 1).
 - A normal document delete RETAINS its blob (ADR 0013); the sample-demo clear DELETES
   its blob (ADR 0028). Both directions are deliberate.
+- The sample-demo row is excluded from the plan-limit population on every enforcing /
+  reporting surface (dashboard fence, portal fence, Settings `documentsUsed`) via the
+  shared `PlanDocumentScope.CountsTowardLimit` predicate, and never generates reminder
+  mail (sample documents dropped from the query; the sample VENDOR's address dropped
+  from the recipient list even for a real document assigned to it). But the dashboard's
+  `totalDocuments` still COUNTS the sample — that asymmetry is deliberate ("what's in
+  my account" vs "what do I owe for"), so a 4-real+1-sample org showing "5 documents"
+  on the dashboard and "4 / 5" in Settings is correct (ADR 0028 Amendment 1, #367).
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).

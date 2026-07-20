@@ -145,14 +145,15 @@ public static class VendorPortalEndpoints
         // Distinct error code from the dashboard's plan.limit_reached: this copy faces
         // the VENDOR, who can't upgrade anything — the cure is telling the business.
         // Checked before the form/blob work so a capped-out upload costs nothing.
-        // Excludes the sample-demo document (!d.IsSample) for the same reason the dashboard
-        // gate does (#238 / ADR 0028): it's a throwaway artifact, not a paid slot. Without the
-        // exclusion the two ingress paths disagree — the portal would reject a real vendor's
-        // upload one document early while the org's own dashboard upload still succeeded (#367).
+        // Counts through the SHARED plan-limit predicate (#367) so this fence and the dashboard
+        // fence it mirrors can never diverge again. It excludes the sample-demo document
+        // (#238 / ADR 0028): a throwaway artifact, not a paid slot. While the portal counted it and
+        // the dashboard did not, the two ingress paths disagreed on the same cap — a real vendor's
+        // upload was refused a document early while the org's own upload still succeeded.
         if (sub.DocumentLimit is { } docLimit)
         {
             var activeDocs = await db.Documents
-                .CountAsync(d => d.OrganizationId == link.Vendor.OrganizationId && d.DeletedAt == null && !d.IsSample, ct);
+                .CountAsync(PlanDocumentScope.CountsTowardLimit(link.Vendor.OrganizationId), ct);
             if (activeDocs >= docLimit)
                 return Error(403, "vendor.portal_document_limit_reached",
                     $"{link.Vendor.Organization.Name} can't accept more documents right now. Let them know, and they can make room for yours.");

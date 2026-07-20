@@ -145,11 +145,11 @@ public static class BillingEndpoints
             .FirstOrDefaultAsync(s => s.OrganizationId == currentUser.OrganizationId.Value, ct);
         if (sub is null) return Error(404, "billing.not_found", "Subscription not found.");
 
-        // Mirrors the enforcement gates' population (!d.IsSample) so the Settings tile reports the
-        // number the plan limit actually enforces (#238 / ADR 0028). Counting the sample here made a
-        // 4-real-document org on DocumentLimit=5 read "5/5" and fire the frontend over-limit warning
-        // purely because of the demo row — upgrade pressure a document early (#367).
-        var docCount = await db.Documents.CountAsync(d => d.OrganizationId == sub.OrganizationId && d.DeletedAt == null && !d.IsSample, ct);
+        // The SAME predicate the upload gates enforce (#367), so the tile can never report a number
+        // the gates disagree with. Counting the sample here made a 4-real-document org on
+        // DocumentLimit=5 read "5 / 5" — a tile that looks full while a real slot is still free and
+        // the dashboard upload it implies is blocked actually succeeds.
+        var docCount = await db.Documents.CountAsync(PlanDocumentScope.CountsTowardLimit(sub.OrganizationId), ct);
         return Results.Ok(new
         {
             data = new
