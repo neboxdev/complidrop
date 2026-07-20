@@ -566,7 +566,7 @@ describe("VendorsPage — add-form contact email validation (#369)", () => {
     fireEvent.change(email, { target: { value: "jane@acme,com" } });
 
     expect(addButton()).toBeDisabled();
-    expect(screen.getByText(/enter a valid email address/i)).toBeInTheDocument();
+    expect(screen.getByText(/enter a valid contact email address/i)).toBeInTheDocument();
     expect(email).toHaveAttribute("aria-invalid", "true");
   });
 
@@ -574,7 +574,7 @@ describe("VendorsPage — add-form contact email validation (#369)", () => {
     mount();
     fireEvent.change(await screen.findByLabelText(/^name$/i), { target: { value: "Acme" } });
     expect(addButton()).toBeEnabled();
-    expect(screen.queryByText(/enter a valid email address/i)).toBeNull();
+    expect(screen.queryByText(/enter a valid contact email address/i)).toBeNull();
   });
 
   it("sends the address stripped with the SHARED blank set, not a native trim", async () => {
@@ -634,7 +634,7 @@ describe("VendorsPage — add-form contact email validation (#369)", () => {
       target: { value: "jos\u00E9@empresa.es" },
     });
 
-    expect(screen.queryByText(/enter a valid email address/i)).toBeNull();
+    expect(screen.queryByText(/enter a valid contact email address/i)).toBeNull();
     expect(addButton()).toBeEnabled();
     fireEvent.click(addButton());
 

@@ -84,6 +84,20 @@ function isBlank(c: string): boolean {
 }
 
 /**
+ * A blank-class character that renders as NOTHING (or as an indistinguishable look-alike):
+ * everything in the class except ordinary space and the ASCII layout controls, which a user can
+ * plainly see. Drives only the choice of error copy, never accept/reject — so it deliberately has
+ * no corpus entry: the corpus owns what is REJECTED, this owns how we word it.
+ *
+ * NBSP counts as invisible on purpose — it is pixel-identical to a space, so "there is a space
+ * here" is not a fix the user can act on, whereas "there is a hidden character" is.
+ */
+function isInvisible(c: string): boolean {
+  const p = c.codePointAt(0)!;
+  return isBlank(c) && p !== 0x0020 && !(p >= 0x0009 && p <= 0x000d);
+}
+
+/**
  * Non-empty local part, a single `@`, and a dotted domain — no blank-or-invisible character
  * anywhere. Rejects `jane@acme,com` (no dot in the domain) and `Jane Smith <jane@acme.com>`
  * (space in the local part). JS's `$` without `/m` matches only at end-of-string, which is
@@ -120,10 +134,48 @@ export function trimContactEmail(raw: string | null | undefined): string | null 
  * disagree about what was inspected.
  */
 export function isMalformedContactEmail(raw: string | null | undefined): boolean {
-  const normalized = trimContactEmail(raw);
-  if (normalized === null) return false;
-  return normalized.length > CONTACT_EMAIL_MAX_LENGTH || !WELL_FORMED.test(normalized);
+  return contactEmailError(raw) !== undefined;
 }
 
-/** Shared inline-error copy, so both vendor forms say the same thing. */
-export const CONTACT_EMAIL_ERROR = "Enter a valid email address.";
+/**
+ * Shared inline-error copy. Mirrored by `ContactEmail.InvalidMessage` and friends on the server
+ * and pinned to the shared corpus's `messages` block by test on both sides, so the message the
+ * user reads while typing and the 400 body they get on submit cannot say different things about
+ * the same input — a quieter mirror pair than the predicate, but the same drift class.
+ */
+export const CONTACT_EMAIL_ERROR =
+  "Enter a valid contact email address, like ops@acmecatering.com - or leave it blank.";
+
+/**
+ * Separate copy for the invisible-character case. "Enter a valid email address" is unactionable
+ * when the field LOOKS correct: a zero-width or non-breaking character pasted from a PDF or a mail
+ * client renders as nothing, so the user re-reads a correct-looking address and cannot see what is
+ * wrong with it. The explicit blank class rejects these (neither engine's `\s` covers most of
+ * them), which is why this message is needed now and was not before.
+ */
+export const CONTACT_EMAIL_HIDDEN_CHARACTER_ERROR =
+  "This address contains a hidden character - retype it, or leave it blank.";
+
+/** Copy for a value that is otherwise well-formed but longer than the column. */
+export const CONTACT_EMAIL_TOO_LONG_ERROR =
+  "That email address is too long - use one under 256 characters, or leave it blank.";
+
+/**
+ * The message to show for a rejected address, or `undefined` when it is acceptable — the single
+ * decision both forms render. Blank is acceptable: a vendor with no contact email is a supported
+ * state. Mirrors the server's `ContactEmail.DescribeProblem`.
+ */
+export function contactEmailError(raw: string | null | undefined): string | undefined {
+  const normalized = trimContactEmail(raw);
+  if (normalized === null) return undefined;
+  if (normalized.length > CONTACT_EMAIL_MAX_LENGTH) return CONTACT_EMAIL_TOO_LONG_ERROR;
+  if (WELL_FORMED.test(normalized)) return undefined;
+
+  // Edges are already stripped, so any remaining blank-class character is INTERIOR. But only the
+  // INVISIBLE ones earn the hidden-character wording: an ordinary space or tab is plainly visible,
+  // so "contains a hidden character" would be a lie for the display-name form
+  // `Jane Smith <jane@acme.com>` — one of the two literals this ticket reports.
+  for (const c of normalized) if (isInvisible(c)) return CONTACT_EMAIL_HIDDEN_CHARACTER_ERROR;
+
+  return CONTACT_EMAIL_ERROR;
+}

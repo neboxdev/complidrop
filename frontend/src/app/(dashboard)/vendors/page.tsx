@@ -21,7 +21,7 @@ import { useVendors, useCreateVendor } from "@/hooks/useVendors";
 import { VendorCoverageBadge } from "@/components/VendorCoverageBadge";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
-import { CONTACT_EMAIL_ERROR, isMalformedContactEmail, trimContactEmail } from "@/lib/contact-email";
+import { contactEmailError, trimContactEmail } from "@/lib/contact-email";
 import { isAuthError } from "@/lib/query-client";
 import { PageTip } from "@/components/onboarding/PageTip";
 import { TIP_IDS } from "@/lib/onboarding";
@@ -69,7 +69,11 @@ export default function VendorsPage() {
   // The email rule moved to lib/contact-email (#369) so this form and the detail edit
   // form share ONE definition — they had drifted, and the edit form had none at all.
   const trimmedName = name.trim();
-  const emailInvalid = isMalformedContactEmail(email);
+  // The MESSAGE is the decision (#369): an address rejected for an invisible character needs
+  // different copy than a plain typo, or the user re-reads a correct-looking field with nothing
+  // to act on. `emailInvalid` is derived from it so the gate and the copy cannot disagree.
+  const emailError = contactEmailError(email);
+  const emailInvalid = emailError !== undefined;
   const duplicateName =
     trimmedName !== "" && all.some((v) => v.name.trim().toLowerCase() === trimmedName.toLowerCase());
 
@@ -136,7 +140,7 @@ export default function VendorsPage() {
                 aria-describedby={emailInvalid ? emailErrId : undefined}
               />
               {emailInvalid && (
-                <p id={emailErrId} className="mt-1 text-xs text-red-600">{CONTACT_EMAIL_ERROR}</p>
+                <p id={emailErrId} className="mt-1 text-xs text-red-600">{emailError}</p>
               )}
             </div>
             <Button type="submit" className="w-full sm:w-auto" disabled={!trimmedName || emailInvalid || createVendor.isPending}>

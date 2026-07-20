@@ -114,9 +114,13 @@ dense in blank code points and both surrogate halves, with zero mismatches.
   `josé@empresa.es` — which the shared predicate accepts and the other form saved happily. That is
   the same drift class on a new axis. `inputMode="email"` keeps the mobile keyboard and
   `autoComplete="email"` keeps autofill; only the contradicting grammar is dropped. Preferred over
-  `noValidate` on the `<form>` so the guarantee is local to the field. **The account-email inputs
-  in `(auth)/` still carry `type="email"`** — same shape, same latent issue, but auth is a
-  sensitive area outside this ticket's scope; tracked separately.
+  `noValidate` on the `<form>` so the guarantee is local to the field. **Four account-email inputs
+  still carry `type="email"`**, all in real `<form>`s with no `noValidate`, so all four are
+  stricter than the API they post to (`AuthEndpoints.IsValidEmail` accepts anything with an `@`):
+  `(auth)/login`, `(auth)/register`, `(auth)/forgot-password`, and
+  `(dashboard)/settings/account-management.tsx` (the change-email field). The first three are
+  under the `frontend/src/app/(auth)/**` sensitive glob; the settings one is **not** — it is
+  deferred purely as out-of-scope for this ticket, not for sensitivity. Tracked separately.
 - **Bidi and invisible-format controls are still accepted** (U+200E/200F, U+202A–U+202E,
   U+2061–U+2064, U+2066–U+2069). They are not in the blank class, so `ops\u200E@acme.com` is
   stored, renders pixel-identical to the real address in the vendor list, and is unsendable — the

@@ -18,13 +18,19 @@ import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  CONTACT_EMAIL_ERROR,
+  CONTACT_EMAIL_HIDDEN_CHARACTER_ERROR,
   CONTACT_EMAIL_MAX_LENGTH,
+  CONTACT_EMAIL_TOO_LONG_ERROR,
+  contactEmailError,
   isMalformedContactEmail,
   trimContactEmail,
 } from "@/lib/contact-email";
 
 type Cases = {
   maxLength: number;
+  blankRanges: [number, number][];
+  messages: { invalid: string; hiddenCharacter: string; tooLong: string };
   valid: string[];
   malformed: string[];
   paddedValid: { raw: string; normalized: string }[];
@@ -147,6 +153,64 @@ describe("trimContactEmail stays linear (#369)", () => {
 
     expect(result).toBe(hostile); // interior blanks are not edges — nothing is stripped
     expect(elapsed).toBeLessThan(1_500);
+  });
+});
+
+describe("the blank set is owned by the shared corpus (#369)", () => {
+  it("implements exactly the corpus's blankRanges across the BMP", () => {
+    // The case lists only SAMPLE the class, so cross-language agreement used to be sampled too:
+    // adding a range to ONE mirror passed both suites whenever the added code points were not
+    // sampled. `blankRanges` declares the SET; both sides walk the BMP against it.
+    const inCorpus = new Array<boolean>(0x10000).fill(false);
+    for (const [lo, hi] of cases.blankRanges) {
+      for (let cp = lo; cp <= hi; cp++) inCorpus[cp] = true;
+    }
+
+    const disagreements: string[] = [];
+    for (let cp = 0; cp <= 0xffff; cp++) {
+      // Probed through the public api: a lone blank-class character strips to nothing.
+      const byPredicate = trimContactEmail(String.fromCharCode(cp)) === null;
+      if (byPredicate !== inCorpus[cp]) {
+        disagreements.push(
+          `U+${cp.toString(16).toUpperCase().padStart(4, "0")} (predicate=${byPredicate}, corpus=${inCorpus[cp]})`,
+        );
+        if (disagreements.length >= 10) break;
+      }
+    }
+
+    expect(disagreements).toEqual([]);
+  });
+});
+
+describe("rejection copy (#369)", () => {
+  it("matches the shared corpus, so client and server cannot say different things", () => {
+    expect(CONTACT_EMAIL_ERROR).toBe(cases.messages.invalid);
+    expect(CONTACT_EMAIL_HIDDEN_CHARACTER_ERROR).toBe(cases.messages.hiddenCharacter);
+    expect(CONTACT_EMAIL_TOO_LONG_ERROR).toBe(cases.messages.tooLong);
+  });
+
+  it("names the invisible-character case instead of the generic typo copy", () => {
+    // "Enter a valid contact email address" is unactionable when the field LOOKS correct: a pasted
+    // zero-width character renders as nothing, so the user re-reads a correct-looking address with
+    // nothing to act on. The explicit blank class is what makes this reachable (JS's \s does not
+    // cover ZWSP), so the copy had to arrive with it.
+    expect(contactEmailError("ops\u200Bacme@acme.com")).toBe(CONTACT_EMAIL_HIDDEN_CHARACTER_ERROR);
+    expect(contactEmailError("ops\u00A0acme@acme.com")).toBe(CONTACT_EMAIL_HIDDEN_CHARACTER_ERROR);
+
+    // A plain typo keeps the generic copy — the hidden-character wording would be a lie.
+    expect(contactEmailError("jane@acme,com")).toBe(CONTACT_EMAIL_ERROR);
+
+    // The display-name form is the sharp case: it contains SPACES, which ARE in the blank class,
+    // but a space is plainly visible. Calling it a hidden character would send the user hunting for
+    // something invisible in a string whose problem is right there in front of them.
+    expect(contactEmailError("Jane Smith <jane@acme.com>")).toBe(CONTACT_EMAIL_ERROR);
+    expect(contactEmailError("jane doe@acme.com")).toBe(CONTACT_EMAIL_ERROR);
+
+    expect(contactEmailError("a".repeat(250) + "@acme.com")).toBe(CONTACT_EMAIL_TOO_LONG_ERROR);
+
+    expect(contactEmailError("ops@acme.com")).toBeUndefined();
+    expect(contactEmailError("   ")).toBeUndefined();
+    expect(contactEmailError(null)).toBeUndefined();
   });
 });
 

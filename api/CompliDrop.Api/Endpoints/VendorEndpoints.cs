@@ -183,7 +183,7 @@ public static class VendorEndpoints
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
         if (string.IsNullOrWhiteSpace(req.Name)) return Error(400, "validation.name", "Vendor name is required.");
-        if (!ContactEmail.TryNormalize(req.ContactEmail, out var contactEmail)) return ContactEmailInvalid();
+        if (!ContactEmail.TryNormalize(req.ContactEmail, out var contactEmail)) return ContactEmailInvalid(req.ContactEmail);
         if (!await TemplateIsAssignable(req.ComplianceTemplateId, db, ct)) return TemplateNotFound();
 
         var vendor = new Vendor
@@ -224,7 +224,7 @@ public static class VendorEndpoints
         // #369: the same guard on the update path. This is the one the ticket reports — the detail
         // edit form is where a contact email actually gets corrected (and mistyped), and a bad value
         // saved here breaks every subsequent reminder send silently.
-        if (!ContactEmail.TryNormalize(req.ContactEmail, out var contactEmail)) return ContactEmailInvalid();
+        if (!ContactEmail.TryNormalize(req.ContactEmail, out var contactEmail)) return ContactEmailInvalid(req.ContactEmail);
 
         var v = await db.Vendors.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (v is null) return NotFound();
@@ -505,9 +505,12 @@ public static class VendorEndpoints
     // #369: normalization (#340's trim-so-it-round-trips-against-the-suppression-key rule) now lives in
     // Services/ContactEmail alongside the format check, so the write path and the validity gate can't
     // disagree about what value was inspected. The rationale is preserved on ContactEmail.Normalize.
-    private static IResult ContactEmailInvalid() =>
+    // #369: the message is chosen per-input (ContactEmail.DescribeProblem) so an address rejected
+    // for an INVISIBLE character says so, instead of telling the user to fix an address that already
+    // looks correct. The same copy is mirrored client-side from the shared corpus.
+    private static IResult ContactEmailInvalid(string? submitted) =>
         Error(400, "validation.contact_email",
-            "Enter a valid contact email address, like ops@acmecatering.com — or leave it blank.");
+            ContactEmail.DescribeProblem(submitted) ?? ContactEmail.InvalidMessage);
 
     // #340: maps the per-(org, email) suppression reason to the wire label the vendor badge renders
     // (null = deliverable). Shared by the list (dict lookup) and the detail (single lookup).

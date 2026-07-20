@@ -28,6 +28,30 @@ namespace CompliDrop.Api.Services;
 /// </summary>
 public static partial class ContactEmail
 {
+    /// <summary>
+    /// User-facing rejection copy, mirrored in <c>frontend/src/lib/contact-email.ts</c> and pinned
+    /// to the shared corpus's <c>messages</c> block by test on both sides — so the inline message
+    /// the user reads while typing and the 400 body they get on submit cannot say different things
+    /// about the same input. A quieter mirror pair than the predicate itself, but the same drift
+    /// class this module exists to prevent.
+    /// </summary>
+    public const string InvalidMessage =
+        "Enter a valid contact email address, like ops@acmecatering.com - or leave it blank.";
+
+    /// <summary>
+    /// Separate copy for the invisible-character case. "Enter a valid email address" is unactionable
+    /// when the field LOOKS correct: a zero-width or non-breaking character pasted from a PDF or a
+    /// mail client renders as nothing, so the user re-reads a correct-looking address and cannot see
+    /// what is wrong with it. The explicit blank class rejects these (JS's and .NET's <c>\s</c> do
+    /// not cover most of them), which is why the message is needed now and was not before.
+    /// </summary>
+    public const string HiddenCharacterMessage =
+        "This address contains a hidden character - retype it, or leave it blank.";
+
+    /// <summary>Copy for a value that is otherwise well-formed but longer than the column.</summary>
+    public const string TooLongMessage =
+        "That email address is too long - use one under 256 characters, or leave it blank.";
+
     /// <summary>Max persisted length — <c>Vendor.ContactEmail</c> is <c>varchar(256)</c>.</summary>
     public const int MaxLength = 256;
 
@@ -104,6 +128,18 @@ public static partial class ContactEmail
         || c == '\uFEFF';                          // ZWNBSP / BOM
 
     /// <summary>
+    /// A blank-class character that renders as NOTHING (or as an indistinguishable look-alike):
+    /// everything in the class except ordinary space and the ASCII layout controls, which a user
+    /// can plainly see. Drives only the choice of error copy, never accept/reject.
+    /// <para>
+    /// NBSP counts as invisible on purpose — it is pixel-identical to a space, so "there is a space
+    /// here" is not a fix the user can act on, whereas "there is a hidden character" is.
+    /// </para>
+    /// </summary>
+    private static bool IsInvisible(char c) =>
+        IsBlank(c) && c != ' ' && !(c >= '\u0009' && c <= '\u000D');
+
+    /// <summary>
     /// Non-empty local part, a single <c>@</c>, and a dotted domain — no blank-or-invisible character
     /// anywhere. <c>\z</c> (not <c>$</c>) so a trailing newline can't slip through: .NET's <c>$</c>
     /// also matches before a final <c>\n</c>. (JS's <c>$</c> without <c>/m</c> does not, so the mirror
@@ -169,5 +205,28 @@ public static partial class ContactEmail
 
         normalized = null;
         return false;
+    }
+
+    /// <summary>
+    /// The message to show for a rejected address, or <c>null</c> when it is acceptable. Chooses
+    /// the invisible-character wording when the reason the value failed is a blank-class code point
+    /// the user cannot see — telling someone to "enter a valid email address" when the field
+    /// already reads <c>ops@acme.com</c> gives them nothing to act on.
+    /// </summary>
+    public static string? DescribeProblem(string? email)
+    {
+        var normalized = Normalize(email);
+        if (normalized is null) return null;
+        if (normalized.Length > MaxLength) return TooLongMessage;
+        if (WellFormed().IsMatch(normalized)) return null;
+
+        // Edges are already stripped, so any remaining blank-class character is INTERIOR. But only
+        // the INVISIBLE ones earn the hidden-character wording: an ordinary space or tab is plainly
+        // visible, so "contains a hidden character" would be a lie for the display-name form
+        // `Jane Smith <jane@acme.com>` — one of the two literals this ticket reports.
+        foreach (var c in normalized)
+            if (IsInvisible(c)) return HiddenCharacterMessage;
+
+        return InvalidMessage;
     }
 }

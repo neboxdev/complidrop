@@ -582,12 +582,12 @@ describe("VendorDetailPage — contact email validation (#369)", () => {
     fireEvent.change(input, { target: { value: "jane@acme,com" } });
 
     expect(saveButton()).toBeDisabled();
-    expect(screen.getByText(/enter a valid email address/i)).toBeInTheDocument();
+    expect(screen.getByText(/enter a valid contact email address/i)).toBeInTheDocument();
     expect(input).toHaveAttribute("aria-invalid", "true");
     // The message is wired as the input's description, so a screen reader announces the
     // reason rather than leaving Save mysteriously dead (#76 label/description contract).
     expect(input.getAttribute("aria-describedby")).toBe(
-      screen.getByText(/enter a valid email address/i).id,
+      screen.getByText(/enter a valid contact email address/i).id,
     );
   });
 
@@ -601,7 +601,7 @@ describe("VendorDetailPage — contact email validation (#369)", () => {
     mount();
     fireEvent.change(await emailField(), { target: { value: "   " } });
     expect(saveButton()).toBeEnabled();
-    expect(screen.queryByText(/enter a valid email address/i)).toBeNull();
+    expect(screen.queryByText(/enter a valid contact email address/i)).toBeNull();
   });
 
   it("recovers once the typo is corrected, and sends the trimmed address", async () => {
@@ -629,7 +629,7 @@ describe("VendorDetailPage — contact email validation (#369)", () => {
     //      stores an unsendable padded address — now fails this test.
     fireEvent.change(input, { target: { value: "\u0085jane@acme.com\u200B" } });
     expect(saveButton()).toBeEnabled();
-    expect(screen.queryByText(/enter a valid email address/i)).toBeNull();
+    expect(screen.queryByText(/enter a valid contact email address/i)).toBeNull();
 
     fireEvent.click(saveButton());
 
@@ -661,7 +661,61 @@ describe("VendorDetailPage — a vendor whose STORED email is already malformed 
 
   it("explains the problem and disables Save on load, before the user touches anything", async () => {
     mount(LEGACY);
-    expect(await screen.findByText(/enter a valid email address/i)).toBeInTheDocument();
+    expect(await screen.findByText(/enter a valid contact email address/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /save changes/i })).toBeDisabled();
+  });
+
+  it("explains at the Save button why it is dead, not only at the field", async () => {
+    // The field-level error sits far up the form, and a disabled button never receives the hover
+    // that would show a title — so without a sibling note the operator sees a dead Save with no
+    // reason. The blank-NAME case already had this treatment; the email case did not, and it is
+    // the worse of the two because Save is disabled before the user touches anything.
+    mount(LEGACY);
+    expect(await screen.findByText(/fix or clear the contact email before saving/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /save changes/i })).toBeDisabled();
+  });
+
+  it("does not let an unsaved checklist pick read as applied while Save is blocked", async () => {
+    // The checklist panel reflects the UNSAVED selection, so picking one on a legacy-malformed
+    // vendor swapped the amber "No requirements set" warning for the green "We'll check every
+    // document for: …" list — telling the operator grading is configured for a vendor that stays
+    // ungraded, because the assignment can never be persisted. Checklist assignment drives
+    // grading, so that is a compliance claim, not a UI nit.
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(LEGACY)),
+      http.get(url("/api/compliance/templates"), () =>
+        jsonOk([{ id: "t_caterer", name: "Caterer", isSystemTemplate: true }]),
+      ),
+      http.get(url("/api/compliance/templates/t_caterer"), () =>
+        jsonOk({
+          id: "t_caterer",
+          name: "Caterer",
+          isSystemTemplate: true,
+          rules: [
+            {
+              id: "r1",
+              documentType: "coi",
+              fieldName: "general_liability_limit",
+              operator: "min_value",
+              expectedValue: "1000000",
+              errorMessage: null,
+              sortOrder: 1,
+            },
+          ],
+        }),
+      ),
+    );
+    renderWithProviders(<VendorDetailPage />, { auth: authedMe, params: { id: LEGACY.id } });
+
+    // Wait for the template list to load before selecting — changing a <select> to a value whose
+    // <option> has not rendered yet is a no-op, which would make this assertion vacuous.
+    const picker = await screen.findByLabelText(/what this vendor must prove/i);
+    await screen.findByRole("option", { name: /caterer/i });
+    fireEvent.change(picker, { target: { value: "t_caterer" } });
+    expect((picker as HTMLSelectElement).value).toBe("t_caterer");
+
+    // The requirement list may render — but it must not claim to be in effect.
+    expect(await screen.findByText(/not applied yet/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /save changes/i })).toBeDisabled();
   });
 
@@ -673,7 +727,7 @@ describe("VendorDetailPage — a vendor whose STORED email is already malformed 
     fireEvent.change(input, { target: { value: "jane@acme.com" } });
 
     expect(screen.getByRole("button", { name: /save changes/i })).toBeEnabled();
-    expect(screen.queryByText(/enter a valid email address/i)).toBeNull();
+    expect(screen.queryByText(/enter a valid contact email address/i)).toBeNull();
   });
 
   it("also lets the operator clear the address, rather than trapping them behind an unknown one", async () => {

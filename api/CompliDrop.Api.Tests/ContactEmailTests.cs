@@ -28,12 +28,16 @@ public class ContactEmailTests
 {
     private sealed record ContactEmailCases(
         int MaxLength,
+        int[][] BlankRanges,
+        CorpusMessages Messages,
         string[] Valid,
         string[] Malformed,
         PaddedCase[] PaddedValid,
         string[] Blank);
 
     private sealed record PaddedCase(string Raw, string Normalized);
+
+    private sealed record CorpusMessages(string Invalid, string HiddenCharacter, string TooLong);
 
     private static readonly ContactEmailCases Cases = LoadContactEmailCases();
 
@@ -145,6 +149,70 @@ public class ContactEmailTests
     }
 
     // ---- the two representations of the blank class must never disagree ------------------------
+
+    [Fact]
+    public void The_blank_predicate_matches_the_shared_corpus_ranges()
+    {
+        // The corpus's case lists only SAMPLE the blank class, so cross-language agreement used to
+        // be sampled too: a range added to ONE mirror passed both suites whenever the added code
+        // points happened not to appear in those lists. `blankRanges` declares the SET, and both
+        // sides walk the BMP against it — so equivalence is total, and adding a range means editing
+        // the corpus AND both predicates.
+        var inCorpus = new bool[0x10000];
+        foreach (var range in Cases.BlankRanges)
+        {
+            range.Length.Should().Be(2, "each corpus range is a [lo, hi] pair");
+            for (var cp = range[0]; cp <= range[1]; cp++) inCorpus[cp] = true;
+        }
+
+        var disagreements = new List<string>();
+        for (var i = 0; i <= 0xFFFF; i++)
+        {
+            if (ContactEmail.IsBlank((char)i) != inCorpus[i])
+                disagreements.Add($"U+{i:X4} (predicate={ContactEmail.IsBlank((char)i)}, corpus={inCorpus[i]})");
+            if (disagreements.Count >= 10) break;
+        }
+
+        disagreements.Should().BeEmpty("the corpus owns the blank set; this side must implement exactly it");
+    }
+
+    [Fact]
+    public void The_rejection_copy_matches_the_shared_corpus()
+    {
+        // The inline message the user reads while typing and the 400 body they get on submit are a
+        // second, quieter mirror pair. Declared once in the corpus so they cannot diverge.
+        ContactEmail.InvalidMessage.Should().Be(Cases.Messages.Invalid);
+        ContactEmail.HiddenCharacterMessage.Should().Be(Cases.Messages.HiddenCharacter);
+        ContactEmail.TooLongMessage.Should().Be(Cases.Messages.TooLong);
+    }
+
+    [Fact]
+    public void An_invisible_contaminant_gets_its_own_message_not_the_generic_one()
+    {
+        // "Enter a valid contact email address" is unactionable when the field LOOKS correct: a
+        // pasted zero-width character renders as nothing, so the user re-reads a correct-looking
+        // address with no idea what is wrong. The explicit blank class is what makes this
+        // reachable — neither engine's \s covers ZWSP — so the copy had to arrive with it.
+        ContactEmail.DescribeProblem("ops\u200Bacme@acme.com").Should().Be(ContactEmail.HiddenCharacterMessage);
+        ContactEmail.DescribeProblem("ops\u00A0acme@acme.com").Should().Be(ContactEmail.HiddenCharacterMessage);
+
+        // A plain typo keeps the generic copy — the hidden-character wording would be a lie.
+        ContactEmail.DescribeProblem("jane@acme,com").Should().Be(ContactEmail.InvalidMessage);
+
+        // The display-name form is the sharp case: it contains SPACES, which ARE in the blank class,
+        // but a space is plainly visible. Calling it a hidden character would send the user hunting
+        // for something invisible in a string whose problem is right there in front of them.
+        ContactEmail.DescribeProblem("Jane Smith <jane@acme.com>").Should().Be(ContactEmail.InvalidMessage);
+        ContactEmail.DescribeProblem("jane doe@acme.com").Should().Be(ContactEmail.InvalidMessage);
+
+        // Over-length is its own case: the address may be perfectly well-formed.
+        ContactEmail.DescribeProblem(new string('a', 250) + "@acme.com").Should().Be(ContactEmail.TooLongMessage);
+
+        // Acceptable values describe no problem at all.
+        ContactEmail.DescribeProblem("ops@acme.com").Should().BeNull();
+        ContactEmail.DescribeProblem("   ").Should().BeNull();
+        ContactEmail.DescribeProblem(null).Should().BeNull();
+    }
 
     [Fact]
     public void The_blank_predicate_and_the_character_class_agree()

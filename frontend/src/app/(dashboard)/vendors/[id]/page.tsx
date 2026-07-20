@@ -12,7 +12,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { VendorCoverageBadge } from "@/components/VendorCoverageBadge";
 import { requirementSentence } from "@/lib/requirements";
 import { complianceStatusLabel } from "@/lib/display-labels";
-import { CONTACT_EMAIL_ERROR, isMalformedContactEmail, trimContactEmail } from "@/lib/contact-email";
+import { contactEmailError, trimContactEmail } from "@/lib/contact-email";
 import {
   useVendor,
   useGeneratePortalLink,
@@ -185,7 +185,15 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
   // #369: shared with the list add-form so the two can't drift. Blank stays saveable —
   // a vendor with no contact email is a supported state (the "Email link" button below
   // already explains it needs one).
-  const contactEmailInvalid = isMalformedContactEmail(form.contactEmail);
+  // The MESSAGE is the decision (#369): an address rejected for an invisible character needs
+  // different copy than a plain typo, or the user re-reads a correct-looking field with nothing
+  // to act on. `contactEmailInvalid` is derived from it so the gate and the copy cannot disagree.
+  const contactEmailProblem = contactEmailError(form.contactEmail);
+  const contactEmailInvalid = contactEmailProblem !== undefined;
+  // An edit the operator has made but cannot persist while the address is malformed. Compared
+  // against the SAVED assignment so an already-assigned checklist is not mislabelled as pending.
+  const checklistChangePending =
+    form.complianceTemplateId !== (vendor.complianceTemplateId ?? "");
 
   // Show what the chosen checklist checks AT DECISION TIME (#239 delta 1) — the
   // highest-leverage gap the #237 audit found: Pat used to assign a checklist on
@@ -234,7 +242,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
               inputMode="email"
               value={form.contactEmail}
               onChange={(v) => setForm({ ...form, contactEmail: v })}
-              error={contactEmailInvalid ? CONTACT_EMAIL_ERROR : undefined}
+              error={contactEmailProblem}
             />
             <LabeledInput label="Contact phone" value={form.contactPhone} onChange={(v) => setForm({ ...form, contactPhone: v })} />
             <LabeledInput label="Category" value={form.category} onChange={(v) => setForm({ ...form, category: v })} />
@@ -281,6 +289,18 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                   role="status"
                   className="mt-2 rounded-md border border-emerald-100 bg-emerald-50/60 px-3 py-2.5 text-xs text-emerald-900"
                 >
+                  {/* This panel reflects the UNSAVED selection, so while Save is blocked it would
+                      otherwise read as an applied assignment — telling the operator grading is
+                      configured for a vendor that stays ungraded (#369). Checklist assignment
+                      drives grading, so that is a compliance claim, not just a UI nit.
+                      Gated on the selection actually DIFFERING from what is stored: if this
+                      checklist is already assigned, the panel is describing reality and
+                      "not applied yet" would be its own lie. */}
+                  {contactEmailInvalid && checklistChangePending && (
+                    <p className="mb-1.5 font-medium text-amber-800">
+                      Not applied yet — save to start grading against this checklist.
+                    </p>
+                  )}
                   {selectedTemplate.isLoading || !selectedTemplate.data ? (
                     <span className="text-emerald-800/70">Loading what this checklist requires…</span>
                   ) : selectedTemplate.data.rules.length === 0 ? (
@@ -346,6 +366,17 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
               {!form.name.trim() && (
                 <p role="status" className="text-xs text-rose-600">
                   Vendor name is required.
+                </p>
+              )}
+              {/* #369: the same treatment for the contact-email block. The field-level error sits
+                  far up the form, and a disabled button never receives the hover that would show a
+                  title — so without this the operator sees a dead Save with no reason, which is
+                  most confusing on exactly the vendor this gate exists for: one whose STORED
+                  address is already malformed, where Save is disabled before they touch anything.
+                  Names the checklist explicitly because that edit is the costly one to lose. */}
+              {contactEmailInvalid && form.name.trim() && (
+                <p role="status" className="text-xs text-rose-600">
+                  Fix or clear the contact email before saving — including any checklist change.
                 </p>
               )}
               <Button

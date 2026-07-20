@@ -1,5 +1,52 @@
 {
   "maxLength": 256,
+  "blankRanges": [
+    [
+      0,
+      32
+    ],
+    [
+      127,
+      160
+    ],
+    [
+      5760,
+      5760
+    ],
+    [
+      8192,
+      8205
+    ],
+    [
+      8232,
+      8233
+    ],
+    [
+      8239,
+      8239
+    ],
+    [
+      8287,
+      8287
+    ],
+    [
+      8288,
+      8288
+    ],
+    [
+      12288,
+      12288
+    ],
+    [
+      65279,
+      65279
+    ]
+  ],
+  "messages": {
+    "invalid": "Enter a valid contact email address, like ops@acmecatering.com - or leave it blank.",
+    "hiddenCharacter": "This address contains a hidden character - retype it, or leave it blank.",
+    "tooLong": "That email address is too long - use one under 256 characters, or leave it blank."
+  },
   "_comment": [
     "THE shared accept/reject corpus for the vendor contact-email predicate (#369).",
     "Read by BOTH api/CompliDrop.Api.Tests/ContactEmailTests.cs and",
@@ -27,6 +74,17 @@
     "to every range bound, so an off-by-one that widened a range is caught as a false rejection.",
     "'maxLength' is the varchar(256) column width, asserted against each side's own constant so",
     "the two cannot drift - it was previously the only rule of the pair this file did not pin.",
+    "",
+    "'blankRanges' is the blank class ITSELF. The case lists above only SAMPLE it, so a range",
+    "added to one mirror alone used to pass both suites whenever the added code points were not",
+    "sampled. Each side now walks the BMP asserting its own predicate against these ranges, which",
+    "makes cross-language equivalence total. Adding a range means editing this list AND both",
+    "predicates - which is the point.",
+    "",
+    "'messages' is the user-facing rejection copy, shared so the client's inline message and the",
+    "server's 400 body cannot diverge. Hyphens here are ASCII on purpose: this file is consumed",
+    "by two languages and an em-dash round-trips badly through some tooling. Each side asserts",
+    "its own constants against these strings.",
     "",
     "'valid' means ONLY 'the predicate accepts this', not 'this is a good address'. Some adjacency",
     "probes are bidi controls (U+202A, U+202E) - deliberately not in the blank class, so listed",
