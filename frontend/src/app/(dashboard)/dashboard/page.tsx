@@ -5,7 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { useMe, useCompleteOnboarding } from "@/hooks/useAuth";
-import { useDashboardStats, useExpiryPipeline, useRecentActivity } from "@/hooks/useDashboard";
+import { useDashboardStats, useExpiryPipeline, useRecentActivity, type ExpiryPipeline } from "@/hooks/useDashboard";
 import { actionLabel, relativeTime } from "@/lib/display-labels";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { peekTourRestart, clearTourRestart } from "@/lib/onboarding";
@@ -58,18 +58,6 @@ export default function DashboardPage() {
   // an API hiccup must never make a paying account look brand-new-and-empty (#318
   // FP-040). Loading shows skeletons (not hard zeros, #318 FP-046).
   const hasData = (stats.data?.totalDocuments ?? 0) > 0;
-
-  // Scale the bars to the BIGGEST bucket (min 1 to avoid /0), so a single
-  // bucket of 11+ documents isn't visually flattened by a hardcoded max. (#188)
-  const p = pipeline.data;
-  const pipelineMax = Math.max(
-    1,
-    p?.expired ?? 0,
-    p?.bucket30 ?? 0,
-    p?.bucket60 ?? 0,
-    p?.bucket90 ?? 0,
-    p?.beyond ?? 0,
-  );
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-8 space-y-8">
@@ -148,17 +136,27 @@ export default function DashboardPage() {
             </Card>
           </section>
 
+          {/* The pipeline is its OWN request, so it fails independently of stats.
+              Rendering buckets requires loaded data — a failed or still-pending read
+              shows an error or a skeleton, never `?? 0` zeros, which on this card
+              would read as "nothing is expired" over an org with expired COIs (#368). */}
           <section>
             <Card>
               <CardContent className="p-6">
                 <h2 className="text-base font-semibold text-slate-800 mb-4">When documents expire</h2>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 text-center">
-                  <PipelineBucket label="Expired" value={pipeline.data?.expired ?? 0} hue="rose" max={pipelineMax} href="/documents?status=Expired" />
-                  <PipelineBucket label="Next 30 days" value={pipeline.data?.bucket30 ?? 0} hue="amber" max={pipelineMax} href="/documents?expiresWithin=30" />
-                  <PipelineBucket label="30–60 days" value={pipeline.data?.bucket60 ?? 0} hue="sky" max={pipelineMax} />
-                  <PipelineBucket label="60–90 days" value={pipeline.data?.bucket90 ?? 0} hue="sky" max={pipelineMax} />
-                  <PipelineBucket label="90+ days" value={pipeline.data?.beyond ?? 0} hue="emerald" max={pipelineMax} />
-                </div>
+                {pipeline.isSuccess ? (
+                  <PipelineBuckets data={pipeline.data} />
+                ) : pipeline.isError ? (
+                  <div className="space-y-2" role="alert">
+                    <p className="text-sm text-slate-600">We couldn&apos;t load when your documents expire.</p>
+                    <Button variant="outline" size="sm" onClick={() => void pipeline.refetch()} disabled={pipeline.isFetching}>
+                      <RotateCw className={pipeline.isFetching ? "w-3.5 h-3.5 mr-1 animate-spin" : "w-3.5 h-3.5 mr-1"} />
+                      Try again
+                    </Button>
+                  </div>
+                ) : (
+                  <PipelineSkeleton />
+                )}
               </CardContent>
             </Card>
           </section>
@@ -331,6 +329,40 @@ function StatCard({
     </Link>
   ) : (
     card
+  );
+}
+
+// The five buckets, rendered ONLY from a loaded pipeline read (#368). Taking a
+// non-optional `ExpiryPipeline` is the point: there is no `?? 0` fallback left to
+// turn a failed request into a confident "Expired: 0".
+function PipelineBuckets({ data }: { data: ExpiryPipeline }) {
+  // Scale the bars to the BIGGEST bucket (min 1 to avoid /0), so a single
+  // bucket of 11+ documents isn't visually flattened by a hardcoded max. (#188)
+  const max = Math.max(1, data.expired, data.bucket30, data.bucket60, data.bucket90, data.beyond);
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 text-center">
+      <PipelineBucket label="Expired" value={data.expired} hue="rose" max={max} href="/documents?status=Expired" />
+      <PipelineBucket label="Next 30 days" value={data.bucket30} hue="amber" max={max} href="/documents?expiresWithin=30" />
+      <PipelineBucket label="30–60 days" value={data.bucket60} hue="sky" max={max} />
+      <PipelineBucket label="60–90 days" value={data.bucket90} hue="sky" max={max} />
+      <PipelineBucket label="90+ days" value={data.beyond} hue="emerald" max={max} />
+    </div>
+  );
+}
+
+// Loading placeholder for the pipeline card — mirrors the bucket grid's shape so the
+// card reserves its space, matching StatGridSkeleton's treatment of the same row.
+function PipelineSkeleton() {
+  return (
+    <div
+      className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3"
+      role="status"
+      aria-label="Loading when documents expire"
+    >
+      {[0, 1, 2, 3, 4].map((i) => (
+        <Skeleton key={i} className="h-24 rounded-md" />
+      ))}
+    </div>
   );
 }
 

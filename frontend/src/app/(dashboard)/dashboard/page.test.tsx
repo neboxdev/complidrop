@@ -21,6 +21,7 @@ import {
   jsonError,
   authedMe,
   makeMe,
+  sequencedResponses,
 } from "@/test";
 
 // sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
@@ -230,6 +231,83 @@ describe("DashboardPage — state matrix (#36)", () => {
 
     await waitFor(() => expect(screen.getByText("12")).toBeInTheDocument()); // totalDocuments
     expect(screen.queryByText(/couldn't load your dashboard/i)).toBeNull();
+  });
+});
+
+describe("DashboardPage — the expiry pipeline fails independently of stats (#368)", () => {
+  // /stats and /expiry-pipeline are two separate requests. Before #368 the pipeline
+  // card was gated on `stats.isError` alone, so a stats-200 / pipeline-5xx pair
+  // rendered five buckets off `pipeline.data?.x ?? 0` — a confident "Expired: 0" on
+  // the surface an operator trusts to tell them what has lapsed.
+  it("pipeline 5xx while stats succeed: an error + Try again replaces the buckets, NEVER a false 'Expired: 0'", async () => {
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), () =>
+        jsonError("server.error", "pipeline down", { status: 500 }),
+      ),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    // Stats landed, so the numbers region and the pipeline card's heading still render
+    // — the failure is scoped to the one card that owns the failed query.
+    expect(await screen.findByText("12")).toBeInTheDocument();
+    expect(screen.getByText(/when documents expire/i)).toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(screen.getByText(/couldn't load when your documents expire/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+
+    // THE REGRESSION ITSELF: no bucket may render without loaded data. With the fix
+    // reverted these three fail — the grid renders zeros for an org holding 1 expired COI.
+    expect(screen.queryByRole("link", { name: /expired: 0 documents/i })).toBeNull();
+    expect(screen.queryByText("Expired")).toBeNull();
+    expect(screen.queryByText("90+ days")).toBeNull();
+  });
+
+  it("Try again refetches the pipeline and reveals the real counts", async () => {
+    const pipelineSeq = sequencedResponses(
+      () => jsonError("server.error", "blip", { status: 500 }),
+      () => jsonOk(PIPELINE),
+    );
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), () => pipelineSeq()),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    fireEvent.click(await screen.findByRole("button", { name: /try again/i }));
+
+    // PIPELINE.expired is 1 — recovering to a NON-zero count is what proves the
+    // earlier zeros would have been a lie rather than a coincidence.
+    expect(
+      await screen.findByRole("link", { name: /expired: 1 documents\. view them/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load when your documents expire/i)).toBeNull();
+  });
+
+  it("pipeline still in flight after stats land: a skeleton, not hard zeros", async () => {
+    const never = new Promise<void>(() => {});
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), async () => {
+        await never;
+        return jsonOk(PIPELINE);
+      }),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    expect(await screen.findByText("12")).toBeInTheDocument(); // stats resolved
+    expect(
+      screen.getByRole("status", { name: /loading when documents expire/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /expired: 0 documents/i })).toBeNull();
   });
 });
 
