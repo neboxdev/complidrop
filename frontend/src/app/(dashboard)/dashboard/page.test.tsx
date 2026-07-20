@@ -5,9 +5,17 @@
  * The page fans out to useDashboardStats + useExpiryPipeline +
  * useRecentActivity, plus useMe for the greeting. Each can be in any of
  * loading / error / empty / populated, so we drive a representative set
- * of combinations: all-loading, all-populated, all-error (handled
- * gracefully via fallback values), and the partial-success path (one
- * hook fails, two resolve).
+ * of combinations: all-loading, all-populated, and the partial-success
+ * paths where one query fails while the others resolve.
+ *
+ * The contract these tests defend: NO query falls back to zeros. Each
+ * one owns its own error and loading surface, because a coalesced `?? 0`
+ * on this page reads as a compliance fact ("nothing is expired") rather
+ * than as missing data. A stats failure yields DashboardError instead of
+ * a zeroed grid (#318 FP-040); a pipeline failure yields the scoped
+ * error + Try again on its own card (#368); an activity failure yields
+ * its own retry card. A truthful zero — a SUCCESSFUL read that really is
+ * 0 — must still render.
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import { http } from "msw";
@@ -21,7 +29,9 @@ import {
   jsonError,
   authedMe,
   makeMe,
+  sequencedResponses,
 } from "@/test";
+import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 
 // sonner is mocked by the harness (vitest.setup.ts + src/test/sonner.ts). See #74.
 
@@ -114,6 +124,14 @@ describe("DashboardPage — state matrix (#36)", () => {
       screen.getByRole("status", { name: /loading recent activity/i }),
     ).toBeInTheDocument();
     expect(screen.queryByText(/^loading…$/i)).toBeNull();
+    // StatGridSkeleton reuses PipelineSkeleton for its bucket row with
+    // `labelled={false}`: its own wrapper is already the role="status" live
+    // region, and nesting a second one would announce the region twice.
+    // Dropping that prop fails here. (#368 review)
+    expect(screen.getByRole("status", { name: /loading your dashboard/i })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("status", { name: /loading when documents expire/i }),
+    ).toBeNull();
   });
 
   it("empty (zero-state org): the Get started checklist REPLACES the all-zeros stat grid (#191/#3)", async () => {
@@ -230,6 +248,165 @@ describe("DashboardPage — state matrix (#36)", () => {
 
     await waitFor(() => expect(screen.getByText("12")).toBeInTheDocument()); // totalDocuments
     expect(screen.queryByText(/couldn't load your dashboard/i)).toBeNull();
+  });
+});
+
+describe("DashboardPage — the expiry pipeline fails independently of stats (#368)", () => {
+  // /stats and /expiry-pipeline are two separate requests. Before #368 the pipeline
+  // card was gated on `stats.isError` alone, so a stats-200 / pipeline-5xx pair
+  // rendered five buckets off `pipeline.data?.x ?? 0` — a confident "Expired: 0" on
+  // the surface an operator trusts to tell them what has lapsed.
+  it("pipeline 5xx while stats succeed: an error + Try again replaces the buckets, NEVER a false 'Expired: 0'", async () => {
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), () =>
+        jsonError("server.error", "pipeline down", { status: 500 }),
+      ),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    // Stats landed, so the numbers region and the pipeline card's heading still render
+    // — the failure is scoped to the one card that owns the failed query.
+    expect(await screen.findByText("12")).toBeInTheDocument();
+    expect(screen.getByText(/when documents expire/i)).toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(screen.getByText(/couldn't load when your documents expire/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+    // The detail line carries the SERVER's copy (CLAUDE.md error-message policy).
+    expect(screen.getByText("pipeline down")).toBeInTheDocument();
+
+    // THE REGRESSION ITSELF: no bucket may render without loaded data. With the fix
+    // reverted these three fail — the grid renders zeros for an org holding 1 expired COI.
+    expect(screen.queryByRole("link", { name: /expired: 0 documents/i })).toBeNull();
+    expect(screen.queryByText("Expired")).toBeNull();
+    expect(screen.queryByText("90+ days")).toBeNull();
+  });
+
+  it("pipeline 502 with a non-JSON body: the card shows GENERIC_FALLBACK_MESSAGE, never HTTP jargon", async () => {
+    // Symmetric with the documents pages' pin (#97 + #77): a 502 HTML proxy page
+    // must not leak `statusText` or raw HTML into the card. api.ts converts it to
+    // GENERIC_FALLBACK_MESSAGE; this card must surface that, exercising the `||`
+    // branch of the detail line.
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), () =>
+        Promise.resolve(
+          new Response("<html>502 Bad Gateway</html>", {
+            status: 502,
+            statusText: "Bad Gateway",
+            headers: { "Content-Type": "text/html" },
+          }),
+        ),
+      ),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(GENERIC_FALLBACK_MESSAGE);
+    // The house negative invariant — no statusText, status code, or raw markup.
+    expect(alert).not.toHaveTextContent(/bad gateway/i);
+    expect(alert).not.toHaveTextContent(/502/);
+    expect(alert).not.toHaveTextContent(/html/i);
+  });
+
+  it("Try again refetches the pipeline and reveals the real counts", async () => {
+    const pipelineSeq = sequencedResponses(
+      () => jsonError("server.error", "blip", { status: 500 }),
+      () => jsonOk(PIPELINE),
+    );
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), () => pipelineSeq()),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    fireEvent.click(await screen.findByRole("button", { name: /try again/i }));
+
+    // PIPELINE.expired is 1 — recovering to a NON-zero count is what proves the
+    // earlier zeros would have been a lie rather than a coincidence.
+    expect(
+      await screen.findByRole("link", { name: /expired: 1 documents\. view them/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load when your documents expire/i)).toBeNull();
+  });
+
+  it("pipeline still in flight after stats land: a skeleton, not hard zeros", async () => {
+    const never = new Promise<void>(() => {});
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), async () => {
+        await never;
+        return jsonOk(PIPELINE);
+      }),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    expect(await screen.findByText("12")).toBeInTheDocument(); // stats resolved
+    expect(
+      screen.getByRole("status", { name: /loading when documents expire/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /expired: 0 documents/i })).toBeNull();
+  });
+
+  it("an EXPIRED-SESSION 401 shows no error card — the global redirect owns that case", async () => {
+    // House pattern (lib/query-client.ts, mirrored in documents/vendors): a
+    // definitive auth error nulls the me-cache and the layout redirects to /login,
+    // so this card must not flash "we couldn't load…" over a logged-out session.
+    // It falls through to the skeleton, which asserts nothing about expiries.
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), () =>
+        jsonError("auth.token_expired", "Your session expired.", { status: 401 }),
+      ),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    expect(await screen.findByText("12")).toBeInTheDocument(); // stats landed
+    await waitFor(() =>
+      expect(
+        screen.getByRole("status", { name: /loading when documents expire/i }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/couldn't load when your documents expire/i)).toBeNull();
+    expect(screen.queryByText(/your session expired/i)).toBeNull();
+    // And still no fabricated counts.
+    expect(screen.queryByRole("link", { name: /expired: 0 documents/i })).toBeNull();
+  });
+
+  it("a SUCCESSFUL all-zero read still renders the buckets — a truthful zero is not suppressed", async () => {
+    // The opposite direction of the fix, and the reason it gates on `isSuccess`
+    // rather than on the counts: an org that genuinely has nothing expired must
+    // still see "Expired: 0". Over-correcting to "hide the card when every bucket
+    // is 0" would pass every other test in this block but fail this one.
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), () =>
+        jsonOk({ expired: 0, bucket30: 0, bucket60: 0, bucket90: 0, beyond: 0 }),
+      ),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    expect(
+      await screen.findByRole("link", { name: /expired: 0 documents\. view them/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("90+ days")).toBeInTheDocument();
+    // ...and neither failure surface is showing.
+    expect(screen.queryByText(/couldn't load when your documents expire/i)).toBeNull();
+    expect(screen.queryByRole("status", { name: /loading when documents expire/i })).toBeNull();
   });
 });
 
