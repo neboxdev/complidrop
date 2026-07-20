@@ -5,7 +5,7 @@
  * pinned in that page's own test file.
  *
  * The accept/reject corpus is NOT written inline — it is loaded from
- * `docs/fixtures/contact-email-cases.json`, the same file that drives
+ * `api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json`, the same file that drives
  * `VendorEndpointsTests.MalformedEmails()` on the server. That is deliberate: the first
  * review pass found that hand-maintained parallel lists were already unequal at
  * introduction, and that the two `\s`-based regexes genuinely disagreed on real input
@@ -32,7 +32,10 @@ type Cases = {
 
 // vitest runs with cwd = frontend/, so the repo root is one level up. Asserted rather than
 // assumed: a silently-missing fixture would make every it.each below vacuous.
-const FIXTURE = resolve(process.cwd(), "../docs/fixtures/contact-email-cases.json");
+const FIXTURE = resolve(
+  process.cwd(),
+  "../api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json",
+);
 if (!existsSync(FIXTURE)) {
   throw new Error(
     `Shared contact-email corpus not found at ${FIXTURE}. It is the single source both this ` +

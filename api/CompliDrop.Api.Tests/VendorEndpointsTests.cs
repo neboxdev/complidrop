@@ -826,121 +826,14 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     // reminder send silently — sends retry in place (ADR 0025) and surface nothing to the operator.
     // The API is the authoritative gate because it is reachable without either form.
     //
-    // The accept/reject corpus is NOT inlined here: it is loaded from the SHARED fixture
-    // docs/fixtures/contact-email-cases.json, the same file frontend/src/lib/contact-email.test.ts
-    // reads. The first review pass found hand-maintained parallel lists were already unequal at
-    // introduction AND that the two \s-based regexes genuinely disagreed on real input (.NET's \s
-    // includes U+0085 and excludes U+FEFF; JS's is the reverse). One list makes "the two
-    // implementations agree" mechanical instead of a comment nobody re-checks.
-
-    private sealed record ContactEmailCases(
-        string[] Valid,
-        string[] Malformed,
-        PaddedCase[] PaddedValid,
-        string[] Blank);
-
-    private sealed record PaddedCase(string Raw, string Normalized);
-
-    private static readonly ContactEmailCases Cases = LoadContactEmailCases();
-
-    private static ContactEmailCases LoadContactEmailCases()
-    {
-        // Copied next to the test assembly by the csproj <None Include ... Link="SharedFixtures\">.
-        var path = Path.Combine(AppContext.BaseDirectory, "SharedFixtures", "contact-email-cases.json");
-        if (!File.Exists(path))
-            throw new FileNotFoundException(
-                $"Shared contact-email corpus not found at {path}. It is the single source both this " +
-                "suite and frontend/src/lib/contact-email.test.ts read (#369) — do not inline the " +
-                "cases here instead.", path);
-
-        var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-        return JsonSerializer.Deserialize<ContactEmailCases>(File.ReadAllText(path), opts)
-               ?? throw new InvalidOperationException($"Could not parse {path}");
-    }
-
-    public static TheoryData<string> MalformedEmails()
-    {
-        var data = new TheoryData<string>();
-        foreach (var c in Cases.Malformed) data.Add(c);
-        return data;
-    }
-
-    public static TheoryData<string> ValidEmails()
-    {
-        var data = new TheoryData<string>();
-        foreach (var c in Cases.Valid) data.Add(c);
-        return data;
-    }
-
-    public static TheoryData<string, string> PaddedValidEmails()
-    {
-        var data = new TheoryData<string, string>();
-        foreach (var c in Cases.PaddedValid) data.Add(c.Raw, c.Normalized);
-        return data;
-    }
-
-    public static TheoryData<string> BlankEmails()
-    {
-        var data = new TheoryData<string>();
-        foreach (var c in Cases.Blank) data.Add(c);
-        return data;
-    }
-
-    /// <summary>Renders invisible code points so a failure message names the character.</summary>
-    private static string Show(string s) =>
-        string.Concat(s.Select(ch => ch is >= ' ' and <= '~' ? ch.ToString() : $"\\u{(int)ch:X4}"));
-
-    [Fact]
-    public void The_shared_corpus_loaded_and_is_non_trivial()
-    {
-        // Guards every theory below: a silently-missing or emptied fixture would make them all
-        // vacuously pass with zero cases.
-        Cases.Valid.Length.Should().BeGreaterThan(3);
-        Cases.Malformed.Length.Should().BeGreaterThan(10);
-        Cases.PaddedValid.Length.Should().BeGreaterThan(3);
-        Cases.Blank.Length.Should().BeGreaterThan(3);
-    }
+    // The predicate's own unit tests, the shared-corpus loader and the MemberData providers live in
+    // ContactEmailTests — a plain class, so the cross-language agreement pin does not need Docker
+    // and a per-case DB reset to run. What stays HERE is what genuinely needs HTTP + a database:
+    // that the gate is actually wired into both write paths, with the right status and error code,
+    // and that a rejected write leaves the stored address untouched. Both read the SAME corpus.
 
     [Theory]
-    [MemberData(nameof(MalformedEmails))]
-    public void The_predicate_rejects_every_malformed_case_in_the_shared_corpus(string bad)
-    {
-        // Unit-level mirror of the frontend's it.each over the SAME list — this is the assertion
-        // that actually pins cross-language agreement, including the code points the two engines'
-        // \s classes disagree about (U+0085, U+FEFF) and the C0 controls Postgres cannot store.
-        ContactEmail.IsWellFormed(bad).Should().BeFalse($"{Show(bad)} must be rejected");
-    }
-
-    [Theory]
-    [MemberData(nameof(ValidEmails))]
-    public void The_predicate_accepts_every_valid_case_in_the_shared_corpus(string good)
-    {
-        // Includes sample-vendor@example.com (#238 seeds it — rejecting it would break the
-        // one-click demo) and a non-ASCII address (the predicate must not become ASCII-only).
-        ContactEmail.IsWellFormed(good).Should().BeTrue($"{Show(good)} must be accepted");
-    }
-
-    [Theory]
-    [MemberData(nameof(PaddedValidEmails))]
-    public void Normalization_strips_the_same_edges_the_frontend_strips(string raw, string normalized)
-    {
-        // The BOM/NEL rows are the ones .NET Trim() and JS .trim() disagree on. Both sides strip
-        // via the shared explicit character class instead, so these must agree exactly.
-        ContactEmail.Normalize(raw).Should().Be(normalized, $"{Show(raw)} normalizes to its bare address");
-        ContactEmail.IsWellFormed(raw).Should().BeTrue($"{Show(raw)} is valid once stripped");
-    }
-
-    [Theory]
-    [MemberData(nameof(BlankEmails))]
-    public void Blank_normalizes_to_null_and_stays_valid(string blank)
-    {
-        // Load-bearing: a vendor with no contact email is a supported state.
-        ContactEmail.Normalize(blank).Should().BeNull($"{Show(blank)} is absent, not empty string");
-        ContactEmail.IsWellFormed(blank).Should().BeTrue($"{Show(blank)} must not become a 400");
-    }
-
-    [Theory]
-    [MemberData(nameof(MalformedEmails))]
+    [MemberData(nameof(ContactEmailTests.MalformedEmails), MemberType = typeof(ContactEmailTests))]
     public async Task Creating_a_vendor_with_a_malformed_contact_email_is_400_and_stores_nothing(string bad)
     {
         var auth = await RegisterAndLoginAsync();
@@ -956,7 +849,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
 
         // Specifically a 400, not a 500: the NUL case reaches Postgres as SQLSTATE 22021 without
         // the control-character exclusion, exactly like an over-length value without the cap.
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"{Show(bad)} is not a usable address");
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"{ContactEmailTests.Show(bad)} is not a usable address");
         (await ErrorCode(resp)).Should().Be("validation.contactEmail");
 
         await using var db = CreateSystemDb();
@@ -965,7 +858,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     }
 
     [Theory]
-    [MemberData(nameof(MalformedEmails))]
+    [MemberData(nameof(ContactEmailTests.MalformedEmails), MemberType = typeof(ContactEmailTests))]
     public async Task Updating_a_vendor_with_a_malformed_contact_email_is_400_and_preserves_the_stored_address(string bad)
     {
         // This is the path #369 actually reports — where a contact email gets corrected, and mistyped.
@@ -981,7 +874,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             complianceTemplateId = (Guid?)null,
         });
 
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"{Show(bad)} is not a usable address");
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"{ContactEmailTests.Show(bad)} is not a usable address");
         (await ErrorCode(resp)).Should().Be("validation.contactEmail");
 
         await using var db = CreateSystemDb();

@@ -231,7 +231,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                 shared predicate as the add-form; the server enforces the same 400. */}
             <LabeledInput
               label="Contact email"
-              type="email"
+              inputMode="email"
               value={form.contactEmail}
               onChange={(v) => setForm({ ...form, contactEmail: v })}
               error={contactEmailInvalid ? CONTACT_EMAIL_ERROR : undefined}
@@ -534,13 +534,20 @@ function LabeledInput({
   label,
   value,
   onChange,
-  type,
+  inputMode,
   error,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
-  type?: string;
+  /**
+   * Soft-keyboard hint only (#369). Deliberately NOT a `type` passthrough: `type="email"` brings
+   * the browser's ASCII-only native grammar, which contradicts the shared `isMalformedContactEmail`
+   * predicate on addresses like `josé@empresa.es`, and its value sanitizer silently strips a
+   * DIFFERENT whitespace set than the shared helper does. Both would reintroduce the form-to-form
+   * drift #369 exists to remove. The predicate + `error` below are the whole gate.
+   */
+  inputMode?: "email" | "tel" | "numeric";
   /** Inline validation message; when set the input is marked invalid and describes it (#369). */
   error?: string;
 }) {
@@ -554,7 +561,7 @@ function LabeledInput({
       <label htmlFor={id} className="text-xs text-slate-500">{label}</label>
       <Input
         id={id}
-        type={type}
+        inputMode={inputMode}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className="mt-1"

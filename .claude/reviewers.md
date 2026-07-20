@@ -45,15 +45,30 @@ Both are defined in this repo's `.claude/agents/`.
   different strictness — do not "unify" them. The pair that MUST agree is
   `Services/ContactEmail.cs` ↔ `frontend/src/lib/contact-email.ts`; drift between
   THOSE two is a real finding — and it is now pinned mechanically, since both test
-  suites are driven by the shared corpus `docs/fixtures/contact-email-cases.json`.
-  Add a case there, not to one suite.
+  suites are driven by the shared corpus
+  `api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json`. Add a case there,
+  not to one suite. It sits in the api test tree so `api-ci`'s `api/**` filter covers a
+  corpus-only edit; `frontend-ci` names it explicitly (the #272 precedent). Moving it
+  back under `docs/` would silently un-enforce the guarantee above.
 - Those two mirrors spell their blank-character class out as explicit `\uXXXX` ranges
-  instead of `\s`, and strip edges with that class instead of `Trim()`/`.trim()`. That
+  instead of `\s`, and strip edges with that same set instead of `Trim()`/`.trim()`. That
   verbosity is DELIBERATE and load-bearing, not a style lapse: .NET's `\s` includes
   U+0085 and excludes U+FEFF while JS's is the reverse, and the two native trims diverge
   on the same pair — which made the mirrors genuinely disagree (a pasted BOM was rejected
   client-side and ACCEPTED server-side, storing an unsendable address). `\s`, `\p{C}`, or
   any general-category class re-introduces engine-dependence; do not "simplify" to one.
+- Edge-stripping is a LINEAR SCAN (`ContactEmail.IsBlank` / `isBlank`), not a regex, on
+  both sides. The regex form `^[BLANK]+|[BLANK]+\z` is unanchored in its second
+  alternative, so when that alternative can't match, the engine retries at every offset —
+  quadratic in a request-controlled body, with the 256 cap applied only AFTER
+  normalization. Do not "simplify" the scan back into a regex.
+  Note the hostile shape if you ever re-measure this: blanks in the MIDDLE with a
+  non-blank at BOTH ends. Leading/trailing padding is LINEAR (the `^`-anchored alternative
+  consumes it in one match) — a repro built from leading spaces shows no blowup and will
+  wrongly clear the pattern. Measured on the generated-regex path: 100k → 225 ms,
+  200k → 1.0 s, 400k → 4.3 s.
+  The predicate and the character class are kept in agreement by a test that walks the
+  whole BMP, so adding a range to one without the other fails.
 - Vendor update is BLOCK-UNTIL-FIXED on a malformed contact email (#369): `UpdateVendor`
   validates the submitted address whether or not that request changed it, so a vendor
   whose STORED address is already malformed (written by the pre-#369 unguarded edit path)

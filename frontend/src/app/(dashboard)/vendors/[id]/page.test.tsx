@@ -618,7 +618,16 @@ describe("VendorDetailPage — contact email validation (#369)", () => {
     fireEvent.change(input, { target: { value: "jane@acme,com" } });
     expect(saveButton()).toBeDisabled();
 
-    fireEvent.change(input, { target: { value: "  jane@acme.com  " } });
+    // Padded with NEL (U+0085) and ZWSP (U+200B), NOT plain spaces. Two reasons, both of which
+    // made the earlier ASCII-padded version of this assertion unable to fail:
+    //   1. This input used to be type="email", whose HTML value-sanitization algorithm (jsdom
+    //      implements it) strips leading/trailing ASCII whitespace before React's onChange ever
+    //      runs — so `form.contactEmail` was ALREADY bare and trimContactEmail was a no-op here.
+    //   2. `String.prototype.trim` does NOT strip these two (it does strip NBSP and BOM, which
+    //      is why padding with those would still be vacuous against a plain `.trim()`). They are
+    //      in the SHARED blank class, so swapping trimContactEmail for `.trim()` — the drift that
+    //      stores an unsendable padded address — now fails this test.
+    fireEvent.change(input, { target: { value: "\u0085jane@acme.com\u200B" } });
     expect(saveButton()).toBeEnabled();
     expect(screen.queryByText(/enter a valid email address/i)).toBeNull();
 

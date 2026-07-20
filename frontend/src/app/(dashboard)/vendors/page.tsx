@@ -87,8 +87,8 @@ export default function VendorsPage() {
 
       <Card>
         <CardContent className="p-5">
-          {/* A real <form> so Enter submits (FP-076); type="email" + a light format check
-              so a typo'd address isn't accepted silently, and a duplicate-name hint (FP-073). */}
+          {/* A real <form> so Enter submits (FP-076); a light format check so a typo'd address
+              isn't accepted silently, and a duplicate-name hint (FP-073). */}
           <form
             className="flex flex-col gap-3 sm:flex-row sm:items-end"
             onSubmit={async (e) => {
@@ -118,7 +118,15 @@ export default function VendorsPage() {
               <label htmlFor={emailId} className="text-xs text-slate-500">Contact email</label>
               <Input
                 id={emailId}
-                type="email"
+                // Deliberately NOT type="email" (#369). This input sits in a real <form>, so the
+                // browser's native constraint validation would run — and its local-part grammar is
+                // ASCII-only, so `josé@empresa.es` (which our shared predicate accepts, and which
+                // the detail form saves happily) left "Add vendor" enabled, showed no error, and
+                // silently never submitted. That is the exact form-to-form drift this ticket exists
+                // to remove, on a new axis. `inputMode` keeps the mobile email keyboard and
+                // `autoComplete` keeps autofill, so the only thing dropped is the contradicting
+                // grammar. Chosen over `noValidate` on the <form> so the guarantee is local to the
+                // field rather than an attribute a future edit can quietly delete.
                 inputMode="email"
                 autoComplete="email"
                 value={email}

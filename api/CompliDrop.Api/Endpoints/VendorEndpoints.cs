@@ -183,7 +183,7 @@ public static class VendorEndpoints
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
         if (string.IsNullOrWhiteSpace(req.Name)) return Error(400, "validation.name", "Vendor name is required.");
-        if (!ContactEmail.IsWellFormed(req.ContactEmail)) return ContactEmailInvalid();
+        if (!ContactEmail.TryNormalize(req.ContactEmail, out var contactEmail)) return ContactEmailInvalid();
         if (!await TemplateIsAssignable(req.ComplianceTemplateId, db, ct)) return TemplateNotFound();
 
         var vendor = new Vendor
@@ -191,7 +191,7 @@ public static class VendorEndpoints
             Id = Guid.NewGuid(),
             OrganizationId = currentUser.OrganizationId.Value,
             Name = req.Name.Trim(),
-            ContactEmail = ContactEmail.Normalize(req.ContactEmail),
+            ContactEmail = contactEmail,
             ContactPhone = req.ContactPhone,
             Category = req.Category,
             ComplianceTemplateId = req.ComplianceTemplateId,
@@ -224,14 +224,14 @@ public static class VendorEndpoints
         // #369: the same guard on the update path. This is the one the ticket reports — the detail
         // edit form is where a contact email actually gets corrected (and mistyped), and a bad value
         // saved here breaks every subsequent reminder send silently.
-        if (!ContactEmail.IsWellFormed(req.ContactEmail)) return ContactEmailInvalid();
+        if (!ContactEmail.TryNormalize(req.ContactEmail, out var contactEmail)) return ContactEmailInvalid();
 
         var v = await db.Vendors.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (v is null) return NotFound();
         if (!await TemplateIsAssignable(req.ComplianceTemplateId, db, ct)) return TemplateNotFound();
         var templateChanged = v.ComplianceTemplateId != req.ComplianceTemplateId;
         v.Name = req.Name.Trim();
-        v.ContactEmail = ContactEmail.Normalize(req.ContactEmail);
+        v.ContactEmail = contactEmail;
         v.ContactPhone = req.ContactPhone;
         v.Category = req.Category;
         v.ComplianceTemplateId = req.ComplianceTemplateId;
