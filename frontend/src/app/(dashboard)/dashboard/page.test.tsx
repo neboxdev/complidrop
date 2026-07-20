@@ -5,9 +5,17 @@
  * The page fans out to useDashboardStats + useExpiryPipeline +
  * useRecentActivity, plus useMe for the greeting. Each can be in any of
  * loading / error / empty / populated, so we drive a representative set
- * of combinations: all-loading, all-populated, all-error (handled
- * gracefully via fallback values), and the partial-success path (one
- * hook fails, two resolve).
+ * of combinations: all-loading, all-populated, and the partial-success
+ * paths where one query fails while the others resolve.
+ *
+ * The contract these tests defend: NO query falls back to zeros. Each
+ * one owns its own error and loading surface, because a coalesced `?? 0`
+ * on this page reads as a compliance fact ("nothing is expired") rather
+ * than as missing data. A stats failure yields DashboardError instead of
+ * a zeroed grid (#318 FP-040); a pipeline failure yields the scoped
+ * error + Try again on its own card (#368); an activity failure yields
+ * its own retry card. A truthful zero — a SUCCESSFUL read that really is
+ * 0 — must still render.
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import { http } from "msw";
@@ -308,6 +316,30 @@ describe("DashboardPage — the expiry pipeline fails independently of stats (#3
       screen.getByRole("status", { name: /loading when documents expire/i }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /expired: 0 documents/i })).toBeNull();
+  });
+
+  it("a SUCCESSFUL all-zero read still renders the buckets — a truthful zero is not suppressed", async () => {
+    // The opposite direction of the fix, and the reason it gates on `isSuccess`
+    // rather than on the counts: an org that genuinely has nothing expired must
+    // still see "Expired: 0". Over-correcting to "hide the card when every bucket
+    // is 0" would pass every other test in this block but fail this one.
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), () =>
+        jsonOk({ expired: 0, bucket30: 0, bucket60: 0, bucket90: 0, beyond: 0 }),
+      ),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    expect(
+      await screen.findByRole("link", { name: /expired: 0 documents\. view them/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("90+ days")).toBeInTheDocument();
+    // ...and neither failure surface is showing.
+    expect(screen.queryByText(/couldn't load when your documents expire/i)).toBeNull();
+    expect(screen.queryByRole("status", { name: /loading when documents expire/i })).toBeNull();
   });
 });
 

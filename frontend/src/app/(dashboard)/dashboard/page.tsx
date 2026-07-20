@@ -149,6 +149,11 @@ export default function DashboardPage() {
                 ) : pipeline.isError ? (
                   <div className="space-y-2" role="alert">
                     <p className="text-sm text-slate-600">We couldn&apos;t load when your documents expire.</p>
+                    {/* Server copy (already sanitized to friendly text by api.ts) or the
+                        shared fallback — the house error-card pattern in CLAUDE.md. */}
+                    <p className="text-xs text-slate-500">
+                      {pipeline.error?.message?.trim() || GENERIC_FALLBACK_MESSAGE}
+                    </p>
                     <Button variant="outline" size="sm" onClick={() => void pipeline.refetch()} disabled={pipeline.isFetching}>
                       <RotateCw className={pipeline.isFetching ? "w-3.5 h-3.5 mr-1 animate-spin" : "w-3.5 h-3.5 mr-1"} />
                       Try again
@@ -274,11 +279,7 @@ function StatGridSkeleton() {
         <Card>
           <CardContent className="p-6 space-y-4">
             <Skeleton className="h-4 w-40" />
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
-              {[0, 1, 2, 3, 4].map((i) => (
-                <Skeleton key={i} className="h-24 rounded-md" />
-              ))}
-            </div>
+            <PipelineSkeleton labelled={false} />
           </CardContent>
         </Card>
       </section>
@@ -350,14 +351,17 @@ function PipelineBuckets({ data }: { data: ExpiryPipeline }) {
   );
 }
 
-// Loading placeholder for the pipeline card — mirrors the bucket grid's shape so the
-// card reserves its space, matching StatGridSkeleton's treatment of the same row.
-function PipelineSkeleton() {
+// Loading placeholder for the bucket row — mirrors the grid's shape so the card
+// reserves its space. Shared with StatGridSkeleton, which renders the same row for
+// the cold-load case; `labelled={false}` there because that skeleton's own wrapper
+// already carries role="status", and nesting a second one would announce the region
+// twice to a screen reader.
+function PipelineSkeleton({ labelled = true }: { labelled?: boolean }) {
   return (
     <div
       className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3"
-      role="status"
-      aria-label="Loading when documents expire"
+      role={labelled ? "status" : undefined}
+      aria-label={labelled ? "Loading when documents expire" : undefined}
     >
       {[0, 1, 2, 3, 4].map((i) => (
         <Skeleton key={i} className="h-24 rounded-md" />
