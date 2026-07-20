@@ -278,17 +278,24 @@ public class ReminderBackgroundService(
                         foreach (var doc in docs)
                         {
                             var recipients = new List<string>(reminderInternalUsers);
-                            // #367: never mail the sample-demo VENDOR. Excluding sample documents from the
-                            // query above is not sufficient on its own — a user can assign a REAL document
-                            // to the sample vendor from the vendor dropdown, and that document legitimately
-                            // reaches this loop. Its vendor address is the fictional sample-vendor@example.com
-                            // (RFC 2606 reserved, accepts no mail), so sending is a guaranteed hard bounce
-                            // that suppresses the address and paints a "bounced" alarm badge on a vendor that
-                            // does not exist. The org's INTERNAL recipients still get this reminder — the
-                            // document is real and its expiry matters; only the fake address is dropped.
+                            // #367: never mail the fictional sample-demo address. Excluding sample
+                            // documents from the query above is not sufficient on its own — a user can
+                            // assign a REAL document to the sample vendor from the vendor dropdown, and
+                            // that document legitimately reaches this loop carrying
+                            // sample-vendor@example.com (RFC 2606 reserved, accepts no mail): a guaranteed
+                            // hard bounce that suppresses the address and paints a "bounced" alarm badge on
+                            // a vendor that does not exist. The org's INTERNAL recipients still get this
+                            // reminder — the document is real and its expiry matters.
+                            //
+                            // Keyed on the ADDRESS, not Vendor.IsSample: UpdateVendor lets a user rename the
+                            // sample vendor and give it a REAL contact address without clearing IsSample, so
+                            // a flag-based skip would silently drop that real vendor's mail forever, with no
+                            // UI signal (VendorDetail carries no IsSample, and ContactEmailStatus stays null
+                            // because no suppression row is ever written). The undeliverable address is the
+                            // hazard; the flag is only a label.
                             if (reminder.NotifyVendor
-                                && doc.Vendor is { IsSample: false }
-                                && !string.IsNullOrWhiteSpace(doc.Vendor.ContactEmail))
+                                && !string.IsNullOrWhiteSpace(doc.Vendor?.ContactEmail)
+                                && !SampleData.IsUndeliverableSampleAddress(doc.Vendor.ContactEmail))
                                 recipients.Add(doc.Vendor.ContactEmail);
                             // Distinct uses OrdinalIgnoreCase to match the dedupe HashSet below and the
                             // intent of "one mail per real recipient": a user email stored lowercased

@@ -399,6 +399,16 @@ public static class VendorEndpoints
             return Error(400, "vendor.no_contact_email",
                 "Add a contact email for this vendor first, then you can email them the upload link.");
 
+        // #367: the demo vendor's seeded address is RFC 2606 reserved and accepts no mail, so sending
+        // here is a guaranteed hard bounce that would suppress the address and paint a permanent
+        // "bounced" alarm badge on a vendor that doesn't exist. Refuse with an actionable message
+        // instead. Checked on the ADDRESS, not Vendor.IsSample, so a user who repurposes the sample
+        // vendor by giving it a real contact email can mail it normally (same rule as the reminder
+        // worker). Ordered after no_contact_email so a blank address keeps its more specific copy.
+        if (SampleData.IsUndeliverableSampleAddress(vendor.ContactEmail))
+            return Error(400, "vendor.sample_no_email",
+                "This is the demo vendor, so its contact address isn't real. Add your own vendor to email an upload link.");
+
         if (!link.IsActive)
             return Error(400, "vendorPortalLink.inactive",
                 "This upload link has been revoked. Generate a new one to email it.");

@@ -256,8 +256,8 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
     [Fact]
     public async Task A_real_vendors_address_is_still_mailed()
     {
-        // Direction guard for the sample-vendor skip: it must key on IsSample, not silently mute
-        // every vendor recipient. Identical arrangement, vendorIsSample: false.
+        // Direction guard for the sample-address skip: it must not silently mute every vendor
+        // recipient. Identical arrangement, ordinary address.
         var seed = await SeedReminderAsync(
             NyEightAm,
             notifyInternal: false,
@@ -267,6 +267,46 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
 
         Email.Sends.Select(s => s.ToEmail).Should().BeEquivalentTo(new[] { "real@vendor.test" });
+    }
+
+    [Fact]
+    public async Task A_repurposed_sample_vendor_with_a_real_address_is_still_mailed()
+    {
+        // The regression a flag-based skip would cause (#367 review, CONFIRMED). UpdateVendor lets a
+        // user rename the sample vendor and replace its address with a REAL one, and it never clears
+        // IsSample — so skipping on `Vendor.IsSample` would drop that real vendor's reminders forever,
+        // silently: VendorDetail carries no IsSample, and ContactEmailStatus stays null because no
+        // suppression row is ever written. Suppressing on the ADDRESS keeps the repurposed vendor
+        // working. IsSample is deliberately still true here — that is exactly the untouched-flag state
+        // UpdateVendor leaves behind.
+        var seed = await SeedReminderAsync(
+            NyEightAm,
+            notifyInternal: false,
+            notifyVendor: true, vendorEmail: "bob@real.test",
+            documentIsSample: false, vendorIsSample: true);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Select(s => s.ToEmail).Should().BeEquivalentTo(
+            new[] { "bob@real.test" },
+            "a vendor repurposed away from the fictional address must receive its reminders");
+        (await LogCountAsync(seed.ReminderId, seed.DocumentId)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task The_fictional_sample_address_is_skipped_even_on_a_vendor_not_flagged_as_sample()
+    {
+        // The mirror of the above: the hazard is the undeliverable address itself, so it is skipped
+        // wherever it appears — the flag is only a label. Pins that the check reads ContactEmail.
+        var seed = await SeedReminderAsync(
+            NyEightAm,
+            notifyInternal: false,
+            notifyVendor: true, vendorEmail: "Sample-Vendor@Example.com", // as-typed casing
+            documentIsSample: false, vendorIsSample: false);
+
+        await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
+
+        Email.Sends.Should().BeEmpty("the RFC 2606 address accepts no mail regardless of the flag or its casing");
     }
 
     // ───────── #340: bounce / complaint suppression ─────────

@@ -18,7 +18,8 @@ namespace CompliDrop.Api.Endpoints;
 public static class SampleEndpoints
 {
     private const string SampleVendorName = "Brightside Catering Co. (Sample)";
-    private const string SampleVendorEmail = "sample-vendor@example.com";
+    // Shared with the send paths that must never mail this address (SampleData, #367).
+    private const string SampleVendorEmail = SampleData.VendorEmail;
     private const string SampleFileName = "Sample Certificate of Insurance.pdf";
 
     public static void MapSampleEndpoints(this WebApplication app)

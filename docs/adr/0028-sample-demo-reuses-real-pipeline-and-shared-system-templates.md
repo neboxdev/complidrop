@@ -149,11 +149,20 @@ sample, which produced two live defects:
    seeded org state so the copies cannot drift again. This generalizes the original consequence from
    "the count" to "the population", following the shared-predicate pattern of
    [ADR 0033](0033-document-supersession-expired-liability.md).
-2. **Reminders.** The sample never generates mail, enforced at two levels: sample *documents* are
-   dropped from the reminder worker's document query, and the sample *vendor's* address is dropped
-   from the recipient list even when a REAL document is assigned to it (a user can pick the sample
-   vendor from the dropdown). Internal recipients still get reminders for that real document — its
-   expiry matters; only the fictional address is suppressed.
+2. **Mail.** The fictional sample address is never sent to, enforced at three points: sample
+   *documents* are dropped from the reminder worker's document query; the seeded address
+   `sample-vendor@example.com` is dropped from the reminder recipient list even when a REAL document
+   is assigned to the sample vendor (a user can pick it from the dropdown); and the manual
+   "email this upload link" action refuses with `vendor.sample_no_email` rather than sending.
+   Internal recipients still get reminders for a real document — its expiry matters; only the
+   fictional address is suppressed.
+
+   **Keyed on the ADDRESS, not the `IsSample` flag.** `UpdateVendor` lets a user rename the sample
+   vendor and give it a REAL contact address, and it never clears `IsSample`. A flag-based skip would
+   therefore drop that repurposed vendor's mail permanently and *silently* — `VendorDetail` carries no
+   `IsSample`, and `ContactEmailStatus` stays null because no suppression row is ever written, so
+   nothing in the UI would explain the missing reminders. The undeliverable address is the actual
+   hazard; the flag is only a label. The constant and its predicate live in `Services/SampleData`.
 
 **Deliberately unchanged:** the dashboard's `totalDocuments` still counts the sample. That tile
 answers "what is in my account", not "what do I owe for", and the sample is genuinely there and

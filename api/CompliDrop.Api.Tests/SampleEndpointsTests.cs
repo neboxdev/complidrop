@@ -498,6 +498,37 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
     private static string SampleLiquorLimitValue() =>
         ParseMoney(SampleCertificateGenerator.LiquorLiabilityEachOccurrence).ToString(CultureInfo.InvariantCulture);
 
+    [Fact]
+    public async Task Emailing_an_upload_link_to_the_demo_vendor_is_refused_with_actionable_copy()
+    {
+        // #367 review: the reminder worker was taught not to mail the demo vendor's RFC 2606 address,
+        // but this manual "email the upload link" action is the OTHER path that sends to
+        // Vendor.ContactEmail. Unguarded it produces the same guaranteed hard bounce, EmailSuppression
+        // row and permanent "bounced" alarm badge on a vendor that doesn't exist — at real Resend cost.
+        var auth = await RegisterAndLoginAsync();
+        await SetPortalEntitlementAsync(auth.OrgId, on: true);
+        (await SeedSampleAsync(auth.Client)).EnsureSuccessStatusCode();
+        Guid sampleVendorId;
+        await using (var db = CreateSystemDb())
+            sampleVendorId = (await db.Vendors.SingleAsync(v => v.OrganizationId == auth.OrgId && v.IsSample)).Id;
+        var mint = await auth.Client.PostAsync($"/api/vendors/{sampleVendorId}/portal-link", null);
+        mint.EnsureSuccessStatusCode();
+        var linkId = (await mint.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("id").GetGuid();
+        var email = (FakeEmailService)Fixture.Factory.Services.GetRequiredService<IEmailService>();
+        email.Reset();
+
+        var resp = await auth.Client.PostAsync($"/api/vendors/{sampleVendorId}/portal-link/{linkId}/email", null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var error = (await resp.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error");
+        error.GetProperty("code").GetString().Should().Be("vendor.sample_no_email");
+        error.GetProperty("message").GetString().Should()
+            .Contain("demo vendor", "the copy must tell the user WHY, in product language")
+            .And.NotContainAny("RFC", "bounce", "SMTP");
+        email.Sends.Should().BeEmpty("no mail may be sent to the fictional address");
+    }
+
     private static decimal ParseMoney(string money) =>
         decimal.Parse(money.Replace("$", "").Replace(",", ""), CultureInfo.InvariantCulture);
 

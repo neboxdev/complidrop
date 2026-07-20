@@ -38,9 +38,13 @@ Both are defined in this repo's `.claude/agents/`.
   its blob (ADR 0028). Both directions are deliberate.
 - The sample-demo row is excluded from the plan-limit population on every enforcing /
   reporting surface (dashboard fence, portal fence, Settings `documentsUsed`) via the
-  shared `PlanDocumentScope.CountsTowardLimit` predicate, and never generates reminder
-  mail (sample documents dropped from the query; the sample VENDOR's address dropped
-  from the recipient list even for a real document assigned to it). But the dashboard's
+  shared `PlanDocumentScope.CountsTowardLimit` predicate, and never generates mail
+  (sample documents dropped from the reminder query; the fictional
+  `sample-vendor@example.com` dropped from the recipient list even for a real document
+  assigned to that vendor; the manual email-link action refuses it). That mail skip is
+  deliberately keyed on the ADDRESS (`SampleData.IsUndeliverableSampleAddress`), NOT on
+  `Vendor.IsSample` — `UpdateVendor` repurposes the sample vendor without clearing the
+  flag, so a flag-based skip silently drops a real vendor's mail. But the dashboard's
   `totalDocuments` still COUNTS the sample — that asymmetry is deliberate ("what's in
   my account" vs "what do I owe for"), so a 4-real+1-sample org showing "5 documents"
   on the dashboard and "4 / 5" in Settings is correct (ADR 0028 Amendment 1, #367).
