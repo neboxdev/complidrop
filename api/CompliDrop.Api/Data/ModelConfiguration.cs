@@ -61,7 +61,12 @@ internal static class ModelConfiguration
         builder.Entity<Vendor>(e =>
         {
             e.Property(v => v.Name).HasMaxLength(200);
-            e.Property(v => v.ContactEmail).HasMaxLength(256);
+            // Bound to the validator's constant rather than a third copy of 256 (#369): the column
+            // width is what the ContactEmail cap exists to respect (Npgsql does not truncate, so an
+            // over-length value is a 500 without it), and a widened column that left the validator
+            // behind would silently re-open that gap. The corpus pins the two mirrors' constants to
+            // each other; this pins the schema to the server's.
+            e.Property(v => v.ContactEmail).HasMaxLength(Services.ContactEmail.MaxLength);
             e.Property(v => v.ContactPhone).HasMaxLength(50);
             e.Property(v => v.Category).HasMaxLength(100);
             e.Property(v => v.EntityType).HasMaxLength(50);

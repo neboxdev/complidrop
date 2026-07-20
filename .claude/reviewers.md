@@ -36,46 +36,31 @@ Both are defined in this repo's `.claude/agents/`.
   nonCompliant / expiringSoon or future pipeline buckets (ADR 0033 + Amendment 1).
 - A normal document delete RETAINS its blob (ADR 0013); the sample-demo clear DELETES
   its blob (ADR 0028). Both directions are deliberate.
-- Two email validators coexist ON PURPOSE (#369): `Services/ContactEmail.IsWellFormed`
-  (vendor contact email — strict: dotted domain, no blank/invisible chars, ≤256) and
-  `AuthEndpoints.IsValidEmail` (account email — lax: `Contains('@')`). An account email
-  is PROVEN by the verification mail, so a typo self-corrects and over-strict signup
-  validation locks out a real customer; a vendor contact email is never proven and a
-  typo fails silently forever (reminders retry in place, ADR 0025). Different evidence,
-  different strictness — do not "unify" them. The pair that MUST agree is
-  `Services/ContactEmail.cs` ↔ `frontend/src/lib/contact-email.ts`; drift between
-  THOSE two is a real finding — and it is now pinned mechanically, since both test
-  suites are driven by the shared corpus
-  `api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json`. Add a case there,
-  not to one suite. It sits in the api test tree so `api-ci`'s `api/**` filter covers a
-  corpus-only edit; `frontend-ci` names it explicitly (the #272 precedent). Moving it
-  back under `docs/` would silently un-enforce the guarantee above.
-- Those two mirrors spell their blank-character class out as explicit `\uXXXX` ranges
-  instead of `\s`, and strip edges with that same set instead of `Trim()`/`.trim()`. That
-  verbosity is DELIBERATE and load-bearing, not a style lapse: .NET's `\s` includes
-  U+0085 and excludes U+FEFF while JS's is the reverse, and the two native trims diverge
-  on the same pair — which made the mirrors genuinely disagree (a pasted BOM was rejected
-  client-side and ACCEPTED server-side, storing an unsendable address). `\s`, `\p{C}`, or
-  any general-category class re-introduces engine-dependence; do not "simplify" to one.
-- Edge-stripping is a LINEAR SCAN (`ContactEmail.IsBlank` / `isBlank`), not a regex, on
-  both sides. The regex form `^[BLANK]+|[BLANK]+\z` is unanchored in its second
-  alternative, so when that alternative can't match, the engine retries at every offset —
-  quadratic in a request-controlled body, with the 256 cap applied only AFTER
-  normalization. Do not "simplify" the scan back into a regex.
-  Note the hostile shape if you ever re-measure this: blanks in the MIDDLE with a
-  non-blank at BOTH ends. Leading/trailing padding is LINEAR (the `^`-anchored alternative
-  consumes it in one match) — a repro built from leading spaces shows no blowup and will
-  wrongly clear the pattern. Measured on the generated-regex path: 100k → 225 ms,
-  200k → 1.0 s, 400k → 4.3 s.
-  The predicate and the character class are kept in agreement by a test that walks the
-  whole BMP, so adding a range to one without the other fails.
+- Vendor contact-email validation is ADR 0038; the review-time facts that follow are
+  pointers into it, not a second copy of the rationale.
+  - Two email validators coexist ON PURPOSE: `Services/ContactEmail.IsWellFormed` (vendor
+    contact email — strict) and `AuthEndpoints.IsValidEmail` (account email — lax,
+    `Contains('@')`). Different evidence, different strictness — do not "unify" them.
+  - The pair that MUST agree is `Services/ContactEmail.cs` <-> `frontend/src/lib/contact-email.ts`;
+    drift between THOSE two is a real finding. It is pinned mechanically by the shared corpus
+    `api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json` (add a case THERE, not to
+    one suite) plus a BMP-walking class-vs-predicate test on each side. The corpus lives in the
+    api test tree so `api-ci`'s `api/**` filter covers a corpus-only edit; `frontend-ci` names it
+    explicitly. Moving it back under `docs/` silently un-enforces the guarantee.
+  - Both mirrors spell the blank class out as explicit `\uXXXX` ranges rather than `\s`, and strip
+    edges with a LINEAR SCAN rather than a regex. Both are load-bearing, not style: `\s` differs
+    between the engines, and the regex form is quadratic. Do not "simplify" either.
+    If you re-measure the regex: the hostile shape is blanks in the MIDDLE with a non-blank at
+    BOTH ends. Leading/trailing padding is linear and will wrongly clear the pattern.
+  - `valid` cases in the corpus mean "the predicate accepts this", NOT "this is a good address" —
+    some are bidi controls listed to pin a range bound. Bidi/invisible-format controls being
+    accepted is a KNOWN deferred decision (ADR 0038 Consequences), not an oversight to re-flag.
 - Vendor update is BLOCK-UNTIL-FIXED on a malformed contact email (#369): `UpdateVendor`
-  validates the submitted address whether or not that request changed it, so a vendor
+  validates the submitted address whether or not this request changed it, so a vendor
   whose STORED address is already malformed (written by the pre-#369 unguarded edit path)
-  must be corrected or cleared before unrelated edits land. Deliberate: the address is
-  actively failing, the detail form shows the reason inline on load with Save disabled,
-  and both correcting and clearing are accepted. Finding these rows without opening each
-  vendor is [#430](https://github.com/neboxdev/complidrop/issues/430), not a defect here.
+  must be corrected or cleared before unrelated edits land. Deliberate — rationale and the
+  rejected alternative are in ADR 0038. Finding those rows without opening each vendor is
+  [#430](https://github.com/neboxdev/complidrop/issues/430), not a defect here.
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).

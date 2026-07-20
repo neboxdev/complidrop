@@ -14,7 +14,7 @@
  * comment nobody re-checks.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -24,24 +24,38 @@ import {
 } from "@/lib/contact-email";
 
 type Cases = {
+  maxLength: number;
   valid: string[];
   malformed: string[];
   paddedValid: { raw: string; normalized: string }[];
   blank: string[];
 };
 
-// vitest runs with cwd = frontend/, so the repo root is one level up. Asserted rather than
+// Located by walking UP from the working directory rather than resolving a fixed `../` hop.
+// cwd is only `frontend/` because the CI job sets working-directory, so a fixed relative path
+// throws at module scope — killing the whole file rather than one assertion — when the suite is
+// run from the repo root instead. (`import.meta.url` is not usable here: under Vite's transform
+// it is not a file: URL, so fileURLToPath rejects it.) Existence is still asserted rather than
 // assumed: a silently-missing fixture would make every it.each below vacuous.
-const FIXTURE = resolve(
-  process.cwd(),
-  "../api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json",
-);
-if (!existsSync(FIXTURE)) {
+const FIXTURE_REL = "api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json";
+
+function locateFixture(): string {
+  let dir = process.cwd();
+  for (let up = 0; up < 5; up++) {
+    const candidate = resolve(dir, FIXTURE_REL);
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break; // filesystem root
+    dir = parent;
+  }
   throw new Error(
-    `Shared contact-email corpus not found at ${FIXTURE}. It is the single source both this ` +
-      `suite and ContactEmailTests read (#369) — do not inline the cases here instead.`,
+    `Shared contact-email corpus not found: no ${FIXTURE_REL} above ${process.cwd()}. It is the ` +
+      `single source both this suite and ContactEmailTests read (#369) — do not inline the cases ` +
+      `here instead.`,
   );
 }
+
+const FIXTURE = locateFixture();
 const cases: Cases = JSON.parse(readFileSync(FIXTURE, "utf8"));
 
 /**
@@ -67,6 +81,15 @@ describe("isMalformedContactEmail (#369)", () => {
     expect(cases.malformed.length).toBeGreaterThan(10);
     expect(cases.paddedValid.length).toBeGreaterThan(3);
     expect(cases.blank.length).toBeGreaterThan(3);
+  });
+
+  it("agrees with the shared corpus about the length cap", () => {
+    // The varchar(256) column width was the ONE rule of the mirror pair the corpus did not
+    // declare: each side asserted the cap against its OWN constant, so this one and
+    // ContactEmail.MaxLength could drift apart with both suites green — and this side would then
+    // leave Save enabled on an address the server 400s, which is exactly the form-vs-API drift
+    // #369 exists to remove. Declared once in the corpus, asserted on both sides.
+    expect(CONTACT_EMAIL_MAX_LENGTH).toBe(cases.maxLength);
   });
 
   it.each(cases.malformed)("rejects %s", (bad) => {
@@ -99,6 +122,31 @@ describe("isMalformedContactEmail (#369)", () => {
     expect(atLimit).toHaveLength(CONTACT_EMAIL_MAX_LENGTH);
     expect(isMalformedContactEmail(atLimit)).toBe(false);
     expect(isMalformedContactEmail("a" + atLimit)).toBe(true);
+  });
+});
+
+describe("trimContactEmail stays linear (#369)", () => {
+  it("strips a blank-heavy value promptly", () => {
+    // Mirror of the server's `Normalization_of_a_blank_heavy_value_completes_promptly`.
+    // reviewers.md requires the linear scan on BOTH sides, but only the server had a guard: this
+    // file would not have failed if trimContactEmail were rewritten back into the quadratic
+    // `^[BLANK]+|[BLANK]+$` regex, because every corpus padding case is short and edge-anchored.
+    //
+    // The shape is load-bearing. Leading/trailing padding is LINEAR even under the regex (the
+    // `^`-anchored alternative consumes it in one match), so an edge-padded probe would be
+    // vacuous. The pathological input is blanks in the MIDDLE with a non-blank at BOTH ends,
+    // where neither alternative can match and the engine retries at every offset.
+    //
+    // isMalformedContactEmail runs synchronously on every keystroke and paste in both vendor
+    // forms, so the regression this guards is a frozen tab, not just a slow function.
+    const hostile = "x" + " ".repeat(500_000) + "x";
+
+    const started = performance.now();
+    const result = trimContactEmail(hostile);
+    const elapsed = performance.now() - started;
+
+    expect(result).toBe(hostile); // interior blanks are not edges — nothing is stripped
+    expect(elapsed).toBeLessThan(1_500);
   });
 });
 

@@ -27,6 +27,7 @@ namespace CompliDrop.Api.Tests;
 public class ContactEmailTests
 {
     private sealed record ContactEmailCases(
+        int MaxLength,
         string[] Valid,
         string[] Malformed,
         PaddedCase[] PaddedValid,
@@ -82,6 +83,17 @@ public class ContactEmailTests
     /// <summary>Renders invisible code points so a failure message names the character.</summary>
     public static string Show(string s) =>
         string.Concat(s.Select(ch => ch is >= ' ' and <= '~' ? ch.ToString() : $"\\u{(int)ch:X4}"));
+
+    [Fact]
+    public void The_length_cap_matches_the_shared_corpus()
+    {
+        // The varchar(256) column width was the ONE rule of the mirror pair the corpus did not
+        // declare: each side asserted the cap against its OWN constant, so ContactEmail.MaxLength
+        // and CONTACT_EMAIL_MAX_LENGTH could drift apart with both suites green — and the client
+        // would then leave Save enabled on an address the server 400s, which is exactly the
+        // form-vs-API drift #369 exists to remove. Declared once, asserted on both sides.
+        ContactEmail.MaxLength.Should().Be(Cases.MaxLength);
+    }
 
     [Fact]
     public void The_shared_corpus_loaded_and_is_non_trivial()
@@ -209,11 +221,16 @@ public class ContactEmailTests
     }
 
     [Fact]
-    public void An_oversized_value_is_rejected_without_running_the_format_regex()
+    public void An_oversized_value_is_rejected_and_yields_no_value_to_persist()
     {
-        // The length cap is checked BEFORE the WellFormed regex (see TryNormalize), so an
-        // over-length value can never reach the backtracking engine. Also the 400-not-500 guard:
-        // ContactEmail is varchar(256) and Npgsql does not truncate.
+        // Named for what it ASSERTS, not for the cap-before-regex ordering in TryNormalize: that
+        // ordering is real and deliberate (it keeps an oversized value away from the backtracking
+        // engine) but nothing here can observe it — swapping the two blocks leaves this green. The
+        // ordering rationale lives on TryNormalize itself rather than in a test name that promises
+        // a guarantee it does not pin.
+        //
+        // What this DOES pin: the 400-not-500 guard (ContactEmail is varchar(256) and Npgsql does
+        // not truncate) and that a rejected value yields nothing for the caller to persist.
         var tooLong = new string('a', 250) + "@acme.com"; // 259 > 256, and otherwise well-formed
 
         ContactEmail.TryNormalize(tooLong, out var normalized).Should().BeFalse();

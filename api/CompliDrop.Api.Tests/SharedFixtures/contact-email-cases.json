@@ -1,4 +1,5 @@
 {
+  "maxLength": 256,
   "_comment": [
     "THE shared accept/reject corpus for the vendor contact-email predicate (#369).",
     "Read by BOTH api/CompliDrop.Api.Tests/ContactEmailTests.cs and",
@@ -24,6 +25,8 @@
     "two different code paths over the same set, so a range present in one and missing from the",
     "other only surfaces if both are covered. 'valid' additionally pins the code points ADJACENT",
     "to every range bound, so an off-by-one that widened a range is caught as a false rejection.",
+    "'maxLength' is the varchar(256) column width, asserted against each side's own constant so",
+    "the two cannot drift - it was previously the only rule of the pair this file did not pin.",
     "",
     "'valid' means ONLY 'the predicate accepts this', not 'this is a good address'. Some adjacency",
     "probes are bidi controls (U+202A, U+202E) - deliberately not in the blank class, so listed",
@@ -52,7 +55,8 @@
     "a\u2061b@acme.com",
     "a\u2fffb@acme.com",
     "a\u3001b@acme.com",
-    "a\ufefeb@acme.com"
+    "a\ufefeb@acme.com",
+    "a\uff00b@acme.com"
   ],
   "malformed": [
     "jane@acme,com",

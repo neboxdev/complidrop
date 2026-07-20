@@ -850,7 +850,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         // Specifically a 400, not a 500: the NUL case reaches Postgres as SQLSTATE 22021 without
         // the control-character exclusion, exactly like an over-length value without the cap.
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"{ContactEmailTests.Show(bad)} is not a usable address");
-        (await ErrorCode(resp)).Should().Be("validation.contactEmail");
+        (await ErrorCode(resp)).Should().Be("validation.contact_email");
 
         await using var db = CreateSystemDb();
         (await db.Vendors.AnyAsync(v => v.Name == "Acme Catering"))
@@ -875,7 +875,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         });
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"{ContactEmailTests.Show(bad)} is not a usable address");
-        (await ErrorCode(resp)).Should().Be("validation.contactEmail");
+        (await ErrorCode(resp)).Should().Be("validation.contact_email");
 
         await using var db = CreateSystemDb();
         (await db.Vendors.SingleAsync(v => v.Id == vendorId)).ContactEmail
@@ -972,7 +972,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             complianceTemplateId = (Guid?)null,
         });
         tooLong.StatusCode.Should().Be(HttpStatusCode.BadRequest, "one char over the column width is a 400, not a 500");
-        (await ErrorCode(tooLong)).Should().Be("validation.contactEmail");
+        (await ErrorCode(tooLong)).Should().Be("validation.contact_email");
     }
 
     [Fact]
@@ -1020,7 +1020,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             complianceTemplateId = (Guid?)null,
         });
         blocked.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-        (await ErrorCode(blocked)).Should().Be("validation.contactEmail");
+        (await ErrorCode(blocked)).Should().Be("validation.contact_email");
 
         // Correcting the address in the same save is the intended escape hatch, and it lands.
         var fixedUp = await auth.Client.PutAsJsonAsync($"/api/vendors/{vendorId}", new

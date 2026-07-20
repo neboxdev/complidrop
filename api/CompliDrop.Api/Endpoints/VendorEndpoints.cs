@@ -506,7 +506,7 @@ public static class VendorEndpoints
     // Services/ContactEmail alongside the format check, so the write path and the validity gate can't
     // disagree about what value was inspected. The rationale is preserved on ContactEmail.Normalize.
     private static IResult ContactEmailInvalid() =>
-        Error(400, "validation.contactEmail",
+        Error(400, "validation.contact_email",
             "Enter a valid contact email address, like ops@acmecatering.com — or leave it blank.");
 
     // #340: maps the per-(org, email) suppression reason to the wire label the vendor badge renders
