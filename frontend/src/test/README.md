@@ -173,6 +173,10 @@ Two-tier setup, documented here once so it doesn't get re-litigated.
   - Injecting your own spy (`renderWithProviders({ router: { replace } })`) **overrides** the live behavior for that field, because `setNavigationState` merges the router field-by-field. Use that when you want to assert a navigation was requested without the URL actually moving.
 
   To simulate a URL change the page did NOT initiate — a same-route sidebar click, Back, an external deep link — call `setNavigationState({ searchParams, pathname })` mid-test; it notifies subscribers, so mounted components re-render against the new URL.
+
+  **`window.history.pushState` / `replaceState` are bridged too, and apply SYNCHRONOUSLY.** Next's App Router integrates the native History API: those calls update the URL and sync `usePathname`/`useSearchParams` with no route navigation and no RSC fetch (the documented path for list filter/sort state — the documents page uses it). The synchronous/deferred split between the two mechanisms is deliberate and mirrors the real router; don't collapse it.
+
+  `setNavigationCommitDelay(ms)` staggers `router.push`/`replace` commit latency within a test. Real commits wait on their own RSC fetch, so two dispatched together land at different times — with a single shared deadline that interleaving is untestable. Reset to 0 between tests.
 - **Per-file `vi.mock("next/navigation", ...)`** (escape hatch). Required when the test needs a hoisted spy on `useSearchParams` or wants to capture the call site at module load (see `register-form.test.tsx` for the canonical example). Vitest's per-file mock registry overrides the setup-file mock within the file's own module scope — file-level mocks always win.
 
 Pick the default unless you have a specific reason to escape it.

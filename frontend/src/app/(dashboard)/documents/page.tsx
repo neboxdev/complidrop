@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useDropzone, type FileRejection } from "react-dropzone";
 import { toast } from "sonner";
 import {
@@ -72,7 +72,6 @@ const FILTER_SELECT_CLASS =
 
 export default function DocumentsPage() {
   // --- list controls (#187) ---
-  const router = useRouter();
   const searchParams = useSearchParams();
   // Filters are URL-addressable (FP-041), and the URL is their SINGLE SOURCE OF
   // TRUTH (#370): a deep link lands pre-filtered (the dashboard's
@@ -101,59 +100,54 @@ export default function DocumentsPage() {
   // there's no vendor dropdown, so it's only ever set by an inbound link.
   const vendorId = searchParams.get("vendor") || undefined;
 
-  // A navigation we've dispatched but that hasn't come back through
-  // `searchParams` yet: `{ from: the URL we computed it against, to: the URL we
-  // asked for }`. `router.replace` commits in a transition, so between two
-  // quick filter changes the URL we can READ is still the pre-navigation one.
-  // Composing the second change on top of that stale string would silently drop
-  // the first (pick a status, then a type fast enough, and the status is gone).
-  // The old state-based version got this right for free — four independent
-  // state cells can't clobber each other — so this ref is what keeps deriving
-  // from the URL from regressing it.
-  const pendingNav = useRef<{ from: string; to: string } | null>(null);
-  const currentQuery = searchParams.toString();
-  useEffect(() => {
-    // Our navigation landed (or something else moved the URL) — stop composing.
-    if (pendingNav.current && currentQuery === pendingNav.current.to) {
-      pendingNav.current = null;
-    }
-  }, [currentQuery]);
-
-  // The ONE writer. Patches the live query string rather than rebuilding it
-  // from scratch, so a param this page doesn't model (today: none besides the
-  // filters, but `?vendor=` is exactly that from this control's perspective)
-  // survives an unrelated filter change. `replace`, not `push`, so tweaking a
-  // dropdown doesn't stack a history entry per keystroke.
+  // The ONE writer, shared by every control.
+  //
+  // `window.history.replaceState`, NOT `router.replace`: Next's App Router
+  // integrates the native History API, updating the history entry and syncing
+  // `usePathname`/`useSearchParams` with NO route navigation and no RSC fetch.
+  // The docs name list filtering as its purpose, and on this page the
+  // difference is load-bearing rather than cosmetic. `router.replace` commits
+  // in a transition, which put a Next-server round-trip in FRONT of every
+  // filter interaction (the dropdown looks frozen meanwhile, since there is no
+  // loading.tsx under (dashboard)) and opened a window where the URL we can
+  // READ is still the old one — a window that produced three separate defects
+  // in review: controls snapping back to the previous option, a second quick
+  // change composing on the stale string and dropping the first, and the
+  // search box being re-seeded mid-word by its own echo. A synchronous write
+  // closes all three by construction instead of compensating for them.
+  //
+  // It patches the query string rather than rebuilding it, so a param this
+  // page doesn't model survives an unrelated filter change — `?vendor=` is
+  // exactly that from a dropdown's perspective.
   const writeFilters = useCallback(
     (patch: Record<string, string>) => {
-      const live = searchParams.toString();
-      // Compose on our own in-flight target only while the URL still reads as
-      // the one we computed that target from; the moment anything else moves
-      // the URL, that external value wins.
-      const base = pendingNav.current?.from === live ? pendingNav.current.to : live;
-      const sp = new URLSearchParams(base);
+      const sp = new URLSearchParams(searchParams.toString());
       for (const [key, value] of Object.entries(patch)) {
         if (value) sp.set(key, value);
         else sp.delete(key);
       }
       const qs = sp.toString();
-      pendingNav.current = { from: live, to: qs };
-      router.replace(qs ? `/documents?${qs}` : "/documents", { scroll: false });
+      window.history.replaceState(null, "", qs ? `/documents?${qs}` : "/documents");
     },
-    [router, searchParams],
+    [searchParams],
   );
 
   // Clear every filter at once, including params with no control of their own.
   const clearFilters = useCallback(() => {
-    pendingNav.current = { from: searchParams.toString(), to: "" };
-    router.replace("/documents", { scroll: false });
-  }, [router, searchParams]);
+    window.history.replaceState(null, "", "/documents");
+  }, []);
 
   // The search box is the one filter with local state: it must echo every
   // keystroke, but only the debounced value belongs in the URL (and in a
   // request). `searchInput` is therefore a draft of `search`, not a second
   // source of truth.
   const [searchInput, setSearchInput] = useState(search);
+  // The last search value THIS page wrote. Re-seeding on our own echo would
+  // wipe anything typed since the debounce fired: type "acme", the timer
+  // writes ?search=acme, you keep typing " roofing", and the echo arriving
+  // mid-word resets the box to "acme". Only a value we did not dispatch is a
+  // genuine external change worth adopting.
+  const dispatchedSearch = useRef<string | null>(null);
   // Re-seed the box when the URL's search changes underneath us — a same-route
   // sidebar click, Back, or Clear. Adjusting state during render (rather than
   // in an effect) is React's supported path for "derive from a changing input":
@@ -161,7 +155,7 @@ export default function DocumentsPage() {
   const [lastUrlSearch, setLastUrlSearch] = useState(search);
   if (search !== lastUrlSearch) {
     setLastUrlSearch(search);
-    setSearchInput(search);
+    if (search !== dispatchedSearch.current) setSearchInput(search);
   }
 
   // Debounce the search box so we don't fire a request per keystroke, then
@@ -171,7 +165,10 @@ export default function DocumentsPage() {
   // see #187 review — so a mount-time settle can't clobber the user's page.)
   useEffect(() => {
     if (searchInput === search) return;
-    const t = setTimeout(() => writeFilters({ search: searchInput }), 300);
+    const t = setTimeout(() => {
+      dispatchedSearch.current = searchInput;
+      writeFilters({ search: searchInput });
+    }, 300);
     return () => clearTimeout(t);
   }, [searchInput, search, writeFilters]);
 
@@ -563,6 +560,7 @@ export default function DocumentsPage() {
               // change and the box would keep its text — with the pending timer
               // then writing it straight back.
               setSearchInput("");
+              dispatchedSearch.current = "";
             }}
           >
             Clear

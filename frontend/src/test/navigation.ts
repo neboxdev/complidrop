@@ -71,6 +71,65 @@ function notifyNavigation(): void {
 }
 
 /**
+ * Deferred navigation commits that haven't fired yet. `resetNavigation()`
+ * cancels them so a navigation can never cross a test boundary.
+ */
+const pendingApplies = new Set<ReturnType<typeof setTimeout>>();
+
+/**
+ * How long a dispatched navigation takes to commit, in ms (default 0 — the
+ * next macrotask).
+ *
+ * The real App Router's commit latency is per-navigation: each one waits on its
+ * own RSC fetch, so two navigations dispatched together land at different times
+ * and can even land out of order. With a fixed 0ms defer every in-flight
+ * navigation shares one deadline and lands in one drain, which makes a whole
+ * class of interleaving untestable — including "one of our OWN earlier
+ * navigations commits while a later one is still in flight", the window two
+ * #370 defects lived in.
+ *
+ * Set it per navigation to stagger commits:
+ *
+ *     setNavigationCommitDelay(5);   fireEvent.change(statusSelect);  // lands first
+ *     setNavigationCommitDelay(50);  fireEvent.change(typeSelect);    // still in flight
+ *     act(() => vi.advanceTimersByTime(10));                          // only the first landed
+ *
+ * Reset to 0 by `resetNavigation()`.
+ */
+let commitDelayMs = 0;
+
+export function setNavigationCommitDelay(ms: number): void {
+  commitDelayMs = ms;
+}
+
+/**
+ * Split an href into the parts a navigation applies. Shared by the router
+ * mock and the History-API bridge so both agree on edge cases.
+ *
+ * `hasQuery` distinguishes "set the query" from "leave it alone": "/x?a=1" and
+ * "?a=1" carry one, "/x" and "#top" don't. A path-only href still clears the
+ * query (that's what makes Clear's "/documents" work); a hash-only href
+ * touches nothing.
+ */
+function parseHref(href: string): { pathname: string; query: string; hasQuery: boolean } | null {
+  // Absolute URLs (rare in-app, but `router.replace(new URL(...).toString())`
+  // is legal) parse via URL; relative ones are split by hand because the
+  // WHATWG parser demands a base.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(href)) {
+    const parsed = new URL(href);
+    // An absolute URL always fully specifies the query.
+    return { pathname: parsed.pathname, query: parsed.search.replace(/^\?/, ""), hasQuery: true };
+  }
+  const [beforeHash] = href.split("#");
+  const queryAt = beforeHash.indexOf("?");
+  return {
+    pathname: queryAt === -1 ? beforeHash : beforeHash.slice(0, queryAt),
+    query: queryAt === -1 ? "" : beforeHash.slice(queryAt + 1),
+    hasQuery: queryAt !== -1,
+  };
+}
+
+/**
  * Apply a navigation href to `navState`, the way the real App Router does.
  *
  * Without this, `router.replace` was an inert spy and `useSearchParams()`
@@ -97,30 +156,65 @@ function notifyNavigation(): void {
  */
 function applyNavigation(href: unknown): void {
   if (typeof href !== "string") return;
-  // Absolute URLs (rare in-app, but `router.replace(new URL(...).toString())`
-  // is legal) parse via URL; relative ones are split by hand because the
-  // WHATWG parser demands a base.
-  let pathname: string;
-  let query: string;
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(href)) {
-    const parsed = new URL(href);
-    pathname = parsed.pathname;
-    query = parsed.search.replace(/^\?/, "");
-  } else {
-    const [beforeHash] = href.split("#");
-    const queryAt = beforeHash.indexOf("?");
-    pathname = queryAt === -1 ? beforeHash : beforeHash.slice(0, queryAt);
-    query = queryAt === -1 ? "" : beforeHash.slice(queryAt + 1);
-  }
+  const target = parseHref(href);
+  if (!target) return;
+  const { pathname, query, hasQuery } = target;
   // Deferred to a macrotask so the calling component's own synchronous
   // re-render (and its effects) run FIRST against the pre-navigation URL —
   // see the transition note above.
-  setTimeout(() => {
-    // A hash-only or query-only href ("?page=2") leaves the path alone.
+  //
+  // The handle is TRACKED because `resetNavigation()` (the global afterEach)
+  // rebuilds navState synchronously and cannot cancel a queued timer: a
+  // navigation dispatched near the end of a test — or from a late async
+  // callback, like the 401 -> /login redirect — would otherwise land AFTER the
+  // reset and rewrite pathname/searchParams inside the NEXT test, re-rendering
+  // whatever it has mounted, outside `act`. Vitest drains afterEach on
+  // microtasks, so a macrotask always loses that race.
+  const handle = setTimeout(() => {
+    pendingApplies.delete(handle);
+    // A hash-only href leaves BOTH the path and the query alone; a query-only
+    // href ("?page=2") keeps the path.
+    if (!hasQuery && !pathname) return;
     if (pathname) navState.pathname = pathname;
     navState.searchParams = new URLSearchParams(query);
     notifyNavigation();
-  }, 0);
+  }, commitDelayMs);
+  pendingApplies.add(handle);
+}
+
+/**
+ * Bridge `window.history.pushState` / `replaceState` into `navState`.
+ *
+ * Next's App Router integrates the native History API: those calls update the
+ * history entry AND sync `usePathname` / `useSearchParams`, with no route
+ * navigation and no RSC fetch (docs: "Native History API" — the documented
+ * path for list filtering/sorting). The documents page uses it, so the harness
+ * has to model it or those writes would be invisible to the component.
+ *
+ * SYNCHRONOUS, unlike `router.push`/`replace` — that difference is the entire
+ * point of the API and the reason it doesn't have the in-flight window that
+ * `router.replace` does.
+ */
+function applyHistoryUrl(url: unknown): void {
+  if (typeof url !== "string" || url === "") return;
+  const target = parseHref(url);
+  if (!target) return;
+  if (target.pathname) navState.pathname = target.pathname;
+  if (target.hasQuery || target.pathname) {
+    navState.searchParams = new URLSearchParams(target.query);
+  }
+  notifyNavigation();
+}
+
+if (typeof window !== "undefined" && !("__cdNavBridge" in window.history)) {
+  Object.defineProperty(window.history, "__cdNavBridge", { value: true });
+  for (const method of ["pushState", "replaceState"] as const) {
+    const original = window.history[method].bind(window.history);
+    window.history[method] = (data: unknown, unused: string, url?: string | URL | null) => {
+      original(data, unused, url);
+      applyHistoryUrl(typeof url === "string" ? url : url?.toString());
+    };
+  }
 }
 
 function makeRouter(): RouterMock {
@@ -183,6 +277,12 @@ export const navState: NavigationState = {
  * across tests in the same file.
  */
 export function resetNavigation(): void {
+  // Cancel any deferred commit still queued from this test. Without this the
+  // reset below is not authoritative: a macrotask scheduled by a navigation
+  // late in test N fires during test N+1 and rewrites the URL under it.
+  for (const handle of pendingApplies) clearTimeout(handle);
+  pendingApplies.clear();
+  commitDelayMs = 0;
   navState.router = makeRouter();
   navState.params = {};
   navState.searchParams = new URLSearchParams();
