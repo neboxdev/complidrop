@@ -12,6 +12,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { VendorCoverageBadge } from "@/components/VendorCoverageBadge";
 import { requirementSentence } from "@/lib/requirements";
 import { complianceStatusLabel } from "@/lib/display-labels";
+import { CONTACT_EMAIL_ERROR, isMalformedContactEmail, trimContactEmail } from "@/lib/contact-email";
 import {
   useVendor,
   useGeneratePortalLink,
@@ -181,6 +182,11 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
   // needs its id at this level so the label can reference it.
   const templateSelectId = useId();
 
+  // #369: shared with the list add-form so the two can't drift. Blank stays saveable —
+  // a vendor with no contact email is a supported state (the "Email link" button below
+  // already explains it needs one).
+  const contactEmailInvalid = isMalformedContactEmail(form.contactEmail);
+
   // Show what the chosen checklist checks AT DECISION TIME (#239 delta 1) — the
   // highest-leverage gap the #237 audit found: Pat used to assign a checklist on
   // faith, with nothing on the path ever revealing what it requires. Keyed on the
@@ -220,7 +226,16 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <LabeledInput label="Name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
-            <LabeledInput label="Contact email" value={form.contactEmail} onChange={(v) => setForm({ ...form, contactEmail: v })} />
+            {/* #369: the edit form had no format check while the list add-form did, so a typo
+                corrected here saved 200 OK and then broke every reminder send silently. Same
+                shared predicate as the add-form; the server enforces the same 400. */}
+            <LabeledInput
+              label="Contact email"
+              type="email"
+              value={form.contactEmail}
+              onChange={(v) => setForm({ ...form, contactEmail: v })}
+              error={contactEmailInvalid ? CONTACT_EMAIL_ERROR : undefined}
+            />
             <LabeledInput label="Contact phone" value={form.contactPhone} onChange={(v) => setForm({ ...form, contactPhone: v })} />
             <LabeledInput label="Category" value={form.category} onChange={(v) => setForm({ ...form, category: v })} />
             <div className="sm:col-span-2">
@@ -337,8 +352,11 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                 onClick={async () => {
                   try {
                     await update.mutateAsync({
+                      // #369: send the TRIMMED address so the value that satisfied the
+                      // enabled-state is the value transmitted (the server trims too, but
+                      // agreeing here keeps the two from ever disagreeing about what was checked).
                       name: form.name.trim(),
-                      contactEmail: form.contactEmail || null,
+                      contactEmail: trimContactEmail(form.contactEmail),
                       contactPhone: form.contactPhone || null,
                       category: form.category || null,
                       complianceTemplateId: form.complianceTemplateId || null,
@@ -348,7 +366,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                     toast.error(err instanceof Error ? err.message : "Failed to update vendor");
                   }
                 }}
-                disabled={update.isPending || !form.name.trim()}
+                disabled={update.isPending || !form.name.trim() || contactEmailInvalid}
                 title={form.name.trim() ? undefined : "Vendor name is required."}
               >
                 Save changes
@@ -512,15 +530,38 @@ function complianceBadgeClass(status: string): string {
   }
 }
 
-function LabeledInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+function LabeledInput({
+  label,
+  value,
+  onChange,
+  type,
+  error,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  type?: string;
+  /** Inline validation message; when set the input is marked invalid and describes it (#369). */
+  error?: string;
+}) {
   // a11y: per-instance id wires label→input via htmlFor (#76). useId
   // gives a stable id per LabeledInput instance, so two inputs with
   // the same `label` prop on the same page each get their own id.
   const id = useId();
+  const errId = useId();
   return (
     <div>
       <label htmlFor={id} className="text-xs text-slate-500">{label}</label>
-      <Input id={id} value={value} onChange={(e) => onChange(e.target.value)} className="mt-1" />
+      <Input
+        id={id}
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="mt-1"
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? errId : undefined}
+      />
+      {error && <p id={errId} className="mt-1 text-xs text-red-600">{error}</p>}
     </div>
   );
 }

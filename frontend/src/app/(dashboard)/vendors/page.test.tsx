@@ -545,3 +545,35 @@ describe("VendorsPage — client-side search + pagination (#187)", () => {
     expect(screen.getByRole("link", { name: "Vendor 01" })).toBeInTheDocument();
   });
 });
+
+describe("VendorsPage — add-form contact email validation (#369)", () => {
+  // This form has guarded the email since FP-076; #369 moved the rule into the shared
+  // lib/contact-email predicate so the detail edit form could reuse it. These pin that the
+  // extraction preserved the behavior — a silent regression here would re-open the gap
+  // from the other side.
+  function mount() {
+    server.use(http.get(url("/api/vendors"), () => jsonOk([])));
+    return renderWithProviders(<VendorsPage />, { auth: authedMe });
+  }
+
+  const addButton = () => screen.getByRole("button", { name: /add vendor/i });
+
+  it("blocks Add and explains why when the email is malformed", async () => {
+    mount();
+    fireEvent.change(await screen.findByLabelText(/^name$/i), { target: { value: "Acme" } });
+    const email = screen.getByLabelText(/^contact email$/i);
+
+    fireEvent.change(email, { target: { value: "jane@acme,com" } });
+
+    expect(addButton()).toBeDisabled();
+    expect(screen.getByText(/enter a valid email address/i)).toBeInTheDocument();
+    expect(email).toHaveAttribute("aria-invalid", "true");
+  });
+
+  it("allows a blank email — a vendor with no contact email is a valid state", async () => {
+    mount();
+    fireEvent.change(await screen.findByLabelText(/^name$/i), { target: { value: "Acme" } });
+    expect(addButton()).toBeEnabled();
+    expect(screen.queryByText(/enter a valid email address/i)).toBeNull();
+  });
+});

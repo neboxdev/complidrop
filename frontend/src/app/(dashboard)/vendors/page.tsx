@@ -21,6 +21,7 @@ import { useVendors, useCreateVendor } from "@/hooks/useVendors";
 import { VendorCoverageBadge } from "@/components/VendorCoverageBadge";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { CONTACT_EMAIL_ERROR, isMalformedContactEmail } from "@/lib/contact-email";
 import { isAuthError } from "@/lib/query-client";
 import { PageTip } from "@/components/onboarding/PageTip";
 import { TIP_IDS } from "@/lib/onboarding";
@@ -65,9 +66,11 @@ export default function VendorsPage() {
 
   // Add-vendor form validation (FP-076 / FP-073): block an obviously-malformed email,
   // and warn (non-blocking) when the name duplicates an existing vendor.
+  // The email rule moved to lib/contact-email (#369) so this form and the detail edit
+  // form share ONE definition — they had drifted, and the edit form had none at all.
   const trimmedName = name.trim();
   const trimmedEmail = email.trim();
-  const emailInvalid = trimmedEmail !== "" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
+  const emailInvalid = isMalformedContactEmail(email);
   const duplicateName =
     trimmedName !== "" && all.some((v) => v.name.trim().toLowerCase() === trimmedName.toLowerCase());
 
@@ -123,7 +126,7 @@ export default function VendorsPage() {
                 aria-describedby={emailInvalid ? emailErrId : undefined}
               />
               {emailInvalid && (
-                <p id={emailErrId} className="mt-1 text-xs text-red-600">Enter a valid email address.</p>
+                <p id={emailErrId} className="mt-1 text-xs text-red-600">{CONTACT_EMAIL_ERROR}</p>
               )}
             </div>
             <Button type="submit" className="w-full sm:w-auto" disabled={!trimmedName || emailInvalid || createVendor.isPending}>

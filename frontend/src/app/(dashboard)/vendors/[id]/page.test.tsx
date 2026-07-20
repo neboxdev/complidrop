@@ -550,3 +550,83 @@ describe("VendorDetailPage — remove vendor (#319 FP-073)", () => {
     await waitFor(() => expect(pushSpy).toHaveBeenCalledWith("/vendors"));
   });
 });
+
+describe("VendorDetailPage — contact email validation (#369)", () => {
+  function mount(vendor: VendorDetail = VENDOR_DETAIL) {
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(vendor)),
+      http.get(url("/api/compliance/templates"), () => jsonOk([])),
+      http.get(url("/api/compliance/templates/:tid"), ({ params }) =>
+        jsonOk({ id: params.tid, name: "Checklist", isSystemTemplate: true, rules: [] }),
+      ),
+    );
+    return renderWithProviders(<VendorDetailPage />, {
+      auth: authedMe,
+      params: { id: vendor.id },
+    });
+  }
+
+  async function emailField() {
+    return await screen.findByLabelText(/^contact email$/i);
+  }
+
+  const saveButton = () => screen.getByRole("button", { name: /save changes/i });
+
+  it("blocks Save and explains why when the edited email is malformed", async () => {
+    // The reported hole: the list add-form guarded this, the edit form did not, so a typo
+    // here saved 200 OK and then broke every reminder send silently (ADR 0025 retries in place).
+    mount();
+    const input = await emailField();
+    expect(saveButton()).toBeEnabled();
+
+    fireEvent.change(input, { target: { value: "jane@acme,com" } });
+
+    expect(saveButton()).toBeDisabled();
+    expect(screen.getByText(/enter a valid email address/i)).toBeInTheDocument();
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    // The message is wired as the input's description, so a screen reader announces the
+    // reason rather than leaving Save mysteriously dead (#76 label/description contract).
+    expect(input.getAttribute("aria-describedby")).toBe(
+      screen.getByText(/enter a valid email address/i).id,
+    );
+  });
+
+  it("blocks a pasted display-name address", async () => {
+    mount();
+    fireEvent.change(await emailField(), { target: { value: "Jane Smith <jane@acme.com>" } });
+    expect(saveButton()).toBeDisabled();
+  });
+
+  it("keeps Save enabled when the field is cleared — no contact email is a valid state", async () => {
+    mount();
+    fireEvent.change(await emailField(), { target: { value: "   " } });
+    expect(saveButton()).toBeEnabled();
+    expect(screen.queryByText(/enter a valid email address/i)).toBeNull();
+  });
+
+  it("recovers once the typo is corrected, and sends the trimmed address", async () => {
+    let sent: unknown = undefined;
+    server.use(
+      http.put(url("/api/vendors/:id"), async ({ request }) => {
+        sent = await request.json();
+        return jsonOk({ id: "v_acme_01" });
+      }),
+    );
+    mount();
+    const input = await emailField();
+
+    fireEvent.change(input, { target: { value: "jane@acme,com" } });
+    expect(saveButton()).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: "  jane@acme.com  " } });
+    expect(saveButton()).toBeEnabled();
+    expect(screen.queryByText(/enter a valid email address/i)).toBeNull();
+
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(sent).toBeDefined());
+    // Trimmed on the wire so the value that satisfied the enabled-state IS the value stored.
+    expect((sent as { contactEmail: string }).contactEmail).toBe("jane@acme.com");
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Vendor updated"));
+  });
+});
