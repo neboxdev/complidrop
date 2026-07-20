@@ -6,7 +6,7 @@
  *
  * The accept/reject corpus is NOT written inline — it is loaded from
  * `api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json`, the same file that drives
- * `VendorEndpointsTests.MalformedEmails()` on the server. That is deliberate: the first
+ * `ContactEmailTests.MalformedEmails()` on the server. That is deliberate: the first
  * review pass found that hand-maintained parallel lists were already unequal at
  * introduction, and that the two `\s`-based regexes genuinely disagreed on real input
  * (.NET's `\s` has U+0085 and lacks U+FEFF; JS's is the reverse). Driving both suites from
@@ -39,7 +39,7 @@ const FIXTURE = resolve(
 if (!existsSync(FIXTURE)) {
   throw new Error(
     `Shared contact-email corpus not found at ${FIXTURE}. It is the single source both this ` +
-      `suite and VendorEndpointsTests read (#369) — do not inline the cases here instead.`,
+      `suite and ContactEmailTests read (#369) — do not inline the cases here instead.`,
   );
 }
 const cases: Cases = JSON.parse(readFileSync(FIXTURE, "utf8"));
@@ -99,6 +99,43 @@ describe("isMalformedContactEmail (#369)", () => {
     expect(atLimit).toHaveLength(CONTACT_EMAIL_MAX_LENGTH);
     expect(isMalformedContactEmail(atLimit)).toBe(false);
     expect(isMalformedContactEmail("a" + atLimit)).toBe(true);
+  });
+});
+
+describe("the blank class and the blank predicate agree (#369)", () => {
+  it("never disagrees on any code point in the BMP", () => {
+    // The blank set exists TWICE in this module by necessity: as the BLANK character class
+    // (used by WELL_FORMED to REJECT) and as the isBlank predicate (used by trimContactEmail
+    // to STRIP). A range added to one and not the other splits the two halves of one rule —
+    // an address could be rejected as malformed while its padding was left unstripped, or a
+    // padded address could strip to something the server then rejects. Either way the mirrors
+    // stop agreeing with `Services/ContactEmail.cs`, which is the failure #369 is about.
+    //
+    // Both sides are probed through the PUBLIC api rather than by exporting the constant, so
+    // this pins observable behavior:
+    //   class     — a blank char mid-address makes it malformed (WELL_FORMED excludes BLANK)
+    //   predicate — a lone blank char strips to nothing, i.e. normalizes to null
+    //
+    // Mirrors `The_blank_predicate_and_the_character_class_agree` on the server, which walks
+    // the same range against the same set.
+    const disagreements: string[] = [];
+
+    for (let cp = 0; cp <= 0xffff; cp++) {
+      const c = String.fromCharCode(cp);
+      if (c === "@") continue; // malformed for an unrelated reason — not a blank-class signal
+
+      const byClass = isMalformedContactEmail(`a${c}b@acme.com`);
+      const byPredicate = trimContactEmail(c) === null;
+
+      if (byClass !== byPredicate) {
+        disagreements.push(
+          `U+${cp.toString(16).toUpperCase().padStart(4, "0")} (class=${byClass}, predicate=${byPredicate})`,
+        );
+        if (disagreements.length >= 10) break;
+      }
+    }
+
+    expect(disagreements).toEqual([]);
   });
 });
 
