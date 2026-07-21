@@ -199,6 +199,70 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
             .CountAsync(d => d.OrganizationId == orgB.OrgId && d.IsSample && d.DeletedAt == null)).Should().Be(0);
     }
 
+    [Fact]
+    public async Task Clear_regrades_a_real_document_that_was_assigned_to_the_sample_vendor()
+    {
+        // #422 companion: the clear soft-deletes the sample VENDOR, but only IsSample documents go
+        // with it. A REAL document assigned to the sample vendor (a supported repurposing — the
+        // reminder engine special-cases exactly that state) survives the clear, and without the
+        // delete-time re-grade it would keep its verdict + check rows graded against the Caterer
+        // checklist that no longer governs it — the same stranded-verdict hole as DeleteVendor.
+        var auth = await RegisterAndLoginAsync();
+        await SeedSampleAsync(auth.Client);
+
+        Guid realDocId;
+        await using (var seed = CreateSystemDb())
+        {
+            var sampleVendorId = (await seed.Vendors
+                .SingleAsync(v => v.OrganizationId == auth.OrgId && v.IsSample)).Id;
+            var now = DateTime.UtcNow;
+            realDocId = Guid.NewGuid();
+            seed.Documents.Add(new Document
+            {
+                Id = realDocId,
+                OrganizationId = auth.OrgId,
+                VendorId = sampleVendorId,
+                OriginalFileName = "real-coi.pdf",
+                BlobStorageUrl = "memory://real",
+                BlobStoragePath = $"path/{Guid.NewGuid():N}",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                GeneralLiabilityLimit = 3_000_000m,
+                ExpirationDate = now.AddYears(1),
+                ComplianceStatus = ComplianceStatus.Pending,
+                ExtractionStatus = ExtractionStatus.Completed,
+                IsSample = false,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        // A REAL evaluation against the Caterer checklist: whatever the verdict, the doc now holds
+        // check rows and a non-Pending status — the state the clear must not strand.
+        (await auth.Client.PostAsync($"/api/compliance/check/{realDocId}", null)).EnsureSuccessStatusCode();
+        await using (var db = CreateSystemDb())
+        {
+            (await db.Documents.SingleAsync(d => d.Id == realDocId)).ComplianceStatus
+                .Should().NotBe(ComplianceStatus.Pending, "arrange: the doc must hold a real pre-clear verdict");
+            (await db.ComplianceChecks.CountAsync(c => c.DocumentId == realDocId)).Should().BeGreaterThan(0,
+                "arrange: the evaluation must have produced check rows to shed");
+        }
+
+        (await auth.Client.DeleteAsync("/api/sample")).EnsureSuccessStatusCode();
+
+        await using (var verify = CreateSystemDb())
+        {
+            var doc = await verify.Documents.SingleAsync(d => d.Id == realDocId);
+            doc.DeletedAt.Should().BeNull("a real document must survive the sample clear");
+            doc.ComplianceStatus.Should().Be(ComplianceStatus.Pending,
+                "its vendor is gone with the sample, so no checklist governs it — the old verdict would be vacuous");
+            (await verify.ComplianceChecks.CountAsync(c => c.DocumentId == realDocId)).Should().Be(0,
+                "the check rows against the no-longer-governing checklist must be shed");
+        }
+    }
+
     // ---- dashboard flags + plan limit ----
 
     [Fact]
