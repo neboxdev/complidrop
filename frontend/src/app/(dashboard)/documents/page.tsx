@@ -93,50 +93,62 @@ export default function DocumentsPage() {
   // except an explicit user action.
   const [page, setPage] = useState(1);
 
-  // The authoritative query string is `window.location.search`, NOT
-  // `useSearchParams()`.
+  // WHICH of the two URL copies is current depends on HOW the URL moved, so
+  // neither can be preferred unconditionally. Getting this backwards is what
+  // broke the two previous passes of this ticket, in opposite directions:
   //
-  // Both describe the same URL, but they update at different times: a
-  // `history.replaceState` moves `window.location` synchronously while Next
-  // syncs the hook through `startTransition` (see `writeFilters`). Deriving the
-  // controls straight from the hook therefore made every filter pick flash
-  // BACKWARDS — React re-rendered the still-old value onto a controlled
-  // <select>, reverting the user's choice for a frame until the transition
-  // landed. (Verified, not theorised: immediately after picking "Expired",
-  // window.location.search is "?status=Expired" while useSearchParams() is
-  // still empty and the select reads "".) The pre-#370 page used local state
-  // and never flickered, so deriving naively would have been a regression.
+  //   History-API write (our own `writeFilters`)  window.location  leads
+  //                                               useSearchParams() lags
+  //   Router navigation (deep link, sidebar)      useSearchParams() leads
+  //                                               window.location  lags
   //
-  // This is still ONE source of truth — `window.location` — with two change
-  // SIGNALS telling us when to re-read it: the hook (Back, popstate, a
-  // same-route nav, any external change) and `writeTick` (our own writes,
-  // which land before paint because a setState in an event handler flushes
-  // synchronously). Neither signal carries a filter value, so there is no
-  // second copy to fall out of sync.
-  const [writeTick, setWriteTick] = useState(0);
-  const query = useMemo(
-    () =>
-      new URLSearchParams(
-        // SSR/first render: no window. The hook and the real URL agree at rest,
-        // so this is the same string and hydration matches.
-        typeof window === "undefined" ? searchParams.toString() : window.location.search,
-      ),
-    // `searchParams` is a fresh object on every router commit, so its identity
-    // is a sound change signal.
-    //
-    // `writeTick` looks unused to the lint rule because the memo body reads
-    // `window.location`, which changes out of band — the rule only tracks
-    // values it can see flowing in. It is not a value, it is an INVALIDATION
-    // SIGNAL: bumping it is how a write says "the url moved, re-read it".
-    // Dropping it (as the rule suggests) reintroduces the bug this whole
-    // structure exists to prevent — the memo would then only refresh on the
-    // deferred router commit, so the control the user just touched renders its
-    // old value for a frame and two writes in one window clobber each other.
-    // Pinned by "the picked option does not snap back" and "three filter
-    // changes in a row compose" in page.test.tsx.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [searchParams, writeTick],
-  );
+  // Verified in `next/dist/client/components/app-router.js`: `searchParams` is
+  // derived from `canonicalUrl` in a RENDER-phase `useMemo`, while
+  // `window.location` is moved afterwards in `HistoryUpdater`'s
+  // `useInsertionEffect` — the COMMIT phase. That internal write carries
+  // `__NA`, so the patched `replaceState` short-circuits and dispatches
+  // nothing: no follow-up render ever corrects a component that read
+  // `window.location` during a navigation render. Preferring it therefore
+  // renders the PREVIOUS route's query, permanently, on every deep link — the
+  // dashboard's "Non-compliant" card would land on ?status=NonCompliant
+  // showing an unfiltered list.
+  //
+  // So the HOOK is the base truth: it is correct for every change we did not
+  // make. Our own writes — the one case where the hook lags — are overlaid on
+  // top until the router echoes them back. The overlay is what stops a filter
+  // pick flashing backwards for a frame, which is the symptom that pushed the
+  // earlier pass onto `window.location` in the first place.
+  const routerQuery = searchParams.toString();
+  // Our own writes the router hasn't echoed back yet, oldest first; the newest
+  // is what the controls render. A QUEUE rather than one value because two
+  // writes can be in flight at once (each `replaceState` schedules its own
+  // transition), and when the first lands it must not drag the controls back
+  // to it while the second is still pending.
+  const [pendingWrites, setPendingWrites] = useState<string[]>([]);
+  // Reconcile only when the router side actually MOVED. Without this guard an
+  // unrelated re-render (a page change, a refetch) would compare a still-old
+  // `routerQuery` against the overlay and discard it.
+  const [lastRouterQuery, setLastRouterQuery] = useState(routerQuery);
+  if (routerQuery !== lastRouterQuery) {
+    setLastRouterQuery(routerQuery);
+    const landed = pendingWrites.indexOf(routerQuery);
+    // One of ours landing retires it and everything queued before it. Anything
+    // else is an external navigation (Back, a deep link, the sidebar click of
+    // scenario B), which supersedes the overlay entirely.
+    setPendingWrites(landed === -1 ? [] : pendingWrites.slice(landed + 1));
+  }
+  const effectiveQuery = pendingWrites.at(-1) ?? routerQuery;
+  const query = useMemo(() => new URLSearchParams(effectiveQuery), [effectiveQuery]);
+  // Mirrored for `writeFilters`, which must compose on this value but must not
+  // close over it (see there). Assigned during render rather than in an effect
+  // because a write can be dispatched before an effect for the current render
+  // has run — a debounce firing in the same tick as a router commit — and an
+  // effect-updated mirror would then compose on the previous URL. The
+  // assignment is idempotent and derived purely from committed state, so a
+  // discarded concurrent render cannot leave it wrong: the render that commits
+  // is also the one whose value the next event handler reads.
+  const effectiveQueryRef = useRef(effectiveQuery);
+  effectiveQueryRef.current = effectiveQuery;
 
   const search = query.get("search") ?? "";
   const status = query.get("status") ?? "";
@@ -160,41 +172,34 @@ export default function DocumentsPage() {
   // page doesn't model survives an unrelated filter change — `?vendor=` is
   // exactly that from a dropdown's perspective.
   //
-  // Composed on `window.location.search`, NOT `useSearchParams()`.
+  // Composed on `effectiveQuery`, NOT on `window.location.search` and not on
+  // the raw hook — it is the only expression that is current under BOTH
+  // orderings above. Composing on `window.location` drops a deep link's params
+  // on the first filter touch (the address bar is still the previous route's
+  // during a navigation render); composing on the raw hook drops the earlier of
+  // two writes made inside one transition window.
   //
-  // This is the load-bearing line. `replaceState` is only HALF synchronous:
-  // Next's patch routes the router sync through `startTransition`
-  // (`app-router.js`, `applyUrlFromHistoryPushReplace`) and then calls the
-  // native method. So on the line after a write, `window.location.search` is
-  // already the new value while `useSearchParams()` still returns the old one.
-  // Composing on the hook would mean every write patches a stale base — two
-  // filter changes inside one transition window and the first is silently
-  // dropped. `window.location` is the copy the browser updates synchronously,
-  // so it is the only correct base for a read-modify-write. (An earlier pass
-  // claimed the whole call was synchronous and leaned on that; it isn't, and
-  // the tests below now pin the difference.)
-  //
-  // Empty deps, therefore: this closes over nothing that changes. That also
-  // keeps the search-debounce effect below from re-arming its 300ms timer every
-  // time an UNRELATED filter changes.
+  // Read through a ref so the callback can close over nothing and stay
+  // referentially stable: an unstable `writeFilters` re-arms the 300ms search
+  // debounce below on every unrelated filter change.
   const writeFilters = useCallback((patch: Record<string, string>) => {
-    const sp = new URLSearchParams(window.location.search);
+    const sp = new URLSearchParams(effectiveQueryRef.current);
     for (const [key, value] of Object.entries(patch)) {
       if (value) sp.set(key, value);
       else sp.delete(key);
     }
     const qs = sp.toString();
     window.history.replaceState(null, "", qs ? `/documents?${qs}` : "/documents");
-    // Re-read the URL now rather than waiting for Next's transition — see the
-    // `query` note above. Without this the control the user just touched
-    // renders its OLD value for a frame.
-    setWriteTick((t) => t + 1);
+    // Render the new value NOW. Next syncs `useSearchParams()` through a
+    // transition, so without the overlay the control the user just touched
+    // renders its OLD value until that lands.
+    setPendingWrites((q) => [...q, qs]);
   }, []);
 
   // Clear every filter at once, including params with no control of their own.
   const clearFilters = useCallback(() => {
     window.history.replaceState(null, "", "/documents");
-    setWriteTick((t) => t + 1);
+    setPendingWrites((q) => [...q, ""]);
   }, []);
 
   // The search box is the one filter with local state: it must echo every
@@ -208,26 +213,29 @@ export default function DocumentsPage() {
   // from a changing input": it re-renders before paint, so the box never
   // flashes the stale text.
   //
-  // UNCONDITIONAL, deliberately. There used to be a `dispatchedSearch` ref
-  // latching the last value this page wrote, so the box would not be re-seeded
-  // by its own echo — the fear being: the debounce writes ?search=acme, you
-  // keep typing " roofing", and the echo lands mid-word and truncates you back
-  // to "acme".
+  // Guarded against the page's OWN echo, but only for one comparison.
   //
-  // That echo can no longer arrive late. `search` is re-read from
-  // `window.location` at WRITE time (see `query`), so it changes in the same
-  // task as the debounce that wrote it, when `searchInput` still holds exactly
-  // the value just written — the re-seed is a no-op the user cannot type
-  // inside of. Next's transition commit later recomputes the same string and
-  // adjusts nothing. The latch guarded a window that no longer exists, and a
-  // ref that outlives the value it describes is a liability: it went stale
-  // across an external clear and swallowed the re-seed on the following Back
-  // (the box stayed empty and the debounce then wrote the restored filter back
-  // OUT of the URL). Deleting it removes the bug and the machinery together.
+  // The debounce writes ?search=acme; you keep typing " roofing"; the echo
+  // lands mid-word and truncates you back to "acme". The window is real: the
+  // debounce's `setPendingWrites` is a DefaultLane update flushed in a later
+  // scheduler macrotask, while a keystroke in that gap renders at SyncLane
+  // FIRST — so the later render re-seeds over characters typed after the write.
+  //
+  // An earlier pass removed this guard on the theory that `search` changes in
+  // the same task as the write. It does not, for the lane reason above.
+  //
+  // But the ORIGINAL guard was a ref holding the last dispatched value
+  // indefinitely, and that went stale: across an external clear it swallowed
+  // the re-seed on the following Back, leaving the box empty and letting the
+  // debounce write the restored filter back OUT of the URL. Retiring the echo
+  // after a single comparison fixes both — it covers exactly the one re-seed
+  // its own write provokes, and never outlives it.
+  const [searchEcho, setSearchEcho] = useState<string | null>(null);
   const [lastUrlSearch, setLastUrlSearch] = useState(search);
   if (search !== lastUrlSearch) {
     setLastUrlSearch(search);
-    setSearchInput(search);
+    setSearchEcho(null);
+    if (search !== searchEcho) setSearchInput(search);
   }
 
   // Debounce the search box so we don't fire a request per keystroke, then
@@ -237,7 +245,12 @@ export default function DocumentsPage() {
   // means no write at all (so a deep link is a pure read).
   useEffect(() => {
     if (searchInput === search) return;
-    const t = setTimeout(() => writeFilters({ search: searchInput }), 300);
+    const t = setTimeout(() => {
+      // Announce the echo in the SAME batch as the write, so the re-seed check
+      // above sees it on the render where `search` becomes this value.
+      setSearchEcho(searchInput);
+      writeFilters({ search: searchInput });
+    }, 300);
     return () => clearTimeout(t);
   }, [searchInput, search, writeFilters]);
 

@@ -160,6 +160,13 @@ describe("DocumentsPage — URL-addressable filters (#317 FP-041)", () => {
       // Give the 300ms search debounce room to misfire if it were going to.
       await new Promise((r) => setTimeout(r, 400));
       expect(replaceStateSpy).not.toHaveBeenCalled();
+      // Spying ONE writer is a blind spot in the other direction: an echo
+      // reintroduced through the router (the mechanism this page used before it
+      // moved to the History API) would leave the spy above untouched. Cover
+      // both mechanisms so the assertion is about mount being a pure read, not
+      // about which API a future edit happens to pick.
+      expect(navState.router.replace).not.toHaveBeenCalled();
+      expect(navState.router.push).not.toHaveBeenCalled();
       // …and the deep link is untouched, not rewritten to an equivalent string.
       expect(currentQuery().get("status")).toBe("Expired");
     } finally {
@@ -197,6 +204,15 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     });
 
     fireEvent.click(await screen.findByRole("button", { name: /^clear$/i }));
+
+    // SYNCHRONOUSLY, before the router commit: the controls must already read
+    // cleared. `clearFilters` pushes its own write onto the overlay for exactly
+    // this reason — without that push the dropdown keeps rendering "Expired"
+    // until the transition lands, so Clear looks like a dead control for a
+    // frame. Every other Clear assertion in this file waits, so none of them
+    // can observe that window; deleting the overlay push leaves them all green.
+    expect(screen.getByLabelText(/filter by compliance status/i)).toHaveValue("");
+
     await new Promise((r) => setTimeout(r, 400));
     unsubscribe();
 
@@ -301,6 +317,48 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     await waitFor(() => expect(navState.searchParams.get("type")).toBe("permit"));
     expect(navState.searchParams.get("vendor")).toBeNull();
     expect(navState.searchParams.get("status")).toBeNull();
+  });
+
+  it("an earlier write landing does not drag the controls back while a later one is in flight (#370)", async () => {
+    // Two writes can be in flight at once, each carrying its own transition.
+    // When the FIRST one's snapshot lands, `useSearchParams()` becomes a value
+    // that is neither the pre-write base nor what the user last picked. An
+    // overlay holding a SINGLE pending value has to read that as an external
+    // navigation and drop the second write — so the type dropdown snaps back to
+    // "" mid-interaction while the address bar already shows the right thing.
+    // Holding the pending writes as a QUEUE is what distinguishes "one of ours
+    // landing" from "somebody else moved the URL".
+    //
+    // Staggered commit delays are what make the interleaving expressible at
+    // all: the status write commits at 5ms while the type write is still in
+    // flight until 60ms. With one shared deadline both land in the same drain
+    // and this window never exists.
+    server.use(
+      http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))),
+    );
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, pathname: "/documents" });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    setNavigationCommitDelay(5);
+    fireEvent.change(screen.getByLabelText(/filter by compliance status/i), {
+      target: { value: "Expired" },
+    });
+    setNavigationCommitDelay(60);
+    fireEvent.change(screen.getByLabelText(/filter by document type/i), {
+      target: { value: "permit" },
+    });
+
+    // The first snapshot lands; the second is still pending.
+    await waitFor(() => expect(navState.searchParams.get("status")).toBe("Expired"));
+    expect(navState.searchParams.get("type")).toBeNull();
+
+    // Neither control may have moved off what the user picked.
+    expect(screen.getByLabelText(/filter by compliance status/i)).toHaveValue("Expired");
+    expect(screen.getByLabelText(/filter by document type/i)).toHaveValue("permit");
+
+    // And the second write is not lost once its own snapshot lands.
+    await waitFor(() => expect(navState.searchParams.get("type")).toBe("permit"));
+    expect(navState.searchParams.get("status")).toBe("Expired");
   });
 
   it("the picked option does not snap back while the router transition catches up (#370)", async () => {
@@ -439,6 +497,49 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     });
   });
 
+  it("keeps characters typed in the same drain as the debounce write (#370)", async () => {
+    // The test above widens the window with a slow ROUTER commit, and under the
+    // current design nothing can go wrong there: the overlay moves `search` in
+    // the same batch as the write, so the later commit re-derives the identical
+    // string and the re-seed never re-fires. Verified — it stays green with the
+    // echo guard deleted, so it does not pin it.
+    //
+    // The window that IS real is one scheduler tick wide. The debounce's
+    // `setPendingWrites` is a DefaultLane update: React schedules it through the
+    // Scheduler's MessageChannel, a separate macrotask. An input event is also a
+    // macrotask, so a keystroke CAN be processed between the timer callback and
+    // that flush — it renders first at SyncLane, then the DefaultLane render
+    // arrives carrying the older `search` and re-seeds over the new characters.
+    //
+    // Reproduced by registering the keystroke on a timer with the SAME deadline
+    // as the page's debounce: ours was armed second, so it runs immediately
+    // after the write, inside the gap. Deleting the `searchEcho` guard truncates
+    // "acme roofing" back to "acme" here.
+    server.use(
+      http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))),
+    );
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, pathname: "/documents" });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    const box = screen.getByLabelText(/search documents/i);
+    fireEvent.change(box, { target: { value: "acme" } });
+
+    await new Promise<void>((resolve) => {
+      setTimeout(() => {
+        fireEvent.change(box, { target: { value: "acme roofing" } });
+        resolve();
+      }, 300);
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(box).toHaveValue("acme roofing");
+
+    // The guard is spent, not sticky: the full text still reaches the URL.
+    await waitFor(() => expect(currentQuery().get("search")).toBe("acme roofing"), {
+      timeout: 3000,
+    });
+  });
+
   it("restores the search box on Back after an external clear (#370)", async () => {
     // The echo-guard latch remembers the last search value THIS page wrote, so
     // the box isn't re-seeded mid-word by its own echo. But the latch also has
@@ -534,9 +635,19 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
       target: { value: "permit" },
     });
 
-    // The search write must still land on ITS original schedule. Both filters
-    // survive, which also re-checks that neither write clobbered the other.
-    await waitFor(() => expect(currentQuery().get("search")).toBe("acme"), { timeout: 1000 });
+    // Assert on the ORIGINAL schedule, synchronously at ~t=380.
+    //
+    // This used to be `waitFor(…, { timeout: 1000 })`, which could not fail on
+    // the regression it names: a re-arm restarts the 300ms timer at t=200, so
+    // the write lands at t=500 — still comfortably inside a 1000ms budget, so
+    // the test passed either way. (Verified against an isolated `[searchParams]`
+    // dep mutation: all tests stayed green.) Sampling once at t=380 sits
+    // between the two schedules, with ~80ms of slack after the honest deadline
+    // and ~120ms before the regressed one.
+    await new Promise((r) => setTimeout(r, 180));
+    expect(currentQuery().get("search")).toBe("acme");
+    // Both filters survive, which also re-checks that neither write clobbered
+    // the other.
     expect(currentQuery().get("type")).toBe("permit");
   });
 
