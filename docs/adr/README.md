@@ -46,3 +46,4 @@ Use `/adr <title>` to scaffold a new one.
 - [0036](0036-system-template-seed-convergence.md) — System templates converge to their seed (add/update/delete), tenant clones never; re-grade on change
 - [0037](0037-frontend-sentry-pii-scrubbing-and-gating.md) — Frontend Sentry: PII scrubbing, dev/no-DSN no-op gating, source-map degradation (renumbered from a colliding 0036)
 - [0038](0038-vendor-contact-email-mirrored-validation.md) — Vendor contact email: one strict rule mirrored in two languages, explicit blank class, linear edge strip
+- [0039](0039-documents-url-source-of-truth-overlay.md) — Documents filters read the URL through a pending-write overlay; `useSearchParams()` is the base, never `window.location` unconditionally

@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useDropzone, type FileRejection } from "react-dropzone";
 import { toast } from "sonner";
 import {
@@ -49,6 +49,14 @@ import { TIP_IDS } from "@/lib/onboarding";
 
 const PAGE_SIZE = 25;
 
+/**
+ * Search-box debounce. Exported because a regression test has to arm a timer on
+ * the SAME deadline to reproduce the one-scheduler-tick window where a keystroke
+ * can be overwritten by the write's own echo — duplicating the literal there
+ * would let this constant drift and silently close the window under test.
+ */
+export const SEARCH_DEBOUNCE_MS = 300;
+
 // Compliance-status filter values. The <option> labels come from the shared
 // complianceStatusLabel map (#188) so the dropdown and the row badges speak the
 // SAME words ("Action needed", "Awaiting review", …); the value stays the raw
@@ -72,45 +80,205 @@ const FILTER_SELECT_CLASS =
 
 export default function DocumentsPage() {
   // --- list controls (#187) ---
-  const router = useRouter();
   const searchParams = useSearchParams();
-  // Filters are URL-addressable (FP-041): seed from the query string so a deep
-  // link lands pre-filtered (the dashboard's "Non-compliant" card -> ?status=
-  // NonCompliant, a vendor's "Docs N" -> ?vendor=<id>), and the active filters
-  // are mirrored back (replace, not push) so the view is shareable and a Back
-  // from a detail page re-seeds it. (In-page changes use replace, so they don't
-  // stack history entries.)
+  // Filters are URL-addressable (FP-041), and the URL is their SINGLE SOURCE OF
+  // TRUTH (#370): a deep link lands pre-filtered (the dashboard's
+  // "Non-compliant" card -> ?status=NonCompliant, a vendor's "Docs N" ->
+  // ?vendor=<id>), the view is shareable, and Back re-seeds it.
+  //
+  // These used to be four `useState` cells mirrored back into the URL by an
+  // effect. That was a feedback loop — the effect's input (`searchParams`)
+  // lagged its own output by a commit — with two live defects:
+  //   A. Clear reset state and replaced to "/documents", but the effect re-ran
+  //      against the pre-navigation snapshot and re-added `?vendor=`, so the
+  //      vendor filter survived the click meant to clear it.
+  //   B. Clicking "Documents" in the sidebar while filtered is a same-route
+  //      nav: no remount, so the `useState` initializers didn't re-run. The
+  //      list stayed filtered under a bare URL, and the next filter change
+  //      wrote that stale residue back.
+  // Deriving instead of mirroring makes both structurally impossible — there
+  // is no second copy to fall out of sync, and nothing writes state->URL
+  // except an explicit user action.
   const [page, setPage] = useState(1);
-  const [searchInput, setSearchInput] = useState(() => searchParams.get("search") ?? "");
-  const [search, setSearch] = useState(() => searchParams.get("search") ?? ""); // debounced value sent to the server
-  const [status, setStatus] = useState(() => searchParams.get("status") ?? "");
-  const [typeFilter, setTypeFilter] = useState(() => searchParams.get("type") ?? "");
-  const [expiresWithin, setExpiresWithin] = useState(() => searchParams.get("expiresWithin") ?? "");
+
+  // WHICH of the two URL copies is current depends on HOW the URL moved, so
+  // neither can be preferred unconditionally. Getting this backwards is what
+  // broke the two previous passes of this ticket, in opposite directions:
+  //
+  //   History-API write (our own `writeFilters`)  window.location  leads
+  //                                               useSearchParams() lags
+  //   Router navigation (deep link, sidebar)      useSearchParams() leads
+  //                                               window.location  lags
+  //
+  // Verified in `next/dist/client/components/app-router.js`: `searchParams` is
+  // derived from `canonicalUrl` in a RENDER-phase `useMemo`, while
+  // `window.location` is moved afterwards in `HistoryUpdater`'s
+  // `useInsertionEffect` — the COMMIT phase. That internal write carries
+  // `__NA`, so the patched `replaceState` short-circuits and dispatches
+  // nothing: no follow-up render ever corrects a component that read
+  // `window.location` during a navigation render. Preferring it therefore
+  // renders the PREVIOUS route's query, permanently, on every deep link — the
+  // dashboard's "Non-compliant" card would land on ?status=NonCompliant
+  // showing an unfiltered list.
+  //
+  // So the HOOK is the base truth: it is correct for every change we did not
+  // make. Our own writes — the one case where the hook lags — are overlaid on
+  // top until the router echoes them back. The overlay is what stops a filter
+  // pick flashing backwards for a frame, which is the symptom that pushed the
+  // earlier pass onto `window.location` in the first place.
+  const routerQuery = searchParams.toString();
+  // Our own writes the router hasn't echoed back yet, oldest first; the newest
+  // is what the controls render. A QUEUE rather than one value because two
+  // writes can be in flight at once (each `replaceState` schedules its own
+  // transition), and when the first lands it must not drag the controls back
+  // to it while the second is still pending.
+  const [pendingWrites, setPendingWrites] = useState<string[]>([]);
+  // Reconcile only when the router side actually MOVED. Without this guard an
+  // unrelated re-render (a page change, a refetch) would compare a still-old
+  // `routerQuery` against the overlay and discard it.
+  const [lastRouterQuery, setLastRouterQuery] = useState(routerQuery);
+  if (routerQuery !== lastRouterQuery) {
+    setLastRouterQuery(routerQuery);
+    const landed = pendingWrites.indexOf(routerQuery);
+    // One of ours landing retires it and everything queued before it. Anything
+    // else is an external navigation (Back, a deep link, the sidebar click of
+    // scenario B), which supersedes the overlay entirely.
+    setPendingWrites(landed === -1 ? [] : pendingWrites.slice(landed + 1));
+  } else if (pendingWrites.length > 0 && pendingWrites.at(-1) === routerQuery) {
+    // The overlay is REDUNDANT: what we last wrote is already what the router
+    // reports, so it can contribute nothing. Retire it.
+    //
+    // The drain above only runs when `routerQuery` MOVES, which leaves a hole:
+    // a pair of writes that nets back to the URL the router already holds (pick
+    // a filter, immediately undo it) may never move it. Next derives
+    // `searchParams` from `canonicalUrl`, so an unchanged canonical URL is a
+    // byte-identical string and no change is observed — and `dispatchAction`
+    // marks a pending ACTION_RESTORE discarded when a second lands before the
+    // first resolves, so the intermediate need never commit at all. The entries
+    // would then sit here for the component's lifetime, and a LATER same-route
+    // navigation to a value still in that stale queue would match `indexOf`
+    // against it and leave a residue that supersedes the real URL.
+    //
+    // This branch cannot fire in the genuine two-in-flight case: there `at(-1)`
+    // is the NEWER write, which by definition the router has not reached yet.
+    setPendingWrites([]);
+  }
+  const effectiveQuery = pendingWrites.at(-1) ?? routerQuery;
+  const query = useMemo(() => new URLSearchParams(effectiveQuery), [effectiveQuery]);
+  // Mirrored for `writeFilters`, which must compose on this value but must not
+  // close over it (see there). Assigned during render rather than in an effect
+  // because a write can be dispatched before an effect for the current render
+  // has run — a debounce firing in the same tick as a router commit — and an
+  // effect-updated mirror would then compose on the previous URL. The
+  // assignment is idempotent and derived purely from committed state, so a
+  // discarded concurrent render cannot leave it wrong: the render that commits
+  // is also the one whose value the next event handler reads.
+  const effectiveQueryRef = useRef(effectiveQuery);
+  effectiveQueryRef.current = effectiveQuery;
+
+  const search = query.get("search") ?? "";
+  const status = query.get("status") ?? "";
+  const typeFilter = query.get("type") ?? "";
+  const expiresWithin = query.get("expiresWithin") ?? "";
   // ?vendor=<id> is honored for deep-linking (FP-071's "Documents from {vendor}");
-  // there's no vendor dropdown, so it's read-only from the URL.
-  const vendorId = searchParams.get("vendor") || undefined;
+  // there's no vendor dropdown, so it's only ever set by an inbound link.
+  const vendorId = query.get("vendor") || undefined;
 
-  // Debounce the search box so we don't fire a request per keystroke. The
-  // page-1 reset lives in the input's onChange (an event handler) — NOT here —
-  // so this effect only ever syncs the debounced value. Resetting page in this
-  // effect would also fire on mount (~300ms later) and clobber any page the user
-  // had navigated to in the meantime. (#187 review — test-quality reviewer)
-  useEffect(() => {
-    const t = setTimeout(() => setSearch(searchInput), 300);
-    return () => clearTimeout(t);
-  }, [searchInput]);
-
-  // Mirror the active filters into the URL (replace — no history spam per change). (FP-041)
-  useEffect(() => {
-    const sp = new URLSearchParams();
-    if (search) sp.set("search", search);
-    if (status) sp.set("status", status);
-    if (typeFilter) sp.set("type", typeFilter);
-    if (expiresWithin) sp.set("expiresWithin", expiresWithin);
-    if (vendorId) sp.set("vendor", vendorId);
+  // The ONE writer, shared by every control.
+  //
+  // `window.history.replaceState`, NOT `router.replace`: Next's App Router
+  // integrates the native History API, updating the history entry and syncing
+  // `usePathname`/`useSearchParams` with NO route navigation and no RSC fetch.
+  // The docs name list filtering as its purpose, and on this page that removes
+  // a Next-server round-trip from the front of every filter interaction (the
+  // dropdown looks frozen meanwhile, since there is no loading.tsx under
+  // (dashboard)).
+  //
+  // It patches the query string rather than rebuilding it, so a param this
+  // page doesn't model survives an unrelated filter change — `?vendor=` is
+  // exactly that from a dropdown's perspective.
+  //
+  // Composed on `effectiveQuery`, NOT on `window.location.search` and not on
+  // the raw hook — it is the only expression that is current under BOTH
+  // orderings above. Composing on `window.location` drops a deep link's params
+  // on the first filter touch (the address bar is still the previous route's
+  // during a navigation render); composing on the raw hook drops the earlier of
+  // two writes made inside one transition window.
+  //
+  // Read through a ref so the callback can close over nothing and stay
+  // referentially stable: an unstable `writeFilters` re-arms the 300ms search
+  // debounce below on every unrelated filter change.
+  const writeFilters = useCallback((patch: Record<string, string>) => {
+    const sp = new URLSearchParams(effectiveQueryRef.current);
+    for (const [key, value] of Object.entries(patch)) {
+      if (value) sp.set(key, value);
+      else sp.delete(key);
+    }
     const qs = sp.toString();
-    router.replace(qs ? `/documents?${qs}` : "/documents", { scroll: false });
-  }, [search, status, typeFilter, expiresWithin, vendorId, router]);
+    window.history.replaceState(null, "", qs ? `/documents?${qs}` : "/documents");
+    // Render the new value NOW. Next syncs `useSearchParams()` through a
+    // transition, so without the overlay the control the user just touched
+    // renders its OLD value until that lands.
+    setPendingWrites((q) => [...q, qs]);
+  }, []);
+
+  // Clear every filter at once, including params with no control of their own.
+  const clearFilters = useCallback(() => {
+    window.history.replaceState(null, "", "/documents");
+    setPendingWrites((q) => [...q, ""]);
+  }, []);
+
+  // The search box is the one filter with local state: it must echo every
+  // keystroke, but only the debounced value belongs in the URL (and in a
+  // request). `searchInput` is therefore a draft of `search`, not a second
+  // source of truth.
+  const [searchInput, setSearchInput] = useState(search);
+  // Re-seed the box whenever the URL's search changes underneath us — a
+  // same-route sidebar click, Back, Clear, a deep link. Adjusting state during
+  // render (rather than in an effect) is React's supported path for "derive
+  // from a changing input": it re-renders before paint, so the box never
+  // flashes the stale text.
+  //
+  // Guarded against the page's OWN echo, but only for one comparison.
+  //
+  // The debounce writes ?search=acme; you keep typing " roofing"; the echo
+  // lands mid-word and truncates you back to "acme". The window is real: the
+  // debounce's `setPendingWrites` is a DefaultLane update flushed in a later
+  // scheduler macrotask, while a keystroke in that gap renders at SyncLane
+  // FIRST — so the later render re-seeds over characters typed after the write.
+  //
+  // An earlier pass removed this guard on the theory that `search` changes in
+  // the same task as the write. It does not, for the lane reason above.
+  //
+  // But the ORIGINAL guard was a ref holding the last dispatched value
+  // indefinitely, and that went stale: across an external clear it swallowed
+  // the re-seed on the following Back, leaving the box empty and letting the
+  // debounce write the restored filter back OUT of the URL. Retiring the echo
+  // after a single comparison fixes both — it covers exactly the one re-seed
+  // its own write provokes, and never outlives it.
+  const [searchEcho, setSearchEcho] = useState<string | null>(null);
+  const [lastUrlSearch, setLastUrlSearch] = useState(search);
+  if (search !== lastUrlSearch) {
+    setLastUrlSearch(search);
+    setSearchEcho(null);
+    if (search !== searchEcho) setSearchInput(search);
+  }
+
+  // Debounce the search box so we don't fire a request per keystroke, then
+  // write THROUGH to the URL. The `searchInput === search` bail is what keeps
+  // this from looping: the write updates `search`, which re-runs the effect,
+  // which then does nothing — and on mount, where the two already agree, it
+  // means no write at all (so a deep link is a pure read).
+  useEffect(() => {
+    if (searchInput === search) return;
+    const t = setTimeout(() => {
+      // Announce the echo in the SAME batch as the write, so the re-seed check
+      // above sees it on the render where `search` becomes this value.
+      setSearchEcho(searchInput);
+      writeFilters({ search: searchInput });
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [searchInput, search, writeFilters]);
 
   const params: DocumentListParams = {
     page,
@@ -132,6 +300,22 @@ export default function DocumentsPage() {
   const serverPageSize = docs.data?.pageSize ?? PAGE_SIZE;
   const totalPages = Math.max(1, Math.ceil(total / serverPageSize));
 
+  // Any filter change returns to page 1 so the new results are visible. This
+  // keys off the filter values themselves rather than living in each dropdown's
+  // onChange (#370): filters now arrive from the URL, so they also change on a
+  // Back, a deep link, or a same-route nav — routes the handler-based reset
+  // never saw, which stranded the user on a page that no longer exists in the
+  // new result set.
+  // JSON.stringify, not join(sep): `search` is free text, so any separator
+  // character could appear inside a value and let two different filter sets
+  // produce the same key (search "a b" vs search "a" plus a "b" filter).
+  const filterKey = JSON.stringify([search, status, typeFilter, expiresWithin, vendorId ?? ""]);
+  const [lastFilterKey, setLastFilterKey] = useState(filterKey);
+  const filtersJustChanged = filterKey !== lastFilterKey;
+  if (filtersJustChanged) {
+    setLastFilterKey(filterKey);
+    setPage(1);
+  }
   // Self-heal if `page` fell out of range — e.g. another tab/user (or a backend
   // mutation) shrank the result set while we sat on the last page. Setting state
   // during render is React's supported "adjust state when derived data changes"
@@ -140,13 +324,13 @@ export default function DocumentsPage() {
   // converges — once page == totalPages the guard is false. The delete onSuccess
   // below still decrements as a same-session fast path so we skip the empty
   // fetch. (#187 review — correctness reviewer)
-  if (page > totalPages) setPage(totalPages);
+  //
+  // `else if` so the two adjustments can't fight over one render: on a filter
+  // change `totalPages` is still derived from the PREVIOUS filter's response,
+  // and letting it queue a second setPage after the reset would clamp the user
+  // to the old result set's last page instead of page 1. (#370)
+  else if (page > totalPages) setPage(totalPages);
 
-  // Any filter dropdown change returns to page 1 so the new results are visible.
-  const onFilterChange = (setter: (v: string) => void) => (value: string) => {
-    setter(value);
-    setPage(1);
-  };
   const hasActiveFilters = Boolean(search || status || typeFilter || expiresWithin || vendorId);
 
   // Drop stages the files; the vendor + document-type step below must be
@@ -414,10 +598,12 @@ export default function DocumentsPage() {
             aria-label="Search documents"
             placeholder="Search by file or vendor name…"
             value={searchInput}
-            onChange={(e) => {
-              setSearchInput(e.target.value);
-              setPage(1); // reset immediately on type so matches aren't hidden on a later page
-            }}
+            // No setPage(1) here: the filter-signature reset below owns that
+            // now (#370), and it fires when `search` actually reaches the URL.
+            // Resetting on every keystroke instead re-based the list to page 1
+            // 300ms BEFORE the search term landed, costing one extra unfiltered
+            // request per search.
+            onChange={(e) => setSearchInput(e.target.value)}
             className="pl-8"
           />
         </div>
@@ -425,7 +611,7 @@ export default function DocumentsPage() {
           aria-label="Filter by compliance status"
           className={FILTER_SELECT_CLASS}
           value={status}
-          onChange={(e) => onFilterChange(setStatus)(e.target.value)}
+          onChange={(e) => writeFilters({ status: e.target.value })}
         >
           <option value="">All statuses</option>
           {STATUS_FILTER_VALUES.map((value) => (
@@ -438,7 +624,7 @@ export default function DocumentsPage() {
           aria-label="Filter by document type"
           className={FILTER_SELECT_CLASS}
           value={typeFilter}
-          onChange={(e) => onFilterChange(setTypeFilter)(e.target.value)}
+          onChange={(e) => writeFilters({ type: e.target.value })}
         >
           <option value="">All types</option>
           {DOCUMENT_TYPES.map((t) => (
@@ -451,7 +637,7 @@ export default function DocumentsPage() {
           aria-label="Filter by expiry"
           className={FILTER_SELECT_CLASS}
           value={expiresWithin}
-          onChange={(e) => onFilterChange(setExpiresWithin)(e.target.value)}
+          onChange={(e) => writeFilters({ expiresWithin: e.target.value })}
         >
           <option value="">Any expiry</option>
           {EXPIRY_FILTERS.map((x) => (
@@ -466,18 +652,24 @@ export default function DocumentsPage() {
             variant="ghost"
             size="sm"
             onClick={() => {
+              // Dropping the whole query string clears every filter at once,
+              // including the `?vendor=` deep link that has no dropdown of its
+              // own (#317 review). Page and the derived filters follow from the
+              // now-empty URL; nothing re-adds a param afterwards, which is the
+              // #370 fix — the old mirror effect used to re-run against the
+              // pre-navigation snapshot and resurrect `?vendor=`.
+              //
+              // Goes through `clearFilters` (a History-API write) rather than
+              // `router.replace` so `window.location` is bare IMMEDIATELY: a
+              // dropdown touched before the router transition commits composes
+              // on the CLEARED url, not on the stale filters.
+              clearFilters();
+              // The search DRAFT is the one piece of state the URL can't clear:
+              // if the user typed within the last 300ms, `search` is still ""
+              // (the debounce hasn't written yet), so the URL-sync above sees no
+              // change and the box would keep its text — with the pending timer
+              // then writing it straight back.
               setSearchInput("");
-              setSearch("");
-              setStatus("");
-              setTypeFilter("");
-              setExpiresWithin("");
-              setPage(1);
-              // vendorId is read-only from the URL (no state setter), so resetting
-              // state alone leaves a ?vendor= deep link in place and the mirror
-              // effect just rewrites it — Clear would be a dead control. Drop the
-              // whole query string so the vendor filter is actually clearable; the
-              // mirror effect then reconciles against the now-empty state. (#317 review)
-              router.replace("/documents", { scroll: false });
             }}
           >
             Clear

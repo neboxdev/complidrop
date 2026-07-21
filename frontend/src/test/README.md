@@ -166,6 +166,35 @@ Per-file `vi.mock("sonner", …)` still works as an escape hatch (Vitest's per-f
 Two-tier setup, documented here once so it doesn't get re-litigated.
 
 - **Default (setup-file mock + harness options).** `vitest.setup.ts` mocks `next/navigation` once against the mutable `navState`. Most tests use this — they drive routing through `renderWithProviders({ router, params, searchParams, pathname })` and assert on the returned spies (or `navState.router.push.mock.calls`). `notFound()` and `redirect()` throw a `NEXT_NOT_FOUND` / `NEXT_REDIRECT` sentinel so component code after them cannot silently keep running.
+
+  **`push` / `replace` actually navigate (#370).** They remain assertable spies, but they also apply the href to `navState` — so `useSearchParams()` / `usePathname()` return the NEW value afterwards and subscribed components re-render (both hooks read through `useSyncExternalStore`). Two properties this buys, both load-bearing:
+
+  - The commit is **deferred by a macrotask**, mirroring the real App Router's transition. A component that calls `replace` in an event handler re-renders at least once with the OLD query string still readable. Do not "fix" this into a synchronous apply: #370's scenario A lived exactly in that window, and a synchronous mock lets the bug pass its own regression test (verified, not assumed).
+  - Injecting your own spy (`renderWithProviders({ router: { replace } })`) **overrides** the live behavior for that field, because `setNavigationState` merges the router field-by-field. Use that when you want to assert a navigation was requested without the URL actually moving.
+
+  To simulate a URL change the page did NOT initiate — a same-route sidebar click, Back, an external deep link — call `setNavigationState({ searchParams, pathname })` mid-test; it notifies subscribers, so mounted components re-render against the new URL.
+
+  **`window.history.pushState` / `replaceState` are bridged too, and they SPLIT (#370).** Next's App Router integrates the native History API: those calls update the URL and sync `usePathname`/`useSearchParams` with no route navigation and no RSC fetch (the documented path for list filter/sort state — the documents page uses it). But the two halves do not land together:
+
+  - `window.location` updates **synchronously** (the native call).
+  - `useSearchParams()` / `usePathname()` update **a commit later** — Next routes its own sync through `startTransition` (`app-router.js`, `applyUrlFromHistoryPushReplace`). Skipping the RSC fetch makes this window narrower than `router.replace`'s, not absent.
+
+  This was previously documented — and mocked — as fully synchronous, with a "don't collapse it" note attached. That was wrong, and it cost a whole review pass: a page composed its filter writes on the transition-deferred hook, and the synchronous mock meant its own regression tests passed anyway. **When you need "has the URL changed", assert `window.location.search`; use `navState.searchParams` only when the router snapshot is itself the subject, and `await` it.**
+
+  **⚠️ The two mechanisms split in OPPOSITE directions. Neither source is universally "the current one".**
+
+  | | leads | lags |
+  |---|---|---|
+  | History-API write (`replaceState` you call) | `window.location` | `useSearchParams()` |
+  | Router navigation (`<Link>`, `router.push/replace`, deep link) | `useSearchParams()` | `window.location` |
+
+  For a router navigation Next derives `searchParams` from `canonicalUrl` in a **render-phase** `useMemo`, then moves `window.location` in `HistoryUpdater`'s **`useInsertionEffect`** (commit phase) — and that internal write carries `__NA`, so the history patch short-circuits and dispatches nothing. **No follow-up render ever corrects a component that read `window.location` during a navigation render.** A page that unconditionally prefers `window.location` therefore renders the PREVIOUS route's query, permanently, on every deep link.
+
+  **How a page resolves this** (the documents page is the reference implementation): take `useSearchParams()` as the base — it is correct for every change the page did not make — and overlay the page's OWN writes on top until the router echoes them back. Hold those pending writes as a **queue**, not a single value: two writes can be in flight at once, and when the first lands the router snapshot equals neither the pre-write base nor what the user last picked, so a single-value overlay reads it as an external navigation and discards the second write. Anything the router reports that is not in the queue *is* an external navigation and supersedes the overlay.
+
+  The harness models both orderings (`applyNavigation` / `setNavigationState` notify first and move the address bar in a microtask; the History bridge does the reverse). Do not "simplify" either one into a single synchronous update — each direction has already hidden a real defect for a full review pass.
+
+  `setNavigationCommitDelay(ms)` staggers commit latency within a test, for BOTH mechanisms. Real `router` commits wait on their own RSC fetch, so two dispatched together land at different times — with a single shared deadline that interleaving is untestable. A History-API commit waits on a transition instead, which React can schedule late or interrupt; same knob, since what a test cares about is how long the component keeps reading the old value. Reset to 0 between tests.
 - **Per-file `vi.mock("next/navigation", ...)`** (escape hatch). Required when the test needs a hoisted spy on `useSearchParams` or wants to capture the call site at module load (see `register-form.test.tsx` for the canonical example). Vitest's per-file mock registry overrides the setup-file mock within the file's own module scope — file-level mocks always win.
 
 Pick the default unless you have a specific reason to escape it.
@@ -211,7 +240,7 @@ Only if every test would otherwise have to redeclare it. The bar is high: a defa
 ## Lifecycle (what `vitest.setup.ts` does)
 
 - Pins `NEXT_PUBLIC_API_URL` before any module reads it.
-- Mocks `next/navigation` once, sourced from the mutable `navState`.
+- Mocks `next/navigation` once, sourced from the mutable `navState`; `useSearchParams` / `usePathname` subscribe via `useSyncExternalStore` so a `push`/`replace` re-renders them.
 - `server.listen({ onUnhandledRequest: "error" })` so missed handlers fail loudly.
 - After every test: RTL cleanup, `server.resetHandlers()`, `resetNavigation()` (rebuilds every spy in `navState`, including `notFound` / `redirect`).
 - After the suite: `server.close()`.

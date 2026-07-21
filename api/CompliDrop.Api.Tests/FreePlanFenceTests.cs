@@ -54,8 +54,9 @@ public sealed class FreePlanFenceTests(IntegrationTestFixture fixture) : Integra
     private static Task<HttpResponseMessage> UploadAsync(HttpClient client, string token) =>
         client.PostAsync($"/api/portal/{token}/upload", UploadForm(PdfBytes(), "coi.pdf", "application/pdf"));
 
-    /// <summary>Seeds an active document directly (the portal cap counts non-deleted docs).</summary>
-    private async Task SeedDocumentAsync(Guid orgId, Guid? vendorId = null, DateTime? deletedAt = null)
+    /// <summary>Seeds an active document directly (the portal cap counts non-deleted, non-sample docs).</summary>
+    private async Task SeedDocumentAsync(
+        Guid orgId, Guid? vendorId = null, DateTime? deletedAt = null, bool isSample = false)
     {
         await using var db = CreateSystemDb();
         db.Documents.Add(new Document
@@ -71,6 +72,7 @@ public sealed class FreePlanFenceTests(IntegrationTestFixture fixture) : Integra
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
             DeletedAt = deletedAt,
+            IsSample = isSample,
         });
         await db.SaveChangesAsync();
     }
@@ -413,6 +415,46 @@ public sealed class FreePlanFenceTests(IntegrationTestFixture fixture) : Integra
         var resp = await UploadAsync(client, seeded.Token);
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task Sample_demo_document_does_not_count_toward_the_portal_cap()
+    {
+        // #367: the sample-demo document (#238 / ADR 0028) is excluded from the plan limit, and the
+        // dashboard gate has always honored that (DocumentEndpoints: && !d.IsSample). The portal gate
+        // omitted it, so the two ingress paths disagreed: with the cap filled by one real doc + the
+        // sample, an org's own dashboard upload succeeded while a real VENDOR's upload was refused a
+        // document early. Revert the portal exclusion and this 403s.
+        var seeded = await SeedLinkAsync(hasVendorPortal: true, documentLimit: 2);
+        await SeedDocumentAsync(seeded.OrgId);
+        await SeedDocumentAsync(seeded.OrgId, isSample: true);
+        var client = CreateClient();
+
+        var resp = await UploadAsync(client, seeded.Token);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "the sample occupies no paid slot, so one of the two slots is still free");
+        await using var db = CreateSystemDb();
+        (await db.Documents.IgnoreQueryFilters().CountAsync(
+                d => d.OrganizationId == seeded.OrgId && d.DeletedAt == null && !d.IsSample))
+            .Should().Be(2, "the vendor's upload lands as the second REAL document");
+    }
+
+    [Fact]
+    public async Task Sample_demo_document_does_not_shift_the_portal_cap_upward()
+    {
+        // The other direction of #367 — the exclusion must not become a free extra slot. With the
+        // cap filled by real documents, adding a sample changes nothing: still refused.
+        var seeded = await SeedLinkAsync(hasVendorPortal: true, documentLimit: 2);
+        await SeedDocumentAsync(seeded.OrgId);
+        await SeedDocumentAsync(seeded.OrgId);
+        await SeedDocumentAsync(seeded.OrgId, isSample: true);
+        var client = CreateClient();
+
+        var resp = await UploadAsync(client, seeded.Token);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await Error(resp)).GetProperty("code").GetString().Should().Be("vendor.portal_document_limit_reached");
     }
 
     [Fact]

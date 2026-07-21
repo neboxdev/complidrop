@@ -27,7 +27,13 @@ export {
 export { server } from "./server";
 export * from "./helpers";
 export * from "./fixtures";
-export { navState, resetNavigation, setNavigationState } from "./navigation";
+export {
+  navState,
+  resetNavigation,
+  setNavigationState,
+  setNavigationCommitDelay,
+  subscribeNavigation,
+} from "./navigation";
 export type { NavigationState, RouterMock } from "./navigation";
 export {
   toastSuccess,

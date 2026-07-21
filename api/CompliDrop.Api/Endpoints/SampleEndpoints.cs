@@ -18,11 +18,12 @@ namespace CompliDrop.Api.Endpoints;
 public static class SampleEndpoints
 {
     private const string SampleVendorName = "Brightside Catering Co. (Sample)";
+    // Shared with the send paths that must never mail this address (SampleData, #367).
     // internal (via InternalsVisibleTo) so VendorEndpointsTests can assert the SEEDED address against
     // the #369 contact-email validator by reference rather than a copied literal — a copy would still
     // pass if this constant were changed to something the validator rejects, i.e. it could not detect
     // the regression it guards (the sample vendor becoming unsaveable through the vendor form).
-    internal const string SampleVendorEmail = "sample-vendor@example.com";
+    internal const string SampleVendorEmail = SampleData.VendorEmail;
     private const string SampleFileName = "Sample Certificate of Insurance.pdf";
 
     public static void MapSampleEndpoints(this WebApplication app)

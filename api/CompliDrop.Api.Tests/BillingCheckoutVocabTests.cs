@@ -331,4 +331,67 @@ public sealed class BillingCheckoutVocabTests(IntegrationTestFixture fixture) : 
         body.GetProperty("data").GetProperty("cancelAtPeriodEnd").GetBoolean()
             .Should().BeTrue("the subscription endpoint must surface cancelAtPeriodEnd for the billing card");
     }
+
+    [Fact]
+    public async Task Subscription_documentsUsed_counts_real_documents_only_not_the_sample_demo()
+    {
+        // #367: documentsUsed feeds the Settings "x / limit" tile, so it must report the population
+        // the plan gates actually ENFORCE — which excludes the sample-demo document (#238 /
+        // ADR 0028). Counting the sample made a 4-real-document org on DocumentLimit=5 read "5 / 5":
+        // a tile that reads full while a real slot is free and the upload it implies is blocked
+        // actually succeeds. (It does NOT trip the amber over-limit warning — that gate is strictly
+        // documentsUsed > documentLimit, so 5 > 5 is false. The harm is the misleading tile and its
+        // disagreement with the gates, not a spurious warning.) Revert the exclusion and this reads 3.
+        var auth = await RegisterAndLoginAsync();
+        await SeedDocumentAsync(auth.OrgId, isSample: false);
+        await SeedDocumentAsync(auth.OrgId, isSample: false);
+        await SeedDocumentAsync(auth.OrgId, isSample: true);
+
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>("/api/billing/subscription");
+
+        body.GetProperty("data").GetProperty("documentsUsed").GetInt32()
+            .Should().Be(2, "the sample-demo row occupies no paid slot, so the tile must not count it");
+    }
+
+    [Fact]
+    public async Task Subscription_documentsUsed_excludes_soft_deleted_and_soft_deleted_sample_rows()
+    {
+        // Pins the tile's observable output across BOTH exclusion dimensions at once. Note the
+        // soft-delete half is belt-and-braces: GetSubscription reads SystemDbContext, whose global
+        // query filter (ModelConfiguration.ApplySoftDeleteFilters) already drops DeletedAt rows, so
+        // deleting the inline DeletedAt clause alone would NOT turn this red. The clause is kept
+        // explicit in PlanDocumentScope so the shared predicate stays correct for any caller —
+        // including one that reaches for IgnoreQueryFilters(). What this test does discriminate is
+        // the sample dimension surviving alongside a deleted row (drop !d.IsSample and it reads 2).
+        var auth = await RegisterAndLoginAsync();
+        await SeedDocumentAsync(auth.OrgId, isSample: false);
+        await SeedDocumentAsync(auth.OrgId, isSample: false, deletedAt: DateTime.UtcNow);
+        await SeedDocumentAsync(auth.OrgId, isSample: true);
+        await SeedDocumentAsync(auth.OrgId, isSample: true, deletedAt: DateTime.UtcNow);
+
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>("/api/billing/subscription");
+
+        body.GetProperty("data").GetProperty("documentsUsed").GetInt32()
+            .Should().Be(1, "only the one live, non-sample document occupies a paid slot");
+    }
+
+    private async Task SeedDocumentAsync(Guid orgId, bool isSample, DateTime? deletedAt = null)
+    {
+        await using var db = CreateSystemDb();
+        db.Documents.Add(new Document
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            OriginalFileName = "seed.pdf",
+            BlobStorageUrl = "blob://seed",
+            FileSizeBytes = 1,
+            ContentType = "application/pdf",
+            DocumentType = "coi",
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+            DeletedAt = deletedAt,
+            IsSample = isSample,
+        });
+        await db.SaveChangesAsync();
+    }
 }
