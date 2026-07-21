@@ -3,9 +3,10 @@ namespace CompliDrop.Api.Endpoints;
 /// <summary>
 /// Shared runner for the post-commit compliance re-grade fan-outs (#364) — the batched
 /// <c>IComplianceCheckService.Reevaluate*</c> passes that follow a rule upsert, a rule delete, a
-/// template delete, or a vendor checklist reassignment. Every one of those callers commits its
-/// mutation FIRST and then re-grades, so they all share the same two hazards and must handle them
-/// identically; keeping the policy here is what stops the four sites drifting apart.
+/// template delete, a vendor checklist reassignment, or a vendor soft-delete (#422: both the vendor
+/// delete endpoint and the sample-data clear). Every one of those callers commits its mutation FIRST
+/// and then re-grades, so they all share the same two hazards and must handle them identically;
+/// keeping the policy here is what stops the six sites drifting apart.
 /// </summary>
 internal static class PostCommitRegrade
 {

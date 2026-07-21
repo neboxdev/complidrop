@@ -319,13 +319,14 @@ public static class ComplianceEndpoints
         // makes this a STRICT SUPERSET of the loop it replaces. Membership alone is not: the
         // predicate joins through d.Vendor, which carries the Vendor soft-delete query filter, so
         // a document whose vendor was soft-deleted reads Vendor == null and drops out of it. That
-        // state is reachable and NOT self-correcting — DeleteVendor soft-deletes with no re-grade
-        // at all, leaving those documents on a Compliant verdict graded against rules that no
-        // longer govern them (the vacuous-Compliant class #257 exists to prevent). The old loop
-        // healed them to Pending as a side effect of iterating the deleted rule's check rows;
-        // passing affectedDocIds keeps that heal instead of letting a performance fix quietly
-        // drop a verdict correction. Foreign ids (possible only via the #273 cross-org
-        // assignment state) are filtered out by the tenant filter, exactly as EvaluateAsync did.
+        // state is still reachable — DeleteVendor fans out its own post-commit re-grade since
+        // #422, but that pass is best-effort (a truncated or failed run is swallowed), so a
+        // document can be left on a Compliant verdict graded against rules that no longer govern
+        // it (the vacuous-Compliant class #257 exists to prevent). The old loop healed those to
+        // Pending as a side effect of iterating the deleted rule's check rows; passing
+        // affectedDocIds keeps that heal instead of letting a performance fix quietly drop a
+        // verdict correction. Foreign ids (possible only via the #273 cross-org assignment
+        // state) are filtered out by the tenant filter, exactly as EvaluateAsync did.
         //
         // Token handling and failure swallowing live in PostCommitRegrade.RunAsync — read its doc
         // comment for why this must not ride the request's ct and must not 500 a committed delete.

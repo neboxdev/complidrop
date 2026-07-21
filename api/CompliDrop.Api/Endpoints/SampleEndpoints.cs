@@ -180,6 +180,8 @@ public static class SampleEndpoints
     private static async Task<IResult> ClearSample(
         AppDbContext db,
         IBlobStorageService blobs,
+        IComplianceCheckService checker,
+        IHostApplicationLifetime lifetime,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
@@ -230,6 +232,21 @@ public static class SampleEndpoints
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
         }
+
+        // Re-evaluation fan-out (#422 companion): the clear soft-deletes the sample VENDOR, and a
+        // vendor soft-delete un-governs whatever documents SURVIVE it. The sample doc goes in the
+        // same transaction, so this is a no-op for the pure demo lifecycle — but a REAL document
+        // assigned to the sample vendor (a supported repurposing; the reminder engine special-cases
+        // exactly that state, see reviewers.md) is NOT IsSample, survives the clear, and would
+        // otherwise keep a verdict + check rows graded against the Caterer checklist that no longer
+        // governs it — the same stranded-verdict hole DeleteVendor had. Same shape as there: tracker
+        // cleared first (the soft-deleted vendors/docs are still tracked, and EF's relationship
+        // fixup would attach the dead vendor to every re-loaded document), then the best-effort
+        // post-commit re-grade. The response below reads only the detached lists' counts.
+        db.ChangeTracker.Clear();
+        await PostCommitRegrade.RunAsync(
+            token => checker.ReevaluateForVendorsAsync(sampleVendorIds, token),
+            lifetime, loggerFactory, "sample-data clear");
 
         return Results.Ok(new
         {
