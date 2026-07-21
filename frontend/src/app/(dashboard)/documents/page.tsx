@@ -49,6 +49,14 @@ import { TIP_IDS } from "@/lib/onboarding";
 
 const PAGE_SIZE = 25;
 
+/**
+ * Search-box debounce. Exported because a regression test has to arm a timer on
+ * the SAME deadline to reproduce the one-scheduler-tick window where a keystroke
+ * can be overwritten by the write's own echo — duplicating the literal there
+ * would let this constant drift and silently close the window under test.
+ */
+export const SEARCH_DEBOUNCE_MS = 300;
+
 // Compliance-status filter values. The <option> labels come from the shared
 // complianceStatusLabel map (#188) so the dropdown and the row badges speak the
 // SAME words ("Action needed", "Awaiting review", …); the value stays the raw
@@ -136,6 +144,24 @@ export default function DocumentsPage() {
     // else is an external navigation (Back, a deep link, the sidebar click of
     // scenario B), which supersedes the overlay entirely.
     setPendingWrites(landed === -1 ? [] : pendingWrites.slice(landed + 1));
+  } else if (pendingWrites.length > 0 && pendingWrites.at(-1) === routerQuery) {
+    // The overlay is REDUNDANT: what we last wrote is already what the router
+    // reports, so it can contribute nothing. Retire it.
+    //
+    // The drain above only runs when `routerQuery` MOVES, which leaves a hole:
+    // a pair of writes that nets back to the URL the router already holds (pick
+    // a filter, immediately undo it) may never move it. Next derives
+    // `searchParams` from `canonicalUrl`, so an unchanged canonical URL is a
+    // byte-identical string and no change is observed — and `dispatchAction`
+    // marks a pending ACTION_RESTORE discarded when a second lands before the
+    // first resolves, so the intermediate need never commit at all. The entries
+    // would then sit here for the component's lifetime, and a LATER same-route
+    // navigation to a value still in that stale queue would match `indexOf`
+    // against it and leave a residue that supersedes the real URL.
+    //
+    // This branch cannot fire in the genuine two-in-flight case: there `at(-1)`
+    // is the NEWER write, which by definition the router has not reached yet.
+    setPendingWrites([]);
   }
   const effectiveQuery = pendingWrites.at(-1) ?? routerQuery;
   const query = useMemo(() => new URLSearchParams(effectiveQuery), [effectiveQuery]);
@@ -250,7 +276,7 @@ export default function DocumentsPage() {
       // above sees it on the render where `search` becomes this value.
       setSearchEcho(searchInput);
       writeFilters({ search: searchInput });
-    }, 300);
+    }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [searchInput, search, writeFilters]);
 

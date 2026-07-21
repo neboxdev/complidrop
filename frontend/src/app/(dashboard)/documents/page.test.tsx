@@ -14,7 +14,7 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { http } from "msw";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
-import DocumentsPage from "./page";
+import DocumentsPage, { SEARCH_DEBOUNCE_MS } from "./page";
 import {
   renderWithProviders,
   server,
@@ -319,6 +319,61 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     expect(navState.searchParams.get("status")).toBeNull();
   });
 
+  it("a filter picked and immediately undone does not poison a later deep link (#370)", async () => {
+    // The overlay queue is drained only when the router's query actually MOVES.
+    // A pair of writes that nets back to the URL the router already holds never
+    // moves it: Next derives `searchParams` from `canonicalUrl`, so an
+    // unchanged canonical URL yields a byte-identical string and no change
+    // event (and `dispatchAction` discards a pending ACTION_RESTORE when a
+    // second one lands first, so the intermediate URL need never commit).
+    //
+    // Those entries then sit in the queue forever. The damage is DELAYED: a
+    // later deep link to a value still sitting in the stale queue matches
+    // `indexOf` against the stale entry, slices to the residue behind it, and
+    // renders an unfiltered list under a filtered URL — the exact symptom this
+    // ticket exists to remove, reintroduced through the overlay.
+    //
+    // ⚠️ NON-DISCRIMINATING, deliberately, and labelled as such. This harness
+    // commits BOTH History-API writes (`applyHistoryUrl` sets a fresh
+    // `searchParams` and notifies every time), so the queue drains normally and
+    // this passes with the redundancy branch in page.tsx deleted. Verified — do
+    // not read it as proof of that branch. A real-browser probe did not
+    // reproduce it either: two Playwright `selectOption` calls are far enough
+    // apart that both ACTION_RESTOREs commit separately, so the discard path is
+    // never entered. Modelling Next's ACTION_RESTORE coalescing in the harness
+    // is tracked separately; until then this pins the END STATE (a later deep
+    // link filters both the control and the list) rather than the mechanism.
+    const requestedUrls: string[] = [];
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        requestedUrls.push(request.url);
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, pathname: "/documents" });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    // Pick a filter and undo it, with no await between — the net URL is the
+    // bare one the router already reports.
+    const statusSelect = screen.getByLabelText(/filter by compliance status/i);
+    fireEvent.change(statusSelect, { target: { value: "Expired" } });
+    fireEvent.change(statusSelect, { target: { value: "" } });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(currentQuery().toString()).toBe("");
+
+    // Now a genuine external deep link to the value that was picked-and-undone.
+    setNavigationState({ searchParams: { status: "Expired" }, pathname: "/documents" });
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/filter by compliance status/i)).toHaveValue("Expired"),
+    );
+    // …and the LIST must be filtered too, not just the control.
+    await waitFor(() => {
+      const last = requestedUrls[requestedUrls.length - 1];
+      expect(last && new URL(last).searchParams.get("status")).toBe("Expired");
+    });
+  });
+
   it("an earlier write landing does not drag the controls back while a later one is in flight (#370)", async () => {
     // Two writes can be in flight at once, each carrying its own transition.
     // When the FIRST one's snapshot lands, `useSearchParams()` becomes a value
@@ -331,8 +386,18 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     //
     // Staggered commit delays are what make the interleaving expressible at
     // all: the status write commits at 5ms while the type write is still in
-    // flight until 60ms. With one shared deadline both land in the same drain
+    // flight until 500ms. With one shared deadline both land in the same drain
     // and this window never exists.
+    //
+    // The second delay is 500ms, not the ~60ms that would be enough in
+    // principle. At the 5ms commit the rendered output is IDENTICAL under
+    // correct code, so no DOM mutation fires and `waitFor` cannot resolve via
+    // its MutationObserver — it falls through to a 50ms poll, and RTL's
+    // asyncWrapper adds a `setTimeout(0)` hop before the body resumes. That put
+    // the "still in flight" assertion at ~t=51 against a commit at t=60: a
+    // ~10ms margin that a GC pause or a parallel worker would erase, failing a
+    // correct page. 500ms makes the window an order of magnitude wider than the
+    // poll granularity while still fitting the trailing waitFor's budget.
     server.use(
       http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))),
     );
@@ -343,12 +408,14 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     fireEvent.change(screen.getByLabelText(/filter by compliance status/i), {
       target: { value: "Expired" },
     });
-    setNavigationCommitDelay(60);
+    setNavigationCommitDelay(500);
     fireEvent.change(screen.getByLabelText(/filter by document type/i), {
       target: { value: "permit" },
     });
 
-    // The first snapshot lands; the second is still pending.
+    // The first snapshot lands; the second is still pending. This assertion is
+    // the PRECONDITION — without it the two control assertions below would pass
+    // vacuously once both commits have landed.
     await waitFor(() => expect(navState.searchParams.get("status")).toBe("Expired"));
     expect(navState.searchParams.get("type")).toBeNull();
 
@@ -526,9 +593,23 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
 
     await new Promise<void>((resolve) => {
       setTimeout(() => {
+        // ASSERT the interleaving rather than assuming it. This test's power
+        // rests on a Node timer property — both timers armed in the same tick
+        // with the same duration share an expiry bucket and run back-to-back —
+        // and if that ever stops holding (the page's debounce constant changes,
+        // React/RTL start flushing differently) the window silently closes and
+        // the test would pass with the guard deleted. These two checks turn
+        // every such ordering into a loud red instead.
+        //
+        // (a) the debounce write already ran…
+        expect(new URLSearchParams(window.location.search).get("search")).toBe("acme");
+        // …and (b) its DefaultLane render has NOT yet flushed. Once it does,
+        // `search` becomes "acme", `hasActiveFilters` flips and Clear appears.
+        expect(screen.queryByRole("button", { name: /^clear$/i })).toBeNull();
+
         fireEvent.change(box, { target: { value: "acme roofing" } });
         resolve();
-      }, 300);
+      }, SEARCH_DEBOUNCE_MS);
     });
 
     await new Promise((r) => setTimeout(r, 50));
@@ -637,13 +718,21 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
 
     // Assert on the ORIGINAL schedule, synchronously at ~t=380.
     //
-    // This used to be `waitFor(…, { timeout: 1000 })`, which could not fail on
-    // the regression it names: a re-arm restarts the 300ms timer at t=200, so
-    // the write lands at t=500 — still comfortably inside a 1000ms budget, so
-    // the test passed either way. (Verified against an isolated `[searchParams]`
-    // dep mutation: all tests stayed green.) Sampling once at t=380 sits
-    // between the two schedules, with ~80ms of slack after the honest deadline
-    // and ~120ms before the regressed one.
+    // This was `waitFor(…, { timeout: 1000 })`, which could not fail on the
+    // regression it names: a re-arm restarts the 300ms timer at t=200, so the
+    // write lands at t=500 — comfortably inside a 1000ms budget, and the test
+    // passed either way. (Verified against an isolated `[searchParams]` dep
+    // mutation: all tests stayed green.) Sampling once at t=380 sits between
+    // the two schedules: ~80ms of slack after the honest deadline, ~120ms
+    // before the regressed one.
+    //
+    // A fake-timer rewrite was tried here (review suggestion) and REVERTED with
+    // evidence: `vi.advanceTimersByTime(200)` then `(100)` drains the harness's
+    // deferred router commit inside the same advance, so the re-armed debounce
+    // still fires within the window and the test passes against the very dep
+    // mutation it exists to catch — measured, not assumed. Determinism is worth
+    // less than discrimination: this form's failure mode under load is
+    // silent-green, which the fake-timer form had ALWAYS.
     await new Promise((r) => setTimeout(r, 180));
     expect(currentQuery().get("search")).toBe("acme");
     // Both filters survive, which also re-checks that neither write clobbered
