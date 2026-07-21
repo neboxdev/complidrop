@@ -390,8 +390,10 @@ public static class DocumentEndpoints
         {
             // The one-click sample-demo document (#238) is a throwaway artifact, not a customer
             // document — it must never consume a paid plan slot, so it's excluded from the count.
+            // Shared predicate (#367): the portal fence and the Settings tile count the same
+            // population, so no surface can drift out of agreement with this one.
             var activeCount = await sysDb.Documents
-                .CountAsync(d => d.OrganizationId == orgId && d.DeletedAt == null && !d.IsSample, ct);
+                .CountAsync(PlanDocumentScope.CountsTowardLimit(orgId), ct);
             if (activeCount >= limit)
                 return Error(403, "plan.limit_reached", $"Document limit of {limit} reached. Upgrade to add more.");
         }

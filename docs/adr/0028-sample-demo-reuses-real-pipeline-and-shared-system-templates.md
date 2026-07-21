@@ -1,6 +1,6 @@
 # 0028. The sample-certificate demo reuses the real pipeline; assigned system templates stay shared
 
-- **Status:** accepted
+- **Status:** accepted (amended 2026-07-20 — see [Amendment 1](#amendment-1-2026-07-20--the-sample-is-excluded-from-the-whole-enforcement-population-and-from-reminders))
 - **Date:** 2026-06-21
 - **Deciders:** Ruben G.
 
@@ -121,6 +121,55 @@ shared rows. This ADR fixes the *model* (shared); #239 fixes the *view*.
   tenant filter, the soft-delete interceptor, audit logging, and the dashboard counts unchanged —
   they are simply *labelled* "Sample" in the UI and removable in one click. No parallel storage or
   lifecycle.
+
+## Amendment 1 (2026-07-20) — the sample is excluded from the whole enforcement population, and from reminders
+
+Decided on [#367](https://github.com/neboxdev/complidrop/issues/367). The original Positive
+consequence named exactly one exclusion — "the sample document is excluded from the plan
+document-limit count" — and the Neutral consequence's "flows through everything unchanged" framing
+was read as scoping that exclusion to a single call site. It was: only the dashboard upload gate
+carried it. The portal upload gate, the Settings usage tile, and the reminder worker all counted the
+sample, which produced two live defects:
+
+- **The two ingress fences disagreed.** A capped org's own dashboard upload succeeded while the
+  vendor-portal fence (#261), which exists precisely to mirror it, refused a real vendor's upload one
+  document early — and the Settings tile reported a third number that neither gate enforced.
+- **The demo generated real mail.** The sample COI expires ~1 year out, so it reached the 60/30/14/7
+  reminder rungs and mailed `sample-vendor@example.com` — an RFC 2606 reserved domain that accepts no
+  mail. Every send was a guaranteed hard bounce, writing an `EmailSuppression`, a
+  `reminder.recipient_suppressed` feed event and a "bounced" alarm badge onto a vendor that does not
+  exist, at real Resend cost.
+
+**The amended rule**, in two parts:
+
+1. **Plan-limit population.** A sample row occupies no paid slot on ANY surface that enforces or
+   *reports* the limit. The predicate is defined once, in
+   `Services/PlanDocumentScope.CountsTowardLimit`, and shared by the dashboard fence, the portal
+   fence, and the Settings tile; `PlanLimitConsistencyTests` pins all three to the same number for one
+   seeded org state so the copies cannot drift again. This generalizes the original consequence from
+   "the count" to "the population", following the shared-predicate pattern of
+   [ADR 0033](0033-document-supersession-expired-liability.md).
+2. **Mail.** The fictional sample address is never sent to, enforced at three points: sample
+   *documents* are dropped from the reminder worker's document query; the seeded address
+   `sample-vendor@example.com` is dropped from the reminder recipient list even when a REAL document
+   is assigned to the sample vendor (a user can pick it from the dropdown); and the manual
+   "email this upload link" action refuses with `vendor.sample_no_email` rather than sending.
+   Internal recipients still get reminders for a real document — its expiry matters; only the
+   fictional address is suppressed.
+
+   **Keyed on the ADDRESS, not the `IsSample` flag.** `UpdateVendor` lets a user rename the sample
+   vendor and give it a REAL contact address, and it never clears `IsSample`. A flag-based skip would
+   therefore drop that repurposed vendor's mail permanently and *silently* — `VendorDetail` carries no
+   `IsSample`, and `ContactEmailStatus` stays null because no suppression row is ever written, so
+   nothing in the UI would explain the missing reminders. The undeliverable address is the actual
+   hazard; the flag is only a label. The constant and its predicate live in `Services/SampleData`.
+
+**Deliberately unchanged:** the dashboard's `totalDocuments` still counts the sample. That tile
+answers "what is in my account", not "what do I owe for", and the sample is genuinely there and
+labelled — so a user who seeded the demo sees "5 documents" on the dashboard and "4 / 5" in Settings.
+That split is intended: the two numbers answer different questions. Everything else in the Neutral
+consequence below still holds — samples remain ordinary rows under the tenant filter, the soft-delete
+interceptor, and audit logging, with no parallel storage or lifecycle.
 
 ## Alternatives considered
 
