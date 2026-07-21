@@ -3,7 +3,8 @@ import { afterAll, afterEach, beforeAll, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { server } from "./src/test/server";
 import { installAbortSignalBridge } from "./src/test/abort-signal-bridge";
-import { navState, resetNavigation } from "./src/test/navigation";
+import { useSyncExternalStore } from "react";
+import { navState, resetNavigation, subscribeNavigation } from "./src/test/navigation";
 import {
   toastSuccess,
   toastError,
@@ -33,11 +34,27 @@ import {
 // the lower-level `setNavigationState(…)` helper. `notFound` and `redirect`
 // throw a sentinel error so component code after them cannot silently keep
 // running (matching real Next semantics); tests still assert on the spy.
+//
+// `useSearchParams` / `usePathname` read through `useSyncExternalStore` so a
+// `router.push`/`replace` (which now applies the href to `navState`, see
+// `navigation.ts`) re-renders subscribers the way the real App Router does.
+// Reading `navState.searchParams` directly would return a stale object
+// forever, which is what made #370 — a URL/state desync bug — untestable.
 vi.mock("next/navigation", () => ({
   useRouter: () => navState.router,
   useParams: () => navState.params,
-  useSearchParams: () => navState.searchParams,
-  usePathname: () => navState.pathname,
+  useSearchParams: () =>
+    useSyncExternalStore(
+      subscribeNavigation,
+      () => navState.searchParams,
+      () => navState.searchParams,
+    ),
+  usePathname: () =>
+    useSyncExternalStore(
+      subscribeNavigation,
+      () => navState.pathname,
+      () => navState.pathname,
+    ),
   notFound: (...args: unknown[]) => navState.notFound(...args),
   redirect: (...args: unknown[]) => navState.redirect(...args),
 }));
