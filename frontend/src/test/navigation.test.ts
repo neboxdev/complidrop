@@ -11,6 +11,11 @@
  * pinned here — absolute URLs, hash-only and query-only hrefs, non-string
  * input, unsubscribe, and cross-test timer cancellation — are otherwise
  * unexercised.
+ *
+ * The History-API bridge gets its own block. It had no direct coverage at all
+ * while it was modelled as synchronous, so nothing contradicted that model when
+ * it turned out to be wrong — the page suite could only observe the bridge
+ * through a component, where a page bug and a harness bug look identical.
  */
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { navState, resetNavigation, setNavigationState, subscribeNavigation } from "./navigation";
@@ -146,5 +151,84 @@ describe("resetNavigation", () => {
     await settle();
     expect(onChange).not.toHaveBeenCalled();
     unsubscribe();
+  });
+
+  it("drops a subscriber that leaked from a test that threw before unsubscribing", async () => {
+    // `cleanup()` unmounts components (which unsubscribes them) before this
+    // runs, so this only bites a test that subscribed BY HAND — the documents
+    // scenario-A test does — and threw before its `unsubscribe()`. Without the
+    // clear, that callback survives and fires inside the next test.
+    const leaked = vi.fn();
+    subscribeNavigation(leaked);
+    resetNavigation();
+
+    setNavigationState({ searchParams: { status: "Expired" } });
+    expect(leaked).not.toHaveBeenCalled();
+  });
+});
+
+describe("the History-API bridge", () => {
+  // The bridge was originally modelled as fully synchronous, which is what let
+  // a page compose filter writes on a transition-deferred value and still pass
+  // its own regression tests (#370, second review pass). These pin the split.
+
+  it("moves window.location synchronously but defers the router snapshot", async () => {
+    setNavigationState({ pathname: "/documents", searchParams: {} });
+
+    window.history.replaceState(null, "", "/documents?status=Expired");
+
+    // The address bar is already there…
+    expect(window.location.search).toBe("?status=Expired");
+    // …while `useSearchParams()`'s source is not. Next wraps its own sync in
+    // startTransition, so a component reading the hook on the next line still
+    // sees the OLD query string.
+    expect(navState.searchParams.get("status")).toBeNull();
+
+    await settle();
+    expect(navState.searchParams.get("status")).toBe("Expired");
+    expect(navState.pathname).toBe("/documents");
+  });
+
+  it("notifies subscribers only once the deferred half lands", async () => {
+    const onChange = vi.fn();
+    const unsubscribe = subscribeNavigation(onChange);
+
+    window.history.replaceState(null, "", "/documents?a=1");
+    expect(onChange).not.toHaveBeenCalled();
+
+    await settle();
+    expect(onChange).toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it("bridges pushState as well as replaceState", async () => {
+    window.history.pushState(null, "", "/documents?b=2");
+    expect(window.location.search).toBe("?b=2");
+    await settle();
+    expect(navState.searchParams.get("b")).toBe("2");
+  });
+
+  it("cancels a pending history commit at resetNavigation, like a router one", async () => {
+    window.history.replaceState(null, "", "/documents?leak=1");
+    resetNavigation();
+    await settle();
+    // Neither half may survive into the next test.
+    expect(navState.searchParams.toString()).toBe("");
+    expect(window.location.search).toBe("");
+  });
+
+  it("keeps window.location in step when a test seeds the url", () => {
+    // `renderWithProviders({ searchParams })` routes through here, so a page
+    // that reads `window.location.search` must see what the test seeded — not
+    // the previous test's url.
+    setNavigationState({ pathname: "/documents", searchParams: { vendor: "v1" } });
+    expect(window.location.pathname).toBe("/documents");
+    expect(new URLSearchParams(window.location.search).get("vendor")).toBe("v1");
+  });
+
+  it("moves window.location when a router navigation commits", async () => {
+    navState.router.replace("/documents?status=Expired");
+    await settle();
+    expect(window.location.search).toBe("?status=Expired");
   });
 });

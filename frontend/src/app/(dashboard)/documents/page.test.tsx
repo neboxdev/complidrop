@@ -44,6 +44,20 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/**
+ * The address bar — what `history.replaceState` updates SYNCHRONOUSLY.
+ *
+ * Prefer this over `navState.searchParams` for "did the write land": the hook
+ * is transition-deferred (Next wraps its own sync in `startTransition`, and the
+ * harness models that), so reading it right after a `fireEvent` reports the
+ * PREVIOUS url and the assertion silently tests the wrong instant. Use
+ * `navState.searchParams` only when the router snapshot itself is the subject,
+ * and then await it.
+ */
+function currentQuery(): URLSearchParams {
+  return new URLSearchParams(window.location.search);
+}
+
 // sonner mock + toastSuccess/toastError spies are provided by the
 // harness (see vitest.setup.ts + src/test/sonner.ts). The harness's
 // afterEach resets all toast spies between tests — no per-file
@@ -127,17 +141,30 @@ describe("DocumentsPage — URL-addressable filters (#317 FP-041)", () => {
     // ?status=Expired immediately replaced to the identical URL. That echo was
     // the loop: its input (searchParams) lagged its own output by a commit.
     // Deriving from the URL means mount is a pure read.
-    const replaceSpy = vi.fn();
-    server.use(http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))));
-    renderWithProviders(<DocumentsPage />, {
-      auth: authedMe,
-      searchParams: { status: "Expired" },
-      router: { replace: replaceSpy },
-    });
-    await waitFor(() => expect(screen.getByText(/no documents match your filters/i)).toBeInTheDocument());
-    // Give the 300ms search debounce room to misfire if it were going to.
-    await new Promise((r) => setTimeout(r, 400));
-    expect(replaceSpy).not.toHaveBeenCalled();
+    //
+    // Spy the MECHANISM THE PAGE ACTUALLY USES. This assertion used to watch a
+    // `router.replace` spy, but the page stopped importing `useRouter` when it
+    // moved to the History API — so a reintroduced mount-time echo would have
+    // left the test green. `history.replaceState` is the only writer now.
+    // (The harness's own url seeding goes through the UNPATCHED native method,
+    // so nothing but the page under test lands on this spy.)
+    const replaceStateSpy = vi.spyOn(window.history, "replaceState");
+    try {
+      server.use(http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))));
+      renderWithProviders(<DocumentsPage />, {
+        auth: authedMe,
+        searchParams: { status: "Expired" },
+        pathname: "/documents",
+      });
+      await waitFor(() => expect(screen.getByText(/no documents match your filters/i)).toBeInTheDocument());
+      // Give the 300ms search debounce room to misfire if it were going to.
+      await new Promise((r) => setTimeout(r, 400));
+      expect(replaceStateSpy).not.toHaveBeenCalled();
+      // …and the deep link is untouched, not rewritten to an equivalent string.
+      expect(currentQuery().get("status")).toBe("Expired");
+    } finally {
+      replaceStateSpy.mockRestore();
+    }
   });
 });
 
@@ -276,7 +303,7 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     expect(navState.searchParams.get("status")).toBeNull();
   });
 
-  it("the picked option and the URL both update in the same tick (#370)", async () => {
+  it("the picked option does not snap back while the router transition catches up (#370)", async () => {
     // A `<select value={fromUrl}>` written through `router.replace` reverts to
     // the previous option until the route transition commits — an RSC
     // round-trip in production, with no loading.tsx under (dashboard), so the
@@ -292,9 +319,19 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
       target: { value: "Expired" },
     });
 
-    // Synchronously — no awaits, no transition to wait out.
-    expect(navState.searchParams.get("status")).toBe("Expired");
+    // Both assertions are SYNCHRONOUS and both matter, for different reasons.
+    //
+    // The address bar: `history.replaceState` moves `window.location` before it
+    // returns, so the shareable URL is correct immediately.
+    expect(currentQuery().get("status")).toBe("Expired");
+    // The control: this is the anti-flicker guarantee. The value the user just
+    // picked must NOT revert while Next's transition catches up. Deriving the
+    // <select> straight from `useSearchParams()` fails here — React re-renders
+    // the stale "" onto the controlled element and the pick visibly snaps back.
     expect(screen.getByLabelText(/filter by compliance status/i)).toHaveValue("Expired");
+    // And the hook is still behind at this instant — that lag is real, which is
+    // exactly why neither assertion above may be sourced from it.
+    expect(navState.searchParams.get("status")).toBeNull();
   });
 
   it("a filter change preserves an unrelated ?vendor= deep link", async () => {
@@ -319,8 +356,8 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
       target: { value: "Expired" },
     });
 
-    expect(navState.searchParams.get("vendor")).toBe("v1");
-    expect(navState.searchParams.get("status")).toBe("Expired");
+    expect(currentQuery().get("vendor")).toBe("v1");
+    expect(currentQuery().get("status")).toBe("Expired");
     await waitFor(() => {
       const sp = new URL(requestedUrls[requestedUrls.length - 1]).searchParams;
       expect(sp.get("vendorId")).toBe("v1");
@@ -330,10 +367,13 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
 
   it("three filter changes in a row compose instead of clobbering (#370)", async () => {
     // Each write composes on the query string it can READ, so this is only
-    // safe while that string is current. Under `router.replace` it was not:
-    // the second change read a pre-navigation URL and dropped the first, and a
-    // third dispatched after an intermediate commit dropped the second. The
-    // History API updates synchronously, which is what makes composing sound.
+    // sound while that string is current. `useSearchParams()` is NOT: all three
+    // changes here happen inside one transition window, so a page composing on
+    // the hook patches the same empty base three times and only the last filter
+    // survives. `window.location.search` is updated synchronously by
+    // `replaceState`, which is what makes composing sound — this test is the
+    // discriminator for that choice (revert `writeFilters` to the hook and the
+    // status + type assertions below go null).
     server.use(
       http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))),
     );
@@ -351,9 +391,9 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
       target: { value: "30" },
     });
 
-    expect(navState.searchParams.get("status")).toBe("Expired");
-    expect(navState.searchParams.get("type")).toBe("permit");
-    expect(navState.searchParams.get("expiresWithin")).toBe("30");
+    expect(currentQuery().get("status")).toBe("Expired");
+    expect(currentQuery().get("type")).toBe("permit");
+    expect(currentQuery().get("expiresWithin")).toBe("30");
     expect(screen.getByLabelText(/filter by compliance status/i)).toHaveValue("Expired");
     expect(screen.getByLabelText(/filter by document type/i)).toHaveValue("permit");
     expect(screen.getByLabelText(/filter by expiry/i)).toHaveValue("30");
@@ -369,10 +409,17 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     renderWithProviders(<DocumentsPage />, { auth: authedMe, pathname: "/documents" });
     await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
 
-    // A slow commit widens the window this bug lived in. It is inert while the
-    // page writes through the History API (synchronous, no window at all) —
-    // that is the point: this test goes red the moment anyone reintroduces an
-    // asynchronous `router.replace` write for the search filter.
+    // A slow commit widens the window this bug lives in. This USED to be inert:
+    // the harness applied History-API writes synchronously, so there was no
+    // window at all. It now defers the router-snapshot half of a `replaceState`
+    // the way Next does, so the delay is load-bearing — the stale hook value
+    // genuinely lingers while the user keeps typing.
+    //
+    // What keeps the box intact is that `search` is re-read from
+    // `window.location` at write time rather than waiting for that commit
+    // (see `query` in page.tsx). Source it from the hook instead and this test
+    // goes red: the late echo lands mid-word and truncates "acme roofing" back
+    // to "acme".
     setNavigationCommitDelay(300);
 
     const box = screen.getByLabelText(/search documents/i);
@@ -390,6 +437,107 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     await waitFor(() => expect(navState.searchParams.get("search")).toBe("acme roofing"), {
       timeout: 3000,
     });
+  });
+
+  it("restores the search box on Back after an external clear (#370)", async () => {
+    // The echo-guard latch remembers the last search value THIS page wrote, so
+    // the box isn't re-seeded mid-word by its own echo. But the latch also has
+    // to be RETIRED once the URL no longer holds that value, or it swallows a
+    // later legitimate re-seed:
+    //
+    //   type "acme"        -> debounce writes ?search=acme, latch := "acme"
+    //   sidebar -> bare /documents  -> box correctly re-seeded to ""
+    //   Back    -> ?search=acme     -> "acme" still equals the stale latch, so
+    //                                  the re-seed is SKIPPED and the box stays
+    //                                  empty; 300ms later the debounce writes
+    //                                  the empty value back out, silently
+    //                                  undoing the Back.
+    server.use(
+      http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))),
+    );
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, pathname: "/documents" });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    const box = screen.getByLabelText(/search documents/i);
+    fireEvent.change(box, { target: { value: "acme" } });
+    // Past the 300ms debounce: the page has now written ?search=acme itself,
+    // which is what arms the latch.
+    await waitFor(() => expect(currentQuery().get("search")).toBe("acme"), { timeout: 3000 });
+
+    // An external same-route nav to a bare /documents (the sidebar link).
+    setNavigationState({ searchParams: {}, pathname: "/documents" });
+    await waitFor(() => expect(box).toHaveValue(""));
+
+    // Back to the filtered url.
+    setNavigationState({ searchParams: { search: "acme" }, pathname: "/documents" });
+
+    // The box must adopt the restored value…
+    await waitFor(() => expect(box).toHaveValue("acme"));
+    // …and it must STILL be there after the debounce interval, i.e. the page
+    // did not quietly write the restored filter back out of the URL.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(box).toHaveValue("acme");
+    expect(currentQuery().get("search")).toBe("acme");
+  });
+
+  it("resetting a dropdown to its All… option drops the param entirely (#370)", async () => {
+    // `writeFilters` has two halves — sp.set for a value, sp.delete for "".
+    // Only the set half was covered, so a regression that wrote `?status=`
+    // (empty but present) instead of removing it would have gone unnoticed;
+    // the request would then carry a meaningless empty filter.
+    const requestedUrls: string[] = [];
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        requestedUrls.push(request.url);
+        return jsonOk(makeDocumentsResponse({ items: [], total: 0 }));
+      }),
+    );
+    renderWithProviders(<DocumentsPage />, {
+      auth: authedMe,
+      searchParams: { status: "Expired", vendor: "v1" },
+      pathname: "/documents",
+    });
+    await waitFor(() => expect(requestedUrls.some((u) => u.includes("status=Expired"))).toBe(true));
+
+    fireEvent.change(screen.getByLabelText(/filter by compliance status/i), {
+      target: { value: "" },
+    });
+
+    // Removed, not blanked.
+    expect(currentQuery().has("status")).toBe(false);
+    // The unrelated deep link is untouched by the delete.
+    expect(currentQuery().get("vendor")).toBe("v1");
+    await waitFor(() => {
+      const sp = new URL(requestedUrls[requestedUrls.length - 1]).searchParams;
+      expect(sp.has("status")).toBe(false);
+      expect(sp.get("vendorId")).toBe("v1");
+    });
+  });
+
+  it("an unrelated filter change does not re-arm the pending search debounce (#370)", async () => {
+    // `writeFilters` closes over nothing, so the debounce effect's dep list is
+    // stable. When it closed over `searchParams`, every unrelated filter change
+    // produced a NEW callback identity, which re-ran the effect, which cleared
+    // and re-armed the 300ms timer — so holding a dropdown steady could defer
+    // the search write indefinitely, and the re-armed timer fired holding a
+    // pre-transition closure.
+    server.use(
+      http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))),
+    );
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, pathname: "/documents" });
+    await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText(/search documents/i), { target: { value: "acme" } });
+    // Nudge an unrelated filter ~200ms into the 300ms debounce window.
+    await new Promise((r) => setTimeout(r, 200));
+    fireEvent.change(screen.getByLabelText(/filter by document type/i), {
+      target: { value: "permit" },
+    });
+
+    // The search write must still land on ITS original schedule. Both filters
+    // survive, which also re-checks that neither write clobbered the other.
+    await waitFor(() => expect(currentQuery().get("search")).toBe("acme"), { timeout: 1000 });
+    expect(currentQuery().get("type")).toBe("permit");
   });
 
   it("a URL-driven filter change resets pagination to page 1 (#370)", async () => {
@@ -429,6 +577,50 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
       expect(sp.get("status")).toBe("Expired");
       expect(sp.get("page")).toBe("1");
     });
+  });
+
+  it("searching from a later page lands on page 1, without an extra unfiltered fetch (#370)", async () => {
+    // The search box used to call setPage(1) on every keystroke. That reset the
+    // list to page 1 a full debounce interval BEFORE the term reached the URL,
+    // so the user paid one extra request for the unfiltered page 1 that was
+    // about to be replaced. The filter-signature reset covers this correctly
+    // instead — but only once the term actually lands, so pin both halves: the
+    // page does reset, and nothing re-bases early.
+    const requestedUrls: string[] = [];
+    server.use(
+      http.get(url("/api/documents"), ({ request }) => {
+        requestedUrls.push(request.url);
+        const p = new URL(request.url).searchParams.get("page") ?? "1";
+        return jsonOk(
+          makeDocumentsResponse({
+            items: [makeDocument({ id: `d_${p}`, originalFileName: `row-p${p}.pdf` })],
+            total: 60,
+            page: Number(p),
+            pageSize: 25,
+          }),
+        );
+      }),
+    );
+    renderWithProviders(<DocumentsPage />, { auth: authedMe, pathname: "/documents" });
+    await waitFor(() => expect(screen.getByText("row-p1.pdf")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+    await waitFor(() =>
+      expect(new URL(requestedUrls[requestedUrls.length - 1]).searchParams.get("page")).toBe("2"),
+    );
+    const requestsOnPage2 = requestedUrls.length;
+
+    fireEvent.change(screen.getByLabelText(/search documents/i), { target: { value: "acme" } });
+
+    // The search term lands AND the list is re-based to page 1 together.
+    await waitFor(() => {
+      const sp = new URL(requestedUrls[requestedUrls.length - 1]).searchParams;
+      expect(sp.get("search")).toBe("acme");
+      expect(sp.get("page")).toBe("1");
+    }, { timeout: 3000 });
+
+    // Exactly one new request — no interim page-1-unfiltered round trip.
+    expect(requestedUrls.length).toBe(requestsOnPage2 + 1);
   });
 
   it("the search box round-trips through the URL and re-seeds when the URL changes", async () => {
@@ -479,8 +671,10 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     // The Clear button is present because the vendor filter is active.
     fireEvent.click(await screen.findByRole("button", { name: /^clear$/i }));
     // The fix: Clear drops the whole query string, so the vendor param — which
-    // has no dropdown of its own — goes with it.
-    expect(navState.searchParams.toString()).toBe("");
+    // has no dropdown of its own — goes with it. Asserted on the address bar
+    // (synchronous); the hook follows a commit later.
+    expect(currentQuery().toString()).toBe("");
+    await waitFor(() => expect(navState.searchParams.toString()).toBe(""));
   });
 });
 

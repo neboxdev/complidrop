@@ -174,9 +174,14 @@ Two-tier setup, documented here once so it doesn't get re-litigated.
 
   To simulate a URL change the page did NOT initiate — a same-route sidebar click, Back, an external deep link — call `setNavigationState({ searchParams, pathname })` mid-test; it notifies subscribers, so mounted components re-render against the new URL.
 
-  **`window.history.pushState` / `replaceState` are bridged too, and apply SYNCHRONOUSLY.** Next's App Router integrates the native History API: those calls update the URL and sync `usePathname`/`useSearchParams` with no route navigation and no RSC fetch (the documented path for list filter/sort state — the documents page uses it). The synchronous/deferred split between the two mechanisms is deliberate and mirrors the real router; don't collapse it.
+  **`window.history.pushState` / `replaceState` are bridged too, and they SPLIT (#370).** Next's App Router integrates the native History API: those calls update the URL and sync `usePathname`/`useSearchParams` with no route navigation and no RSC fetch (the documented path for list filter/sort state — the documents page uses it). But the two halves do not land together:
 
-  `setNavigationCommitDelay(ms)` staggers `router.push`/`replace` commit latency within a test. Real commits wait on their own RSC fetch, so two dispatched together land at different times — with a single shared deadline that interleaving is untestable. Reset to 0 between tests.
+  - `window.location` updates **synchronously** (the native call).
+  - `useSearchParams()` / `usePathname()` update **a commit later** — Next routes its own sync through `startTransition` (`app-router.js`, `applyUrlFromHistoryPushReplace`). Skipping the RSC fetch makes this window narrower than `router.replace`'s, not absent.
+
+  This was previously documented — and mocked — as fully synchronous, with a "don't collapse it" note attached. That was wrong, and it cost a whole review pass: a page composed its filter writes on the transition-deferred hook, and the synchronous mock meant its own regression tests passed anyway. **When you need "has the URL changed", assert `window.location.search`; use `navState.searchParams` only when the router snapshot is itself the subject, and `await` it.**
+
+  `setNavigationCommitDelay(ms)` staggers commit latency within a test, for BOTH mechanisms. Real `router` commits wait on their own RSC fetch, so two dispatched together land at different times — with a single shared deadline that interleaving is untestable. A History-API commit waits on a transition instead, which React can schedule late or interrupt; same knob, since what a test cares about is how long the component keeps reading the old value. Reset to 0 between tests.
 - **Per-file `vi.mock("next/navigation", ...)`** (escape hatch). Required when the test needs a hoisted spy on `useSearchParams` or wants to capture the call site at module load (see `register-form.test.tsx` for the canonical example). Vitest's per-file mock registry overrides the setup-file mock within the file's own module scope — file-level mocks always win.
 
 Pick the default unless you have a specific reason to escape it.

@@ -80,6 +80,13 @@ const pendingApplies = new Set<ReturnType<typeof setTimeout>>();
  * How long a dispatched navigation takes to commit, in ms (default 0 — the
  * next macrotask).
  *
+ * Applies to BOTH commit paths — `router.push`/`replace` and the History-API
+ * bridge — because both are deferred in the real App Router (see
+ * `applyHistoryUrl`). The underlying latencies differ in kind (an RSC fetch vs
+ * a `startTransition` commit React may schedule late or interrupt), but for a
+ * test the useful knob is the same one: how long the component keeps rendering
+ * against the OLD `useSearchParams()` after it dispatched a write.
+ *
  * The real App Router's commit latency is per-navigation: each one waits on its
  * own RSC fetch, so two navigations dispatched together land at different times
  * and can even land out of order. With a fixed 0ms defer every in-flight
@@ -154,6 +161,31 @@ function parseHref(href: string): { pathname: string; query: string; hasQuery: b
  * `useSyncExternalStore` compares snapshots by reference — mutating the
  * existing instance in place would not re-render.
  */
+/**
+ * The unpatched `history.replaceState`, captured before the bridge below wraps
+ * it. Used to move `window.location` WITHOUT re-entering our own bridge (which
+ * would queue a redundant deferred commit, and recurse).
+ */
+const nativeReplaceState =
+  typeof window !== "undefined" ? window.history.replaceState.bind(window.history) : null;
+
+/**
+ * Move `window.location` to match a navigation.
+ *
+ * The harness models the URL in two places because the browser does: the
+ * address bar (`window.location`, which `history.replaceState` updates
+ * SYNCHRONOUSLY) and the router's snapshot (`useSearchParams()`, which lands a
+ * commit later). Code under test reads both — `writeFilters` composes on
+ * `window.location.search` precisely BECAUSE it is the synchronous one (#370)
+ * — so a harness that moved only `navState` would make the page compose on a
+ * URL that never changes, and every filter write would clobber the last.
+ */
+function syncWindowLocation(pathname: string, query: string): void {
+  if (!nativeReplaceState) return;
+  const path = pathname || window.location.pathname;
+  nativeReplaceState(null, "", query ? `${path}?${query}` : path);
+}
+
 function applyNavigation(href: unknown): void {
   if (typeof href !== "string") return;
   const target = parseHref(href);
@@ -177,6 +209,9 @@ function applyNavigation(href: unknown): void {
     if (!hasQuery && !pathname) return;
     if (pathname) navState.pathname = pathname;
     navState.searchParams = new URLSearchParams(query);
+    // A router navigation moves the address bar and the router snapshot
+    // TOGETHER, at commit — unlike the History bridge, which splits them.
+    syncWindowLocation(pathname, query);
     notifyNavigation();
   }, commitDelayMs);
   pendingApplies.add(handle);
@@ -191,19 +226,45 @@ function applyNavigation(href: unknown): void {
  * path for list filtering/sorting). The documents page uses it, so the harness
  * has to model it or those writes would be invisible to the component.
  *
- * SYNCHRONOUS, unlike `router.push`/`replace` — that difference is the entire
- * point of the API and the reason it doesn't have the in-flight window that
- * `router.replace` does.
+ * **The router sync is DEFERRED, and the two halves split apart.** This was
+ * modelled as fully synchronous and that was wrong — the mistake that made
+ * #370's second review pass necessary. Next's patch
+ * (`next/dist/client/components/app-router.js`, `applyUrlFromHistoryPushReplace`)
+ * routes the router update through `startTransition`:
+ *
+ *     const applyUrlFromHistoryPushReplace = (url) => {
+ *       startTransition(() => { dispatchAppRouterAction({ type: ACTION_RESTORE, … }) })
+ *     }
+ *     window.history.replaceState = function (data, _unused, url) {
+ *       if (url) applyUrlFromHistoryPushReplace(url)   // deferred
+ *       return originalReplaceState(data, _unused, url) // synchronous
+ *     }
+ *
+ * So after a `replaceState` returns:
+ *   - `window.location.search` is ALREADY the new value (the native call), and
+ *   - `useSearchParams()` still returns the OLD one until the transition
+ *     commits.
+ *
+ * Skipping the RSC fetch makes the window narrower than `router.replace`'s, not
+ * absent. Modelling it as absent let a page compose filter writes on a
+ * transition-deferred value and still pass its own regression test.
+ *
+ * The synchronous half is handled by the bridge below calling the ORIGINAL
+ * method; this function is only the deferred half.
  */
 function applyHistoryUrl(url: unknown): void {
   if (typeof url !== "string" || url === "") return;
   const target = parseHref(url);
   if (!target) return;
-  if (target.pathname) navState.pathname = target.pathname;
-  if (target.hasQuery || target.pathname) {
-    navState.searchParams = new URLSearchParams(target.query);
-  }
-  notifyNavigation();
+  const handle = setTimeout(() => {
+    pendingApplies.delete(handle);
+    if (target.pathname) navState.pathname = target.pathname;
+    if (target.hasQuery || target.pathname) {
+      navState.searchParams = new URLSearchParams(target.query);
+    }
+    notifyNavigation();
+  }, commitDelayMs);
+  pendingApplies.add(handle);
 }
 
 if (typeof window !== "undefined" && !("__cdNavBridge" in window.history)) {
@@ -211,6 +272,10 @@ if (typeof window !== "undefined" && !("__cdNavBridge" in window.history)) {
   for (const method of ["pushState", "replaceState"] as const) {
     const original = window.history[method].bind(window.history);
     window.history[method] = (data: unknown, unused: string, url?: string | URL | null) => {
+      // Native first: this is the SYNCHRONOUS half — `window.location` is the
+      // new URL the instant this returns. `applyHistoryUrl` then queues the
+      // DEFERRED half (the `useSearchParams()` snapshot). Splitting them is the
+      // whole point; see `applyHistoryUrl`.
       original(data, unused, url);
       applyHistoryUrl(typeof url === "string" ? url : url?.toString());
     };
@@ -283,12 +348,21 @@ export function resetNavigation(): void {
   for (const handle of pendingApplies) clearTimeout(handle);
   pendingApplies.clear();
   commitDelayMs = 0;
+  // RTL's `cleanup()` unmounts components (which unsubscribes them) before this
+  // runs, but a test that subscribes by hand and throws before its `unsubscribe`
+  // would leak a callback into the next test — and it would fire, because
+  // `notifyNavigation` iterates whatever is in the set. Dropping them here makes
+  // the reset authoritative rather than merely usually-sufficient.
+  navSubscribers.clear();
   navState.router = makeRouter();
   navState.params = {};
   navState.searchParams = new URLSearchParams();
   navState.pathname = "/";
   navState.notFound = makeNotFound();
   navState.redirect = makeRedirect();
+  // Keep the address bar in step with the snapshot — otherwise a query string
+  // from test N is still readable via `window.location.search` in test N+1.
+  syncWindowLocation("/", "");
 }
 
 /**
@@ -314,6 +388,14 @@ export function setNavigationState(patch: {
         : new URLSearchParams(patch.searchParams);
   }
   if (patch.pathname !== undefined) navState.pathname = patch.pathname;
+  // Seeding is an AT-REST url: the address bar and the router snapshot agree
+  // (they only diverge for the duration of a dispatched write). Move
+  // `window.location` too, or a page that composes on `window.location.search`
+  // would read "/" no matter what the test seeded — and `renderWithProviders`'s
+  // `searchParams` option routes through here, so that is every seeded test.
+  if (patch.searchParams !== undefined || patch.pathname !== undefined) {
+    syncWindowLocation(navState.pathname, navState.searchParams.toString());
+  }
   // Re-render anything already mounted — this helper is usable mid-test to
   // simulate an external URL change (e.g. the #370 same-route sidebar click).
   notifyNavigation();
