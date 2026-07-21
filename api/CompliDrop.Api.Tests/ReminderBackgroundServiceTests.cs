@@ -184,15 +184,24 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         // RFC 2606 reserved domain that accepts no mail — so every send is a guaranteed hard bounce
         // that writes an EmailSuppression, a reminder.recipient_suppressed feed event and a
         // "bounced" alarm badge on a vendor that does not exist, at real Resend cost. The worker
-        // must drop the row before the send loop. Revert the ReminderBackgroundService exclusion
-        // and this sends one mail and writes one log row.
+        // must drop the row at the QUERY (`&& !d.IsSample`), before the send loop.
+        //
+        // BOTH recipient taps are deliberately on, so this discriminates the query-level exclusion
+        // on its own: revert only `&& !d.IsSample` and the row reaches the send loop, where the
+        // address guard still drops the fictional vendor address — but the org's real INTERNAL
+        // recipient gets mailed, and both assertions go red. (With no internal recipient the two
+        // guards would shadow each other and a query-only revert would stay green. The address
+        // guard's own independent pins are the two _sample_vendor/_sample_address tests below.)
         var seed = await SeedReminderAsync(
-            NyEightAm, notifyInternal: false, notifyVendor: true,
-            vendorEmail: "sample-vendor@example.com", documentIsSample: true);
+            NyEightAm,
+            notifyInternal: true, internalEmail: "owner@example.com", internalEmailVerified: true,
+            notifyVendor: true, vendorEmail: "sample-vendor@example.com",
+            documentIsSample: true);
 
         await BuildWorker(NyEightAm).ProcessHourlyTickAsync(CancellationToken.None);
 
-        Email.Sends.Should().BeEmpty("a fictional demo vendor must never be emailed");
+        Email.Sends.Should().BeEmpty(
+            "a sample document must never generate a reminder — not even to the org's own internal address");
         (await LogCountAsync(seed.ReminderId, seed.DocumentId))
             .Should().Be(0, "no send means no reminder-log row for the sample document");
     }
