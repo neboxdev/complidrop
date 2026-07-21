@@ -181,6 +181,17 @@ Two-tier setup, documented here once so it doesn't get re-litigated.
 
   This was previously documented — and mocked — as fully synchronous, with a "don't collapse it" note attached. That was wrong, and it cost a whole review pass: a page composed its filter writes on the transition-deferred hook, and the synchronous mock meant its own regression tests passed anyway. **When you need "has the URL changed", assert `window.location.search`; use `navState.searchParams` only when the router snapshot is itself the subject, and `await` it.**
 
+  **⚠️ The two mechanisms split in OPPOSITE directions. Neither source is universally "the current one".**
+
+  | | leads | lags |
+  |---|---|---|
+  | History-API write (`replaceState` you call) | `window.location` | `useSearchParams()` |
+  | Router navigation (`<Link>`, `router.push/replace`, deep link) | `useSearchParams()` | `window.location` |
+
+  For a router navigation Next derives `searchParams` from `canonicalUrl` in a **render-phase** `useMemo`, then moves `window.location` in `HistoryUpdater`'s **`useInsertionEffect`** (commit phase) — and that internal write carries `__NA`, so the history patch short-circuits and dispatches nothing. **No follow-up render ever corrects a component that read `window.location` during a navigation render.** A page that unconditionally prefers `window.location` therefore renders the PREVIOUS route's query, permanently, on every deep link.
+
+  The harness models both orderings (`applyNavigation` / `setNavigationState` notify first and move the address bar in a microtask; the History bridge does the reverse). Do not "simplify" either one into a single synchronous update — each direction has already hidden a real defect for a full review pass.
+
   `setNavigationCommitDelay(ms)` staggers commit latency within a test, for BOTH mechanisms. Real `router` commits wait on their own RSC fetch, so two dispatched together land at different times — with a single shared deadline that interleaving is untestable. A History-API commit waits on a transition instead, which React can schedule late or interrupt; same knob, since what a test cares about is how long the component keeps reading the old value. Reset to 0 between tests.
 - **Per-file `vi.mock("next/navigation", ...)`** (escape hatch). Required when the test needs a hoisted spy on `useSearchParams` or wants to capture the call site at module load (see `register-form.test.tsx` for the canonical example). Vitest's per-file mock registry overrides the setup-file mock within the file's own module scope — file-level mocks always win.
 

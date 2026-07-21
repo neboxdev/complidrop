@@ -217,11 +217,26 @@ describe("the History-API bridge", () => {
     expect(window.location.search).toBe("");
   });
 
-  it("keeps window.location in step when a test seeds the url", () => {
-    // `renderWithProviders({ searchParams })` routes through here, so a page
-    // that reads `window.location.search` must see what the test seeded — not
-    // the previous test's url.
+  it("seeds the router snapshot BEFORE the address bar, like a router navigation", async () => {
+    // `setNavigationState` models an external/router URL change, so it splits
+    // the way a router navigation does — the opposite way to a History-API
+    // write. The snapshot is authoritative during the render; `window.location`
+    // catches up afterwards (Next moves it in HistoryUpdater's
+    // useInsertionEffect, a commit-phase effect).
+    //
+    // This ordering is load-bearing, not incidental: a page that prefers
+    // `window.location` over `useSearchParams()` renders the PREVIOUS route's
+    // query for a router navigation and is never corrected, because Next's
+    // internal history write carries `__NA` and dispatches nothing.
     setNavigationState({ pathname: "/documents", searchParams: { vendor: "v1" } });
+
+    // Snapshot first…
+    expect(navState.pathname).toBe("/documents");
+    expect(navState.searchParams.get("vendor")).toBe("v1");
+    // …address bar not yet.
+    expect(new URLSearchParams(window.location.search).get("vendor")).toBeNull();
+
+    await settle();
     expect(window.location.pathname).toBe("/documents");
     expect(new URLSearchParams(window.location.search).get("vendor")).toBe("v1");
   });

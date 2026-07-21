@@ -209,10 +209,23 @@ function applyNavigation(href: unknown): void {
     if (!hasQuery && !pathname) return;
     if (pathname) navState.pathname = pathname;
     navState.searchParams = new URLSearchParams(query);
-    // A router navigation moves the address bar and the router snapshot
-    // TOGETHER, at commit — unlike the History bridge, which splits them.
-    syncWindowLocation(pathname, query);
+    // A router navigation splits the OPPOSITE way to the History bridge, and
+    // getting this backwards hid a production-breaking bug for a whole review
+    // pass. Next derives `searchParams` from `canonicalUrl` in a render-phase
+    // useMemo (app-router.js, `Router`), but moves `window.location` later, in
+    // HistoryUpdater's `useInsertionEffect` — the COMMIT phase. And that
+    // internal write carries `__NA`, so the history patch short-circuits and
+    // dispatches nothing: no follow-up render ever corrects a component that
+    // read `window.location` during the navigation render.
+    //
+    // So: snapshot first (the render sees the NEW query), address bar second.
+    // The microtask is what actually creates the gap — `notifyNavigation()`
+    // only SCHEDULES React's re-render, so moving `window.location` on the
+    // next line would still beat the render and hide the bug (verified: with
+    // the two calls adjacent, the documents suite is fully green against a
+    // page that is broken in production).
     notifyNavigation();
+    queueMicrotask(() => syncWindowLocation(pathname, query));
   }, commitDelayMs);
   pendingApplies.add(handle);
 }
@@ -388,15 +401,15 @@ export function setNavigationState(patch: {
         : new URLSearchParams(patch.searchParams);
   }
   if (patch.pathname !== undefined) navState.pathname = patch.pathname;
-  // Seeding is an AT-REST url: the address bar and the router snapshot agree
-  // (they only diverge for the duration of a dispatched write). Move
-  // `window.location` too, or a page that composes on `window.location.search`
-  // would read "/" no matter what the test seeded — and `renderWithProviders`'s
-  // `searchParams` option routes through here, so that is every seeded test.
-  if (patch.searchParams !== undefined || patch.pathname !== undefined) {
-    syncWindowLocation(navState.pathname, navState.searchParams.toString());
-  }
   // Re-render anything already mounted — this helper is usable mid-test to
-  // simulate an external URL change (e.g. the #370 same-route sidebar click).
+  // simulate an external URL change (e.g. the #370 same-route sidebar click),
+  // which is a ROUTER navigation. Same ordering as `applyNavigation`: the
+  // snapshot lands first (render-phase), the address bar follows (commit-phase
+  // `useInsertionEffect`). Notifying first is what lets a component that
+  // wrongly prefers `window.location` render the PREVIOUS route's query.
   notifyNavigation();
+  if (patch.searchParams !== undefined || patch.pathname !== undefined) {
+    const p = navState.pathname, q = navState.searchParams.toString();
+    queueMicrotask(() => syncWindowLocation(p, q));
+  }
 }
