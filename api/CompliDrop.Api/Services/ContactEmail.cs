@@ -48,9 +48,12 @@ public static partial class ContactEmail
     public const string HiddenCharacterMessage =
         "This address contains a hidden character - retype it, or leave it blank.";
 
-    /// <summary>Copy for a value that is otherwise well-formed but longer than the column.</summary>
+    /// <summary>
+    /// Copy for a value that is otherwise well-formed but longer than the column. "256 or fewer",
+    /// not "under 256": exactly 256 is an accepted boundary (the varchar width), pinned by test.
+    /// </summary>
     public const string TooLongMessage =
-        "That email address is too long - use one under 256 characters, or leave it blank.";
+        "That email address is too long - use 256 characters or fewer, or leave it blank.";
 
     /// <summary>Max persisted length — <c>Vendor.ContactEmail</c> is <c>varchar(256)</c>.</summary>
     public const int MaxLength = 256;

@@ -156,9 +156,12 @@ export const CONTACT_EMAIL_ERROR =
 export const CONTACT_EMAIL_HIDDEN_CHARACTER_ERROR =
   "This address contains a hidden character - retype it, or leave it blank.";
 
-/** Copy for a value that is otherwise well-formed but longer than the column. */
+/**
+ * Copy for a value that is otherwise well-formed but longer than the column. "256 or fewer",
+ * not "under 256": exactly 256 is an accepted boundary (the varchar width), pinned by test.
+ */
 export const CONTACT_EMAIL_TOO_LONG_ERROR =
-  "That email address is too long - use one under 256 characters, or leave it blank.";
+  "That email address is too long - use 256 characters or fewer, or leave it blank.";
 
 /**
  * The message to show for a rejected address, or `undefined` when it is acceptable — the single

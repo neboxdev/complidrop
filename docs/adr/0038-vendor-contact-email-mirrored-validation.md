@@ -120,7 +120,8 @@ dense in blank code points and both surrogate halves, with zero mismatches.
   `(auth)/login`, `(auth)/register`, `(auth)/forgot-password`, and
   `(dashboard)/settings/account-management.tsx` (the change-email field). The first three are
   under the `frontend/src/app/(auth)/**` sensitive glob; the settings one is **not** — it is
-  deferred purely as out-of-scope for this ticket, not for sensitivity. Tracked separately.
+  deferred purely as out-of-scope for this ticket, not for sensitivity. Tracked as
+  [#432](https://github.com/neboxdev/complidrop/issues/432).
 - **Bidi and invisible-format controls are still accepted** (U+200E/200F, U+202A–U+202E,
   U+2061–U+2064, U+2066–U+2069). They are not in the blank class, so `ops\u200E@acme.com` is
   stored, renders pixel-identical to the real address in the vendor list, and is unsendable — the
@@ -129,7 +130,8 @@ dense in blank code points and both surrogate halves, with zero mismatches.
   semantics beyond the ticket's acceptance criteria, and it is late-session scope creep of exactly
   the kind that caused a churning stop on this branch. The corpus lists a few such code points
   under `valid` **only** to pin the range bounds; its header states that `valid` means "the
-  predicate accepts this", not "this is a good address". Tracked separately.
+  predicate accepts this", not "this is a good address". Tracked as
+  [#431](https://github.com/neboxdev/complidrop/issues/431).
 - **This predicate is a typo catcher, not an RFC 5322 parser.** Over-strict validation that
   rejects a real address is a worse failure than letting an odd one through. Notably it does NOT
   use `System.Net.Mail.MailAddress`, which ACCEPTS the display-name form

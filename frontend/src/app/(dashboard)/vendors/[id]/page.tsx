@@ -102,8 +102,16 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
   // not the editable form field — the server emails the persisted address, so an
   // unsaved edit must not enable the button. The detail re-renders with a fresh
   // vendor prop after a save invalidates the query, flipping this on once saved.
-  const savedEmail = vendor.contactEmail?.trim() ?? "";
+  // Stripped with the SHARED blank set (not .trim()) so presence agrees with the
+  // predicate about e.g. a stored lone ZWSP (#369).
+  const savedEmail = trimContactEmail(vendor.contactEmail) ?? "";
   const hasContactEmail = savedEmail.length > 0;
+  // #369 review: the button keys on VALIDITY, not mere presence. A legacy-malformed
+  // stored address (written by the pre-#369 unguarded edit path) otherwise left this
+  // page calling the address invalid at the top while offering to email the upload
+  // link to it below — and toasting success at the unsendable string.
+  const savedEmailProblem = contactEmailError(vendor.contactEmail);
+  const hasUsableContactEmail = hasContactEmail && savedEmailProblem === undefined;
   const linkActionPending = generate.isPending || emailLink.isPending;
 
   // Plan gate (#261): upload links are a Pro entitlement — the server 403s link
@@ -190,7 +198,11 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
   // to act on. `contactEmailInvalid` is derived from it so the gate and the copy cannot disagree.
   const contactEmailProblem = contactEmailError(form.contactEmail);
   const contactEmailInvalid = contactEmailProblem !== undefined;
-  // An edit the operator has made but cannot persist while the address is malformed. Compared
+  // EVERY reason Save can be dead, not just the email guard — the checklist caveats below key
+  // on this so a pick wedged behind a blank NAME doesn't read as applied either (#369 review:
+  // same lie, different guard). Keep in lockstep with the Save button's disabled predicate.
+  const saveBlocked = !form.name.trim() || contactEmailInvalid;
+  // An edit the operator has made but cannot persist while Save is blocked. Compared
   // against the SAVED assignment so an already-assigned checklist is not mislabelled as pending.
   const checklistChangePending =
     form.complianceTemplateId !== (vendor.complianceTemplateId ?? "");
@@ -282,6 +294,14 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                   <span>
                     No requirements set — this vendor&apos;s documents won&apos;t be marked covered
                     or not until you choose one.
+                    {/* The under-claim mirror of the green panel's caveat below (#369 review):
+                        while Save is blocked, an unsaved CLEAR must not read as "no grading" —
+                        the saved checklist keeps grading until the clear actually persists. */}
+                    {saveBlocked && checklistChangePending && (
+                      <span className="mt-1 block font-medium">
+                        Not cleared yet — the saved checklist still applies until you save.
+                      </span>
+                    )}
                   </span>
                 </p>
               ) : (
@@ -293,10 +313,12 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                       otherwise read as an applied assignment — telling the operator grading is
                       configured for a vendor that stays ungraded (#369). Checklist assignment
                       drives grading, so that is a compliance claim, not just a UI nit.
+                      Keyed on saveBlocked — ANY dead-Save reason (blank name included), not only
+                      the email guard: the lie is identical whichever guard holds Save down.
                       Gated on the selection actually DIFFERING from what is stored: if this
                       checklist is already assigned, the panel is describing reality and
                       "not applied yet" would be its own lie. */}
-                  {contactEmailInvalid && checklistChangePending && (
+                  {saveBlocked && checklistChangePending && (
                     <p className="mb-1.5 font-medium text-amber-800">
                       Not applied yet — save to start grading against this checklist.
                     </p>
@@ -421,7 +443,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                   instead (#261 review). */}
               <Button
                 onClick={emailLinkToVendor}
-                disabled={portalGated || !hasContactEmail || linkActionPending}
+                disabled={portalGated || !hasUsableContactEmail || linkActionPending}
               >
                 <Mail className="w-4 h-4 mr-1" /> Email link to {vendor.name}
               </Button>
@@ -446,6 +468,11 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
           {!portalGated && !hasContactEmail && (
             <p className="text-xs text-amber-700">
               Add a contact email above and save to email the upload link to {vendor.name}.
+            </p>
+          )}
+          {!portalGated && hasContactEmail && !hasUsableContactEmail && (
+            <p className="text-xs text-amber-700">
+              Fix the contact email above and save to email the upload link to {vendor.name}.
             </p>
           )}
 

@@ -45,7 +45,7 @@
   "messages": {
     "invalid": "Enter a valid contact email address, like ops@acmecatering.com - or leave it blank.",
     "hiddenCharacter": "This address contains a hidden character - retype it, or leave it blank.",
-    "tooLong": "That email address is too long - use one under 256 characters, or leave it blank."
+    "tooLong": "That email address is too long - use 256 characters or fewer, or leave it blank."
   },
   "_comment": [
     "THE shared accept/reject corpus for the vendor contact-email predicate (#369).",
