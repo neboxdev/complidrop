@@ -21,6 +21,7 @@ import { useVendors, useCreateVendor } from "@/hooks/useVendors";
 import { VendorCoverageBadge } from "@/components/VendorCoverageBadge";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { contactEmailError, trimContactEmail } from "@/lib/contact-email";
 import { isAuthError } from "@/lib/query-client";
 import { PageTip } from "@/components/onboarding/PageTip";
 import { TIP_IDS } from "@/lib/onboarding";
@@ -65,9 +66,14 @@ export default function VendorsPage() {
 
   // Add-vendor form validation (FP-076 / FP-073): block an obviously-malformed email,
   // and warn (non-blocking) when the name duplicates an existing vendor.
+  // The email rule moved to lib/contact-email (#369) so this form and the detail edit
+  // form share ONE definition — they had drifted, and the edit form had none at all.
   const trimmedName = name.trim();
-  const trimmedEmail = email.trim();
-  const emailInvalid = trimmedEmail !== "" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
+  // The MESSAGE is the decision (#369): an address rejected for an invisible character needs
+  // different copy than a plain typo, or the user re-reads a correct-looking field with nothing
+  // to act on. `emailInvalid` is derived from it so the gate and the copy cannot disagree.
+  const emailError = contactEmailError(email);
+  const emailInvalid = emailError !== undefined;
   const duplicateName =
     trimmedName !== "" && all.some((v) => v.name.trim().toLowerCase() === trimmedName.toLowerCase());
 
@@ -85,15 +91,18 @@ export default function VendorsPage() {
 
       <Card>
         <CardContent className="p-5">
-          {/* A real <form> so Enter submits (FP-076); type="email" + a light format check
-              so a typo'd address isn't accepted silently, and a duplicate-name hint (FP-073). */}
+          {/* A real <form> so Enter submits (FP-076); a light format check so a typo'd address
+              isn't accepted silently, and a duplicate-name hint (FP-073). */}
           <form
             className="flex flex-col gap-3 sm:flex-row sm:items-end"
             onSubmit={async (e) => {
               e.preventDefault();
               if (!trimmedName || emailInvalid) return;
               try {
-                await createVendor.mutateAsync({ name: trimmedName, contactEmail: trimmedEmail || null });
+                // Normalize through the SHARED helper, not a local `.trim() || null` — the two
+                // forms must agree on the transport rule as well as the predicate (#369), and
+                // the native trims differ from the server's stripping on U+0085 / U+FEFF.
+                await createVendor.mutateAsync({ name: trimmedName, contactEmail: trimContactEmail(email) });
                 toast.success("Vendor added");
                 setName("");
                 setEmail("");
@@ -113,7 +122,15 @@ export default function VendorsPage() {
               <label htmlFor={emailId} className="text-xs text-slate-500">Contact email</label>
               <Input
                 id={emailId}
-                type="email"
+                // Deliberately NOT type="email" (#369). This input sits in a real <form>, so the
+                // browser's native constraint validation would run — and its local-part grammar is
+                // ASCII-only, so `josé@empresa.es` (which our shared predicate accepts, and which
+                // the detail form saves happily) left "Add vendor" enabled, showed no error, and
+                // silently never submitted. That is the exact form-to-form drift this ticket exists
+                // to remove, on a new axis. `inputMode` keeps the mobile email keyboard and
+                // `autoComplete` keeps autofill, so the only thing dropped is the contradicting
+                // grammar. Chosen over `noValidate` on the <form> so the guarantee is local to the
+                // field rather than an attribute a future edit can quietly delete.
                 inputMode="email"
                 autoComplete="email"
                 value={email}
@@ -123,7 +140,7 @@ export default function VendorsPage() {
                 aria-describedby={emailInvalid ? emailErrId : undefined}
               />
               {emailInvalid && (
-                <p id={emailErrId} className="mt-1 text-xs text-red-600">Enter a valid email address.</p>
+                <p id={emailErrId} className="mt-1 text-xs text-red-600">{emailError}</p>
               )}
             </div>
             <Button type="submit" className="w-full sm:w-auto" disabled={!trimmedName || emailInvalid || createVendor.isPending}>

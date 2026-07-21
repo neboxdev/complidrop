@@ -545,3 +545,100 @@ describe("VendorsPage — client-side search + pagination (#187)", () => {
     expect(screen.getByRole("link", { name: "Vendor 01" })).toBeInTheDocument();
   });
 });
+
+describe("VendorsPage — add-form contact email validation (#369)", () => {
+  // This form has guarded the email since FP-076; #369 moved the rule into the shared
+  // lib/contact-email predicate so the detail edit form could reuse it. These pin that the
+  // extraction preserved the behavior — a silent regression here would re-open the gap
+  // from the other side.
+  function mount() {
+    server.use(http.get(url("/api/vendors"), () => jsonOk([])));
+    return renderWithProviders(<VendorsPage />, { auth: authedMe });
+  }
+
+  const addButton = () => screen.getByRole("button", { name: /add vendor/i });
+
+  it("blocks Add and explains why when the email is malformed", async () => {
+    mount();
+    fireEvent.change(await screen.findByLabelText(/^name$/i), { target: { value: "Acme" } });
+    const email = screen.getByLabelText(/^contact email$/i);
+
+    fireEvent.change(email, { target: { value: "jane@acme,com" } });
+
+    expect(addButton()).toBeDisabled();
+    expect(screen.getByText(/enter a valid contact email address/i)).toBeInTheDocument();
+    expect(email).toHaveAttribute("aria-invalid", "true");
+  });
+
+  it("allows a blank email — a vendor with no contact email is a valid state", async () => {
+    mount();
+    fireEvent.change(await screen.findByLabelText(/^name$/i), { target: { value: "Acme" } });
+    expect(addButton()).toBeEnabled();
+    expect(screen.queryByText(/enter a valid contact email address/i)).toBeNull();
+  });
+
+  it("sends the address stripped with the SHARED blank set, not a native trim", async () => {
+    // The transport switched from a local `trimmedEmail || null` to the shared
+    // trimContactEmail(), and nothing asserted it — the happy-path test discards the body.
+    //
+    // Padded with NEL (U+0085) and ZWSP (U+200B), NOT spaces and NOT NBSP/BOM. The choice is
+    // load-bearing: `String.prototype.trim` DOES strip NBSP and BOM (its WhiteSpace production
+    // covers them, unlike JS's `\s`), so padding with those would still pass against a plain
+    // `.trim()` and assert nothing. NEL and ZWSP are in the shared BLANK class but survive
+    // `.trim()`, so this fails the moment the form stops routing through the shared helper.
+    //
+    // That drift stores an address no reminder can reach: the per-(org, email) suppression key
+    // the Resend webhook writes is trimmed (#340), and a padded address never matches it.
+    let sent: unknown = undefined;
+    server.use(
+      http.get(url("/api/vendors"), () => jsonOk([])),
+      http.post(url("/api/vendors"), async ({ request }) => {
+        sent = await request.json();
+        return jsonOk({ id: "v_new_01" });
+      }),
+    );
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+
+    fireEvent.change(await screen.findByLabelText(/^name$/i), { target: { value: "Acme" } });
+    fireEvent.change(screen.getByLabelText(/^contact email$/i), {
+      target: { value: "\u0085ops@new.test\u200B" },
+    });
+
+    expect(addButton()).toBeEnabled();
+    fireEvent.click(addButton());
+
+    await waitFor(() => expect(sent).toBeDefined());
+    expect((sent as { contactEmail: string }).contactEmail).toBe("ops@new.test");
+  });
+
+  it("submits a non-ASCII address the shared predicate accepts", async () => {
+    // Regression guard for the second-pass finding: this input sat in a real <form> as
+    // type="email", so the browser's native constraint validation ran — and its local-part
+    // grammar is ASCII-only. `jos\u00E9@empresa.es` is in the shared corpus's ACCEPT list and the
+    // detail form saves it happily, but here Add stayed enabled, no error rendered, and the
+    // submit handler never fired: a dead end, and the exact form-to-form drift #369 exists to
+    // remove. The field is now inputMode="email" (soft-keyboard hint only), so the shared
+    // predicate is the only gate. Reverting to type="email" leaves `sent` undefined here.
+    let sent: unknown = undefined;
+    server.use(
+      http.get(url("/api/vendors"), () => jsonOk([])),
+      http.post(url("/api/vendors"), async ({ request }) => {
+        sent = await request.json();
+        return jsonOk({ id: "v_new_02" });
+      }),
+    );
+    renderWithProviders(<VendorsPage />, { auth: authedMe });
+
+    fireEvent.change(await screen.findByLabelText(/^name$/i), { target: { value: "Empresa" } });
+    fireEvent.change(screen.getByLabelText(/^contact email$/i), {
+      target: { value: "jos\u00E9@empresa.es" },
+    });
+
+    expect(screen.queryByText(/enter a valid contact email address/i)).toBeNull();
+    expect(addButton()).toBeEnabled();
+    fireEvent.click(addButton());
+
+    await waitFor(() => expect(sent).toBeDefined());
+    expect((sent as { contactEmail: string }).contactEmail).toBe("jos\u00E9@empresa.es");
+  });
+});

@@ -1,0 +1,252 @@
+{
+  "maxLength": 256,
+  "blankRanges": [
+    [
+      0,
+      32
+    ],
+    [
+      127,
+      160
+    ],
+    [
+      5760,
+      5760
+    ],
+    [
+      8192,
+      8205
+    ],
+    [
+      8232,
+      8233
+    ],
+    [
+      8239,
+      8239
+    ],
+    [
+      8287,
+      8287
+    ],
+    [
+      8288,
+      8288
+    ],
+    [
+      12288,
+      12288
+    ],
+    [
+      65279,
+      65279
+    ]
+  ],
+  "messages": {
+    "invalid": "Enter a valid contact email address, like ops@acmecatering.com - or leave it blank.",
+    "hiddenCharacter": "This address contains a hidden character - retype it, or leave it blank.",
+    "tooLong": "That email address is too long - use 256 characters or fewer, or leave it blank."
+  },
+  "_comment": [
+    "THE shared accept/reject corpus for the vendor contact-email predicate (#369).",
+    "Read by BOTH api/CompliDrop.Api.Tests/ContactEmailTests.cs and",
+    "frontend/src/lib/contact-email.test.ts, so a case added here is pinned on both sides and",
+    "the two implementations (api Services/ContactEmail.cs <-> frontend/src/lib/contact-email.ts)",
+    "cannot silently drift. Hand-maintained parallel lists were a review finding on the first",
+    "pass: they were already unequal at introduction.",
+    "",
+    "It lives in the api test tree, NOT under docs/, so api-ci's 'api/**' filter covers a",
+    "corpus-only edit; frontend-ci names it explicitly. Under docs/ NEITHER workflow ran for the",
+    "one change most likely to break the guarantee this file provides (a second-pass finding).",
+    "",
+    "Invisible characters are \\uXXXX escapes ON PURPOSE - a literal one is unreviewable.",
+    "They exist because .NET's \\s and JS's \\s are DIFFERENT character classes (.NET's includes",
+    "U+0085 and excludes U+FEFF; JS's is the reverse), and Trim() vs .trim() diverge on the same",
+    "two code points. Both implementations therefore spell the blank class out explicitly instead",
+    "of relying on \\s - these cases are what proves it. U+0000 additionally cannot be stored by",
+    "Postgres at all, so admitting it would 500 rather than 400.",
+    "",
+    "COVERAGE RULE: every range component of the blank class - including BOTH endpoints of every",
+    "multi-code-point range - carries a 'malformed' case (mid-string, where stripping cannot hide",
+    "it) AND a 'paddedValid' case (at an edge, where only the strip set is exercised). Those are",
+    "two different code paths over the same set, so a range present in one and missing from the",
+    "other only surfaces if both are covered. 'valid' additionally pins the code points ADJACENT",
+    "to every range bound, so an off-by-one that widened a range is caught as a false rejection.",
+    "'maxLength' is the varchar(256) column width, asserted against each side's own constant so",
+    "the two cannot drift - it was previously the only rule of the pair this file did not pin.",
+    "",
+    "'blankRanges' is the blank class ITSELF. The case lists above only SAMPLE it, so a range",
+    "added to one mirror alone used to pass both suites whenever the added code points were not",
+    "sampled. Each side now walks the BMP asserting its own predicate against these ranges, which",
+    "makes cross-language equivalence total. Adding a range means editing this list AND both",
+    "predicates - which is the point.",
+    "",
+    "'messages' is the user-facing rejection copy, shared so the client's inline message and the",
+    "server's 400 body cannot diverge. Hyphens here are ASCII on purpose: this file is consumed",
+    "by two languages and an em-dash round-trips badly through some tooling. Each side asserts",
+    "its own constants against these strings.",
+    "",
+    "'valid' means ONLY 'the predicate accepts this', not 'this is a good address'. Some adjacency",
+    "probes are bidi controls (U+202A, U+202E) - deliberately not in the blank class, so listed",
+    "here to pin the bound. Whether bidi controls belong in a stored address is a separate",
+    "question from #369 (this predicate is a typo catcher, not an RFC 5322 parser)."
+  ],
+  "valid": [
+    "ops@acmecatering.com",
+    "jane.doe+coi@sub.domain.co.uk",
+    "o'brien@acme.com",
+    "New.Ops+coi@sub.acme.co.uk",
+    "sample-vendor@example.com",
+    "jos\u00e9@empresa.es",
+    "a!b@acme.com",
+    "a~b@acme.com",
+    "a\u00a1b@acme.com",
+    "a\u167fb@acme.com",
+    "a\u1681b@acme.com",
+    "a\u1fffb@acme.com",
+    "a\u200eb@acme.com",
+    "a\u2027b@acme.com",
+    "a\u202ab@acme.com",
+    "a\u202eb@acme.com",
+    "a\u2030b@acme.com",
+    "a\u205eb@acme.com",
+    "a\u2061b@acme.com",
+    "a\u2fffb@acme.com",
+    "a\u3001b@acme.com",
+    "a\ufefeb@acme.com",
+    "a\uff00b@acme.com"
+  ],
+  "malformed": [
+    "jane@acme,com",
+    "Jane Smith <jane@acme.com>",
+    "jane",
+    "jane@",
+    "@acme.com",
+    "jane@acme",
+    "jane doe@acme.com",
+    "jane@@acme.com",
+    "jane@acme .com",
+    "jane\u0000@acme.com",
+    "jane\u001f@acme.com",
+    "jane @acme.com",
+    "jane\u007f@acme.com",
+    "jane\u0085@acme.com",
+    "jane\u00a0@acme.com",
+    "jane\u1680@acme.com",
+    "jane\u2000@acme.com",
+    "jane\u200b@acme.com",
+    "jane\u200d@acme.com",
+    "jane\u2028@acme.com",
+    "jane\u2029@acme.com",
+    "jane\u202f@acme.com",
+    "jane\u205f@acme.com",
+    "jane\u2060@acme.com",
+    "jane\u3000@acme.com",
+    "jane\ufeff@acme.com"
+  ],
+  "paddedValid": [
+    {
+      "raw": "  ops@acme.com  ",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\tops@acme.com\n",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u0000ops@acme.com\u0000",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u001fops@acme.com\u001f",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": " ops@acme.com ",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u007fops@acme.com\u007f",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u0085ops@acme.com\u0085",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u00a0ops@acme.com\u00a0",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u1680ops@acme.com\u1680",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u2000ops@acme.com\u2000",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u200bops@acme.com\u200b",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u200dops@acme.com\u200d",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u2028ops@acme.com\u2028",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u2029ops@acme.com\u2029",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u202fops@acme.com\u202f",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u205fops@acme.com\u205f",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u2060ops@acme.com\u2060",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u3000ops@acme.com\u3000",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\ufeffops@acme.com\ufeff",
+      "normalized": "ops@acme.com"
+    },
+    {
+      "raw": "\u0000\u001f \u007f\u0085\u00a0\u1680\u2000\u200b\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeffops@acme.com\ufeff\u3000\u2060\u205f\u202f\u2029\u2028\u200d\u200b\u2000\u1680\u00a0\u0085\u007f \u001f\u0000",
+      "normalized": "ops@acme.com"
+    }
+  ],
+  "blank": [
+    "",
+    "   ",
+    "\t\n",
+    "\u0000",
+    "\u001f",
+    " ",
+    "\u007f",
+    "\u0085",
+    "\u00a0",
+    "\u1680",
+    "\u2000",
+    "\u200b",
+    "\u200d",
+    "\u2028",
+    "\u2029",
+    "\u202f",
+    "\u205f",
+    "\u2060",
+    "\u3000",
+    "\ufeff",
+    "\u0000\u001f \u007f\u0085\u00a0\u1680\u2000\u200b\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff"
+  ]
+}

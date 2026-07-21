@@ -36,6 +36,31 @@ Both are defined in this repo's `.claude/agents/`.
   nonCompliant / expiringSoon or future pipeline buckets (ADR 0033 + Amendment 1).
 - A normal document delete RETAINS its blob (ADR 0013); the sample-demo clear DELETES
   its blob (ADR 0028). Both directions are deliberate.
+- Vendor contact-email validation is ADR 0038; the review-time facts that follow are
+  pointers into it, not a second copy of the rationale.
+  - Two email validators coexist ON PURPOSE: `Services/ContactEmail.IsWellFormed` (vendor
+    contact email — strict) and `AuthEndpoints.IsValidEmail` (account email — lax,
+    `Contains('@')`). Different evidence, different strictness — do not "unify" them.
+  - The pair that MUST agree is `Services/ContactEmail.cs` <-> `frontend/src/lib/contact-email.ts`;
+    drift between THOSE two is a real finding. It is pinned mechanically by the shared corpus
+    `api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json` (add a case THERE, not to
+    one suite) plus a BMP-walking class-vs-predicate test on each side. The corpus lives in the
+    api test tree so `api-ci`'s `api/**` filter covers a corpus-only edit; `frontend-ci` names it
+    explicitly. Moving it back under `docs/` silently un-enforces the guarantee.
+  - Both mirrors spell the blank class out as explicit `\uXXXX` ranges rather than `\s`, and strip
+    edges with a LINEAR SCAN rather than a regex. Both are load-bearing, not style: `\s` differs
+    between the engines, and the regex form is quadratic. Do not "simplify" either.
+    If you re-measure the regex: the hostile shape is blanks in the MIDDLE with a non-blank at
+    BOTH ends. Leading/trailing padding is linear and will wrongly clear the pattern.
+  - `valid` cases in the corpus mean "the predicate accepts this", NOT "this is a good address" —
+    some are bidi controls listed to pin a range bound. Bidi/invisible-format controls being
+    accepted is a KNOWN deferred decision (ADR 0038 Consequences), not an oversight to re-flag.
+- Vendor update is BLOCK-UNTIL-FIXED on a malformed contact email (#369): `UpdateVendor`
+  validates the submitted address whether or not this request changed it, so a vendor
+  whose STORED address is already malformed (written by the pre-#369 unguarded edit path)
+  must be corrected or cleared before unrelated edits land. Deliberate — rationale and the
+  rejected alternative are in ADR 0038. Finding those rows without opening each vendor is
+  [#430](https://github.com/neboxdev/complidrop/issues/430), not a defect here.
 - The sample-demo row is excluded from the plan-limit population on every enforcing /
   reporting surface (dashboard fence, portal fence, Settings `documentsUsed`) via the
   shared `PlanDocumentScope.CountsTowardLimit` predicate, and never generates mail

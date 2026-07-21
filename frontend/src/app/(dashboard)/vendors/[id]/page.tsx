@@ -12,6 +12,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { VendorCoverageBadge } from "@/components/VendorCoverageBadge";
 import { requirementSentence } from "@/lib/requirements";
 import { complianceStatusLabel } from "@/lib/display-labels";
+import { contactEmailError, trimContactEmail } from "@/lib/contact-email";
 import {
   useVendor,
   useGeneratePortalLink,
@@ -101,8 +102,16 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
   // not the editable form field — the server emails the persisted address, so an
   // unsaved edit must not enable the button. The detail re-renders with a fresh
   // vendor prop after a save invalidates the query, flipping this on once saved.
-  const savedEmail = vendor.contactEmail?.trim() ?? "";
+  // Stripped with the SHARED blank set (not .trim()) so presence agrees with the
+  // predicate about e.g. a stored lone ZWSP (#369).
+  const savedEmail = trimContactEmail(vendor.contactEmail) ?? "";
   const hasContactEmail = savedEmail.length > 0;
+  // #369 review: the button keys on VALIDITY, not mere presence. A legacy-malformed
+  // stored address (written by the pre-#369 unguarded edit path) otherwise left this
+  // page calling the address invalid at the top while offering to email the upload
+  // link to it below — and toasting success at the unsendable string.
+  const savedEmailProblem = contactEmailError(vendor.contactEmail);
+  const hasUsableContactEmail = hasContactEmail && savedEmailProblem === undefined;
   const linkActionPending = generate.isPending || emailLink.isPending;
 
   // Plan gate (#261): upload links are a Pro entitlement — the server 403s link
@@ -181,6 +190,23 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
   // needs its id at this level so the label can reference it.
   const templateSelectId = useId();
 
+  // #369: shared with the list add-form so the two can't drift. Blank stays saveable —
+  // a vendor with no contact email is a supported state (the "Email link" button below
+  // already explains it needs one).
+  // The MESSAGE is the decision (#369): an address rejected for an invisible character needs
+  // different copy than a plain typo, or the user re-reads a correct-looking field with nothing
+  // to act on. `contactEmailInvalid` is derived from it so the gate and the copy cannot disagree.
+  const contactEmailProblem = contactEmailError(form.contactEmail);
+  const contactEmailInvalid = contactEmailProblem !== undefined;
+  // EVERY reason Save can be dead, not just the email guard — the checklist caveats below key
+  // on this so a pick wedged behind a blank NAME doesn't read as applied either (#369 review:
+  // same lie, different guard). Keep in lockstep with the Save button's disabled predicate.
+  const saveBlocked = !form.name.trim() || contactEmailInvalid;
+  // An edit the operator has made but cannot persist while Save is blocked. Compared
+  // against the SAVED assignment so an already-assigned checklist is not mislabelled as pending.
+  const checklistChangePending =
+    form.complianceTemplateId !== (vendor.complianceTemplateId ?? "");
+
   // Show what the chosen checklist checks AT DECISION TIME (#239 delta 1) — the
   // highest-leverage gap the #237 audit found: Pat used to assign a checklist on
   // faith, with nothing on the path ever revealing what it requires. Keyed on the
@@ -220,7 +246,16 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <LabeledInput label="Name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
-            <LabeledInput label="Contact email" value={form.contactEmail} onChange={(v) => setForm({ ...form, contactEmail: v })} />
+            {/* #369: the edit form had no format check while the list add-form did, so a typo
+                corrected here saved 200 OK and then broke every reminder send silently. Same
+                shared predicate as the add-form; the server enforces the same 400. */}
+            <LabeledInput
+              label="Contact email"
+              inputMode="email"
+              value={form.contactEmail}
+              onChange={(v) => setForm({ ...form, contactEmail: v })}
+              error={contactEmailProblem}
+            />
             <LabeledInput label="Contact phone" value={form.contactPhone} onChange={(v) => setForm({ ...form, contactPhone: v })} />
             <LabeledInput label="Category" value={form.category} onChange={(v) => setForm({ ...form, category: v })} />
             <div className="sm:col-span-2">
@@ -259,6 +294,14 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                   <span>
                     No requirements set — this vendor&apos;s documents won&apos;t be marked covered
                     or not until you choose one.
+                    {/* The under-claim mirror of the green panel's caveat below (#369 review):
+                        while Save is blocked, an unsaved CLEAR must not read as "no grading" —
+                        the saved checklist keeps grading until the clear actually persists. */}
+                    {saveBlocked && checklistChangePending && (
+                      <span className="mt-1 block font-medium">
+                        Not cleared yet — the saved checklist still applies until you save.
+                      </span>
+                    )}
                   </span>
                 </p>
               ) : (
@@ -266,6 +309,20 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                   role="status"
                   className="mt-2 rounded-md border border-emerald-100 bg-emerald-50/60 px-3 py-2.5 text-xs text-emerald-900"
                 >
+                  {/* This panel reflects the UNSAVED selection, so while Save is blocked it would
+                      otherwise read as an applied assignment — telling the operator grading is
+                      configured for a vendor that stays ungraded (#369). Checklist assignment
+                      drives grading, so that is a compliance claim, not just a UI nit.
+                      Keyed on saveBlocked — ANY dead-Save reason (blank name included), not only
+                      the email guard: the lie is identical whichever guard holds Save down.
+                      Gated on the selection actually DIFFERING from what is stored: if this
+                      checklist is already assigned, the panel is describing reality and
+                      "not applied yet" would be its own lie. */}
+                  {saveBlocked && checklistChangePending && (
+                    <p className="mb-1.5 font-medium text-amber-800">
+                      Not applied yet — save to start grading against this checklist.
+                    </p>
+                  )}
                   {selectedTemplate.isLoading || !selectedTemplate.data ? (
                     <span className="text-emerald-800/70">Loading what this checklist requires…</span>
                   ) : selectedTemplate.data.rules.length === 0 ? (
@@ -333,12 +390,26 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                   Vendor name is required.
                 </p>
               )}
+              {/* #369: the same treatment for the contact-email block. The field-level error sits
+                  far up the form, and a disabled button never receives the hover that would show a
+                  title — so without this the operator sees a dead Save with no reason, which is
+                  most confusing on exactly the vendor this gate exists for: one whose STORED
+                  address is already malformed, where Save is disabled before they touch anything.
+                  Names the checklist explicitly because that edit is the costly one to lose. */}
+              {contactEmailInvalid && form.name.trim() && (
+                <p role="status" className="text-xs text-rose-600">
+                  Fix or clear the contact email before saving — including any checklist change.
+                </p>
+              )}
               <Button
                 onClick={async () => {
                   try {
                     await update.mutateAsync({
+                      // #369: send the TRIMMED address so the value that satisfied the
+                      // enabled-state is the value transmitted (the server trims too, but
+                      // agreeing here keeps the two from ever disagreeing about what was checked).
                       name: form.name.trim(),
-                      contactEmail: form.contactEmail || null,
+                      contactEmail: trimContactEmail(form.contactEmail),
                       contactPhone: form.contactPhone || null,
                       category: form.category || null,
                       complianceTemplateId: form.complianceTemplateId || null,
@@ -348,7 +419,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                     toast.error(err instanceof Error ? err.message : "Failed to update vendor");
                   }
                 }}
-                disabled={update.isPending || !form.name.trim()}
+                disabled={update.isPending || !form.name.trim() || contactEmailInvalid}
                 title={form.name.trim() ? undefined : "Vendor name is required."}
               >
                 Save changes
@@ -372,7 +443,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                   instead (#261 review). */}
               <Button
                 onClick={emailLinkToVendor}
-                disabled={portalGated || !hasContactEmail || linkActionPending}
+                disabled={portalGated || !hasUsableContactEmail || linkActionPending}
               >
                 <Mail className="w-4 h-4 mr-1" /> Email link to {vendor.name}
               </Button>
@@ -397,6 +468,11 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
           {!portalGated && !hasContactEmail && (
             <p className="text-xs text-amber-700">
               Add a contact email above and save to email the upload link to {vendor.name}.
+            </p>
+          )}
+          {!portalGated && hasContactEmail && !hasUsableContactEmail && (
+            <p className="text-xs text-amber-700">
+              Fix the contact email above and save to email the upload link to {vendor.name}.
             </p>
           )}
 
@@ -512,15 +588,45 @@ function complianceBadgeClass(status: string): string {
   }
 }
 
-function LabeledInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+function LabeledInput({
+  label,
+  value,
+  onChange,
+  inputMode,
+  error,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  /**
+   * Soft-keyboard hint only (#369). Deliberately NOT a `type` passthrough: `type="email"` brings
+   * the browser's ASCII-only native grammar, which contradicts the shared `isMalformedContactEmail`
+   * predicate on addresses like `josé@empresa.es`, and its value sanitizer silently strips a
+   * DIFFERENT whitespace set than the shared helper does. Both would reintroduce the form-to-form
+   * drift #369 exists to remove. The predicate + `error` below are the whole gate.
+   */
+  inputMode?: "email" | "tel" | "numeric";
+  /** Inline validation message; when set the input is marked invalid and describes it (#369). */
+  error?: string;
+}) {
   // a11y: per-instance id wires label→input via htmlFor (#76). useId
   // gives a stable id per LabeledInput instance, so two inputs with
   // the same `label` prop on the same page each get their own id.
   const id = useId();
+  const errId = useId();
   return (
     <div>
       <label htmlFor={id} className="text-xs text-slate-500">{label}</label>
-      <Input id={id} value={value} onChange={(e) => onChange(e.target.value)} className="mt-1" />
+      <Input
+        id={id}
+        inputMode={inputMode}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="mt-1"
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? errId : undefined}
+      />
+      {error && <p id={errId} className="mt-1 text-xs text-red-600">{error}</p>}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using CompliDrop.Api.Endpoints;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
@@ -817,5 +818,253 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         await using var db = CreateSystemDb();
         var vendor = await db.Vendors.IgnoreQueryFilters().SingleAsync(v => v.Id == vendorId);
         vendor.ContactEmail.Should().Be("ops@acme.test");
+    }
+
+    // ---- #369: contact email format validation -------------------------------------------------
+    // The vendors list add-form guarded this (FP-076); the detail edit form did not, and the API
+    // only trimmed. A typo saved through the edit path returned 200 OK and then broke every
+    // reminder send silently — sends retry in place (ADR 0025) and surface nothing to the operator.
+    // The API is the authoritative gate because it is reachable without either form.
+    //
+    // The predicate's own unit tests, the shared-corpus loader and the MemberData providers live in
+    // ContactEmailTests — a plain class, so the cross-language agreement pin does not need Docker
+    // and a per-case DB reset to run. What stays HERE is what genuinely needs HTTP + a database:
+    // that the gate is actually wired into both write paths, with the right status and error code,
+    // and that a rejected write leaves the stored address untouched. Both read the SAME corpus.
+
+    [Theory]
+    [MemberData(nameof(ContactEmailTests.MalformedEmails), MemberType = typeof(ContactEmailTests))]
+    public async Task Creating_a_vendor_with_a_malformed_contact_email_is_400_and_stores_nothing(string bad)
+    {
+        var auth = await RegisterAndLoginAsync();
+
+        var resp = await auth.Client.PostAsJsonAsync("/api/vendors", new
+        {
+            name = "Acme Catering",
+            contactEmail = bad,
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = (Guid?)null,
+        });
+
+        // Specifically a 400, not a 500: the NUL case reaches Postgres as SQLSTATE 22021 without
+        // the control-character exclusion, exactly like an over-length value without the cap.
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"{ContactEmailTests.Show(bad)} is not a usable address");
+        (await ErrorCode(resp)).Should().Be("validation.contact_email");
+
+        await using var db = CreateSystemDb();
+        (await db.Vendors.AnyAsync(v => v.Name == "Acme Catering"))
+            .Should().BeFalse("the rejected create must not land");
+    }
+
+    [Theory]
+    [MemberData(nameof(ContactEmailTests.MalformedEmails), MemberType = typeof(ContactEmailTests))]
+    public async Task Updating_a_vendor_with_a_malformed_contact_email_is_400_and_preserves_the_stored_address(string bad)
+    {
+        // This is the path #369 actually reports — where a contact email gets corrected, and mistyped.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Acme Catering", "ops@acme.test");
+
+        var resp = await auth.Client.PutAsJsonAsync($"/api/vendors/{vendorId}", new
+        {
+            name = "Acme Catering",
+            contactEmail = bad,
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = (Guid?)null,
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, $"{ContactEmailTests.Show(bad)} is not a usable address");
+        (await ErrorCode(resp)).Should().Be("validation.contact_email");
+
+        await using var db = CreateSystemDb();
+        (await db.Vendors.SingleAsync(v => v.Id == vendorId)).ContactEmail
+            .Should().Be("ops@acme.test", "a rejected update must not clobber the good address");
+    }
+
+    [Fact]
+    public async Task A_blank_contact_email_stays_acceptable_on_both_write_paths()
+    {
+        // Load-bearing at the HTTP level too: if the format gate turned blank into a 400, every
+        // vendor without a contact email would become unsaveable.
+        var auth = await RegisterAndLoginAsync();
+
+        foreach (var blank in new[] { null, "", "   " })
+        {
+            var created = await auth.Client.PostAsJsonAsync("/api/vendors", new
+            {
+                name = $"No Contact {blank?.Length ?? -1}",
+                contactEmail = blank,
+                contactPhone = (string?)null,
+                category = (string?)null,
+                complianceTemplateId = (Guid?)null,
+            });
+            created.StatusCode.Should().Be(HttpStatusCode.OK, $"blank '{blank ?? "<null>"}' must be accepted");
+
+            var id = (await Data(created)).GetProperty("id").GetGuid();
+            var updated = await auth.Client.PutAsJsonAsync($"/api/vendors/{id}", new
+            {
+                name = "Still No Contact",
+                contactEmail = blank,
+                contactPhone = (string?)null,
+                category = (string?)null,
+                complianceTemplateId = (Guid?)null,
+            });
+            updated.StatusCode.Should().Be(HttpStatusCode.OK);
+
+            await using var db = CreateSystemDb();
+            (await db.Vendors.SingleAsync(v => v.Id == id)).ContactEmail
+                .Should().BeNull("blank normalizes to null, not empty string");
+        }
+    }
+
+    [Fact]
+    public async Task A_valid_contact_email_is_accepted_and_trimmed_on_update()
+    {
+        // The trim is #340's rule: the stored value must round-trip EXACTLY against the
+        // per-(org, email) suppression key the Resend webhook writes Trim()'d.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Acme Catering", "ops@acme.test");
+
+        var resp = await auth.Client.PutAsJsonAsync($"/api/vendors/{vendorId}", new
+        {
+            name = "Acme Catering",
+            contactEmail = "  New.Ops+coi@sub.acme.co.uk  ",
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = (Guid?)null,
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.Vendors.SingleAsync(v => v.Id == vendorId)).ContactEmail
+            .Should().Be("New.Ops+coi@sub.acme.co.uk", "trimmed, with the vendor's display casing preserved");
+    }
+
+    [Fact]
+    public async Task An_over_length_contact_email_is_400_rather_than_a_500_from_the_varchar_256_column()
+    {
+        // Vendor.ContactEmail is varchar(256) and Npgsql does NOT truncate, so without the length
+        // cap in the validator this write raises 22001 and surfaces as a 500 (a slice of #389's
+        // class on this field). The at-limit address must still be accepted — the cap is a boundary,
+        // not a margin.
+        var auth = await RegisterAndLoginAsync();
+        const string domain = "@acme.com";
+        var atLimit = new string('a', ContactEmail.MaxLength - domain.Length) + domain;
+        atLimit.Length.Should().Be(ContactEmail.MaxLength);
+
+        var ok = await auth.Client.PostAsJsonAsync("/api/vendors", new
+        {
+            name = "At Limit",
+            contactEmail = atLimit,
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = (Guid?)null,
+        });
+        ok.StatusCode.Should().Be(HttpStatusCode.OK, "an address exactly at the column width is storable");
+
+        var tooLong = await auth.Client.PostAsJsonAsync("/api/vendors", new
+        {
+            name = "Over Limit",
+            contactEmail = "a" + atLimit,
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = (Guid?)null,
+        });
+        tooLong.StatusCode.Should().Be(HttpStatusCode.BadRequest, "one char over the column width is a 400, not a 500");
+        (await ErrorCode(tooLong)).Should().Be("validation.contact_email");
+    }
+
+    [Fact]
+    public void The_seeded_sample_vendor_address_satisfies_the_validator()
+    {
+        // #238 seeds this address on the sample vendor. Referenced through the constant (made
+        // internal for this) rather than a copied literal: a copy would still pass if the seed
+        // were changed to something the validator rejects, i.e. it could not detect the
+        // regression it is named for.
+        ContactEmail.IsWellFormed(SampleEndpoints.SampleVendorEmail).Should().BeTrue();
+    }
+
+    // ---- #369: vendors whose STORED address is already malformed --------------------------------
+    // These rows exist: they are what the previously-unguarded edit path wrote. The deliberate
+    // decision (recorded in .claude/reviewers.md and the PR body) is BLOCK-UNTIL-FIXED — the update
+    // gate validates the submitted address whether or not this request changed it, so the operator
+    // must correct a field that is genuinely broken before other edits land. Rationale: the address
+    // is actively failing (no reminder can reach it), the detail form surfaces the reason inline on
+    // load with Save disabled, and the fix is one edit. The alternative (validate only on change)
+    // would let a known-dead address persist indefinitely behind unrelated saves.
+
+    [Fact]
+    public async Task A_vendor_whose_stored_address_is_already_malformed_must_fix_it_before_other_edits_land()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Legacy Vendor", "ops@acme.test");
+
+        // Simulate the pre-fix row: write a malformed address straight to the DB, bypassing the
+        // new gate (this is exactly what the unguarded edit path used to persist).
+        await using (var seed = CreateSystemDb())
+        {
+            var v = await seed.Vendors.IgnoreQueryFilters().SingleAsync(x => x.Id == vendorId);
+            v.ContactEmail = "Jane Smith <jane@acme.com>";
+            await seed.SaveChangesAsync();
+        }
+
+        // Renaming while echoing the stored bad address is refused — the gate does not care that
+        // this request didn't introduce the typo.
+        var blocked = await auth.Client.PutAsJsonAsync($"/api/vendors/{vendorId}", new
+        {
+            name = "Legacy Vendor Renamed",
+            contactEmail = "Jane Smith <jane@acme.com>",
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = (Guid?)null,
+        });
+        blocked.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(blocked)).Should().Be("validation.contact_email");
+
+        // Correcting the address in the same save is the intended escape hatch, and it lands.
+        var fixedUp = await auth.Client.PutAsJsonAsync($"/api/vendors/{vendorId}", new
+        {
+            name = "Legacy Vendor Renamed",
+            contactEmail = "jane@acme.com",
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = (Guid?)null,
+        });
+        fixedUp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var after = await db.Vendors.SingleAsync(v => v.Id == vendorId);
+        after.ContactEmail.Should().Be("jane@acme.com");
+        after.Name.Should().Be("Legacy Vendor Renamed");
+    }
+
+    [Fact]
+    public async Task Clearing_a_legacy_malformed_address_is_also_accepted()
+    {
+        // The other escape hatch: an operator who doesn't know the right address can blank the
+        // field rather than being stuck. Blank is a supported state, so this must not 400.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await CreateVendorAsync(auth.Client, "Legacy Vendor", "ops@acme.test");
+
+        await using (var seed = CreateSystemDb())
+        {
+            var v = await seed.Vendors.IgnoreQueryFilters().SingleAsync(x => x.Id == vendorId);
+            v.ContactEmail = "jane@acme,com";
+            await seed.SaveChangesAsync();
+        }
+
+        var cleared = await auth.Client.PutAsJsonAsync($"/api/vendors/{vendorId}", new
+        {
+            name = "Legacy Vendor",
+            contactEmail = (string?)null,
+            contactPhone = (string?)null,
+            category = (string?)null,
+            complianceTemplateId = (Guid?)null,
+        });
+
+        cleared.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.Vendors.SingleAsync(v => v.Id == vendorId)).ContactEmail.Should().BeNull();
     }
 }

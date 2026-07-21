@@ -39,6 +39,16 @@
     <!-- SYNTHETIC rule-engine JSON fixtures, copied next to the test assembly so RuleSetLoader
          directory/file loading is discoverable via AppContext.BaseDirectory. -->
     <None Update="RuleEngineFixtures\**\*.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The SHARED contact-email corpus (#369). The frontend suite reads this SAME file by relative
+         path — driving both sides from one list is what keeps Services/ContactEmail.cs and
+         frontend/src/lib/contact-email.ts from drifting (hand-maintained parallel lists were already
+         unequal when they were introduced).
+         It lives HERE, inside the api test tree, rather than under docs/, so that api-ci's "api/**"
+         path filter covers it automatically: a PR that edits only the corpus — the exact change
+         .claude/reviewers.md instructs contributors to make — must run the suites that consume it,
+         or the "mechanically pinned" guarantee is unenforced precisely where it matters. frontend-ci
+         names it explicitly, the same way it already reaches for ExtractionPrompts.cs (#272). -->
+    <None Update="SharedFixtures\contact-email-cases.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
