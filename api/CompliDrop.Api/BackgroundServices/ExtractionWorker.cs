@@ -422,8 +422,14 @@ public class ExtractionWorker(
         // Expired and never triggers a reminder. Field NAMES only, never values: extracted field
         // values are document PII and must not reach logs/Sentry (CLAUDE.md § frontend error
         // monitoring applies the same rule to the backend's structured logs).
+        //
+        // De-duped by field name, LAST value wins — matching fieldsDict above, the typed columns
+        // themselves, and the sibling writer (DocumentEndpoints.UpdateFields). Accumulating on every
+        // occurrence instead meant a model that emitted a canonical field twice (unreadable, then
+        // readable) parsed its column correctly and STILL got routed to manual review, on the strength
+        // of a value the document no longer holds.
         var unreadableFields = new List<string>();
-        foreach (var f in extraction.Fields)
+        foreach (var f in extraction.Fields.GroupBy(x => x.Name).Select(g => g.Last()))
             if (CanonicalDocumentFields.ApplyToTypedColumn(doc, f.Name, f.Value) == TypedColumnResult.Unreadable)
                 unreadableFields.Add(f.Name);
 
