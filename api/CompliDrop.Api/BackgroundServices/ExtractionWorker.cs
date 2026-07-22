@@ -415,23 +415,29 @@ public class ExtractionWorker(
         // Shared with the manual-edit path (DocumentEndpoints.UpdateFields) via
         // CanonicalDocumentFields so both parse identically — see ADR 0017.
         //
-        // Collect the fields the model returned NON-BLANK but unparseable (#383, ADR 0040). Those
-        // clear their typed column, which is indistinguishable downstream from "the certificate has no
-        // such value" — so a real expiration the parser choked on ("12/31/2026 (per endorsement)")
-        // would otherwise leave a high-confidence, no-reprocess-signal document that can never turn
-        // Expired and never triggers a reminder. Field NAMES only, never values: extracted field
-        // values are document PII and must not reach logs/Sentry (CLAUDE.md § frontend error
-        // monitoring applies the same rule to the backend's structured logs).
-        //
-        // De-duped by field name, LAST value wins — matching fieldsDict above, the typed columns
-        // themselves, and the sibling writer (DocumentEndpoints.UpdateFields). Accumulating on every
-        // occurrence instead meant a model that emitted a canonical field twice (unreadable, then
-        // readable) parsed its column correctly and STILL got routed to manual review, on the strength
-        // of a value the document no longer holds.
-        var unreadableFields = new List<string>();
         foreach (var f in extraction.Fields.GroupBy(x => x.Name).Select(g => g.Last()))
-            if (CanonicalDocumentFields.ApplyToTypedColumn(doc, f.Name, f.Value) == TypedColumnResult.Unreadable)
-                unreadableFields.Add(f.Name);
+            CanonicalDocumentFields.ApplyToTypedColumn(doc, f.Name, f.Value);
+
+        // Which fields did the model return NON-BLANK but unparseable (#383, ADR 0040)? Those clear
+        // their typed column, which is indistinguishable downstream from "the certificate has no such
+        // value" — so a real expiration the parser choked on ("12/31/2026 (per endorsement)") would
+        // otherwise leave a high-confidence, no-reprocess-signal document that can never turn Expired
+        // and never triggers a reminder.
+        //
+        // Asked of the DOCUMENT, through the same DocumentFieldReadability predicate the request path
+        // uses (DocumentEndpoints.ResolveManualReview) and the same one the detail DTO reports. This
+        // used to be a second, independent mechanism — a per-field TypedColumnResult accumulated in
+        // this loop — with nothing pinning the two equal, so "is this document in the #383 state?" had
+        // two answers that could drift apart (#383 review round 2, S5). Both inputs it needs are
+        // already final at this point: doc.ExtractionFields was assigned from fieldsDict above and the
+        // typed columns were just written. Last-value-wins now falls out structurally rather than
+        // being something this loop has to remember — the JSON mirror and the typed columns are both
+        // last-wins, and the predicate reads only those.
+        //
+        // Field NAMES only in the log, never values: extracted field values are document PII and must
+        // not reach logs/Sentry (CLAUDE.md § frontend error monitoring applies the same rule to the
+        // backend's structured logs).
+        var unreadableFields = DocumentFieldReadability.UnreadableCanonicalFields(doc);
 
         db.DocumentFields.RemoveRange(db.DocumentFields.Where(df => df.DocumentId == doc.Id));
         foreach (var f in extraction.Fields)
@@ -457,13 +463,13 @@ public class ExtractionWorker(
         // low average confidence and the model's own reprocess signal (#383): neither of those fires
         // for a confidently-read date in a shape we can't parse, so without this the document looks
         // completely healthy while a compliance-critical column sits silently null.
-        doc.ExtractionStatus = avgConf < 0.7 || extraction.NeedsReprocessing || unreadableFields.Count > 0
+        doc.ExtractionStatus = avgConf < 0.7 || extraction.NeedsReprocessing || unreadableFields.Length > 0
             ? ExtractionStatus.ManualRequired
             : ExtractionStatus.Completed;
-        if (unreadableFields.Count > 0)
+        if (unreadableFields.Length > 0)
             logger.LogWarning(
                 "Document {DocumentId} returned {Count} canonical field(s) we could not parse ({Fields}); routed to manual review",
-                doc.Id, unreadableFields.Count, string.Join(", ", unreadableFields));
+                doc.Id, unreadableFields.Length, string.Join(", ", unreadableFields));
         doc.ExtractionCompletedAt = now;
         doc.ProcessingError = null;
         doc.UpdatedAt = now;

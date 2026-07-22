@@ -247,6 +247,10 @@ public static class DocumentEndpoints
                     c.ComplianceRule.ErrorMessage,
                     c.ActualValue, c.IsPassed, c.Notes, c.CheckedAt))
                 .ToArray(),
+            // The #383 state, from the same walk that raises the review flag in ResolveManualReview —
+            // so the detail page can NAME the field it couldn't read instead of pointing at a
+            // confidence outline an unreadable (high-confidence) value never gets. (ADR 0040 Amendment 2)
+            DocumentFieldReadability.UnreadableCanonicalFields(doc),
             extractionFields,
             doc.ExtractionPromptVersion,
             doc.ProcessingError,

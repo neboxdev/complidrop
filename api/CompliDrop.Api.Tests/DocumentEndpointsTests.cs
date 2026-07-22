@@ -1869,6 +1869,85 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed, "an honest absence is not a read failure");
     }
 
+    [Theory]
+    [InlineData("effective_date", "effective as of 01/01/2026, see endorsement")]
+    [InlineData("expiration_date", "2020-01-01 (per endorsement)")]
+    [InlineData("general_liability_limit", "$1M per occurrence")]
+    public async Task An_unreadable_value_on_ANY_canonical_field_routes_the_document_to_a_human(
+        string fieldName, string unreadableValue)
+    {
+        // CanonicalDocumentFields.All is the anti-drift device for the escalation — but nothing pinned
+        // its MEMBERSHIP, and the escalation was only ever exercised for expiration_date and
+        // general_liability_limit. Dropping effective_date from All (or adding a fourth field and
+        // forgetting it) left the whole suite green while the flag silently stopped re-raising for that
+        // field, restoring the #383 hole one field at a time. This drives every name in All through the
+        // REAL endpoint, so a shortened list goes red here (#383 review round 2, S1).
+        //
+        // Note the effective_date / general_liability_limit cases also stay COMPLIANT: this checklist
+        // carries a rule on expiration_date only, which still passes. That is precisely the
+        // configuration ADR 0040 part 3 exists to cover — with no rule on the field, the review flag is
+        // the ONLY thing that surfaces the unreadable value at all.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName, fieldValue = unreadableValue } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            $"an unreadable {fieldName} nulls its typed column, which reads downstream as 'the certificate has no such value'");
+
+        // And the same walk reaches the client, so the detail page can name THIS field.
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        body.GetProperty("data").GetProperty("unreadableFields")
+            .EnumerateArray().Select(e => e.GetString()).Should().Equal(fieldName);
+    }
+
+    [Fact]
+    public async Task The_detail_payload_names_the_canonical_field_we_could_not_read()
+    {
+        // The client half of the #383 dead end (review round 2, confirmed bug 2 / S3). The backend
+        // correctly refuses to clear ManualRequired while a value stays unreadable — but the detail
+        // page's review card was written for the ONLY previous cause of that status, low extraction
+        // confidence, and told the user to fix "the ones outlined in amber". An unreadable value is
+        // read with HIGH confidence (and UpdateFields pins an edited field's confidence to 1.0), so
+        // fieldBorderClass outlines NOTHING: the user is told to correct a field nothing marks, on a
+        // document whose flag they cannot clear. The page needs the field NAMES, and they must come
+        // from the same DocumentFieldReadability walk that raises the flag — a TypeScript re-derivation
+        // of "can this parse?" would drift from the .NET parse it mirrors.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+        await PutUnreadableExpirationAsync(auth.Client, docId);
+
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        var data = body.GetProperty("data");
+        data.GetProperty("extractionStatus").GetString().Should().Be("ManualRequired");
+        data.GetProperty("unreadableFields").EnumerateArray().Select(e => e.GetString())
+            .Should().Equal("expiration_date");
+        // The field the page will mark carries FULL confidence — the pre-existing amber mechanism
+        // cannot see this document, which is the whole reason the names have to be sent.
+        data.GetProperty("fields").EnumerateArray()
+            .First(f => f.GetProperty("fieldName").GetString() == "expiration_date")
+            .GetProperty("confidence").GetDouble().Should().Be(1.0);
+    }
+
+    [Fact]
+    public async Task The_detail_payload_reports_no_unreadable_fields_for_a_healthy_document()
+    {
+        // The discriminating other half: unreadableFields must be EMPTY on a document with a perfectly
+        // readable expiration, or the page would raise its "we couldn't read this" copy on every doc.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        body.GetProperty("data").GetProperty("unreadableFields")
+            .EnumerateArray().Should().BeEmpty();
+    }
+
     [Fact]
     public async Task Editing_a_gl_limit_with_a_currency_symbol_parses_instead_of_nulling_the_column()
     {

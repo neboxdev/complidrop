@@ -424,6 +424,40 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             "the value the document actually carries is readable, so there is nothing for a human to fix");
     }
 
+    [Theory]
+    [InlineData("expiration_date", "12/31/2026 (per endorsement)")]
+    [InlineData("expiration_date", "2027-03-15")]
+    [InlineData("expiration_date", "")]
+    [InlineData("effective_date", "see attached endorsement")]
+    [InlineData("effective_date", "2026-01-01")]
+    [InlineData("general_liability_limit", "1M per occurrence")]
+    [InlineData("general_liability_limit", "$1,000,000")]
+    [InlineData("policy_number", "GL-99887766")]
+    public async Task The_extraction_path_and_the_document_state_predicate_agree_on_unreadability(
+        string field, string value)
+    {
+        // "Does this document carry an unreadable canonical value?" used to be answered by TWO
+        // mechanisms — a per-field TypedColumnResult accumulated here on the extraction path, and the
+        // DocumentFieldReadability predicate on the request path — with nothing pinning them equal
+        // (#383 review round 2, S5). The repo pins every other mirrored predicate exactly this way
+        // (PlanLimitConsistencyTests, ExportService.SupersededIds), so this is the established pattern.
+        //
+        // PersistSuccess now COLLAPSES onto the shared predicate rather than keeping a second copy, so
+        // this asserts the collapse is behaviour-preserving across the readable / unreadable / blank /
+        // non-canonical cases — and goes red if a future edit re-introduces an independent mechanism
+        // that disagrees. ResultWith pins confidence at 0.95 with no reprocess signal, so the
+        // unreadable trigger is the ONLY thing that can set ManualRequired here.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWith(field, value);
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        var routedToReview = doc.ExtractionStatus == ExtractionStatus.ManualRequired;
+        DocumentFieldReadability.HasUnreadableCanonicalValue(doc).Should().Be(routedToReview,
+            "the state the persisted document is IN must match the reason the worker routed it (or didn't)");
+    }
+
     [Fact]
     public async Task Successful_extraction_writes_one_system_document_processed_audit_event()
     {

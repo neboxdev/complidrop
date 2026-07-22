@@ -396,6 +396,27 @@ public class ComplianceRuleEvaluationTests
     }
 
     [Fact]
+    public void Required_FAILS_on_a_NON_canonical_field_whose_JSON_value_is_null()
+    {
+        // The second half of the JsonValueKind.Null arm, and a PRE-EXISTING fail-open in its own right
+        // (#383 review round 2, S2). The arm was added for the canonical fields — where the reader
+        // called a stored JSON null "unreadable" while the writer called it Blank — but the generic
+        // GetRawText() fallback it replaced returned the literal 4-character string "null" for EVERY
+        // field, canonical or not. `required` is !IsNullOrWhiteSpace, so a non-canonical field stored
+        // as JSON null (PUT /fields with fieldValue: null, since FieldUpdateRequest.FieldValue is
+        // string?) SATISFIED its requirement off that string — a passing check on a value the document
+        // does not have. This path never goes through the canonical guard, so only a non-canonical
+        // field can prove it.
+        var doc = new Document { ExtractionFields = JsonDocument.Parse("""{"policy_number":null}""") };
+
+        var (passed, actual, note) = ComplianceCheckService.EvaluateRule(doc, Rule("required", "policy_number"));
+
+        passed.Should().BeFalse("a JSON null is an absence — it must not satisfy `required`");
+        actual.Should().BeNull("the user must never be shown the 4-character string \"null\"");
+        note.Should().Be("Field missing.", "an absence is missing, never unreadable — this field has no typed column at all");
+    }
+
+    [Fact]
     public void LookupValue_returns_null_for_an_unreadable_canonical_value()
     {
         // The fail-open path the ticket names. LookupValue is `internal` and reachable from outside
