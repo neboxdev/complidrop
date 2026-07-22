@@ -49,8 +49,10 @@ internal static class CanonicalDocumentFields
 
     /// <summary>
     /// The three canonical field names, so a caller that must inspect ALL of them
-    /// (<see cref="ComplianceCheckService.HasUnreadableCanonicalValue"/>) enumerates one list rather
-    /// than re-spelling the trio — a fourth copy would be the thing that drifts.
+    /// (<see cref="DocumentFieldReadability.UnreadableCanonicalFields"/>) enumerates one list rather
+    /// than re-spelling the trio — a fourth copy would be the thing that drifts. Membership is pinned
+    /// end-to-end by the endpoint escalation Theory (#383 review round 2, S1): drop a name here and a
+    /// real request stops routing that field's unreadable value to a human, so the suite goes red.
     /// </summary>
     public static readonly string[] All = [EffectiveDate, ExpirationDate, GeneralLiabilityLimit];
 

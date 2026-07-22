@@ -207,7 +207,7 @@ the verdict stays Compliant, the column stays null, the reminder windows stay si
 clicks nothing flags the document. That is the original #383 state, restored.
 
 The re-raise therefore moved **inside `ResolveManualReview`**, so every caller inherits it, and asks
-`ComplianceCheckService.HasUnreadableCanonicalValue(doc)` of the document's own resulting state. The
+`DocumentFieldReadability.HasUnreadableCanonicalValue(doc)` of the document's own resulting state. The
 settled-status guard survives verbatim, now captured **before** the resolve so `Completed`/
 `ManualRequired` is still measured against the incoming status; `Pending`, `Processing` and `Failed`
 are each pinned by a `[Theory]` case so a loosened `!= Pending` cannot pass. `UpdateFields` no longer
@@ -240,7 +240,8 @@ a defect.
   [0027](0027-compliance-date-window-boundaries.md) (the date windows that read the typed column),
   [0025](0025-reminder-catch-up-window-and-failed-send-retry.md) (the reminder windows that read it too)
 - Code: `Services/CanonicalDocumentFields.cs` (`TypedColumnResult`, `IsUnreadable`, `TryParseAmount`, `All`),
-  `Services/ComplianceCheckService.cs` (`EvaluateRule` guard, `LookupValue`, `RawFieldValue`,
-  `TryGetUnreadableValue`, `HasUnreadableCanonicalValue`),
+  `Services/DocumentFieldReadability.cs` (`TypedColumnValue`, `RawFieldValue`, `TryGetUnreadableValue`,
+  `UnreadableCanonicalFields`, `HasUnreadableCanonicalValue`),
+  `Services/ComplianceCheckService.cs` (`EvaluateRule` guard, `LookupValue`),
   `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`),
   `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview` — shared by `UpdateFields` and `MarkVerified`)

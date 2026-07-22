@@ -710,7 +710,7 @@ public static class DocumentEndpoints
         if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
             doc.ExtractionStatus = ExtractionStatus.Completed;
 
-        if (wasSettled && ComplianceCheckService.HasUnreadableCanonicalValue(doc))
+        if (wasSettled && DocumentFieldReadability.HasUnreadableCanonicalValue(doc))
             doc.ExtractionStatus = ExtractionStatus.ManualRequired;
     }
 

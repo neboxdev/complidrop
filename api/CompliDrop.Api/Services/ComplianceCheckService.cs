@@ -467,7 +467,7 @@ public class ComplianceCheckService(
         // show the user the raw text so they can fix it, and say WHY in the note. The document is also
         // pushed to ExtractionStatus.ManualRequired by both writers, so it surfaces even under a
         // checklist that carries no rule on the field.
-        if (TryGetUnreadableValue(doc, rule.FieldName, out var unreadable))
+        if (DocumentFieldReadability.TryGetUnreadableValue(doc, rule.FieldName, out var unreadable))
             return (false, unreadable, UnreadableValueNote);
 
         string? actual = LookupValue(doc, rule.FieldName);
@@ -565,91 +565,16 @@ public class ComplianceCheckService(
         {
             // The typed column is the authority for these three — it is what the date windows, the
             // dashboard counts and the reminder queries all read.
-            if (TypedColumnValue(doc, fieldName) is { } typed) return typed;
+            if (DocumentFieldReadability.TypedColumnValue(doc, fieldName) is { } typed) return typed;
 
             // Column null. The raw JSON is still consulted, but ONLY when it would parse (#383): a
             // legacy row whose JSON holds a readable value keeps resolving, while a value that failed
             // to parse — the case that nulled the column in the first place — resolves to null instead
             // of fail-open-satisfying a `required` rule with text nothing else in the system can read.
-            var raw = RawFieldValue(doc, fieldName);
+            var raw = DocumentFieldReadability.RawFieldValue(doc, fieldName);
             return CanonicalDocumentFields.IsUnreadable(fieldName, raw) ? null : raw;
         }
 
-        return RawFieldValue(doc, fieldName);
-    }
-
-    /// <summary>The canonical field's typed column rendered as the string a rule compares, or null when unset.</summary>
-    private static string? TypedColumnValue(Document doc, string fieldName)
-    {
-        if (string.Equals(fieldName, CanonicalDocumentFields.ExpirationDate, StringComparison.OrdinalIgnoreCase))
-            return doc.ExpirationDate?.ToString("yyyy-MM-dd");
-        if (string.Equals(fieldName, CanonicalDocumentFields.EffectiveDate, StringComparison.OrdinalIgnoreCase))
-            return doc.EffectiveDate?.ToString("yyyy-MM-dd");
-        if (string.Equals(fieldName, CanonicalDocumentFields.GeneralLiabilityLimit, StringComparison.OrdinalIgnoreCase))
-            return doc.GeneralLiabilityLimit?.ToString(CultureInfo.InvariantCulture);
-        return null;
-    }
-
-    /// <summary>The field's value straight out of the <see cref="Document.ExtractionFields"/> JSON, unparsed.</summary>
-    private static string? RawFieldValue(Document doc, string fieldName)
-    {
-        if (doc.ExtractionFields?.RootElement.ValueKind == JsonValueKind.Object
-            && doc.ExtractionFields.RootElement.TryGetProperty(fieldName, out var value))
-        {
-            return value.ValueKind switch
-            {
-                JsonValueKind.String => value.GetString(),
-                JsonValueKind.Number => value.ToString(),
-                // A JSON null is an ABSENCE, and must read as one on BOTH sides (#383 review).
-                // FieldUpdateRequest.FieldValue is string?, so PUT /fields with `fieldValue: null`
-                // stores a JSON null in ExtractionFields — and the generic GetRawText() arm below
-                // returned the literal 4-character string "null" for it. That made the reader
-                // disagree with the writer about the very same edit: ApplyToTypedColumn classified
-                // it Blank (honestly absent), while IsUnreadable saw non-blank text it could not
-                // parse and reported the value UNREADABLE — stamping a check row with the
-                // "we couldn't read this" note and ActualValue "null", which the detail page then
-                // showed the user verbatim. Sticky, too: the JSON null persists, so every later
-                // evaluation re-read "null". ADR 0040 is explicit that Blank stays Blank. Mapping it
-                // here also closes the pre-existing fail-open on NON-canonical fields, where
-                // `required` was satisfied by that same 4-character string.
-                JsonValueKind.Null or JsonValueKind.Undefined => null,
-                _ => value.GetRawText()
-            };
-        }
-        return null;
-    }
-
-    /// <summary>
-    /// True when <paramref name="fieldName"/> is a canonical field whose typed column is null while
-    /// the document DOES carry a raw value for it that cannot be parsed — the #383 state where a
-    /// null column means "unreadable", not "absent". Yields the raw text so the check row can show the
-    /// user exactly what is on the document. <see cref="CanonicalDocumentFields.ApplyToTypedColumn"/>
-    /// is the only writer of the three columns, so a null column with an unparseable raw value is
-    /// precisely the value it refused.
-    /// </summary>
-    internal static bool TryGetUnreadableValue(Document doc, string? fieldName, out string? raw)
-    {
-        raw = null;
-        if (string.IsNullOrWhiteSpace(fieldName) || !CanonicalDocumentFields.IsCanonical(fieldName)) return false;
-        if (TypedColumnValue(doc, fieldName) is not null) return false;
-        raw = RawFieldValue(doc, fieldName);
-        return CanonicalDocumentFields.IsUnreadable(fieldName, raw);
-    }
-
-    /// <summary>
-    /// True when the document CURRENTLY carries an unreadable value on any of the canonical three —
-    /// i.e. it is in the #383 state whatever request or extraction put it there.
-    ///
-    /// Asked of the document's own state rather than of one request's field list on purpose
-    /// (#383 review): <c>DocumentEndpoints.ResolveManualReview</c> must be able to tell whether the
-    /// review it is about to clear is actually resolved, and a request that never mentions
-    /// <c>expiration_date</c> — including the deliberately-empty save the detail page offers while
-    /// the review card is up — says nothing about whether the stored expiration is readable.
-    /// </summary>
-    internal static bool HasUnreadableCanonicalValue(Document doc)
-    {
-        foreach (var field in CanonicalDocumentFields.All)
-            if (TryGetUnreadableValue(doc, field, out _)) return true;
-        return false;
+        return DocumentFieldReadability.RawFieldValue(doc, fieldName);
     }
 }
