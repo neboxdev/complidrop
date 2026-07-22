@@ -48,6 +48,13 @@ internal static class CanonicalDocumentFields
     public const string GeneralLiabilityLimit = "general_liability_limit";
 
     /// <summary>
+    /// The three canonical field names, so a caller that must inspect ALL of them
+    /// (<see cref="ComplianceCheckService.HasUnreadableCanonicalValue"/>) enumerates one list rather
+    /// than re-spelling the trio — a fourth copy would be the thing that drifts.
+    /// </summary>
+    public static readonly string[] All = [EffectiveDate, ExpirationDate, GeneralLiabilityLimit];
+
+    /// <summary>
     /// Maps one field <paramref name="fieldName"/>/<paramref name="value"/> onto the document's
     /// typed column when the name is one of the canonical three; a no-op for any other name.
     /// Returns what happened so the caller can react to the <see cref="TypedColumnResult.Unreadable"/>

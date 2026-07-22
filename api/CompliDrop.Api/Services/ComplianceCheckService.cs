@@ -635,4 +635,21 @@ public class ComplianceCheckService(
         raw = RawFieldValue(doc, fieldName);
         return CanonicalDocumentFields.IsUnreadable(fieldName, raw);
     }
+
+    /// <summary>
+    /// True when the document CURRENTLY carries an unreadable value on any of the canonical three —
+    /// i.e. it is in the #383 state whatever request or extraction put it there.
+    ///
+    /// Asked of the document's own state rather than of one request's field list on purpose
+    /// (#383 review): <c>DocumentEndpoints.ResolveManualReview</c> must be able to tell whether the
+    /// review it is about to clear is actually resolved, and a request that never mentions
+    /// <c>expiration_date</c> — including the deliberately-empty save the detail page offers while
+    /// the review card is up — says nothing about whether the stored expiration is readable.
+    /// </summary>
+    internal static bool HasUnreadableCanonicalValue(Document doc)
+    {
+        foreach (var field in CanonicalDocumentFields.All)
+            if (TryGetUnreadableValue(doc, field, out _)) return true;
+        return false;
+    }
 }
