@@ -73,6 +73,24 @@ Both are defined in this repo's `.claude/agents/`.
   `totalDocuments` still COUNTS the sample — that asymmetry is deliberate ("what's in
   my account" vs "what do I owe for"), so a 4-real+1-sample org showing "5 documents"
   on the dashboard and "4 / 5" in Settings is correct (ADR 0028 Amendment 1, #367).
+- An UNREADABLE canonical value (non-blank, won't parse into its typed column) fails
+  CLOSED everywhere (ADR 0040, #383). The review-time facts that follow are pointers
+  into it, not a second copy of the rationale.
+  - `LookupValue`'s raw-string fallback is narrowed ON PURPOSE — a canonical field whose
+    typed column is null falls back only when the raw value RE-PARSES. That is the
+    fail-open path that let a `required` rule pass off text nothing else could read;
+    it is not an oversight and must not be "restored".
+  - The `EvaluateRule` guard sits AHEAD of the operator switch deliberately: `contains`
+    would otherwise substring-match the raw text of an unparseable date. Do not push it
+    down into the individual operators.
+  - The unreadable note is deliberately NOT `"Field missing."` — the two assert opposite
+    facts about the certificate. Do not unify them.
+  - `UpdateFields` escalates to `ManualRequired` only from `Completed`/`ManualRequired`.
+    That guard is load-bearing: overwriting `Pending` de-queues the document (the worker
+    claims on `ExtractionStatus == Pending`). A missing-status-guard version IS a bug.
+  - Deliberately NOT done: a new `ComplianceStatus` value, softening a computed verdict
+    to `Pending`, rejecting the edit with a 400, or extending the flag to non-canonical
+    fields. All four are recorded rejections in ADR 0040 § Alternatives.
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).
