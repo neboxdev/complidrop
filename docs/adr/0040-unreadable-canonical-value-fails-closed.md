@@ -184,6 +184,54 @@ lower, and that is the path the reported repro used.
 would flip every slash date's month and day — `Slash_format_dates_parse_month_first_under_invariant_culture`).
 An explicit edge strip fixes the currency case without touching the culture contract.
 
+## Amendment 1 — the review flag is a property of the DOCUMENT, not of a request (2026-07-22)
+
+From the #383 verified review, which found the escalation of part 3 leaky in two directions at once.
+The decision above is unchanged; this records how it is actually enforced.
+
+**The flag must be re-raised from the document's resulting state, not from the submitted field
+names.** As first written, `UpdateFields` collected the unreadable fields *of that request* and
+`ResolveManualReview` cleared `ManualRequired` unconditionally. So any save that did not happen to
+mention the unreadable field resolved the review — and **nothing re-raises it afterwards**
+(`ComplianceCheckService` never writes `ExtractionStatus`; only `ExtractionWorker` does), so the flag
+was gone until a full re-extraction. Three reachable routes, all in normal use:
+
+- an **empty-fields save** — the detail page deliberately enables Save with no edits precisely when
+  `extractionStatus` is `ManualRequired`, and posts an empty array;
+- a save touching only an **unrelated field** (the user fixes the policy number);
+- **`PUT /api/documents/{id}/verify`** (`MarkVerified`), the second `ResolveManualReview` caller,
+  which the escalation never covered at all.
+
+Under a checklist carrying no rule on the field — the exact configuration part 3 exists to cover —
+the verdict stays Compliant, the column stays null, the reminder windows stay silent, and after two
+clicks nothing flags the document. That is the original #383 state, restored.
+
+The re-raise therefore moved **inside `ResolveManualReview`**, so every caller inherits it, and asks
+`ComplianceCheckService.HasUnreadableCanonicalValue(doc)` of the document's own resulting state. The
+settled-status guard survives verbatim, now captured **before** the resolve so `Completed`/
+`ManualRequired` is still measured against the incoming status; `Pending`, `Processing` and `Failed`
+are each pinned by a `[Theory]` case so a loosened `!= Pending` cannot pass. `UpdateFields` no longer
+carries its own copy of the rule.
+
+**A JSON `null` is an absence, on both sides.** `FieldUpdateRequest.FieldValue` is `string?`, so
+`PUT /fields` with `fieldValue: null` stores a JSON null in `ExtractionFields`. `RawFieldValue`'s
+`GetRawText()` fallback returned the literal 4-character string `"null"` for it, which `IsUnreadable`
+then reported as unreadable — while `ApplyToTypedColumn` classified the very same edit `Blank`. One
+value, two contradictory readings: the ambiguity class this ADR exists to remove, and a direct
+violation of part 1's "Blank stays Blank". The user-visible result was a check row noting we could
+not read the value with `ActualValue` `"null"`, rendered verbatim, and a document dragged into manual
+review over a value it does not have — sticky, since the stored JSON null was re-read on every later
+evaluation. `RawFieldValue` now maps `JsonValueKind.Null`/`Undefined` to null ahead of the fallback
+arm. This also closes a pre-existing fail-open on **non-canonical** fields, where `required` was
+satisfied by that same 4-character string.
+
+**Last-value-wins on the extraction path.** `PersistSuccess` accumulated its unreadable set on *any*
+occurrence of a duplicated field name, while the JSON mirror, the typed columns and the sibling
+writer are all last-wins — so a model emitting a canonical field twice (unreadable, then readable)
+parsed its column correctly and was still routed to review over a value the document no longer holds.
+Now de-duped by name, last value wins. Fail-safe direction, so this was a consistency fix rather than
+a defect.
+
 ## References
 
 - Tickets: [#383](https://github.com/neboxdev/complidrop/issues/383), [#48](https://github.com/neboxdev/complidrop/issues/48)
@@ -191,6 +239,8 @@ An explicit edge strip fixes the currency case without touching the culture cont
   [0030](0030-compliance-verdict-combined-unit-of-work.md) (inputs + verdict in one unit of work),
   [0027](0027-compliance-date-window-boundaries.md) (the date windows that read the typed column),
   [0025](0025-reminder-catch-up-window-and-failed-send-retry.md) (the reminder windows that read it too)
-- Code: `Services/CanonicalDocumentFields.cs` (`TypedColumnResult`, `IsUnreadable`, `TryParseAmount`),
-  `Services/ComplianceCheckService.cs` (`EvaluateRule` guard, `LookupValue`, `TryGetUnreadableValue`),
-  `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`), `Endpoints/DocumentEndpoints.cs` (`UpdateFields`)
+- Code: `Services/CanonicalDocumentFields.cs` (`TypedColumnResult`, `IsUnreadable`, `TryParseAmount`, `All`),
+  `Services/ComplianceCheckService.cs` (`EvaluateRule` guard, `LookupValue`, `RawFieldValue`,
+  `TryGetUnreadableValue`, `HasUnreadableCanonicalValue`),
+  `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`),
+  `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview` — shared by `UpdateFields` and `MarkVerified`)

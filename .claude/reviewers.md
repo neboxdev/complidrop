@@ -85,9 +85,24 @@ Both are defined in this repo's `.claude/agents/`.
     down into the individual operators.
   - The unreadable note is deliberately NOT `"Field missing."` — the two assert opposite
     facts about the certificate. Do not unify them.
-  - `UpdateFields` escalates to `ManualRequired` only from `Completed`/`ManualRequired`.
-    That guard is load-bearing: overwriting `Pending` de-queues the document (the worker
-    claims on `ExtractionStatus == Pending`). A missing-status-guard version IS a bug.
+  - The request-side escalation to `ManualRequired` lives in ONE place —
+    `DocumentEndpoints.ResolveManualReview`, which BOTH `UpdateFields` and `MarkVerified`
+    call — and is computed from the document's RESULTING state, never from the field names
+    the request submitted. A request that doesn't mention the unreadable field (empty-fields
+    save, unrelated-field save, bare `PUT /verify`) must NOT resolve the review; a version
+    keyed on the submitted names IS a bug.
+  - That escalation fires only from a SETTLED status (`Completed`/`ManualRequired`), measured
+    BEFORE the resolve. Load-bearing: overwriting `Pending` de-queues the document (the worker
+    claims on `ExtractionStatus == Pending`), and `Processing`/`Failed` are the worker's own
+    states. A missing-status-guard version IS a bug — all three exclusions are pinned by a
+    Theory, so a loosened `!= Pending` goes red.
+  - A JSON `null` in `ExtractionFields` is an ABSENCE on both sides: `RawFieldValue` maps
+    `JsonValueKind.Null`/`Undefined` to null. Its old `GetRawText()` fallback returned the
+    literal 4-character string `"null"`, which the reader called unreadable while the writer
+    called it Blank — the same value, two verdicts. Restoring that arm re-opens the split.
+  - `ExtractionWorker.PersistSuccess` de-dupes the unreadable set LAST-VALUE-WINS, matching
+    the JSON mirror, the typed columns and the sibling writer. Accumulating per occurrence
+    sends a document to review over a value it no longer holds.
   - Deliberately NOT done: a new `ComplianceStatus` value, softening a computed verdict
     to `Pending`, rejecting the edit with a 400, or extending the flag to non-canonical
     fields. All four are recorded rejections in ADR 0040 § Alternatives.
