@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -43,14 +44,17 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     /// <summary>
     /// Builds a worker bound to the host's DI (so it resolves the test DB + fakes). The optional
     /// <paramref name="attemptTimeout"/> overrides the per-attempt timeout so the timeout-path tests
-    /// can use a sub-second budget instead of the production minimum.
+    /// can use a sub-second budget instead of the production minimum. Pass a
+    /// <see cref="ListLogger{T}"/> as <paramref name="logger"/> when the emitted log line is itself
+    /// the contract under test (the #383 unreadable-field warning and its PII rule) — the same
+    /// pattern <c>ReminderBackgroundServiceTests</c> uses for the #184 dead-letter flag.
     /// </summary>
-    private ExtractionWorker BuildWorker(TimeSpan? attemptTimeout = null)
+    private ExtractionWorker BuildWorker(TimeSpan? attemptTimeout = null, ILogger<ExtractionWorker>? logger = null)
     {
         var worker = new ExtractionWorker(
             Fixture.Factory.Services.GetRequiredService<IServiceScopeFactory>(),
             Options.Create(new ExtractionSettings()),
-            NullLogger<ExtractionWorker>.Instance);
+            logger ?? NullLogger<ExtractionWorker>.Instance);
         if (attemptTimeout is { } t) worker.AttemptTimeout = t;
         return worker;
     }
@@ -365,6 +369,59 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         var doc = await GetDocAsync(docId);
         doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
         doc.ExpirationDate.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task The_unreadable_field_warning_names_the_field_and_never_logs_its_value()
+    {
+        // The warning carries an explicit PII contract in its own comment — field NAMES only, never
+        // values, because extracted field values are document PII and must not reach logs/Sentry
+        // (CLAUDE.md § frontend error monitoring, applied to the backend's structured logs). Nothing
+        // pinned it while every worker test built with NullLogger, so the contract could be broken by
+        // adding one interpolated value and stay green (#383 review, S3).
+        const string documentValue = "12/31/2026 (per endorsement)";
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWith("expiration_date", documentValue);
+        var logger = new ListLogger<ExtractionWorker>();
+
+        await BuildWorker(logger: logger).ProcessDocumentAsync(docId, CancellationToken.None);
+
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired);
+        logger.Entries.Should()
+            .ContainSingle(e => e.Level == LogLevel.Warning && e.Message.Contains("could not parse"))
+            .Which.Message.Should().Contain("expiration_date",
+                "the operator has to know WHICH field needs a human, or the warning is unactionable");
+        logger.Entries.Should().NotContain(e => e.Message.Contains(documentValue),
+            "an extracted field VALUE is document PII and must never reach the logs");
+    }
+
+    [Fact]
+    public async Task A_canonical_field_emitted_twice_is_judged_on_its_last_value()
+    {
+        // Everything else in PersistSuccess is last-value-wins (the JSON mirror, the typed column),
+        // and so is the sibling writer (DocumentEndpoints.UpdateFields, "last value wins"). The
+        // unreadable set used to accumulate on ANY occurrence, so a model that emitted expiration_date
+        // twice — unreadable, then readable — parsed its column correctly and was STILL routed to
+        // manual review, on the strength of a value the document no longer holds (#383 review, S4).
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = new ExtractionResult(
+            DocumentType: "coi",
+            DocumentSubType: null,
+            Fields:
+            [
+                new ExtractedField("expiration_date", "12/31/2026 (per endorsement)", "string", 0.95),
+                new ExtractedField("expiration_date", "2026-12-31", "string", 0.95)
+            ],
+            NeedsReprocessing: false,
+            Usage: new ExtractionUsage(InputTokens: 100, OutputTokens: 50, EstimatedCostUsd: 0.01m));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExpirationDate.Should().Be(new DateTime(2026, 12, 31, 0, 0, 0, DateTimeKind.Utc),
+            "the LAST value is the one that landed in the typed column");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "the value the document actually carries is readable, so there is nothing for a human to fix");
     }
 
     [Fact]
