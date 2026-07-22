@@ -241,24 +241,22 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
         // #383 secondary, end to end: "$1,500,000" now parses into the typed column, so a certificate
         // that genuinely carries $1.5M passes a $1M floor instead of failing on "Unable to parse
         // numeric comparison" — the fail-CLOSED half of the same root cause.
-        var docId = Guid.NewGuid();
         var id = await SeedAsync(
             expiration: Anchor.AddDays(365),
             docType: "coi",
             extractionFields: Fields("general_liability_limit", "$1,500,000"),
             rules: ("coi", "general_liability_limit", "min_value", "$1,000,000"));
-        docId = id;
 
         // Drive the value through the production writer so the column holds what extraction would.
         await using (var seed = CreateSystemDb())
         {
-            var doc = await seed.Documents.SingleAsync(d => d.Id == docId);
+            var doc = await seed.Documents.SingleAsync(d => d.Id == id);
             CanonicalDocumentFields.ApplyToTypedColumn(doc, "general_liability_limit", "$1,500,000")
                 .Should().Be(TypedColumnResult.Parsed);
             await seed.SaveChangesAsync();
         }
 
-        (await EvaluateForSystem(docId)).Should().Be(ComplianceStatus.Compliant);
+        (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.Compliant);
     }
 
     [Fact]
