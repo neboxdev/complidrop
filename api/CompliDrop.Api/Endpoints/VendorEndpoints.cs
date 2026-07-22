@@ -260,7 +260,10 @@ public static class VendorEndpoints
     private static async Task<IResult> DeleteVendor(
         Guid id,
         AppDbContext db,
+        IComplianceCheckService checker,
         IAuditLogger audit,
+        IHostApplicationLifetime lifetime,
+        ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         var v = await db.Vendors.FirstOrDefaultAsync(x => x.Id == id, ct);
@@ -305,6 +308,32 @@ public static class VendorEndpoints
             await audit.LogAsync(
                 "vendorPortalLink.deactivated_on_vendor_delete", nameof(Vendor), id,
                 after: new { count = linkIds.Count, linkIds });
+
+        // Re-evaluation fan-out (#422): the soft-deleted vendor vanishes behind the query filter,
+        // so its documents — which are NOT deleted with it — now read d.Vendor == null: no
+        // checklist governs them. Without a re-grade they keep their LAST verdict (typically
+        // Compliant, graded against the dead vendor's checklist) plus that checklist's check rows —
+        // the vacuous-Compliant class #257 exists to prevent, still counted by OrgStatus and shown
+        // on the documents list. Every other assignment-changing path already fans out (UpdateVendor,
+        // DeleteTemplate); the delete path was the one hole. Each document takes the
+        // no-governing-rules branch (Pending, checks shed); a date-expired one stays Expired with
+        // its checks (ComputeOutcome's expired-wins branch) — the expired liability does not vanish
+        // with the vendor. The fan-out predicate keys on the VendorId FK, NOT the filtered Vendor
+        // nav, so it still selects the soft-deleted vendor's documents. Post-commit + best-effort
+        // via PostCommitRegrade.RunAsync (#364), same shape and hazards as the other four sites.
+        //
+        // Tracker note: the change tracker still holds the soft-deleted vendor entity, and EF's
+        // relationship fixup would attach it to every document the fan-out re-loads (the SQL join
+        // correctly yields NULL through the filter, but fixup against tracked entities wins). Today
+        // the verdict would still come out right only because that entity's ComplianceTemplate nav
+        // happens to be unloaded. Clear first so each document grades against what the database
+        // says — Vendor == null — not a tracking accident. Nothing is lost: the delete is committed
+        // and the response below uses only locals.
+        db.ChangeTracker.Clear();
+        await PostCommitRegrade.RunAsync(
+            token => checker.ReevaluateForVendorAsync(id, token),
+            lifetime, loggerFactory, "vendor delete");
+
         return Results.Ok(new { data = new { id }, error = (object?)null });
     }
 

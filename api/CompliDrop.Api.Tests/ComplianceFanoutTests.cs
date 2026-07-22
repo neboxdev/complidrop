@@ -219,6 +219,49 @@ public sealed class ComplianceFanoutTests(IntegrationTestFixture fixture) : Inte
     }
 
     [Fact]
+    public async Task ReevaluateForVendors_selects_a_soft_deleted_vendors_documents_via_the_VendorId_FK()
+    {
+        // #422: the vendor-delete fan-out re-grades documents whose vendor is ALREADY soft-deleted
+        // by the time it runs. That only works because the membership predicate keys on the VendorId
+        // FK — the d.Vendor nav carries the Vendor soft-delete query filter, so a predicate that
+        // joined through the nav would select NOTHING here and silently leave the vacuous Compliant
+        // in place (this test's regression mode). Each selected document then loads Vendor == null
+        // (the page query's Include DOES honor the filter) and takes the no-governing-rules branch:
+        // Pending, checks shed. Runs on a fresh context, so this pins the raw predicate — the
+        // endpoint-level VendorEndpointsTests pin covers the shared-request-context path.
+        var orgId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        await SeedOrgWithTemplateAsync(orgId, templateId);
+        var vendor = await SeedVendorAsync(orgId, templateId);
+        var doc = await SeedDocAsync(orgId, vendor, glLimit: 3_000_000m, stored: ComplianceStatus.Pending);
+
+        // A genuine pre-delete verdict: Compliant with one check row against the vendor's checklist.
+        await RunVendorsFanoutAsync(orgId, new[] { vendor });
+        await using (var db = CreateSystemDb())
+        {
+            (await db.Documents.SingleAsync(d => d.Id == doc)).ComplianceStatus
+                .Should().Be(ComplianceStatus.Compliant, "arrange: the doc must hold a real pre-delete verdict");
+            (await db.ComplianceChecks.CountAsync(c => c.DocumentId == doc)).Should().Be(1);
+        }
+
+        // Soft-delete the vendor — the row state DeleteVendor commits before its fan-out runs.
+        await using (var db = CreateSystemDb())
+            await db.Vendors.Where(v => v.Id == vendor)
+                .ExecuteUpdateAsync(s => s.SetProperty(v => v.DeletedAt, (DateTime?)DateTime.UtcNow));
+
+        await RunVendorsFanoutAsync(orgId, new[] { vendor });
+
+        await using (var verify = CreateSystemDb())
+        {
+            (await verify.Documents.SingleAsync(d => d.Id == doc)).ComplianceStatus
+                .Should().Be(ComplianceStatus.Pending,
+                    "the FK-keyed predicate must still select the soft-deleted vendor's documents — a nav-joined one would select nothing and strand the vacuous Compliant");
+            (await verify.ComplianceChecks.CountAsync(c => c.DocumentId == doc)).Should().Be(0,
+                "the checks graded against the dead vendor's checklist must be shed");
+        }
+    }
+
+    [Fact]
     public async Task ReevaluateForVendors_with_an_empty_list_is_a_no_op()
     {
         var orgId = Guid.NewGuid();

@@ -9,8 +9,11 @@ using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CompliDrop.Api.Tests;
@@ -197,6 +200,126 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
             .CountAsync(d => d.OrganizationId == orgA.OrgId && d.IsSample && d.DeletedAt == null)).Should().Be(1);
         (await db.Documents.IgnoreQueryFilters()
             .CountAsync(d => d.OrganizationId == orgB.OrgId && d.IsSample && d.DeletedAt == null)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Clear_regrades_a_real_document_that_was_assigned_to_the_sample_vendor()
+    {
+        // #422 companion: the clear soft-deletes the sample VENDOR, but only IsSample documents go
+        // with it. A REAL document assigned to the sample vendor (a supported repurposing — the
+        // reminder engine special-cases exactly that state) survives the clear, and without the
+        // delete-time re-grade it would keep its verdict + check rows graded against the Caterer
+        // checklist that no longer governs it — the same stranded-verdict hole as DeleteVendor.
+        var auth = await RegisterAndLoginAsync();
+        await SeedSampleAsync(auth.Client);
+
+        Guid realDocId;
+        await using (var seed = CreateSystemDb())
+        {
+            var sampleVendorId = (await seed.Vendors
+                .SingleAsync(v => v.OrganizationId == auth.OrgId && v.IsSample)).Id;
+            var now = DateTime.UtcNow;
+            realDocId = Guid.NewGuid();
+            seed.Documents.Add(new Document
+            {
+                Id = realDocId,
+                OrganizationId = auth.OrgId,
+                VendorId = sampleVendorId,
+                OriginalFileName = "real-coi.pdf",
+                BlobStorageUrl = "memory://real",
+                BlobStoragePath = $"path/{Guid.NewGuid():N}",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                GeneralLiabilityLimit = 3_000_000m,
+                ExpirationDate = now.AddYears(1),
+                ComplianceStatus = ComplianceStatus.Pending,
+                ExtractionStatus = ExtractionStatus.Completed,
+                IsSample = false,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        // A REAL evaluation against the Caterer checklist: whatever the verdict, the doc now holds
+        // check rows and a non-Pending status — the state the clear must not strand.
+        (await auth.Client.PostAsync($"/api/compliance/check/{realDocId}", null)).EnsureSuccessStatusCode();
+        await using (var db = CreateSystemDb())
+        {
+            (await db.Documents.SingleAsync(d => d.Id == realDocId)).ComplianceStatus
+                .Should().NotBe(ComplianceStatus.Pending, "arrange: the doc must hold a real pre-clear verdict");
+            (await db.ComplianceChecks.CountAsync(c => c.DocumentId == realDocId)).Should().BeGreaterThan(0,
+                "arrange: the evaluation must have produced check rows to shed");
+        }
+
+        (await auth.Client.DeleteAsync("/api/sample")).EnsureSuccessStatusCode();
+
+        await using (var verify = CreateSystemDb())
+        {
+            var doc = await verify.Documents.SingleAsync(d => d.Id == realDocId);
+            doc.DeletedAt.Should().BeNull("a real document must survive the sample clear");
+            doc.ComplianceStatus.Should().Be(ComplianceStatus.Pending,
+                "its vendor is gone with the sample, so no checklist governs it — the old verdict would be vacuous");
+            (await verify.ComplianceChecks.CountAsync(c => c.DocumentId == realDocId)).Should().Be(0,
+                "the check rows against the no-longer-governing checklist must be shed");
+        }
+    }
+
+    [Fact]
+    public async Task The_sample_clear_survives_a_failing_re_evaluation_fan_out()
+    {
+        // The #422 companion fan-out is best-effort and request-decoupled, pinned — the sample-clear
+        // analogue of ComplianceRuleDeleteTests.The_rule_delete_survives_a_failing_re_evaluation_fan_out.
+        // The blob cleanup and the soft deletes commit first and the re-grade runs after them, so a
+        // catastrophic re-grade failure cannot roll back the clear the user asked for.
+        //
+        // The RESPONSE is pinned too: PostCommitRegrade.RunAsync swallows the failure, so the caller
+        // sees the 200 its committed clear earned. Unwrapping that into a bare await of the checker on
+        // the request token would 500 a clear that IS done — the user retries and is met with the
+        // "No sample data to clear." no-op — and let a client disconnect truncate the fan-out mid-page.
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IComplianceCheckService>();
+                services.AddScoped<IComplianceCheckService, ThrowingComplianceCheckService>();
+            }));
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+
+        var email = $"user-{Guid.NewGuid():N}@example.com";
+        var reg = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            email,
+            password = "Password1234",
+            fullName = "Test User",
+            companyName = "Test Co",
+            industry = (string?)null,
+            companySize = (string?)null,
+            timeZone = "America/New_York",
+        });
+        reg.EnsureSuccessStatusCode();
+
+        // Seeding never touches the checker, so arrangement works under the throwing double.
+        var docId = DocumentId(await (await SeedSampleAsync(client)).Content.ReadFromJsonAsync<JsonElement>());
+        string blobPath;
+        await using (var setup = CreateSystemDb())
+            blobPath = (await setup.Documents.IgnoreQueryFilters().FirstAsync(d => d.Id == docId)).BlobStoragePath!;
+
+        var resp = await client.DeleteAsync("/api/sample");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "the clear committed — a failing post-commit re-grade must not report it as a server error");
+        await using var verify = CreateSystemDb();
+        var doc = await verify.Documents.IgnoreQueryFilters().FirstAsync(d => d.Id == docId);
+        doc.DeletedAt.Should().NotBeNull(
+            "the soft deletes committed before the fan-out ran — a failing re-grade must not roll them back");
+        (await verify.Vendors.IgnoreQueryFilters().FirstAsync(v => v.Id == doc.VendorId)).DeletedAt
+            .Should().NotBeNull("the sample vendor's soft delete committed in the same transaction");
+        // The blob went in the cleanup pass BEFORE the row deletes — resolve the DERIVED host's fake
+        // store (WithWebHostBuilder builds a separate container with its own FakeBlobStorageService).
+        var blobs = factory.Services.GetRequiredService<IBlobStorageService>();
+        (await blobs.DownloadAsync(blobPath, default)).Should().BeNull(
+            "the blob cleanup is unaffected by the fan-out failure — no orphaned blob");
     }
 
     // ---- dashboard flags + plan limit ----

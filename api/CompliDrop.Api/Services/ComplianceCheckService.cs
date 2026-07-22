@@ -36,8 +36,10 @@ public interface IComplianceCheckService
     /// document ids — the rule-DELETE fan-out (#364). Template membership alone is not a superset of
     /// the population the pre-#364 per-document loop re-graded: a document can hold a check row
     /// against the deleted rule while sitting OUTSIDE that membership, most reachably when its vendor
-    /// was soft-deleted (<see cref="VendorEndpoints.DeleteVendor"/> runs no re-grade, and the Vendor
-    /// soft-delete query filter then makes <c>d.Vendor</c> read null, hiding the document from the
+    /// was soft-deleted and the delete-time re-grade did not land (<see
+    /// cref="VendorEndpoints.DeleteVendor"/> fans out post-commit since #422, but that pass is
+    /// best-effort — a truncated or failed run leaves the documents behind, and the Vendor
+    /// soft-delete query filter then makes <c>d.Vendor</c> read null, hiding them from the
     /// template predicate). Such a document keeps a NON-Expired verdict — a Compliant one graded
     /// against rules that no longer govern it — and the old loop healed it to Pending as a side
     /// effect of iterating the deleted rule's check rows. Passing those ids here keeps the batched
@@ -51,7 +53,11 @@ public interface IComplianceCheckService
     /// <summary>
     /// Re-evaluates every document belonging to the given vendor. The fan-out for a checklist
     /// (re)assignment — so portal-first onboarding (upload, then assign a checklist) no longer
-    /// leaves documents stuck at "Awaiting review" forever (#257).
+    /// leaves documents stuck at "Awaiting review" forever (#257) — and for a vendor DELETE (#422),
+    /// where the soft-deleted vendor's documents must drop their now-ungoverned verdict to Pending
+    /// and shed their check rows instead of keeping a vacuous Compliant. Works on a soft-deleted
+    /// vendor because the membership predicate keys on the <c>VendorId</c> FK, not the filtered
+    /// <c>Vendor</c> nav — see <see cref="ReevaluateForVendorsAsync"/>.
     /// </summary>
     Task ReevaluateForVendorAsync(Guid vendorId, CancellationToken ct);
 
@@ -173,6 +179,11 @@ public class ComplianceCheckService(
         // Array so Npgsql translates the membership test to `= ANY(@ids)` — one parameter — instead
         // of an IN-list that grows a parameter per vendor.
         var ids = vendorIds.ToArray();
+        // The predicate keys on the VendorId FK, NOT the d.Vendor nav: the nav carries the Vendor
+        // soft-delete query filter, and the vendor-DELETE fan-out (#422) exists precisely to
+        // re-grade a just-soft-deleted vendor's documents — a nav-joined predicate would silently
+        // select nothing there. Each selected document then loads Vendor == null (the page query's
+        // Include honors the filter) and takes the no-governing-rules branch: Pending, checks shed.
         return ReevaluateWhereAsync(db, d => d.VendorId != null && ids.Contains(d.VendorId.Value), ct);
     }
 

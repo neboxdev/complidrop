@@ -215,21 +215,29 @@ public sealed class ComplianceRuleDeleteTests(IntegrationTestFixture fixture) : 
     public async Task Deleting_a_rule_regrades_a_document_whose_vendor_was_soft_deleted()
     {
         // #364 review counterexample — the case that falsifies "template membership is a superset".
-        // DeleteVendor soft-deletes with NO re-grade (VendorEndpoints), so a deleted vendor's
-        // documents keep a Compliant verdict AND their check rows while the Vendor soft-delete query
-        // filter makes d.Vendor read null — which drops them out of the template-membership
-        // predicate. The pre-#364 per-document loop healed them to Pending as a side effect of
-        // iterating the deleted rule's check rows; the fan-out therefore takes the check-row holders
-        // as a UNION with template membership so the batched path stays a strict superset. Without
-        // that union this document stays on a vacuous Compliant that no rule governs (#257).
+        // A soft-deleted vendor's documents can keep a Compliant verdict AND their check rows while
+        // the Vendor soft-delete query filter makes d.Vendor read null — which drops them out of the
+        // template-membership predicate. The pre-#364 per-document loop healed them to Pending as a
+        // side effect of iterating the deleted rule's check rows; the fan-out therefore takes the
+        // check-row holders as a UNION with template membership so the batched path stays a strict
+        // superset. Without that union this document stays on a vacuous Compliant that no rule
+        // governs (#257).
+        //
+        // ARRANGEMENT NOTE (#422): DeleteVendor now runs its own delete-time re-grade, so the happy
+        // path no longer leaves this state behind — deleting the vendor through the endpoint here
+        // would heal the document BEFORE the rule delete and turn this pin vacuous (it would pass
+        // even with the union removed). The state is still production-reachable, because that
+        // delete-time fan-out is best-effort (a truncated or failed run is swallowed and leaves the
+        // documents stranded). So the vendor is soft-deleted DIRECTLY, simulating exactly the
+        // fan-out-didn't-land survivor the union remains the backstop for.
         var auth = await RegisterAndLoginAsync();
         var s = await SeedAsync(auth.OrgId, twoRules: false);
 
         Guid orphanedDoc;
+        var doomedVendor = Guid.NewGuid();
         await using (var db = CreateSystemDb())
         {
             var now = DateTime.UtcNow;
-            var doomedVendor = Guid.NewGuid();
             db.Vendors.Add(new Vendor
             {
                 Id = doomedVendor, OrganizationId = auth.OrgId, Name = "Soon deleted",
@@ -254,10 +262,11 @@ public sealed class ComplianceRuleDeleteTests(IntegrationTestFixture fixture) : 
             await db.SaveChangesAsync();
         }
 
-        // Soft-delete the vendor through the real endpoint, so the no-re-grade behaviour under test
-        // is production's, not a hand-built row state.
-        (await auth.Client.DeleteAsync($"/api/vendors/{(await VendorIdOfAsync(orphanedDoc))}"))
-            .EnsureSuccessStatusCode();
+        // Soft-delete the vendor directly (see the arrangement note above): the row state
+        // DeleteVendor commits, WITHOUT its delete-time re-grade having landed.
+        await using (var db = CreateSystemDb())
+            await db.Vendors.Where(v => v.Id == doomedVendor)
+                .ExecuteUpdateAsync(u => u.SetProperty(v => v.DeletedAt, (DateTime?)DateTime.UtcNow));
 
         var resp = await auth.Client.DeleteAsync($"/api/compliance/templates/{s.TemplateId}/rules/{s.RuleAId}");
 
@@ -268,13 +277,6 @@ public sealed class ComplianceRuleDeleteTests(IntegrationTestFixture fixture) : 
                 "its vendor is gone and the rule it was graded against is gone — a Compliant verdict here would be vacuous");
         (await db2.ComplianceChecks.CountAsync(c => c.DocumentId == orphanedDoc)).Should().Be(0,
             "the orphaned check rows must be shed with the re-grade");
-    }
-
-    /// <summary>Reads a document's VendorId through the system context (no tenant filter).</summary>
-    private async Task<Guid> VendorIdOfAsync(Guid documentId)
-    {
-        await using var db = CreateSystemDb();
-        return (await db.Documents.SingleAsync(d => d.Id == documentId)).VendorId!.Value;
     }
 
     [Fact]

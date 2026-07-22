@@ -6,8 +6,11 @@ using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace CompliDrop.Api.Tests;
 
@@ -121,14 +124,16 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             documentType, fieldName, @operator = op, expectedValue, errorMessage = "required", sortOrder = 1,
         });
 
-    private async Task SeedVendorDocAsync(
-        Guid orgId, Guid vendorId, string documentType, ComplianceStatus status, DateTime? expirationDate = null)
+    private async Task<Guid> SeedVendorDocAsync(
+        Guid orgId, Guid vendorId, string documentType, ComplianceStatus status, DateTime? expirationDate = null,
+        decimal? glLimit = null)
     {
         await using var db = CreateSystemDb();
         var now = DateTime.UtcNow;
+        var docId = Guid.NewGuid();
         db.Documents.Add(new Document
         {
-            Id = Guid.NewGuid(),
+            Id = docId,
             OrganizationId = orgId,
             VendorId = vendorId,
             OriginalFileName = "doc.pdf",
@@ -139,11 +144,13 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             DocumentType = documentType,
             ComplianceStatus = status,
             ExpirationDate = expirationDate,
+            GeneralLiabilityLimit = glLimit,
             ExtractionStatus = ExtractionStatus.Completed,
             CreatedAt = now,
             UpdatedAt = now,
         });
         await db.SaveChangesAsync();
+        return docId;
     }
 
     private static JsonElement CoverageFor(JsonElement[] list, Guid vendorId) =>
@@ -588,6 +595,151 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         var second = await auth.Client.DeleteAsync($"/api/vendors/{vendorId}");
 
         second.StatusCode.Should().Be(HttpStatusCode.NotFound, "the soft-deleted vendor is hidden by the query filter");
+    }
+
+    [Fact]
+    public async Task Deleting_a_vendor_regrades_its_documents_to_Pending_and_sheds_their_checks()
+    {
+        // #422: DeleteVendor was the one assignment-changing path with no re-evaluation fan-out
+        // (UpdateVendor and DeleteTemplate both have one). After the soft delete the vendor's
+        // documents read Vendor == null through the query filter, so NO checklist governs them —
+        // yet they kept their last verdict (Compliant, graded against the dead vendor's checklist)
+        // plus its check rows: a vacuous Compliant that OrgStatus counts and the documents list
+        // shows (documents are NOT deleted with their vendor). The four-step ticket repro.
+        var auth = await RegisterAndLoginAsync();
+        var templateId = await CreateTemplateAsync(auth.Client, "Caterer rules");
+        (await AddRuleAsync(auth.Client, templateId, "coi", "general_liability_limit", "min_value", "2000000"))
+            .EnsureSuccessStatusCode();
+
+        var doomedV = await CreateVendorAsync(auth.Client, "Doomed LLC", null);
+        var survivorV = await CreateVendorAsync(auth.Client, "Survivor LLC", null);
+        // GL 3M passes the 2M rule; far-future expiry keeps the date overlay out of the verdict.
+        var doomedDoc = await SeedVendorDocAsync(auth.OrgId, doomedV, "coi", ComplianceStatus.Pending,
+            DateTime.UtcNow.AddYears(1), glLimit: 3_000_000m);
+        var survivorDoc = await SeedVendorDocAsync(auth.OrgId, survivorV, "coi", ComplianceStatus.Pending,
+            DateTime.UtcNow.AddYears(1), glLimit: 3_000_000m);
+
+        // Assigning the checklist runs the REAL evaluation fan-out (#257): both documents earn a
+        // genuine Compliant with one check row — exactly the state the delete must not strand.
+        (await UpdateVendorTemplateAsync(auth.Client, doomedV, templateId)).EnsureSuccessStatusCode();
+        (await UpdateVendorTemplateAsync(auth.Client, survivorV, templateId)).EnsureSuccessStatusCode();
+        await using (var db = CreateSystemDb())
+        {
+            (await db.Documents.SingleAsync(d => d.Id == doomedDoc)).ComplianceStatus
+                .Should().Be(ComplianceStatus.Compliant, "arrange: the doc must hold a real pre-delete verdict");
+            (await db.ComplianceChecks.CountAsync(c => c.DocumentId == doomedDoc)).Should().Be(1);
+        }
+
+        (await auth.Client.DeleteAsync($"/api/vendors/{doomedV}")).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using (var verify = CreateSystemDb())
+        {
+            var doc = await verify.Documents.SingleAsync(d => d.Id == doomedDoc);
+            doc.DeletedAt.Should().BeNull("documents survive their vendor's deletion");
+            doc.VendorId.Should().Be(doomedV, "the FK survives — only the nav reads null through the filter");
+            doc.ComplianceStatus.Should().Be(ComplianceStatus.Pending,
+                "no checklist governs the document once its vendor is gone — keeping the old Compliant would be vacuous");
+            (await verify.ComplianceChecks.CountAsync(c => c.DocumentId == doomedDoc)).Should().Be(0,
+                "the check rows against the no-longer-governing checklist must be shed");
+
+            // Another vendor's document on the SAME checklist is untouched by the fan-out.
+            (await verify.Documents.SingleAsync(d => d.Id == survivorDoc)).ComplianceStatus
+                .Should().Be(ComplianceStatus.Compliant, "an unrelated vendor's verdict must not change");
+            (await verify.ComplianceChecks.CountAsync(c => c.DocumentId == survivorDoc)).Should().Be(1,
+                "an unrelated vendor's check rows must not be shed");
+        }
+    }
+
+    [Fact]
+    public async Task Deleting_a_vendor_keeps_an_expired_documents_liability_and_check_rows()
+    {
+        // #422 edge: for a document whose date has passed, the delete-time re-grade takes
+        // ComputeOutcome's Expired-wins branch — the expired liability does NOT soften to Pending
+        // when its vendor is deleted (deleting a vendor must never make an unmet expired liability
+        // silently vanish), and that branch keeps the check rows from the last real evaluation.
+        // The Compliant→Expired flip is also the proof the fan-out genuinely ran on this document
+        // (the sweep worker is disabled in the test host; nothing else touches the stored status).
+        var auth = await RegisterAndLoginAsync();
+        var templateId = await CreateTemplateAsync(auth.Client, "Caterer rules");
+        (await AddRuleAsync(auth.Client, templateId, "coi", "general_liability_limit", "min_value", "2000000"))
+            .EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Doomed LLC", null);
+        var docId = await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Pending,
+            DateTime.UtcNow.AddYears(1), glLimit: 3_000_000m);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, templateId)).EnsureSuccessStatusCode();
+
+        // The certificate lapses AFTER its real evaluation: stored Compliant + 1 check, date now past.
+        await using (var db = CreateSystemDb())
+        {
+            (await db.Documents.SingleAsync(d => d.Id == docId)).ComplianceStatus
+                .Should().Be(ComplianceStatus.Compliant, "arrange: the doc must hold a real pre-lapse verdict");
+            (await db.ComplianceChecks.CountAsync(c => c.DocumentId == docId)).Should().Be(1);
+            await db.Documents.Where(d => d.Id == docId)
+                .ExecuteUpdateAsync(u => u.SetProperty(d => d.ExpirationDate, DateTime.UtcNow.AddDays(-60)));
+        }
+
+        (await auth.Client.DeleteAsync($"/api/vendors/{vendorId}")).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.SingleAsync(d => d.Id == docId)).ComplianceStatus
+            .Should().Be(ComplianceStatus.Expired,
+                "the delete-time re-grade must surface the lapsed date as Expired, never soften it to Pending");
+        (await verify.ComplianceChecks.CountAsync(c => c.DocumentId == docId)).Should().Be(1,
+            "the Expired branch keeps the check rows from the last real evaluation");
+    }
+
+    [Fact]
+    public async Task The_vendor_delete_survives_a_failing_re_evaluation_fan_out()
+    {
+        // #422's fan-out is best-effort and request-decoupled, pinned — the vendor-delete analogue of
+        // ComplianceRuleDeleteTests.The_rule_delete_survives_a_failing_re_evaluation_fan_out. The soft
+        // delete commits first and the re-grade runs after it, so a catastrophic re-grade failure can
+        // not roll back a vendor the user deleted.
+        //
+        // The RESPONSE is pinned too: PostCommitRegrade.RunAsync swallows the failure, so the caller
+        // sees the 200 its committed delete earned. Unwrapping that into a bare await of the checker on
+        // the request token would 500 a vendor that IS deleted — the user retries and is met with a
+        // 404 — and let a client disconnect truncate the fan-out mid-page.
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IComplianceCheckService>();
+                services.AddScoped<IComplianceCheckService, ThrowingComplianceCheckService>();
+            }));
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+
+        var email = $"user-{Guid.NewGuid():N}@example.com";
+        var reg = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            email,
+            password = "Password1234",
+            fullName = "Test User",
+            companyName = "Test Co",
+            industry = (string?)null,
+            companySize = (string?)null,
+            timeZone = "America/New_York",
+        });
+        reg.EnsureSuccessStatusCode();
+        var orgId = (await reg.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("organizationId").GetGuid();
+
+        // CreateVendor never touches the checker, so arrangement works under the throwing double. The
+        // stored Compliant on a checklist-less vendor's doc is exactly what a SUCCEEDING fan-out would
+        // re-grade to Pending (no governing rules) — a FAILED one must leave it stale instead.
+        var vendorId = await CreateVendorAsync(client, "Doomed LLC", null);
+        var docId = await SeedVendorDocAsync(orgId, vendorId, "coi", ComplianceStatus.Compliant,
+            DateTime.UtcNow.AddYears(1));
+
+        var resp = await client.DeleteAsync($"/api/vendors/{vendorId}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "the delete committed — a failing post-commit re-grade must not report it as a server error");
+        await using var verify = CreateSystemDb();
+        (await verify.Vendors.IgnoreQueryFilters().SingleAsync(v => v.Id == vendorId)).DeletedAt
+            .Should().NotBeNull("the soft delete committed before the fan-out ran — a failing re-grade must not roll it back");
+        (await verify.Documents.SingleAsync(d => d.Id == docId)).ComplianceStatus
+            .Should().Be(ComplianceStatus.Compliant,
+                "a failed fan-out leaves the document on its previous verdict until the next re-grade");
     }
 
     [Fact]
