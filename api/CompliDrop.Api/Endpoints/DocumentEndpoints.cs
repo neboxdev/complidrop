@@ -537,6 +537,14 @@ public static class DocumentEndpoints
             ? (JsonObject)JsonNode.Parse(doc.ExtractionFields.RootElement.GetRawText())!
             : new JsonObject();
 
+        // Canonical fields the user submitted NON-BLANK but unparseable (#383, ADR 0040). This is the
+        // path the reported repro actually used: typing "2020-01-01 (per endorsement)" into the
+        // expiration field nulls the typed column, and a null column reads downstream as "this
+        // certificate has no expiration" — so the document went back to Compliant with an affirmative
+        // "Insurance has not expired". EvaluateRule now fails the rule instead, and the document is
+        // routed back to manual review below so it stays visibly unresolved.
+        var unreadableFields = new List<string>();
+
         // De-dupe by field name (last value wins): a request that lists the same field twice must
         // not create two DocumentField rows for a not-yet-existing field, nor leave the row out of
         // sync with the JSON mirror / typed column (which are themselves last-wins).
@@ -576,11 +584,23 @@ public static class DocumentEndpoints
             // field) and, for the three date/amount fields, the typed columns. The shared
             // CanonicalDocumentFields helper keeps this parse identical to the extraction worker.
             fields[update.FieldName] = update.FieldValue;
-            CanonicalDocumentFields.ApplyToTypedColumn(doc, update.FieldName, update.FieldValue);
+            if (CanonicalDocumentFields.ApplyToTypedColumn(doc, update.FieldName, update.FieldValue)
+                == TypedColumnResult.Unreadable)
+                unreadableFields.Add(update.FieldName);
         }
 
         doc.ExtractionFields = JsonDocument.Parse(fields.ToJsonString());
         ResolveManualReview(doc);
+        // ...but an edit we couldn't read is NOT a resolved review (#383). ResolveManualReview just
+        // cleared the amber card on the grounds that a human looked at the values; re-raise it so the
+        // document keeps asking for a readable value instead of going quiet with a null column.
+        // Escalate ONLY from a settled status: Pending/Processing are the worker's queue states and
+        // overwriting Pending would DE-QUEUE the document (ExtractionWorker claims on
+        // ExtractionStatus == Pending), while Failed is its own louder error state with a
+        // processing-error card. Either way the extraction path re-decides this flag when it lands.
+        if (unreadableFields.Count > 0
+            && doc.ExtractionStatus is ExtractionStatus.Completed or ExtractionStatus.ManualRequired)
+            doc.ExtractionStatus = ExtractionStatus.ManualRequired;
         doc.UpdatedAt = DateTime.UtcNow;
 
         // Combined unit of work (#337 / ADR 0030): compute + apply the verdict the edited inputs imply on

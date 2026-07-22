@@ -414,8 +414,18 @@ public class ExtractionWorker(
         // Map the date/amount fields onto the typed columns ComplianceCheckService reads.
         // Shared with the manual-edit path (DocumentEndpoints.UpdateFields) via
         // CanonicalDocumentFields so both parse identically — see ADR 0017.
+        //
+        // Collect the fields the model returned NON-BLANK but unparseable (#383, ADR 0040). Those
+        // clear their typed column, which is indistinguishable downstream from "the certificate has no
+        // such value" — so a real expiration the parser choked on ("12/31/2026 (per endorsement)")
+        // would otherwise leave a high-confidence, no-reprocess-signal document that can never turn
+        // Expired and never triggers a reminder. Field NAMES only, never values: extracted field
+        // values are document PII and must not reach logs/Sentry (CLAUDE.md § frontend error
+        // monitoring applies the same rule to the backend's structured logs).
+        var unreadableFields = new List<string>();
         foreach (var f in extraction.Fields)
-            CanonicalDocumentFields.ApplyToTypedColumn(doc, f.Name, f.Value);
+            if (CanonicalDocumentFields.ApplyToTypedColumn(doc, f.Name, f.Value) == TypedColumnResult.Unreadable)
+                unreadableFields.Add(f.Name);
 
         db.DocumentFields.RemoveRange(db.DocumentFields.Where(df => df.DocumentId == doc.Id));
         foreach (var f in extraction.Fields)
@@ -437,9 +447,17 @@ public class ExtractionWorker(
             ? extraction.Fields.Average(f => f.Confidence)
             : 0;
         doc.ExtractionConfidence = avgConf;
-        doc.ExtractionStatus = avgConf < 0.7 || extraction.NeedsReprocessing
+        // An unreadable canonical value is a THIRD reason to route a document to a human, alongside
+        // low average confidence and the model's own reprocess signal (#383): neither of those fires
+        // for a confidently-read date in a shape we can't parse, so without this the document looks
+        // completely healthy while a compliance-critical column sits silently null.
+        doc.ExtractionStatus = avgConf < 0.7 || extraction.NeedsReprocessing || unreadableFields.Count > 0
             ? ExtractionStatus.ManualRequired
             : ExtractionStatus.Completed;
+        if (unreadableFields.Count > 0)
+            logger.LogWarning(
+                "Document {DocumentId} returned {Count} canonical field(s) we could not parse ({Fields}); routed to manual review",
+                doc.Id, unreadableFields.Count, string.Join(", ", unreadableFields));
         doc.ExtractionCompletedAt = now;
         doc.ProcessingError = null;
         doc.UpdatedAt = now;
