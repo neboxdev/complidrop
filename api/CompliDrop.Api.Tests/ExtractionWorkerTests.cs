@@ -295,6 +295,78 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             .Should().Be(Extraction.Result.Fields.Count);
     }
 
+    // ----- #383: a canonical value we couldn't parse routes the document to a human --------------
+
+    /// <summary>
+    /// A high-confidence, no-reprocess-signal extraction whose expiration_date is in a shape nothing
+    /// can parse — the #383 scenario. Confidence is deliberately ABOVE the 0.7 manual-review gate so
+    /// the test proves the new unreadable-field trigger, not the pre-existing low-confidence one.
+    /// </summary>
+    private static ExtractionResult ResultWith(string field, string value) => new(
+        DocumentType: "coi",
+        DocumentSubType: null,
+        Fields: [new ExtractedField(field, value, "string", 0.95)],
+        NeedsReprocessing: false,
+        Usage: new ExtractionUsage(InputTokens: 100, OutputTokens: 50, EstimatedCostUsd: 0.01m));
+
+    [Theory]
+    [InlineData("expiration_date", "12/31/2026 (per endorsement)")]
+    [InlineData("expiration_date", "continuous until cancelled")]
+    [InlineData("effective_date", "see attached endorsement")]
+    [InlineData("general_liability_limit", "1M per occurrence")]
+    public async Task An_unparseable_canonical_field_routes_the_document_to_manual_review(string field, string value)
+    {
+        // Without this the document lands Completed and looks perfectly healthy — high confidence, no
+        // reprocess flag, no processing error — while the typed column it needed sits silently null.
+        // Nothing else in the pipeline notices: the model was confident, it just wrote a date shape
+        // the parser can't read. ManualRequired is what puts it in front of a human, and it is the
+        // ONLY backstop when the org's checklist carries no rule on that field at all.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWith(field, value);
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            "an unreadable compliance-critical value must reach a human, not sit as a silent null");
+        doc.ExtractionConfidence.Should().BeGreaterThan(0.7,
+            "the flag must come from the unreadable value, not from the low-confidence gate");
+        doc.ProcessingError.Should().BeNull("this is not an extraction FAILURE — the read succeeded");
+    }
+
+    [Fact]
+    public async Task A_parseable_canonical_field_still_completes_normally()
+    {
+        // The control: the same shape of extraction with a readable date must NOT be dragged into
+        // manual review, or every document would demand attention and the signal would be worthless.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWith("expiration_date", "2027-03-15");
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        doc.ExpirationDate.Should().Be(new DateTime(2027, 3, 15, 0, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public async Task A_blank_canonical_field_does_not_trigger_manual_review()
+    {
+        // An absent value is an honest reading of a certificate that shows none — distinct from a
+        // value we couldn't read. Only the second is a defect worth a human's time.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWith("expiration_date", "");
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        doc.ExpirationDate.Should().BeNull();
+    }
+
     [Fact]
     public async Task Successful_extraction_writes_one_system_document_processed_audit_event()
     {

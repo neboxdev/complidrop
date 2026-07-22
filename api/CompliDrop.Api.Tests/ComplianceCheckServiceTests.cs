@@ -29,6 +29,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
         DateTime? expiration = null,
         string docType = "coi",
         decimal? glLimit = null,
+        System.Text.Json.JsonDocument? extractionFields = null,
         params (string docType, string field, string op, string? expected)[] rules)
     {
         var now = DateTime.UtcNow;
@@ -75,6 +76,7 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
             OriginalFileName = "d.pdf", BlobStorageUrl = "blob://d",
             FileSizeBytes = 1, ContentType = "application/pdf",
             DocumentType = docType, ExpirationDate = expiration, GeneralLiabilityLimit = glLimit,
+            ExtractionFields = extractionFields,
             CreatedAt = now, UpdatedAt = now
         });
 
@@ -188,6 +190,75 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
         var check = await verify.ComplianceChecks.SingleAsync(c => c.DocumentId == id);
         check.IsPassed.Should().BeTrue();
         check.ActualValue.Should().HaveLength(500, "the oversize value is clamped to the column length");
+    }
+
+    // ---------------- #383: an expiration we couldn't read never reads as Compliant ----------------
+
+    /// <summary>The extraction-fields JSON a model produces when it echoes a date verbatim.</summary>
+    private static System.Text.Json.JsonDocument Fields(string field, string value) =>
+        System.Text.Json.JsonSerializer.SerializeToDocument(new Dictionary<string, string> { [field] = value });
+
+    [Fact]
+    public async Task An_unreadable_expiration_date_is_NonCompliant_not_Compliant()
+    {
+        // The reported repro, at the service level: a COI whose expiration_date reads
+        // "2020-01-01 (per endorsement)". The typed column is null (nothing can parse that), so the
+        // Expired branch cannot fire — and before #383 the `expiration_date required` rule PASSED off
+        // the raw string, so the whole document graded Compliant and the detail page affirmed
+        // "Insurance has not expired" over a certificate that expired in 2020. It must fail instead.
+        var id = await SeedAsync(
+            expiration: null,
+            docType: "coi",
+            extractionFields: Fields("expiration_date", "2020-01-01 (per endorsement)"),
+            rules: ("coi", "expiration_date", "required", null));
+
+        (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.NonCompliant);
+
+        await using var db = CreateSystemDb();
+        var check = await db.ComplianceChecks.SingleAsync(c => c.DocumentId == id);
+        check.IsPassed.Should().BeFalse();
+        check.ActualValue.Should().Be("2020-01-01 (per endorsement)", "the user needs to see what's on the document");
+        check.Notes.Should().Be(ComplianceCheckService.UnreadableValueNote);
+    }
+
+    [Fact]
+    public async Task A_readable_future_expiration_still_grades_Compliant()
+    {
+        // The control for the test above: the fail-closed guard must fire on UNREADABLE values only.
+        // Without this pairing, a guard that simply failed every expiration_date rule would look green.
+        var id = await SeedAsync(
+            expiration: Anchor.AddDays(365),
+            docType: "coi",
+            extractionFields: Fields("expiration_date", "2027-06-01"),
+            rules: ("coi", "expiration_date", "required", null));
+
+        (await EvaluateForSystem(id)).Should().Be(ComplianceStatus.Compliant);
+    }
+
+    [Fact]
+    public async Task A_currency_formatted_gl_limit_grades_Compliant_against_its_floor()
+    {
+        // #383 secondary, end to end: "$1,500,000" now parses into the typed column, so a certificate
+        // that genuinely carries $1.5M passes a $1M floor instead of failing on "Unable to parse
+        // numeric comparison" — the fail-CLOSED half of the same root cause.
+        var docId = Guid.NewGuid();
+        var id = await SeedAsync(
+            expiration: Anchor.AddDays(365),
+            docType: "coi",
+            extractionFields: Fields("general_liability_limit", "$1,500,000"),
+            rules: ("coi", "general_liability_limit", "min_value", "$1,000,000"));
+        docId = id;
+
+        // Drive the value through the production writer so the column holds what extraction would.
+        await using (var seed = CreateSystemDb())
+        {
+            var doc = await seed.Documents.SingleAsync(d => d.Id == docId);
+            CanonicalDocumentFields.ApplyToTypedColumn(doc, "general_liability_limit", "$1,500,000")
+                .Should().Be(TypedColumnResult.Parsed);
+            await seed.SaveChangesAsync();
+        }
+
+        (await EvaluateForSystem(docId)).Should().Be(ComplianceStatus.Compliant);
     }
 
     [Fact]
