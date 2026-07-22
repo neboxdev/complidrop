@@ -92,6 +92,43 @@ describe("DocumentDetailPage — not-checked explainer (#316 FP-063)", () => {
       "/vendors/v9",
     );
   });
+
+  it("treats a deleted vendor's surviving doc as no-vendor, not 'needs a checklist' (#422)", async () => {
+    // After a vendor soft-delete, #422 re-grades the surviving document to
+    // Pending: the VendorId FK is retained but the vendor nav resolves null
+    // through the soft-delete filter, so vendorName arrives null and the
+    // check rows are shed. Keying the explainer on vendorId would misclassify
+    // this doc as "has a vendor, no checklist" — promising an automatic check
+    // that can never happen and linking to the deleted vendor's dead page.
+    // The honest state is the no-vendor branch with its working assign remedy
+    // (same vendorName keying as the list page's Assign-vendor cell).
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_delvendor",
+            extractionStatus: "Completed",
+            complianceStatus: "Pending",
+            vendorId: "v_deleted",
+            vendorName: null,
+            complianceChecks: [],
+          }),
+        ),
+      ),
+      http.get(url("/api/vendors"), () => jsonOk([{ id: "v1", name: "Acme Catering" }])),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_delvendor" } });
+
+    // The no-vendor explainer: copy + the inline assign picker.
+    expect(await screen.findByText(/not checked yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/isn't linked to a vendor yet/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/assign a vendor/i)).toBeInTheDocument();
+    // Never the checklist claim nor the "Set up … requirements" link to the
+    // deleted vendor (that page renders "Couldn't load this vendor.").
+    expect(screen.queryByText(/doesn't have a requirements checklist/i)).toBeNull();
+    expect(screen.queryByRole("link", { name: /set up .+ requirements/i })).toBeNull();
+  });
 });
 
 describe("DocumentDetailPage — manual entry on a failed read (#316 FP-064)", () => {

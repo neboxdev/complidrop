@@ -321,7 +321,14 @@ function NotCheckedExplainer({ doc }: { doc: DocDetail }) {
     doc.extractionStatus === "Pending" || doc.extractionStatus === "Processing";
   if (doc.complianceStatus !== "Pending" || isProcessing) return null;
 
-  const noVendor = doc.vendorId == null;
+  // Keyed on the vendor NAME, not the FK: a deleted vendor's surviving doc
+  // keeps its VendorId, but the vendor resolves null through the soft-delete
+  // filter (vendorName null) and #422 re-grades it to Pending with its check
+  // rows shed. Keying on vendorId would misclassify that doc as "has a vendor,
+  // no checklist" — promising an automatic check that can never happen and
+  // linking to a dead vendor page. Same vendorName keying as the list page's
+  // Assign-vendor cell.
+  const noVendor = !doc.vendorName;
   const noChecklist = !noVendor && (doc.complianceChecks?.length ?? 0) === 0;
   // Pending for some reason we can't name (shouldn't happen) — don't guess.
   if (!noVendor && !noChecklist) return null;
