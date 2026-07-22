@@ -600,6 +600,19 @@ public class ComplianceCheckService(
             {
                 JsonValueKind.String => value.GetString(),
                 JsonValueKind.Number => value.ToString(),
+                // A JSON null is an ABSENCE, and must read as one on BOTH sides (#383 review).
+                // FieldUpdateRequest.FieldValue is string?, so PUT /fields with `fieldValue: null`
+                // stores a JSON null in ExtractionFields — and the generic GetRawText() arm below
+                // returned the literal 4-character string "null" for it. That made the reader
+                // disagree with the writer about the very same edit: ApplyToTypedColumn classified
+                // it Blank (honestly absent), while IsUnreadable saw non-blank text it could not
+                // parse and reported the value UNREADABLE — stamping a check row with the
+                // "we couldn't read this" note and ActualValue "null", which the detail page then
+                // showed the user verbatim. Sticky, too: the JSON null persists, so every later
+                // evaluation re-read "null". ADR 0040 is explicit that Blank stays Blank. Mapping it
+                // here also closes the pre-existing fail-open on NON-canonical fields, where
+                // `required` was satisfied by that same 4-character string.
+                JsonValueKind.Null or JsonValueKind.Undefined => null,
                 _ => value.GetRawText()
             };
         }
