@@ -6,8 +6,11 @@ using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace CompliDrop.Api.Tests;
 
@@ -683,6 +686,60 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
                 "the delete-time re-grade must surface the lapsed date as Expired, never soften it to Pending");
         (await verify.ComplianceChecks.CountAsync(c => c.DocumentId == docId)).Should().Be(1,
             "the Expired branch keeps the check rows from the last real evaluation");
+    }
+
+    [Fact]
+    public async Task The_vendor_delete_survives_a_failing_re_evaluation_fan_out()
+    {
+        // #422's fan-out is best-effort and request-decoupled, pinned — the vendor-delete analogue of
+        // ComplianceRuleDeleteTests.The_rule_delete_survives_a_failing_re_evaluation_fan_out. The soft
+        // delete commits first and the re-grade runs after it, so a catastrophic re-grade failure can
+        // not roll back a vendor the user deleted.
+        //
+        // The RESPONSE is pinned too: PostCommitRegrade.RunAsync swallows the failure, so the caller
+        // sees the 200 its committed delete earned. Unwrapping that into a bare await of the checker on
+        // the request token would 500 a vendor that IS deleted — the user retries and is met with a
+        // 404 — and let a client disconnect truncate the fan-out mid-page.
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IComplianceCheckService>();
+                services.AddScoped<IComplianceCheckService, ThrowingComplianceCheckService>();
+            }));
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+
+        var email = $"user-{Guid.NewGuid():N}@example.com";
+        var reg = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            email,
+            password = "Password1234",
+            fullName = "Test User",
+            companyName = "Test Co",
+            industry = (string?)null,
+            companySize = (string?)null,
+            timeZone = "America/New_York",
+        });
+        reg.EnsureSuccessStatusCode();
+        var orgId = (await reg.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("organizationId").GetGuid();
+
+        // CreateVendor never touches the checker, so arrangement works under the throwing double. The
+        // stored Compliant on a checklist-less vendor's doc is exactly what a SUCCEEDING fan-out would
+        // re-grade to Pending (no governing rules) — a FAILED one must leave it stale instead.
+        var vendorId = await CreateVendorAsync(client, "Doomed LLC", null);
+        var docId = await SeedVendorDocAsync(orgId, vendorId, "coi", ComplianceStatus.Compliant,
+            DateTime.UtcNow.AddYears(1));
+
+        var resp = await client.DeleteAsync($"/api/vendors/{vendorId}");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK,
+            "the delete committed — a failing post-commit re-grade must not report it as a server error");
+        await using var verify = CreateSystemDb();
+        (await verify.Vendors.IgnoreQueryFilters().SingleAsync(v => v.Id == vendorId)).DeletedAt
+            .Should().NotBeNull("the soft delete committed before the fan-out ran — a failing re-grade must not roll it back");
+        (await verify.Documents.SingleAsync(d => d.Id == docId)).ComplianceStatus
+            .Should().Be(ComplianceStatus.Compliant,
+                "a failed fan-out leaves the document on its previous verdict until the next re-grade");
     }
 
     [Fact]
