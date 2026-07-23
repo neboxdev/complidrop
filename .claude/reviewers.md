@@ -33,7 +33,30 @@ Both are defined in this repo's `.claude/agents/`.
 - Document supersession de-counts ONLY the Expired liability (dashboard count,
   expiry-pipeline expired bucket, `?status=Expired` list, reminder windows) and the
   audit export annotates-but-keeps; deliberately NOT applied to compliant /
-  nonCompliant / expiringSoon or future pipeline buckets (ADR 0033 + Amendment 1).
+  nonCompliant / expiringSoon or future pipeline buckets (ADR 0033 + Amendments 1 & 2).
+  A superseder must BOTH extend coverage (`ExpirationDate >=` this doc's) AND be
+  continuous (`EffectiveDate` null or `<=` this doc's `ExpirationDate` — ADR 0033
+  Amendment 2 / #362): a future-effective renewal that opens a live coverage gap does
+  NOT supersede, by design (date-adjacency-conservative — effective on the old expiry
+  supersedes, one day after does not).
+- Future-effective verdict (#362 / ADR 0041): a not-yet-in-force cert (`EffectiveDate`
+  a date strictly after today) that would read Compliant/ExpiringSoon reads `Pending`
+  instead — a READ-ONLY overlay. `ComputeOutcome` and the nightly sweep DELIBERATELY
+  keep storing the REAL rule verdict (never `Pending`) so the doc self-heals to it the
+  day it becomes effective — do NOT flag that as a missed demotion; persisting `Pending`
+  would be the bug. The demotion IS mirrored on every READ surface (documents-list
+  filter + badge, dashboard compliant/expiringSoon counts AND the rate denominator,
+  vendor rollup, CSV/PDF export via `ComplianceStatusDeriver.Effective`). A read site
+  that decides Compliant/ExpiringSoon from `.ComplianceStatus` WITHOUT the EffectiveDate
+  demotion IS a real finding (a #294-class count-vs-badge split). Expired still wins
+  outright; a hard fail stays NonCompliant (never masked to Pending). The vendor rollup
+  (`VendorEndpoints.ComputeCoverage`) consults the best CURRENTLY-IN-FORCE cert per
+  required type (ANY doc reading Compliant/ExpiringSoon via the overlay), NOT strictly
+  the newest upload (#362 review / ADR 0041): a vendor still covered by an in-force
+  earlier cert who pre-uploads a future-effective renewal (reads Pending) stays Covered,
+  while an expired-only / non-compliant-only / future-effective-only type still reads
+  ActionNeeded. Do NOT "simplify" it back to latest-upload-only — that reintroduces the
+  false-uncovered regression the review caught.
 - A normal document delete RETAINS its blob (ADR 0013); the sample-demo clear DELETES
   its blob (ADR 0028). Both directions are deliberate.
 - Vendor contact-email validation is ADR 0038; the review-time facts that follow are

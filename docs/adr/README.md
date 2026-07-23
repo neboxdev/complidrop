@@ -48,3 +48,4 @@ Use `/adr <title>` to scaffold a new one.
 - [0038](0038-vendor-contact-email-mirrored-validation.md) — Vendor contact email: one strict rule mirrored in two languages, explicit blank class, linear edge strip
 - [0039](0039-documents-url-source-of-truth-overlay.md) — Documents filters read the URL through a pending-write overlay; `useSearchParams()` is the base, never `window.location` unconditionally
 - [0040](0040-unreadable-canonical-value-fails-closed.md) — An unreadable canonical value fails closed; "absent" and "unreadable" are different facts
+- [0041](0041-future-effective-not-yet-in-force-reads-pending.md) — A not-yet-in-force (future-effective) certificate reads Pending, via a read-only overlay (companion to 0033 Amendment 2)

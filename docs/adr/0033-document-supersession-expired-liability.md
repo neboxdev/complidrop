@@ -1,6 +1,6 @@
 # 0033. Document supersession — latest cert per (vendor, type) for the Expired liability
 
-- **Status:** accepted (amended 2026-06-23 — see [Amendment 1](#amendment-1-2026-06-23--superseder-must-extend-coverage))
+- **Status:** accepted (amended 2026-06-23 — see [Amendment 1](#amendment-1-2026-06-23--superseder-must-extend-coverage); amended 2026-07-23 — see [Amendment 2](#amendment-2-2026-07-23--superseder-must-be-continuous-effective-date))
 - **Date:** 2026-06-23
 - **Deciders:** Ruben G. (founder), Claude (implementing #327)
 
@@ -66,6 +66,19 @@ A post-merge re-review of #327 found that the original predicate (`a newer doc b
 - **Earlier-expiry doc uploaded later** (the "stale correction" case the original Neutral note flagged): no longer treated as the current cert — both show as expired, the conservative-safe outcome.
 
 This narrows supersession (it now de-counts strictly fewer docs), so it can only ever **show more** liability, never less — a safe direction for a compliance tool. The `DocumentSupersession` predicate and the export's in-memory `SupersededIds` mirror were updated together and are pinned equal by a test. The `IX_Documents_Supersession (VendorId, DocumentType, CreatedAt)` index still serves the seek; `ExpirationDate` is a cheap residual filter on the already-narrow per-(vendor, type) row set.
+
+## Amendment 2 (2026-07-23) — superseder must be continuous (effective-date door)
+
+A deep domain review (filed as [#362](https://github.com/neboxdev/complidrop/issues/362)) found that Amendment 1 closed the failure through the **expiration-date** door but left the **effective-date** door open. The revised predicate de-counted an old expired cert whenever a newer cert **extended coverage** (`o.ExpirationDate >= d.ExpirationDate`) — with **no check on when the newer cert becomes effective**. So a renewal effective *in the future* — bought after the old cert already lapsed, starting next month — still superseded the old expired cert and made it vanish from the dashboard Expired count, the deep-linked list, and the reminder windows, even though the vendor has **no coverage in force** for the gap between now and the new policy's effective date. That is the exact "a genuinely-unmet expired liability silently disappearing" failure Amendment 1 exists to prevent, reached through the other date.
+
+**Revised rule:** a document `d` is superseded by `o` (same `VendorId` non-null, same `DocumentType`) only when `o.CreatedAt > d.CreatedAt` **AND** `o.ExpirationDate` is non-null and `o.ExpirationDate >= d.ExpirationDate` (Amendment 1, extends coverage) **AND** `o.EffectiveDate` is null OR `o.EffectiveDate <= d.ExpirationDate` (Amendment 2, continuous — the renewal picks up on or before the old cert lapses, leaving no gap).
+
+- **Future-effective renewal** (`o.EffectiveDate > d.ExpirationDate`): opens a live coverage gap → does **not** supersede → the old expired cert stays counted and keeps reminding until real in-force coverage lands. (Closes the effective-date door.)
+- **Continuous renewal** (`o.EffectiveDate <= d.ExpirationDate`): no gap → still supersedes, exactly as before Amendment 2.
+- **Unknown effective date** (`o.EffectiveDate` null): treated as continuous — the Amendment 1 coverage-extension clause still gates on a real (non-null) expiry, so a still-processing upload with no expiry is already excluded; a doc with an expiry but no effective date is not held back on the effective-date axis.
+- The boundary is **date-adjacency-conservative**: a renewal effective *exactly on* the old cert's expiry date supersedes (continuous); one effective *the day after* does not (a one-day gap). Erring toward showing the gap is the safe direction for a compliance tool.
+
+Both `EffectiveDate` and `ExpirationDate` are face dates stored at UTC midnight (`CanonicalDocumentFields.ParseUtcDate`), so `o.EffectiveDate <= d.ExpirationDate` is a plain `timestamptz`-vs-`timestamptz` comparison that reproduces a calendar-date comparison with no `AT TIME ZONE` (ADR 0009 / 0027). Like Amendment 1 this **narrows** supersession (de-counts strictly fewer docs → shows more liability, never less), needs **no migration** (`EffectiveDate` already exists), and is a cheap residual filter on the already-narrow per-(vendor, type) row set served by `IX_Documents_Supersession`. The `DocumentSupersession` predicate and the export's `SupersededIds` mirror were updated together and stay pinned equal by a test (extended with future-effective gap/continuity cases). See [ADR 0041](0041-future-effective-not-yet-in-force-reads-pending.md), the sibling that closes the same effective-date failure on the **verdict** side (a standalone future-effective cert grading Compliant with no prior cert to supersede).
 
 ## References
 

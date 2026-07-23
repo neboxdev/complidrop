@@ -24,16 +24,23 @@ public static class DashboardEndpoints
         // edges (< today / >= today) are already date-equivalent at midnight.
         var expiringSoonUpperExclusive =
             ComplianceStatusDeriver.WindowUpperBoundExclusive(today, ComplianceStatusDeriver.ExpiringSoonWindowDays);
+        // #362 / ADR 0041: a doc whose EffectiveDate is a date strictly after today is "not yet in force";
+        // an affirmative verdict (Compliant/ExpiringSoon) demotes to Pending. Instant form: EffectiveDate
+        // >= today+1 (UTC midnight) — same date↔instant convention as the expiry bound above (ADR 0027),
+        // so "in force / no effective date" is (EffectiveDate == null || EffectiveDate < notYetEffectiveBound).
+        var notYetEffectiveBound = ComplianceStatusDeriver.NotYetEffectiveLowerBoundInclusive(today);
 
         var docs = db.Documents;
         var totalDocs = await docs.CountAsync(ct);
         // The headline buckets must be mutually exclusive on the EFFECTIVE (date-overlaid) status,
         // or a date-expired-but-stored-Compliant doc gets counted as BOTH compliant AND expired —
         // two answers on one screen (#257). Expired/ExpiringSoon are date-driven; compliant and
-        // nonCompliant exclude any doc the date buckets already claim.
+        // nonCompliant exclude any doc the date buckets already claim. A future-effective doc is
+        // demoted OUT of compliant/expiringSoon into the effective-Pending population (#362).
         var compliant = await docs.CountAsync(d =>
             d.ComplianceStatus == Entities.ComplianceStatus.Compliant
-            && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive), ct);
+            && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive)
+            && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound), ct);
         var nonCompliant = await docs.CountAsync(d =>
             d.ComplianceStatus == Entities.ComplianceStatus.NonCompliant
             && (d.ExpirationDate == null || d.ExpirationDate >= today), ct);
@@ -42,10 +49,12 @@ public static class DashboardEndpoints
         // (its hard fail isn't softened by the date), so it must NOT also be counted here — otherwise
         // it double-counts under both nonCompliant and expiringSoon. Expired stays status-agnostic
         // (Expired is top precedence; the compliant/nonCompliant arms already exclude past-date docs).
+        // A future-effective doc is not yet in force, so it is excluded here too (reads Pending) (#362).
         var expiringSoon = await docs.CountAsync(d =>
             d.ExpirationDate != null
             && d.ExpirationDate >= today
             && d.ExpirationDate < expiringSoonUpperExclusive
+            && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)
             && (d.ComplianceStatus == Entities.ComplianceStatus.Compliant
                 || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon
                 || d.ComplianceStatus == Entities.ComplianceStatus.Pending), ct);
@@ -56,8 +65,15 @@ public static class DashboardEndpoints
         // Denominator for the compliance rate EXCLUDES not-yet-graded documents (#318 FP-042): a fresh
         // upload sits ComplianceStatus.Pending until the worker reads + evaluates it, and counting those
         // as "not compliant" flashed a demoralizing "0%" the instant Pat uploaded her very first document.
-        // Rate = effective-compliant / documents-that-have-a-verdict.
-        var evaluated = await docs.CountAsync(d => d.ComplianceStatus != Entities.ComplianceStatus.Pending, ct);
+        // Rate = effective-compliant / documents-that-have-a-verdict. A future-effective doc reads Pending
+        // (not yet in force, #362), so it is excluded from the denominator too — treated exactly like a
+        // Pending doc, not as a graded non-compliant one; an Expired doc (a real verdict) stays counted.
+        var evaluated = await docs.CountAsync(d =>
+            d.ComplianceStatus != Entities.ComplianceStatus.Pending
+            && !(d.EffectiveDate != null && d.EffectiveDate >= notYetEffectiveBound
+                && (d.ExpirationDate == null || d.ExpirationDate >= today)
+                && (d.ComplianceStatus == Entities.ComplianceStatus.Compliant
+                    || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon)), ct);
         var pendingExtraction = await docs.CountAsync(d =>
             d.ExtractionStatus == Entities.ExtractionStatus.Pending
             || d.ExtractionStatus == Entities.ExtractionStatus.Processing, ct);

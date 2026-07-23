@@ -41,7 +41,7 @@ public static class VendorEndpoints
                     ? v.ComplianceTemplate.Rules.Select(r => r.DocumentType).Distinct().ToList()
                     : new List<string>(),
                 Docs = v.Documents
-                    .Select(d => new DocCoverageInfo(d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.CreatedAt))
+                    .Select(d => new DocCoverageInfo(d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate))
                     .ToList(),
                 DocumentCount = v.Documents.Count,
                 ActivePortalLinks = v.PortalLinks.Count(l => l.IsActive),
@@ -65,16 +65,24 @@ public static class VendorEndpoints
         return Results.Ok(new { data = vendors, error = (object?)null });
     }
 
-    /// <summary>Lightweight per-document view the coverage rollup needs (FP-074).</summary>
+    /// <summary>Lightweight per-document view the coverage rollup needs (FP-074). EffectiveDate feeds the
+    /// future-effective demotion (#362 / ADR 0041) via ComplianceStatusDeriver.Effective. No CreatedAt:
+    /// coverage is decided by the best CURRENTLY-IN-FORCE cert, not the newest upload (#362 review).</summary>
     private sealed record DocCoverageInfo(
-        string DocumentType, Entities.ComplianceStatus ComplianceStatus, DateTime? ExpirationDate, DateTime CreatedAt);
+        string DocumentType, Entities.ComplianceStatus ComplianceStatus, DateTime? ExpirationDate,
+        DateTime? EffectiveDate);
 
     /// <summary>
     /// Rolls a vendor's documents up against the distinct document types its checklist requires
-    /// (#319 FP-074). A required type is "covered" when its LATEST document's EFFECTIVE status
-    /// (ComplianceStatusDeriver, ADR 0027) is Compliant or ExpiringSoon; any required type with no
-    /// document is "missing"; otherwise (Expired / NonCompliant / not-yet-graded) it's action-needed.
-    /// The engine re-grades on rule/assignment change since #257, so this isn't built on stale verdicts.
+    /// (#319 FP-074). A required type is "covered" when it has at least one document whose EFFECTIVE
+    /// status (ComplianceStatusDeriver, ADR 0027/0041) is Compliant or ExpiringSoon — a cert that is
+    /// IN FORCE today (EffectiveDate &lt;= today) and not expired. Coverage is judged on the best
+    /// currently-in-force cert, NOT strictly the newest upload (#362 review): a vendor still covered by
+    /// an in-force earlier cert who PRE-UPLOADS a future-effective renewal (which reads Pending, ADR 0041)
+    /// stays Covered instead of flipping to ActionNeeded. A required type with no document is "missing";
+    /// a type whose only documents are Expired / NonCompliant / not-yet-in-force (Pending) is
+    /// "action-needed" — a genuine gap still surfaces. The engine re-grades on rule/assignment change
+    /// since #257, so this isn't built on stale verdicts.
     /// </summary>
     private static VendorCoverage ComputeCoverage(
         bool hasTemplate, List<string> requiredTypes, List<DocCoverageInfo> docs, DateTime today)
@@ -83,27 +91,53 @@ public static class VendorEndpoints
 
         var missing = new List<string>();
         var actionNeeded = false;
-        // The earliest expiration among the covered required docs (#399). Coverage as a WHOLE lapses
-        // the moment its first-to-expire required doc does, so the nearest expiry is the honest
-        // "covered through" horizon for the vendor. A covered doc with NO expiration doesn't constrain
-        // it (nothing to show), so it's left out of the min — null here means "Covered, no dated docs".
+        // The earliest expiration among the covered required types (#399). Coverage as a WHOLE lapses
+        // the moment its first-to-expire required type does, so the nearest expiry is the honest
+        // "covered through" horizon for the vendor. A type covered only by no-expiry docs doesn't
+        // constrain it (nothing to show), so it's left out of the min — null here means "Covered, no
+        // dated docs".
         DateTime? coveredThrough = null;
         foreach (var type in requiredTypes)
         {
-            var latest = docs
+            var typeDocs = docs
                 .Where(d => string.Equals(d.DocumentType, type, StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(d => d.CreatedAt)
-                .FirstOrDefault();
-            if (latest is null) { missing.Add(ShortTypeLabel(type)); continue; }
-            // Overlay the date the SAME way every other surface does (ComplianceStatusDeriver, ADR 0027)
-            // instead of hand-rolling a 4th copy of the window math. A valid-but-expiring-soon doc is
-            // benign coverage (ExpiringSoon), NOT a hard "action needed" — only Expired / NonCompliant /
-            // not-yet-graded (Pending) leave a required type uncovered.
-            var effective = ComplianceStatusDeriver.Effective(latest.ComplianceStatus, latest.ExpirationDate, today);
-            var covered = effective is Entities.ComplianceStatus.Compliant or Entities.ComplianceStatus.ExpiringSoon;
-            if (!covered) { actionNeeded = true; continue; }
-            if (latest.ExpirationDate is DateTime exp && (coveredThrough is null || exp < coveredThrough))
-                coveredThrough = exp;
+                .ToList();
+            if (typeDocs.Count == 0) { missing.Add(ShortTypeLabel(type)); continue; }
+
+            // Coverage is decided by the best CURRENTLY-IN-FORCE cert, NOT strictly the newest upload
+            // (#362 review / ADR 0041). Overlay the date the SAME way every other surface does
+            // (ComplianceStatusDeriver, ADR 0027/0041) instead of hand-rolling a 4th copy of the window
+            // math: Effective returns Compliant/ExpiringSoon ONLY for a doc in force today
+            // (EffectiveDate <= today) and not expired, so "reads affirmative" already IS "in-force
+            // coverage." A valid-but-expiring-soon doc is benign coverage (ExpiringSoon), not a hard
+            // "action needed." Judging by the newest upload alone would drop a vendor still covered by an
+            // in-force earlier cert to ActionNeeded the instant they PRE-UPLOAD a future-effective renewal
+            // (which reads Pending — not yet in force). An expired-only / non-compliant-only /
+            // future-effective-only type still has NO in-force cert, so a real lapse is never masked.
+            var inForce = typeDocs
+                .Where(d => ComplianceStatusDeriver.Effective(
+                        d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today)
+                    is Entities.ComplianceStatus.Compliant or Entities.ComplianceStatus.ExpiringSoon)
+                .ToList();
+            if (inForce.Count == 0) { actionNeeded = true; continue; }
+
+            // Covered THROUGH the last of this type's in-force certs to expire (a null-expiry in-force
+            // cert = no upper limit, so it doesn't constrain the horizon — the same skip the pre-#362
+            // code applied to a null-expiry latest doc). Across types the vendor's overall horizon is the
+            // MIN — the first required type to fall out of coverage (#399). NOT a future-effective
+            // renewal's far-future date: it isn't in force, so it never appears in `inForce`.
+            DateTime? typeHorizon = null;
+            var typeUnbounded = false;
+            foreach (var d in inForce)
+            {
+                if (d.ExpirationDate is DateTime exp)
+                {
+                    if (typeHorizon is null || exp > typeHorizon) typeHorizon = exp;
+                }
+                else typeUnbounded = true;
+            }
+            if (!typeUnbounded && typeHorizon is DateTime th && (coveredThrough is null || th < coveredThrough))
+                coveredThrough = th;
         }
 
         if (missing.Count > 0) return new VendorCoverage("Missing", [.. missing], null);
@@ -143,7 +177,7 @@ public static class VendorEndpoints
         // rollup needs. Tenant-scoped via the global Documents filter; VendorId scopes to this vendor.
         var coverageDocs = await db.Documents
             .Where(d => d.VendorId == id)
-            .Select(d => new DocCoverageInfo(d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.CreatedAt))
+            .Select(d => new DocCoverageInfo(d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate))
             .ToListAsync(ct);
 
         var coverage = ComputeCoverage(
