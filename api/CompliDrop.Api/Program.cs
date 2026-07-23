@@ -62,6 +62,13 @@ builder.Services.AddSingleton(sp =>
 // the flag off the deployed product must stay behaviorally identical to pre-#416 production.
 builder.Services.AddOptions<TemplateCorrectionsSettings>().Bind(builder.Configuration.GetSection(TemplateCorrectionsSettings.SectionName));
 
+// Compliance-claims gate (#396, CLM-1): default OFF, same inert-until-cleared posture as the two
+// flags above. Gates the corrected additional-insured claim WORDING — the /api/auth/me
+// `features.correctedAdditionalInsuredWording` flag the SPA reads, and the ACORD-checkbox-fallback
+// check NOTE — pending the G1-COUNSEL-BRIEF §0 attorney sign-off. Copy-only when flipped, never a
+// verdict change. DISTINCT from TemplateCorrections above (a different sign-off). See ADR 0042.
+builder.Services.AddOptions<ComplianceClaimsSettings>().Bind(builder.Configuration.GetSection(ComplianceClaimsSettings.SectionName));
+
 // ============================================================
 // Logging — Serilog JSON sink
 // ============================================================
@@ -479,6 +486,14 @@ using (var scope = app.Services.CreateScope())
     logger.LogInformation(
         "Template corrections: {State} (corrected system-checklist set + cross-org re-grade; gated on the G1 legal/insurance sign-off).",
         templateCorrections.Enabled ? "ENABLED" : "disabled");
+
+    // Compliance-claims gate (#396, CLM-1): one boot line, mirroring the two above, so every deploy
+    // names whether the corrected additional-insured claim wording is live. Disabled (the default) =
+    // the legacy pre-#396 copy + check note; stays off until the G1-COUNSEL-BRIEF §0 attorney sign-off.
+    var complianceClaims = app.Services.GetRequiredService<IOptions<ComplianceClaimsSettings>>().Value;
+    logger.LogInformation(
+        "Compliance claims (additional-insured wording): {State} (copy-only; gated on the G1 CLM-1 attorney sign-off).",
+        complianceClaims.CorrectedAdditionalInsuredWording ? "ENABLED" : "disabled");
 
     // Seed: best-effort system compliance templates, after the schema is guaranteed current.
     var sysDb = scope.ServiceProvider.GetRequiredService<SystemDbContext>();

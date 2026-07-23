@@ -27,9 +27,15 @@ public record DeleteAccountRequest(string Password);
 /// <c>CorrectedChecklists</c> mirrors <c>TemplateCorrections:Enabled</c> (ADR 0036 Amendment 3):
 /// while false, the frontend hides the liquor "+ Add a requirement" menu option and the
 /// additional-insured nudge, keeping the gated #416 behavior invisible pending the
-/// G1-COUNSEL-BRIEF §0 legal/insurance sign-off. Additive — no existing me field changed.
+/// G1-COUNSEL-BRIEF §0 legal/insurance sign-off.
+/// <c>CorrectedAdditionalInsuredWording</c> mirrors
+/// <c>ComplianceClaims:CorrectedAdditionalInsuredWording</c> (#396, CLM-1, ADR 0042): while false,
+/// the frontend renders the legacy categorical "Names '{name}' as additional insured" copy; when
+/// true it swaps in the honest "certificate indicates…" wording. DELIBERATELY separate from
+/// <c>CorrectedChecklists</c> — CLM-1 unlocks on a different attorney sign-off.
+/// Additive — no existing me field changed.
 /// </summary>
-public record AuthFeatures(bool CorrectedChecklists);
+public record AuthFeatures(bool CorrectedChecklists, bool CorrectedAdditionalInsuredWording);
 
 public record AuthMeResponse(
     Guid UserId,
