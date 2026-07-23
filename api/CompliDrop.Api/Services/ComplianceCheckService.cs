@@ -460,9 +460,9 @@ public class ComplianceCheckService(
                 // Fail CLOSED on a misconfigured rule (null/blank ExpectedValue): without this guard
                 // `string.Equals(null, null)` is TRUE, so a document MISSING the field read Compliant
                 // while one that HAD the field failed — the wrong-direction (fail-open) verdict #374
-                // fixes, unique among the operators. Mirrors the sibling value-operators, which already
-                // fail closed on a null expected (`contains` guards `rule.ExpectedValue is not null`;
-                // `min_value`'s parse of a null expected fails). UpsertRule now rejects such a rule at
+                // fixes, unique among the operators. Mirrors the sibling value-operators, which also
+                // fail closed on a null/blank expected (`contains` short-circuits at the top of its arm;
+                // `min_value`'s parse of a null/blank expected fails). UpsertRule now rejects such a rule at
                 // write time; this arm is the safety net for any row persisted before that guard. A
                 // WELL-FORMED equals rule is unchanged below — same case-insensitive Trim comparison,
                 // and the "Field missing." note still applies when the expected value is real but the
@@ -475,6 +475,19 @@ public class ComplianceCheckService(
                     actual is null ? "Field missing." : null);
 
             case "contains":
+                // Fail CLOSED on a misconfigured rule (null/blank/empty ExpectedValue) BEFORE either
+                // contains path runs: `"Acme".Contains("")` is TRUE in .NET, so an EMPTY expected would
+                // grade any document that HAS the field as passing — a vacuous false-Compliant (the empty
+                // string is non-null, so it slipped past the plain-path `is not null` guard below; #374
+                // re-review). Placed at the TOP so it ALSO covers the additional_insured affirmative-flag
+                // fallback, where `holder.Contains("")` is likewise TRUE. Mirrors the `equals` guard
+                // exactly (same note). UpsertRule rejects such a rule at write time; this arm is the
+                // safety net for any row persisted before that guard. A WELL-FORMED contains rule (a real,
+                // non-blank expected) — plain substring OR the affirmative-flag fallback — is unchanged
+                // below, since the guard is a no-op for a non-blank expected.
+                if (string.IsNullOrWhiteSpace(rule.ExpectedValue))
+                    return (false, actual, "Rule is misconfigured: no expected value.");
+
                 // ACORD checkbox door (#272): when `additional_insured` arrives as a bare
                 // affirmative flag ("Y", "X", "true" — the per-coverage ADDL INSD column
                 // reading, common in pre-v2-prompt extractions), the certificate SAYS the
