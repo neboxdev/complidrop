@@ -82,6 +82,13 @@ public class ComplianceSweepBackgroundService(
                 .SetProperty(d => d.ComplianceStatus, ComplianceStatus.ExpiringSoon)
                 .SetProperty(d => d.UpdatedAt, now), ct);
 
+        // #362 / ADR 0041: the future-effective → Pending demotion is deliberately NOT swept. Unlike the
+        // Expired / ExpiringSoon transitions (monotonic-forward — a date that passes never un-passes), a
+        // future-effective doc RESOLVES back to its real verdict once today reaches its EffectiveDate.
+        // Persisting Pending here would erase the rule verdict the read overlay needs to reveal on that
+        // crossing, stranding the doc at a stale Pending. So the demotion stays a read-only overlay
+        // (ComplianceStatusDeriver.Effective + the SQL read mirrors); the sweep keeps storing the real
+        // date/rule verdict, which those read surfaces then demote while the doc is not yet in force.
         if (expired > 0 || expiringSoon > 0)
             logger.LogInformation(
                 "Compliance sweep flipped {Expired} document(s) to Expired and {ExpiringSoon} to ExpiringSoon.",

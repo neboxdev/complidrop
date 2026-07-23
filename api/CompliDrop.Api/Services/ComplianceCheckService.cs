@@ -438,6 +438,13 @@ public class ComplianceCheckService(
             if (!passed) allPassed = false;
         }
 
+        // Future-effective demotion (#362 / ADR 0041) is DELIBERATELY NOT applied here. The persisted
+        // status keeps the REAL rule verdict; the "not yet in force → Pending" demotion is a READ-ONLY
+        // overlay (ComplianceStatusDeriver.Effective + every SQL read mirror). Storing Pending would
+        // strand the doc at a stale Pending after it becomes effective — nothing re-runs rule evaluation
+        // on an EffectiveDate crossing, so the stored verdict must retain enough to SELF-HEAL on read the
+        // instant today reaches EffectiveDate, exactly as the Expired/ExpiringSoon overlay does. So a
+        // future-effective all-passing COI is stored Compliant here and READS Pending everywhere.
         var status = allPassed
             ? (expiringSoon ? ComplianceStatus.ExpiringSoon : ComplianceStatus.Compliant)
             : ComplianceStatus.NonCompliant;

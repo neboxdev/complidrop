@@ -65,6 +65,10 @@ public static class DocumentEndpoints
         // is exp >= today+31. The lower edges (< today / >= today) are already date-equivalent.
         var expiringSoonUpperExclusive =
             ComplianceStatusDeriver.WindowUpperBoundExclusive(today, ComplianceStatusDeriver.ExpiringSoonWindowDays);
+        // #362 / ADR 0041: "not yet in force today" is EffectiveDate.Date > today, i.e. the instant form
+        // EffectiveDate >= today+1 (UTC midnight). Same date↔instant convention as the expiry bound above
+        // (ADR 0027). "In force / no effective date" is (EffectiveDate == null || EffectiveDate < this bound).
+        var notYetEffectiveBound = ComplianceStatusDeriver.NotYetEffectiveLowerBoundInclusive(today);
 
         var query = db.Documents.AsQueryable();
         if (!string.IsNullOrWhiteSpace(status))
@@ -82,20 +86,34 @@ public static class DocumentEndpoints
                     ComplianceStatus.Expired => query
                         .Where(d => d.ExpirationDate != null && d.ExpirationDate < today)
                         .Where(DocumentSupersession.IsCurrent(db.Documents)),
+                    // #362: a future-effective (not-yet-in-force) doc is demoted out of ExpiringSoon/Compliant
+                    // into the effective-Pending arm below — same date↔instant rule the dashboard counts use.
                     ComplianceStatus.ExpiringSoon => query.Where(d =>
                         d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate < expiringSoonUpperExclusive
+                        && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)
                         && (d.ComplianceStatus == ComplianceStatus.Compliant
                             || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
                             || d.ComplianceStatus == ComplianceStatus.Pending)),
                     ComplianceStatus.Compliant => query.Where(d =>
                         d.ComplianceStatus == ComplianceStatus.Compliant
-                        && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive)),
+                        && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive)
+                        && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)),
                     ComplianceStatus.NonCompliant => query.Where(d =>
                         d.ComplianceStatus == ComplianceStatus.NonCompliant
                         && (d.ExpirationDate == null || d.ExpirationDate >= today)),
-                    _ => query.Where(d => // Pending — but not if a date overlay would make it Expiring/Expired
-                        d.ComplianceStatus == ComplianceStatus.Pending
-                        && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive)),
+                    _ => query.Where(d =>
+                        // Genuine Pending — stored Pending, not date-overlaid to ExpiringSoon/Expired.
+                        (d.ComplianceStatus == ComplianceStatus.Pending
+                            && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive))
+                        // OR future-effective demotion (#362): a not-yet-in-force cert whose stored verdict is
+                        // affirmative (Compliant / ExpiringSoon / Pending) and which isn't already Expired
+                        // (Expired wins outright). Mirrors ComplianceStatusDeriver.Effective's demotion set, so
+                        // the ?status=Pending list matches every future-effective row's Pending badge.
+                        || (d.EffectiveDate != null && d.EffectiveDate >= notYetEffectiveBound
+                            && (d.ExpirationDate == null || d.ExpirationDate >= today)
+                            && (d.ComplianceStatus == ComplianceStatus.Compliant
+                                || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
+                                || d.ComplianceStatus == ComplianceStatus.Pending))),
                 };
         }
         if (!string.IsNullOrWhiteSpace(type))
@@ -178,7 +196,7 @@ public static class DocumentEndpoints
             d.VendorId,
             d.ExtractionStatus.ToString(),
             d.ExtractionConfidence,
-            ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today).ToString(),
+            ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today).ToString(),
             d.EffectiveDate,
             d.ExpirationDate,
             DaysUntilExpiry(d.ExpirationDate, today),
@@ -229,7 +247,7 @@ public static class DocumentEndpoints
             doc.VendorId,
             doc.ExtractionStatus.ToString(),
             doc.ExtractionConfidence,
-            ComplianceStatusDeriver.Effective(doc.ComplianceStatus, doc.ExpirationDate, today).ToString(),
+            ComplianceStatusDeriver.Effective(doc.ComplianceStatus, doc.ExpirationDate, doc.EffectiveDate, today).ToString(),
             doc.EffectiveDate,
             doc.ExpirationDate,
             DaysUntilExpiry(doc.ExpirationDate, today),

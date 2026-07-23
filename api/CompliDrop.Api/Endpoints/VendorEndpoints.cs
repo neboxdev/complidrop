@@ -41,7 +41,7 @@ public static class VendorEndpoints
                     ? v.ComplianceTemplate.Rules.Select(r => r.DocumentType).Distinct().ToList()
                     : new List<string>(),
                 Docs = v.Documents
-                    .Select(d => new DocCoverageInfo(d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.CreatedAt))
+                    .Select(d => new DocCoverageInfo(d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, d.CreatedAt))
                     .ToList(),
                 DocumentCount = v.Documents.Count,
                 ActivePortalLinks = v.PortalLinks.Count(l => l.IsActive),
@@ -65,9 +65,11 @@ public static class VendorEndpoints
         return Results.Ok(new { data = vendors, error = (object?)null });
     }
 
-    /// <summary>Lightweight per-document view the coverage rollup needs (FP-074).</summary>
+    /// <summary>Lightweight per-document view the coverage rollup needs (FP-074). EffectiveDate feeds the
+    /// future-effective demotion (#362 / ADR 0041) via ComplianceStatusDeriver.Effective.</summary>
     private sealed record DocCoverageInfo(
-        string DocumentType, Entities.ComplianceStatus ComplianceStatus, DateTime? ExpirationDate, DateTime CreatedAt);
+        string DocumentType, Entities.ComplianceStatus ComplianceStatus, DateTime? ExpirationDate,
+        DateTime? EffectiveDate, DateTime CreatedAt);
 
     /// <summary>
     /// Rolls a vendor's documents up against the distinct document types its checklist requires
@@ -99,7 +101,7 @@ public static class VendorEndpoints
             // instead of hand-rolling a 4th copy of the window math. A valid-but-expiring-soon doc is
             // benign coverage (ExpiringSoon), NOT a hard "action needed" — only Expired / NonCompliant /
             // not-yet-graded (Pending) leave a required type uncovered.
-            var effective = ComplianceStatusDeriver.Effective(latest.ComplianceStatus, latest.ExpirationDate, today);
+            var effective = ComplianceStatusDeriver.Effective(latest.ComplianceStatus, latest.ExpirationDate, latest.EffectiveDate, today);
             var covered = effective is Entities.ComplianceStatus.Compliant or Entities.ComplianceStatus.ExpiringSoon;
             if (!covered) { actionNeeded = true; continue; }
             if (latest.ExpirationDate is DateTime exp && (coveredThrough is null || exp < coveredThrough))
@@ -143,7 +145,7 @@ public static class VendorEndpoints
         // rollup needs. Tenant-scoped via the global Documents filter; VendorId scopes to this vendor.
         var coverageDocs = await db.Documents
             .Where(d => d.VendorId == id)
-            .Select(d => new DocCoverageInfo(d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.CreatedAt))
+            .Select(d => new DocCoverageInfo(d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, d.CreatedAt))
             .ToListAsync(ct);
 
         var coverage = ComputeCoverage(
