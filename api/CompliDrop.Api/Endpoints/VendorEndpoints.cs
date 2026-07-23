@@ -41,7 +41,8 @@ public static class VendorEndpoints
                     ? v.ComplianceTemplate.Rules.Select(r => r.DocumentType).Distinct().ToList()
                     : new List<string>(),
                 Docs = v.Documents
-                    .Select(d => new DocCoverageInfo(d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate))
+                    .Select(d => new DocCoverageInfo(
+                        d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, d.ExtractionStatus))
                     .ToList(),
                 DocumentCount = v.Documents.Count,
                 ActivePortalLinks = v.PortalLinks.Count(l => l.IsActive),
@@ -66,11 +67,13 @@ public static class VendorEndpoints
     }
 
     /// <summary>Lightweight per-document view the coverage rollup needs (FP-074). EffectiveDate feeds the
-    /// future-effective demotion (#362 / ADR 0041) via ComplianceStatusDeriver.Effective. No CreatedAt:
-    /// coverage is decided by the best CURRENTLY-IN-FORCE cert, not the newest upload (#362 review).</summary>
+    /// future-effective demotion (#362 / ADR 0041) via ComplianceStatusDeriver.Effective. ExtractionStatus
+    /// lets the rollup drop a doc the SYSTEM ITSELF distrusts (ManualRequired) from in-force coverage
+    /// (#401 / ADR 0042). No CreatedAt: coverage is decided by the best CURRENTLY-IN-FORCE cert, not the
+    /// newest upload (#362 review).</summary>
     private sealed record DocCoverageInfo(
         string DocumentType, Entities.ComplianceStatus ComplianceStatus, DateTime? ExpirationDate,
-        DateTime? EffectiveDate);
+        DateTime? EffectiveDate, Entities.ExtractionStatus ExtractionStatus);
 
     /// <summary>
     /// Rolls a vendor's documents up against the distinct document types its checklist requires
@@ -79,10 +82,12 @@ public static class VendorEndpoints
     /// IN FORCE today (EffectiveDate &lt;= today) and not expired. Coverage is judged on the best
     /// currently-in-force cert, NOT strictly the newest upload (#362 review): a vendor still covered by
     /// an in-force earlier cert who PRE-UPLOADS a future-effective renewal (which reads Pending, ADR 0041)
-    /// stays Covered instead of flipping to ActionNeeded. A required type with no document is "missing";
-    /// a type whose only documents are Expired / NonCompliant / not-yet-in-force (Pending) is
-    /// "action-needed" — a genuine gap still surfaces. The engine re-grades on rule/assignment change
-    /// since #257, so this isn't built on stale verdicts.
+    /// stays Covered instead of flipping to ActionNeeded. A doc the extraction system distrusts
+    /// (ExtractionStatus.ManualRequired) is NOT counted as in-force coverage either, so a distrusted
+    /// extraction can't silently roll up to Covered (#401 / ADR 0042). A required type with no document is
+    /// "missing"; a type whose only documents are Expired / NonCompliant / not-yet-in-force (Pending) /
+    /// awaiting-review (ManualRequired) is "action-needed" — a genuine gap still surfaces. The engine
+    /// re-grades on rule/assignment change since #257, so this isn't built on stale verdicts.
     /// </summary>
     private static VendorCoverage ComputeCoverage(
         bool hasTemplate, List<string> requiredTypes, List<DocCoverageInfo> docs, DateTime today)
@@ -114,8 +119,18 @@ public static class VendorEndpoints
             // in-force earlier cert to ActionNeeded the instant they PRE-UPLOAD a future-effective renewal
             // (which reads Pending — not yet in force). An expired-only / non-compliant-only /
             // future-effective-only type still has NO in-force cert, so a real lapse is never masked.
+            //
+            // #401 / ADR 0042: a doc the extraction system ITSELF flagged as unreliable (ManualRequired
+            // -- a low-confidence verdict-bearing field, an unreadable canonical value, or the model's
+            // reprocess signal) does NOT count as in-force coverage, even if its stored rule verdict reads
+            // Compliant. For a compliance product a verdict the machine distrusts must not silently roll up
+            // to "Covered": a required type covered ONLY by ManualRequired docs falls to ActionNeeded -- a
+            // genuine gap surfaces, exactly like an expired-only type -- until a human confirms the
+            // extraction on the document detail page. Read-time judgement only; the stored ComplianceStatus
+            // is untouched (extraction-trust and rule-verdict are separate axes -- ADR 0042).
             var inForce = typeDocs
-                .Where(d => ComplianceStatusDeriver.Effective(
+                .Where(d => d.ExtractionStatus != Entities.ExtractionStatus.ManualRequired
+                    && ComplianceStatusDeriver.Effective(
                         d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today)
                     is Entities.ComplianceStatus.Compliant or Entities.ComplianceStatus.ExpiringSoon)
                 .ToList();
@@ -177,7 +192,8 @@ public static class VendorEndpoints
         // rollup needs. Tenant-scoped via the global Documents filter; VendorId scopes to this vendor.
         var coverageDocs = await db.Documents
             .Where(d => d.VendorId == id)
-            .Select(d => new DocCoverageInfo(d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate))
+            .Select(d => new DocCoverageInfo(
+                d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, d.ExtractionStatus))
             .ToListAsync(ct);
 
         var coverage = ComputeCoverage(
