@@ -199,4 +199,22 @@ public sealed class ComplianceStatusDeriverTests
         (new DateTime(2026, 6, 15, 23, 0, 0, DateTimeKind.Utc) < bound).Should().BeTrue("effective today at any time is in force");
         (new DateTime(2026, 6, 16, 0, 0, 0, DateTimeKind.Utc) >= bound).Should().BeTrue("effective tomorrow is not yet in force");
     }
+
+    [Fact]
+    public void Null_expiry_with_a_future_effective_date_demotes_an_affirmative_verdict_to_Pending()
+    {
+        // #362 review S2: a doc with NO expiration but a FUTURE effective date takes the null-expiry
+        // (overlaid = stored) branch and THEN the future-effective demotion — so a stored Compliant reads
+        // Pending. This guards the demotion's placement AFTER the expiry if/else: moving it inside the
+        // non-null-expiry (else) block would leave this reading Compliant while the dashboard compliant
+        // count and the ?status=Pending list arm (both of which carry an ExpirationDate == null branch)
+        // demote it — a silent count-vs-badge split. Every other #362 test uses a non-null expiry, so
+        // without this the null-expiry path of the demotion is untested.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, expirationDate: null, effectiveDate: Today.AddDays(30), Today)
+            .Should().Be(ComplianceStatus.Pending);
+        // Control: a null-expiry future-effective doc that FAILS its rules is accurately NonCompliant,
+        // never demoted — the demotion only ever moves a doc OUT of the affirmative tally.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.NonCompliant, expirationDate: null, effectiveDate: Today.AddDays(30), Today)
+            .Should().Be(ComplianceStatus.NonCompliant);
+    }
 }

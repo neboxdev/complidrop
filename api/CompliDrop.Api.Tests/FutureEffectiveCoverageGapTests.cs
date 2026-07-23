@@ -18,7 +18,7 @@ public sealed class FutureEffectiveCoverageGapTests(IntegrationTestFixture fixtu
 {
     private async Task<Guid> SeedDocAsync(
         Guid orgId, ComplianceStatus stored, DateTime? expiration, DateTime? effective,
-        Guid? vendorId = null, string docType = "coi")
+        Guid? vendorId = null, string docType = "coi", DateTime? createdAt = null)
     {
         var now = DateTime.UtcNow;
         var docId = Guid.NewGuid();
@@ -37,7 +37,7 @@ public sealed class FutureEffectiveCoverageGapTests(IntegrationTestFixture fixtu
             ExpirationDate = expiration,
             EffectiveDate = effective,
             ExtractionStatus = ExtractionStatus.Completed,
-            CreatedAt = now,
+            CreatedAt = createdAt ?? now,
             UpdatedAt = now
         });
         await db.SaveChangesAsync();
@@ -202,5 +202,63 @@ public sealed class FutureEffectiveCoverageGapTests(IntegrationTestFixture fixtu
         var vendor = vendors.Single(v => v.GetProperty("id").GetGuid() == vendorId);
         vendor.GetProperty("coverage").GetProperty("status").GetString().Should().Be("ActionNeeded",
             "a future-effective cert is not coverage in force — the vendor needs action");
+    }
+
+    [Fact]
+    public async Task A_vendor_covered_by_an_in_force_cert_stays_Covered_when_a_future_effective_renewal_is_pre_uploaded()
+    {
+        // #362 review (CONFIRMED BUG): the coverage rollup must judge a required type by its best
+        // CURRENTLY-IN-FORCE cert, not strictly the newest upload. A vendor covered today by an in-force
+        // earlier COI (A) who PRE-UPLOADS next year's renewal (B, effective the day A lapses) must stay
+        // Covered — B reads Pending (not yet in force, ADR 0041), but A still provides coverage today.
+        // Basing coverage on the newest upload alone (B → Pending) wrongly flipped this vendor to
+        // ActionNeeded. The textbook insurance-renewal flow must never downgrade a still-covered vendor.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorRequiringCoiAsync(auth.OrgId);
+        var today = DateTime.UtcNow.Date;
+
+        // A: in force ~a year, expires in 31 days (just OUTSIDE the 30-day window → reads plain Compliant),
+        // uploaded first (earlier CreatedAt).
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: today.AddDays(31),
+            effective: today.AddDays(-365), vendorId: vendorId, createdAt: DateTime.UtcNow.AddMinutes(-10));
+        // B: renewal effective the day A lapses (future → reads Pending), expires far out, uploaded LAST
+        // (later CreatedAt) — so the pre-fix "newest upload only" rollup consulted B and returned ActionNeeded.
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: today.AddDays(396),
+            effective: today.AddDays(31), vendorId: vendorId, createdAt: DateTime.UtcNow);
+
+        var vendors = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+        var coverage = vendors.Single(v => v.GetProperty("id").GetGuid() == vendorId).GetProperty("coverage");
+        coverage.GetProperty("status").GetString().Should().Be("Covered",
+            "the in-force earlier cert still covers the vendor today — a pre-uploaded future renewal must not downgrade it");
+        // Honest horizon: covered THROUGH the in-force cert's expiry (day 31), never the not-yet-in-force
+        // renewal's far-future date — a doc that isn't in force can't extend the coverage horizon.
+        coverage.GetProperty("coveredThrough").GetDateTime().Date.Should().Be(today.AddDays(31));
+    }
+
+    [Fact]
+    public async Task A_future_effective_doc_expiring_within_the_window_is_excluded_from_ExpiringSoon_everywhere()
+    {
+        // #362 review S1: a future-effective cert whose expiry falls INSIDE the 30-day ExpiringSoon window
+        // (effective in 5 days, expiring in 20) reads Pending — not yet in force — so it must be excluded
+        // from the dashboard expiringSoon count AND the ?status=ExpiringSoon list, and instead surface under
+        // ?status=Pending with a Pending detail badge. This is the ExpiringSoon mirror of the pinned
+        // Compliant surface: it exercises the effective-date exclusion on DashboardEndpoints (the
+        // expiringSoon count) and DocumentEndpoints (the ExpiringSoon list arm) end-to-end. Dropping that
+        // clause is exactly the #294-class count-vs-badge split reviewers.md calls a real finding.
+        var auth = await RegisterAndLoginAsync();
+        var today = DateTime.UtcNow.Date;
+        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant,
+            expiration: today.AddDays(20), effective: today.AddDays(5));
+
+        (await DetailStatusAsync(auth.Client, id)).Should().Be("Pending",
+            "a not-yet-in-force cert can't assert 'about to lapse' — it reads Pending, not ExpiringSoon");
+        (await ListIdsAsync(auth.Client, "ExpiringSoon")).Should().NotContain(id,
+            "the ?status=ExpiringSoon list must exclude a not-yet-in-force doc");
+        (await ListIdsAsync(auth.Client, "Pending")).Should().Contain(id,
+            "the future-effective doc surfaces under ?status=Pending instead");
+
+        (await StatsAsync(auth.Client)).GetProperty("expiringSoon").GetInt32().Should().Be(0,
+            "the future-effective doc is not yet in force — it must not inflate the ExpiringSoon count");
     }
 }
