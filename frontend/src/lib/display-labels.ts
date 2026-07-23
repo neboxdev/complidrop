@@ -229,7 +229,22 @@ export type ComplianceCheckLike = {
   ruleOperator?: string | null;
   ruleExpectedValue?: string | null;
   actualValue?: string | null;
+  notes?: string | null;
 };
+
+/**
+ * Byte-for-byte mirror of `ComplianceCheckService.UnreadableValueNote` (api). #383 / ADR 0040: a
+ * canonical value we could NOT parse fails its rule and the server stamps THIS note on the check.
+ *
+ * The affected rules' catalog `errorMessage` asserts the value was "not found" (e.g. "No expiration
+ * date was found …") — false when a value WAS found and we merely couldn't read it, and the exact
+ * fact ADR 0040 exists to distinguish. So `complianceFailureReason` keys on this note (a server
+ * verdict, not a re-implementation of parsing on the client) to swap that misleading base for the
+ * honest "we couldn't read" statement. The backend pins its side with `UnreadableValueNote` tests;
+ * `display-labels.test.ts` pins this string, so an edit to one that forgets the other goes red.
+ */
+export const UNREADABLE_VALUE_NOTE =
+  "We couldn't read this value, so we can't confirm this requirement. Check the document and correct it.";
 
 // Field names whose values are dollar amounts — rendered as US currency so the
 // failure reason reads "$1,000,000", not "1000000".
@@ -267,8 +282,27 @@ export function formatCheckValue(
  * operator + field + expected value. Appends what the document actually shows
  * when a value was extracted, or a "couldn't find this" note when it's missing.
  * Never surfaces a raw operator token or snake_case field name. (#193)
+ *
+ * Exception: an UNREADABLE canonical value (#383 / ADR 0040). The catalog
+ * `errorMessage` for these rules claims the value was "not found", but here one
+ * WAS found and we couldn't parse it — so we ignore the misleading owner text
+ * and state honestly that we couldn't read the field, still showing the raw
+ * value so the user can see what to correct. Keyed on the server's own note, so
+ * the client never re-decides "is this readable?"; when this note is present the
+ * check always carries the raw text in `actualValue`.
  */
 export function complianceFailureReason(check: ComplianceCheckLike): string {
+  if (!check.isPassed && check.notes?.trim() === UNREADABLE_VALUE_NOTE) {
+    // Parallel to the terse "… — this document shows X." form below, and audience-neutral: this same
+    // sentence is reused in the vendor-email body, so it carries no owner-only "edit it here" CTA (the
+    // ManualReviewCard on the detail page owns that instruction).
+    const label = fieldLabel(check.ruleFieldName).toLowerCase() || "value";
+    const raw = formatCheckValue(check.ruleFieldName, check.actualValue);
+    return raw
+      ? `We couldn't read the ${label} — this document shows ${raw}.`
+      : `We couldn't read the ${label} on this document.`;
+  }
+
   const expected = formatCheckValue(check.ruleFieldName, check.ruleExpectedValue);
   const synthesized = [
     fieldLabel(check.ruleFieldName),

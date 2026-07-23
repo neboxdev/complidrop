@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -43,14 +44,17 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     /// <summary>
     /// Builds a worker bound to the host's DI (so it resolves the test DB + fakes). The optional
     /// <paramref name="attemptTimeout"/> overrides the per-attempt timeout so the timeout-path tests
-    /// can use a sub-second budget instead of the production minimum.
+    /// can use a sub-second budget instead of the production minimum. Pass a
+    /// <see cref="ListLogger{T}"/> as <paramref name="logger"/> when the emitted log line is itself
+    /// the contract under test (the #383 unreadable-field warning and its PII rule) — the same
+    /// pattern <c>ReminderBackgroundServiceTests</c> uses for the #184 dead-letter flag.
     /// </summary>
-    private ExtractionWorker BuildWorker(TimeSpan? attemptTimeout = null)
+    private ExtractionWorker BuildWorker(TimeSpan? attemptTimeout = null, ILogger<ExtractionWorker>? logger = null)
     {
         var worker = new ExtractionWorker(
             Fixture.Factory.Services.GetRequiredService<IServiceScopeFactory>(),
             Options.Create(new ExtractionSettings()),
-            NullLogger<ExtractionWorker>.Instance);
+            logger ?? NullLogger<ExtractionWorker>.Instance);
         if (attemptTimeout is { } t) worker.AttemptTimeout = t;
         return worker;
     }
@@ -293,6 +297,165 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         await using var db = CreateSystemDb();
         (await db.DocumentFields.CountAsync(f => f.DocumentId == docId))
             .Should().Be(Extraction.Result.Fields.Count);
+    }
+
+    // ----- #383: a canonical value we couldn't parse routes the document to a human --------------
+
+    /// <summary>
+    /// A high-confidence, no-reprocess-signal extraction whose expiration_date is in a shape nothing
+    /// can parse — the #383 scenario. Confidence is deliberately ABOVE the 0.7 manual-review gate so
+    /// the test proves the new unreadable-field trigger, not the pre-existing low-confidence one.
+    /// </summary>
+    private static ExtractionResult ResultWith(string field, string value) => new(
+        DocumentType: "coi",
+        DocumentSubType: null,
+        Fields: [new ExtractedField(field, value, "string", 0.95)],
+        NeedsReprocessing: false,
+        Usage: new ExtractionUsage(InputTokens: 100, OutputTokens: 50, EstimatedCostUsd: 0.01m));
+
+    [Theory]
+    [InlineData("expiration_date", "12/31/2026 (per endorsement)")]
+    [InlineData("expiration_date", "continuous until cancelled")]
+    [InlineData("effective_date", "see attached endorsement")]
+    [InlineData("general_liability_limit", "1M per occurrence")]
+    public async Task An_unparseable_canonical_field_routes_the_document_to_manual_review(string field, string value)
+    {
+        // Without this the document lands Completed and looks perfectly healthy — high confidence, no
+        // reprocess flag, no processing error — while the typed column it needed sits silently null.
+        // Nothing else in the pipeline notices: the model was confident, it just wrote a date shape
+        // the parser can't read. ManualRequired is what puts it in front of a human, and it is the
+        // ONLY backstop when the org's checklist carries no rule on that field at all.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWith(field, value);
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            "an unreadable compliance-critical value must reach a human, not sit as a silent null");
+        doc.ExtractionConfidence.Should().BeGreaterThan(0.7,
+            "the flag must come from the unreadable value, not from the low-confidence gate");
+        doc.ProcessingError.Should().BeNull("this is not an extraction FAILURE — the read succeeded");
+    }
+
+    [Fact]
+    public async Task A_parseable_canonical_field_still_completes_normally()
+    {
+        // The control: the same shape of extraction with a readable date must NOT be dragged into
+        // manual review, or every document would demand attention and the signal would be worthless.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWith("expiration_date", "2027-03-15");
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        doc.ExpirationDate.Should().Be(new DateTime(2027, 3, 15, 0, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public async Task A_blank_canonical_field_does_not_trigger_manual_review()
+    {
+        // An absent value is an honest reading of a certificate that shows none — distinct from a
+        // value we couldn't read. Only the second is a defect worth a human's time.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWith("expiration_date", "");
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        doc.ExpirationDate.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task The_unreadable_field_warning_names_the_field_and_never_logs_its_value()
+    {
+        // The warning carries an explicit PII contract in its own comment — field NAMES only, never
+        // values, because extracted field values are document PII and must not reach logs/Sentry
+        // (CLAUDE.md § frontend error monitoring, applied to the backend's structured logs). Nothing
+        // pinned it while every worker test built with NullLogger, so the contract could be broken by
+        // adding one interpolated value and stay green (#383 review, S3).
+        const string documentValue = "12/31/2026 (per endorsement)";
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWith("expiration_date", documentValue);
+        var logger = new ListLogger<ExtractionWorker>();
+
+        await BuildWorker(logger: logger).ProcessDocumentAsync(docId, CancellationToken.None);
+
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired);
+        logger.Entries.Should()
+            .ContainSingle(e => e.Level == LogLevel.Warning && e.Message.Contains("could not parse"))
+            .Which.Message.Should().Contain("expiration_date",
+                "the operator has to know WHICH field needs a human, or the warning is unactionable");
+        logger.Entries.Should().NotContain(e => e.Message.Contains(documentValue),
+            "an extracted field VALUE is document PII and must never reach the logs");
+    }
+
+    [Fact]
+    public async Task A_canonical_field_emitted_twice_is_judged_on_its_last_value()
+    {
+        // Everything else in PersistSuccess is last-value-wins (the JSON mirror, the typed column),
+        // and so is the sibling writer (DocumentEndpoints.UpdateFields, "last value wins"). The
+        // unreadable set used to accumulate on ANY occurrence, so a model that emitted expiration_date
+        // twice — unreadable, then readable — parsed its column correctly and was STILL routed to
+        // manual review, on the strength of a value the document no longer holds (#383 review, S4).
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = new ExtractionResult(
+            DocumentType: "coi",
+            DocumentSubType: null,
+            Fields:
+            [
+                new ExtractedField("expiration_date", "12/31/2026 (per endorsement)", "string", 0.95),
+                new ExtractedField("expiration_date", "2026-12-31", "string", 0.95)
+            ],
+            NeedsReprocessing: false,
+            Usage: new ExtractionUsage(InputTokens: 100, OutputTokens: 50, EstimatedCostUsd: 0.01m));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExpirationDate.Should().Be(new DateTime(2026, 12, 31, 0, 0, 0, DateTimeKind.Utc),
+            "the LAST value is the one that landed in the typed column");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "the value the document actually carries is readable, so there is nothing for a human to fix");
+    }
+
+    [Theory]
+    [InlineData("expiration_date", "12/31/2026 (per endorsement)")]
+    [InlineData("expiration_date", "2027-03-15")]
+    [InlineData("expiration_date", "")]
+    [InlineData("effective_date", "see attached endorsement")]
+    [InlineData("effective_date", "2026-01-01")]
+    [InlineData("general_liability_limit", "1M per occurrence")]
+    [InlineData("general_liability_limit", "$1,000,000")]
+    [InlineData("policy_number", "GL-99887766")]
+    public async Task The_extraction_path_and_the_document_state_predicate_agree_on_unreadability(
+        string field, string value)
+    {
+        // "Does this document carry an unreadable canonical value?" used to be answered by TWO
+        // mechanisms — a per-field TypedColumnResult accumulated here on the extraction path, and the
+        // DocumentFieldReadability predicate on the request path — with nothing pinning them equal
+        // (#383 review round 2, S5). The repo pins every other mirrored predicate exactly this way
+        // (PlanLimitConsistencyTests, ExportService.SupersededIds), so this is the established pattern.
+        //
+        // PersistSuccess now COLLAPSES onto the shared predicate rather than keeping a second copy, so
+        // this asserts the collapse is behaviour-preserving across the readable / unreadable / blank /
+        // non-canonical cases — and goes red if a future edit re-introduces an independent mechanism
+        // that disagrees. ResultWith pins confidence at 0.95 with no reprocess signal, so the
+        // unreadable trigger is the ONLY thing that can set ManualRequired here.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWith(field, value);
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        var routedToReview = doc.ExtractionStatus == ExtractionStatus.ManualRequired;
+        DocumentFieldReadability.HasUnreadableCanonicalValue(doc).Should().Be(routedToReview,
+            "the state the persisted document is IN must match the reason the worker routed it (or didn't)");
     }
 
     [Fact]
