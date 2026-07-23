@@ -24,6 +24,7 @@ import {
   jsonOk,
   jsonError,
   authedMe,
+  makeMe,
   makeDocumentDetail,
   makeComplianceCheck,
   sequencedJsonOk,
@@ -423,6 +424,49 @@ describe("DocumentDetailPage — what we checked (#239)", () => {
     expect(await screen.findByText(/what we checked/i)).toBeInTheDocument();
     expect(screen.getByText(/at least \$1,000,000 in general liability/i)).toBeInTheDocument();
     expect(screen.getByText(/workers' compensation coverage/i)).toBeInTheDocument();
+  });
+
+  // #396 (CLM-1): the "What we checked" additional-insured line is the separate assertion the ticket
+  // flags — a passing AI check otherwise reads the categorical "Names 'X' as additional insured".
+  const AI_PASS = () =>
+    makeDocumentDetail({
+      id: "d_ai",
+      documentType: "coi",
+      extractionStatus: "Completed",
+      complianceStatus: "Compliant",
+      complianceChecks: [
+        makeComplianceCheck({
+          id: "ai",
+          ruleFieldName: "additional_insured",
+          ruleOperator: "contains",
+          ruleExpectedValue: "Riverside Event Hall",
+          isPassed: true,
+        }),
+      ],
+    });
+
+  it("reads the LEGACY 'Names …' additional-insured line while the CLM-1 flag is off (prod default)", async () => {
+    server.use(http.get(url("/api/documents/:id"), () => jsonOk(AI_PASS())));
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_ai" } });
+
+    expect(await screen.findByText(/what we checked/i)).toBeInTheDocument();
+    expect(screen.getByText("Names “Riverside Event Hall” as additional insured")).toBeInTheDocument();
+    expect(screen.queryByText(/certificate indicates/i)).toBeNull();
+  });
+
+  it("reads the CORRECTED 'certificate indicates …' additional-insured line when the flag is on", async () => {
+    server.use(http.get(url("/api/documents/:id"), () => jsonOk(AI_PASS())));
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: makeMe({ features: { correctedChecklists: false, correctedAdditionalInsuredWording: true } }),
+      params: { id: "d_ai" },
+    });
+
+    expect(await screen.findByText(/what we checked/i)).toBeInTheDocument();
+    expect(
+      screen.getByText("Certificate indicates “Riverside Event Hall” as additional insured"),
+    ).toBeInTheDocument();
+    // The categorical overclaim is gone.
+    expect(screen.queryByText(/Names “Riverside Event Hall” as additional insured/)).toBeNull();
   });
 
   it("shows the non-compliance explainer (not the checked card) when a requirement failed", async () => {

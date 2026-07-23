@@ -752,3 +752,107 @@ describe("RulesPage — TemplateCorrections gate (#416, ADR 0036 Amendment 3)", 
     expect(screen.queryByText(/liquor_liability_limit|min_value/)).toBeNull();
   });
 });
+
+describe("RulesPage — additional-insured claim wording (CLM-1 flag, #396)", () => {
+  // The corrected additional-insured copy ships merged but INVISIBLE until the server flips
+  // ComplianceClaims:CorrectedAdditionalInsuredWording after the G1 attorney sign-off. This flag is
+  // DISTINCT from correctedChecklists — a venue running the flag-off world still authors AI rules,
+  // so both the read sentence and the stored errorMessage must stay on the legacy copy there.
+  const correctedAiWordingMe = makeMe({
+    features: { correctedChecklists: false, correctedAdditionalInsuredWording: true },
+  });
+
+  const DETAIL_WITH_AI = {
+    ...DETAIL,
+    rules: [
+      {
+        id: "r_ai_01",
+        documentType: "coi",
+        fieldName: "additional_insured",
+        operator: "contains",
+        expectedValue: "Riverside Event Hall",
+        errorMessage: "Not named",
+        sortOrder: 1,
+      },
+    ],
+  };
+
+  it("renders the LEGACY categorical sentence while the flag is off (prod default)", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL_WITH_AI)),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    // The legacy "Names …" copy appears in BOTH the requirement row and the live summary.
+    expect(
+      (await screen.findAllByText(/Names “Riverside Event Hall” as additional insured/)).length,
+    ).toBeGreaterThanOrEqual(2);
+    // …and the corrected wording is nowhere while the flag is off.
+    expect(screen.queryByText(/certificate indicates/i)).toBeNull();
+  });
+
+  it("renders the CORRECTED 'certificate indicates…' sentence when the flag is on", async () => {
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk(DETAIL_WITH_AI)),
+    );
+    renderWithProviders(<RulesPage />, { auth: correctedAiWordingMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+
+    expect(
+      (await screen.findAllByText(/Certificate indicates “Riverside Event Hall” as additional insured/)).length,
+    ).toBeGreaterThanOrEqual(2);
+    // The categorical overclaim is gone.
+    expect(screen.queryByText(/Names “Riverside Event Hall” as additional insured/)).toBeNull();
+  });
+
+  it("stores the LEGACY 'not found' errorMessage on the rule when adding it with the flag off", async () => {
+    let body: Record<string, unknown> | undefined;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk({ ...DETAIL, rules: [] })),
+      http.post(url("/api/compliance/templates/:id/rules"), async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return jsonOk({ id: "r_ai" });
+      }),
+    );
+    renderWithProviders(<RulesPage />, { auth: authedMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    await screen.findByRole("heading", { name: /caterer/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /add a requirement/i }));
+    fireEvent.click(screen.getByRole("button", { name: /names you as additional insured/i }));
+    fireEvent.change(screen.getByLabelText(/name to look for/i), { target: { value: "Riverside Event Hall" } });
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+    await waitFor(() => expect(body).toBeDefined());
+    expect(body!.errorMessage).toBe("“Riverside Event Hall” was not found as an additional insured.");
+  });
+
+  it("stores the CORRECTED 'does not indicate' errorMessage on the rule when adding it with the flag on", async () => {
+    let body: Record<string, unknown> | undefined;
+    server.use(
+      http.get(url("/api/compliance/templates"), () => jsonOk([EDITABLE])),
+      http.get(url("/api/compliance/templates/:id"), () => jsonOk({ ...DETAIL, rules: [] })),
+      http.post(url("/api/compliance/templates/:id/rules"), async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>;
+        return jsonOk({ id: "r_ai" });
+      }),
+    );
+    renderWithProviders(<RulesPage />, { auth: correctedAiWordingMe });
+    fireEvent.click(await screen.findByRole("button", { name: /caterer/i }));
+    await screen.findByRole("heading", { name: /caterer/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /add a requirement/i }));
+    fireEvent.click(screen.getByRole("button", { name: /names you as additional insured/i }));
+    fireEvent.change(screen.getByLabelText(/name to look for/i), { target: { value: "Riverside Event Hall" } });
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+
+    await waitFor(() => expect(body).toBeDefined());
+    expect(body!.errorMessage).toBe(
+      "The certificate does not indicate “Riverside Event Hall” as an additional insured.",
+    );
+  });
+});
