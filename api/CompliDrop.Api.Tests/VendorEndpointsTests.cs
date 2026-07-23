@@ -251,6 +251,39 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     }
 
     [Fact]
+    public async Task A_required_type_with_both_a_ManualRequired_and_a_Completed_Compliant_cert_reads_Covered()
+    {
+        // #401 / ADR 0042: the ManualRequired exclusion is PER DOCUMENT, not per TYPE. A required type
+        // covered by BOTH a distrusted (ManualRequired) cert AND a trusted (Completed + Compliant) cert
+        // is genuinely covered by the trusted one — ComputeCoverage drops only the distrusted doc from the
+        // in-force set, so its trusted sibling still counts and the vendor reads Covered, NOT ActionNeeded.
+        // Guards against a regression that excluded the WHOLE type whenever ANY of its docs was
+        // ManualRequired: the two single-doc #401 tests above can't catch that (each type has exactly one
+        // doc), so this two-doc case is the one that pins the per-document semantics.
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Mixed Trust LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        // Two COI certs for the SAME required type: one the system distrusts, one it trusts.
+        await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.ManualRequired);
+        await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.Completed);
+
+        var list = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+        CoverageFor(list, vendorId).GetProperty("status").GetString().Should().Be("Covered",
+            "the exclusion is per-document — the trusted Completed+Compliant cert still provides in-force coverage (#401)");
+
+        var detail = (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/vendors/{vendorId}"))
+            .GetProperty("data").GetProperty("coverage");
+        detail.GetProperty("status").GetString().Should().Be("Covered",
+            "the detail rollup is per-document too — a distrusted sibling doesn't sink a trusted cert (#401)");
+    }
+
+    [Fact]
     public async Task Covered_vendor_surfaces_the_nearest_expiration_as_its_covered_through_horizon()
     {
         // #399: "Covered" means current AS OF TODAY, not covered on a future event date. The rollup
