@@ -73,6 +73,31 @@ public sealed class ComplianceRuleUpsertTests(IntegrationTestFixture fixture) : 
         (await db.ComplianceRules.CountAsync(r => r.ComplianceTemplateId == templateId)).Should().Be(0);
     }
 
+    [Theory]
+    [InlineData("abc")]
+    [InlineData("$1M")]
+    [InlineData("1,00,0x")]
+    public async Task Creating_a_min_value_rule_with_a_non_numeric_expected_value_is_rejected_400(string expected)
+    {
+        // #374 re-review: a min_value threshold that ISN'T a number passes the blank guard above but can
+        // never be satisfied — EvaluateRule fails EVERY document closed with "Unable to parse numeric
+        // comparison." Reject it at the write boundary too, with a DISTINCT code from the blank case, so
+        // the misconfiguration is caught up front instead of silently failing every certificate. The
+        // guard mirrors EvaluateRule's decimal.TryParse(NumberStyles.Any, CultureInfo.InvariantCulture),
+        // so a threshold the eval can parse is never rejected here.
+        var auth = await RegisterAndLoginAsync();
+        var templateId = await CreateTemplateAsync(auth.Client);
+
+        var resp = await PostRuleAsync(auth.Client, templateId, "general_liability_limit", "min_value", expected);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(resp)).Should().Be("validation.expected_value_not_numeric");
+
+        // The reject blocks the write — no rule row lands.
+        await using var db = CreateSystemDb();
+        (await db.ComplianceRules.CountAsync(r => r.ComplianceTemplateId == templateId)).Should().Be(0);
+    }
+
     [Fact]
     public async Task Creating_a_required_rule_without_an_expected_value_is_accepted()
     {
