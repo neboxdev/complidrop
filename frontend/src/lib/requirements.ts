@@ -114,7 +114,7 @@ const NOT_EXPIRED_HELPER =
 // "certificate indicates…", not the categorical "Names…". It is STAGED behind the server flag
 // `features.correctedAdditionalInsuredWording` (ComplianceClaims:CorrectedAdditionalInsuredWording,
 // default OFF) pending the TX-attorney sign-off on CLM-1 (docs/rule-engine/G1-COUNSEL-BRIEF.md §0,
-// TRR §3, ADR 0042). `corrected=false` returns TODAY'S EXACT copy byte-for-byte — the flag-off /
+// TRR §3, ADR 0043). `corrected=false` returns TODAY'S EXACT copy byte-for-byte — the flag-off /
 // flag-unknown default that keeps prod unchanged — and the catalog entry below delegates to it so
 // the legacy strings live in exactly one place.
 // ---------------------------------------------------------------------------

@@ -1123,7 +1123,7 @@ public static class AuthEndpoints
     // TemplateCorrections:Enabled server flag so the SPA can hide the gated rules-page surfaces
     // (liquor add-menu option, additional-insured nudge) until the G1 legal sign-off flips it;
     // correctedAdditionalInsuredWording mirrors ComplianceClaims:CorrectedAdditionalInsuredWording
-    // (#396, CLM-1, ADR 0042) so the SPA renders the legacy vs corrected additional-insured claim
+    // (#396, CLM-1, ADR 0043) so the SPA renders the legacy vs corrected additional-insured claim
     // copy. Both ride EVERY me-shaped payload (me / register / login / complete-onboarding /
     // organization) because the frontend writes each into the same session cache — a payload missing
     // a field would poison the cache the rules / document pages read. No existing field, cookie, or

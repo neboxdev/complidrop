@@ -29,7 +29,7 @@ public record DeleteAccountRequest(string Password);
 /// additional-insured nudge, keeping the gated #416 behavior invisible pending the
 /// G1-COUNSEL-BRIEF §0 legal/insurance sign-off.
 /// <c>CorrectedAdditionalInsuredWording</c> mirrors
-/// <c>ComplianceClaims:CorrectedAdditionalInsuredWording</c> (#396, CLM-1, ADR 0042): while false,
+/// <c>ComplianceClaims:CorrectedAdditionalInsuredWording</c> (#396, CLM-1, ADR 0043): while false,
 /// the frontend renders the legacy categorical "Names '{name}' as additional insured" copy; when
 /// true it swaps in the honest "certificate indicates…" wording. DELIBERATELY separate from
 /// <c>CorrectedChecklists</c> — CLM-1 unlocks on a different attorney sign-off.

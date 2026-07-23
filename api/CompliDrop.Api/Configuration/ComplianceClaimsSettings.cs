@@ -17,7 +17,7 @@ namespace CompliDrop.Api.Configuration;
 /// pre-#396 wording — so a flag-off deploy is behaviorally identical to pre-#396 production, pinned by
 /// test. Flipping to true swaps ONLY those copy strings for the honest "a certificate only INDICATES
 /// additional-insured status; it does not GRANT coverage — request the endorsement" framing. It NEVER
-/// changes a pass/fail verdict — copy only. See ADR 0042.
+/// changes a pass/fail verdict — copy only. See ADR 0043.
 /// </summary>
 public class ComplianceClaimsSettings
 {

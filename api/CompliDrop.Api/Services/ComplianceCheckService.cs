@@ -126,7 +126,7 @@ public class ComplianceCheckService(
     // (a registered service wins over the null default), while a direct `new(...)` without options
     // resolves to false = today's copy. It changes ONLY the affirmative-flag (ACORD checkbox
     // fallback) check NOTE string, never the pass/fail verdict. Behind
-    // ComplianceClaims:CorrectedAdditionalInsuredWording, default OFF (ADR 0042).
+    // ComplianceClaims:CorrectedAdditionalInsuredWording, default OFF (ADR 0043).
     IOptions<ComplianceClaimsSettings>? complianceClaims = null) : IComplianceCheckService
 {
     public const int DefaultReevaluationPageSize = 200;
@@ -475,7 +475,7 @@ public class ComplianceCheckService(
     internal const string UnreadableValueNote =
         "We couldn't read this value, so we can't confirm this requirement. Check the document and correct it.";
 
-    // #396 (CLM-1, ADR 0042): the honest "a certificate only INDICATES additional-insured status; it
+    // #396 (CLM-1, ADR 0043): the honest "a certificate only INDICATES additional-insured status; it
     // does not GRANT coverage — request the endorsement" reminder appended to the affirmative-flag
     // (ACORD checkbox fallback) check note WHEN the ComplianceClaims:CorrectedAdditionalInsuredWording
     // flag is ON. Flag OFF keeps the pre-#396 note ("The additional-insured box is checked…")
@@ -568,7 +568,7 @@ public class ComplianceCheckService(
                     // #396 (CLM-1): fallbackHit — the pass/fail — is computed ABOVE and is identical
                     // regardless of the flag; only the NOTE wording is staged. Flag OFF keeps the
                     // pre-#396 "box is checked" note byte-for-byte; flag ON states the honest
-                    // "certificate INDICATES… request the endorsement" framing (ADR 0042, TRR §3).
+                    // "certificate INDICATES… request the endorsement" framing (ADR 0043, TRR §3).
                     var note = correctedAdditionalInsuredWording
                         ? (fallbackHit
                             ? AdditionalInsuredIndicatedHitNote

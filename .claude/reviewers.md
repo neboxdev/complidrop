@@ -162,7 +162,7 @@ Both are defined in this repo's `.claude/agents/`.
   default-OFF flag `ComplianceClaims:CorrectedAdditionalInsuredWording`, surfaced as
   `features.correctedAdditionalInsuredWording` on `/api/auth/me` — merged-but-inert
   pending the G1-COUNSEL-BRIEF §0 CLM-1 attorney sign-off, same posture as
-  `TemplateCorrections` / `RuleEngine` (ADR 0042). It is COPY-ONLY: flag-OFF keeps the
+  `TemplateCorrections` / `RuleEngine` (ADR 0043). It is COPY-ONLY: flag-OFF keeps the
   legacy "Names '{name}' as additional insured" sentence, the "was not found" failure
   message, and the "box is checked" affirmative-flag check note byte-for-byte (the
   merge-safety no-op — the legacy copy is deliberate, NOT a bug; do not flag or "fix"

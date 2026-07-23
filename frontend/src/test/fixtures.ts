@@ -62,7 +62,7 @@ export const authedMe: Readonly<Me> = {
   // Server feature flags: both default OFF — the production posture pending the G1 sign-offs — so the
   // bulk of tests exercise today's visible product. `correctedChecklists` (#416, ADR 0036 Amendment 3)
   // gates the liquor add-menu option / additional-insured nudge; `correctedAdditionalInsuredWording`
-  // (#396 / CLM-1, ADR 0042) gates the corrected additional-insured claim copy. Flip either via
+  // (#396 / CLM-1, ADR 0043) gates the corrected additional-insured claim copy. Flip either via
   // makeMe({ features: { correctedChecklists: true, correctedAdditionalInsuredWording: false } }).
   features: { correctedChecklists: false, correctedAdditionalInsuredWording: false },
 };

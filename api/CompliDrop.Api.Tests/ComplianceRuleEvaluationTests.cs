@@ -379,7 +379,7 @@ public class ComplianceRuleEvaluationTests
     public void Additional_insured_note_reframes_to_indicates_not_grants_when_the_flag_is_ON()
     {
         // Flag ON swaps ONLY the NOTE wording to the honest "certificate indicates… request the
-        // endorsement" framing (CLM-1 / ADR 0042 / TRR §3): the categorical "box is checked" copy that
+        // endorsement" framing (CLM-1 / ADR 0043 / TRR §3): the categorical "box is checked" copy that
         // overstated additional-insured coverage is gone, on BOTH the hit and the miss note.
         var hit = ComplianceCheckService.EvaluateRule(
             CoiWith("Y", certificateHolder: "Riverside Event Hall"),

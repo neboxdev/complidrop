@@ -255,7 +255,7 @@ public sealed class AuthEndpointsTests(IntegrationTestFixture fixture) : Integra
     [Fact]
     public async Task Me_reports_the_corrected_additional_insured_wording_feature_flag_off_by_default()
     {
-        // #396 (CLM-1, ADR 0042): the additive feature the SPA reads to pick the additional-insured
+        // #396 (CLM-1, ADR 0043): the additive feature the SPA reads to pick the additional-insured
         // claim copy. The shared test host does NOT set ComplianceClaims:CorrectedAdditionalInsuredWording,
         // so it surfaces its prod DEFAULT — OFF (legacy copy) — here. The flag-ON value is pinned by
         // ComplianceClaimsFlagTests against an isolated host, mirroring TemplateCorrectionsFlagTests.

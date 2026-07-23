@@ -9,7 +9,7 @@ namespace CompliDrop.Api.Tests;
 
 /// <summary>
 /// End-to-end proof that the /api/auth/me <c>features.correctedAdditionalInsuredWording</c> flag
-/// (#396, CLM-1, ADR 0042) mirrors <c>ComplianceClaims:CorrectedAdditionalInsuredWording</c> in BOTH
+/// (#396, CLM-1, ADR 0043) mirrors <c>ComplianceClaims:CorrectedAdditionalInsuredWording</c> in BOTH
 /// postures, on every me-shaped payload the SPA caches (register + /me).
 ///
 /// Runs against its OWN container (pattern: <see cref="TemplateCorrectionsFlagTests"/>). Unlike the

@@ -114,7 +114,7 @@ export default function RulesPage() {
   const correctedChecklistsEnabled = me?.features?.correctedChecklists === true;
   // #396 (CLM-1): the corrected additional-insured claim wording. Same strict `=== true` / optional-
   // chain-through-features posture — a loading/undefined/old-backend me defaults to the LEGACY copy
-  // (the safe, prod-identical flag-off state). Distinct flag from correctedChecklists (ADR 0042).
+  // (the safe, prod-identical flag-off state). Distinct flag from correctedChecklists (ADR 0043).
   const correctedAdditionalInsuredWording = me?.features?.correctedAdditionalInsuredWording === true;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // On phones the editor renders ~2 screens below the rail, so tapping a checklist

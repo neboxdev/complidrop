@@ -66,7 +66,7 @@ builder.Services.AddOptions<TemplateCorrectionsSettings>().Bind(builder.Configur
 // flags above. Gates the corrected additional-insured claim WORDING — the /api/auth/me
 // `features.correctedAdditionalInsuredWording` flag the SPA reads, and the ACORD-checkbox-fallback
 // check NOTE — pending the G1-COUNSEL-BRIEF §0 attorney sign-off. Copy-only when flipped, never a
-// verdict change. DISTINCT from TemplateCorrections above (a different sign-off). See ADR 0042.
+// verdict change. DISTINCT from TemplateCorrections above (a different sign-off). See ADR 0043.
 builder.Services.AddOptions<ComplianceClaimsSettings>().Bind(builder.Configuration.GetSection(ComplianceClaimsSettings.SectionName));
 
 // ============================================================

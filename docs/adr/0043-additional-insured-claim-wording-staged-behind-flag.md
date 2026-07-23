@@ -1,4 +1,4 @@
-# 0042. Stage the corrected additional-insured claim wording behind a default-OFF flag (CLM-1)
+# 0043. Stage the corrected additional-insured claim wording behind a default-OFF flag (CLM-1)
 
 - **Status:** accepted
 - **Date:** 2026-07-23

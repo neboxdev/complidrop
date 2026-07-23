@@ -24,7 +24,7 @@ export type Me = {
    * (the prod default, pending the G1 legal/insurance sign-off), the rules page hides the liquor
    * "+ Add a requirement" menu option and the additional-insured nudge.
    * `correctedAdditionalInsuredWording` mirrors the backend
-   * `ComplianceClaims:CorrectedAdditionalInsuredWording` flag (#396 / CLM-1, ADR 0042) — while false
+   * `ComplianceClaims:CorrectedAdditionalInsuredWording` flag (#396 / CLM-1, ADR 0043) — while false
    * (the prod default, pending the G1 attorney sign-off), the additional-insured requirement sentence
    * and failure copy use the legacy categorical "Names …" wording; when true they use the honest
    * "certificate indicates …" wording. Both ride every me-shaped payload (me / register / login /
