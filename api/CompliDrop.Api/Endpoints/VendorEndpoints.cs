@@ -188,7 +188,7 @@ public static class VendorEndpoints
         // Coverage docs are PROJECTED in a separate lightweight query rather than Include(Documents):
         // a third sibling collection Include would cartesian-multiply the result AND re-ship each
         // Document's fat ExtractionRawJson / ExtractionFields jsonb (the split-query convention in
-        // GetDocument / ComplianceCheckService). The projection ships only the four scalar fields the
+        // GetDocument / ComplianceCheckService). The projection ships only the five scalar fields the
         // rollup needs. Tenant-scoped via the global Documents filter; VendorId scopes to this vendor.
         var coverageDocs = await db.Documents
             .Where(d => d.VendorId == id)
