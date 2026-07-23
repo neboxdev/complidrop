@@ -15,6 +15,7 @@ import {
   formatCheckValue,
   processingErrorMessage,
   relativeTime,
+  UNREADABLE_VALUE_NOTE,
 } from "./display-labels";
 
 describe("complianceStatusLabel (#188)", () => {
@@ -241,6 +242,36 @@ describe("complianceFailureReason (#193)", () => {
     });
     expect(reason).toBe(
       "A workers' comp certificate is required — we couldn't find this on the document.",
+    );
+  });
+
+  it("says we couldn't READ the value — never 'not found' — when the check is unreadable (#383)", () => {
+    // ADR 0040: an unparseable canonical value FAILS its rule, and the catalog errorMessage for that
+    // rule asserts the value was "not found". But one WAS found — it just couldn't be parsed. The
+    // sentence must not repeat that false claim beside the value it just contradicted. Keyed on the
+    // server note, so this is the exact row the backend flagged unreadable.
+    const reason = complianceFailureReason({
+      isPassed: false,
+      ruleErrorMessage: "No expiration date was found, so we can't confirm the insurance is current.",
+      ruleFieldName: "expiration_date",
+      ruleOperator: "required",
+      ruleExpectedValue: null,
+      actualValue: "2020-01-01 (per endorsement)",
+      notes: UNREADABLE_VALUE_NOTE,
+    });
+
+    expect(reason).toMatch(/couldn't read the expiration date/i);
+    expect(reason).toContain("2020-01-01 (per endorsement)");
+    // The bug: the old copy rendered the "was found" claim next to the found value.
+    expect(reason).not.toMatch(/was found/i);
+    expect(reason).not.toMatch(/couldn't find this/i);
+  });
+
+  it("keeps the unreadable copy in sync with the backend note constant (#383)", () => {
+    // The mechanism is an exact match against UnreadableValueNote (api). If the two ever drift, the
+    // page silently falls back to the misleading catalog copy — so pin the string itself.
+    expect(UNREADABLE_VALUE_NOTE).toBe(
+      "We couldn't read this value, so we can't confirm this requirement. Check the document and correct it.",
     );
   });
 });

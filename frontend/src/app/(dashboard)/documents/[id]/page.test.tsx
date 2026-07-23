@@ -2103,6 +2103,107 @@ describe("DocumentDetailPage — ManualRequired review CTA (#193)", () => {
     await waitFor(() => expect(screen.getByText("coi.pdf")).toBeInTheDocument());
     expect(screen.queryByText(/double-check these details/i)).toBeNull();
   });
+
+  it("names the unreadable field and highlights its input, without the confidence-outline copy (#383)", async () => {
+    // The frontend half of the #383 dead end (review round 2, confirmed bug 2 / S3). The backend
+    // holds the document at ManualRequired while a canonical value stays unreadable, but an
+    // unreadable value is read with HIGH confidence (1.0 after a manual edit), so the confidence
+    // outline marks NOTHING — yet the old card told the user to fix "the ones outlined in amber".
+    // The unreadable variant must NAME the field and highlight its input independently of confidence.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_unreadable",
+            extractionStatus: "ManualRequired",
+            complianceStatus: "NonCompliant",
+            unreadableFields: ["expiration_date"],
+            fields: [
+              {
+                id: "f-exp",
+                fieldName: "expiration_date",
+                fieldValue: "2020-01-01 (per endorsement)",
+                fieldType: "string",
+                confidence: 1.0, // high confidence — the amber outline can't see this
+                isManuallyEdited: true,
+                originalValue: null,
+              },
+            ],
+            complianceChecks: [
+              makeComplianceCheck({
+                id: "c-exp",
+                ruleFieldName: "expiration_date",
+                ruleOperator: "required",
+                ruleExpectedValue: null,
+                ruleErrorMessage:
+                  "No expiration date was found, so we can't confirm the insurance is current.",
+                actualValue: "2020-01-01 (per endorsement)",
+                isPassed: false,
+                notes:
+                  "We couldn't read this value, so we can't confirm this requirement. Check the document and correct it.",
+              }),
+            ],
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_unreadable" },
+    });
+
+    // Card: names the read failure, tells the user how to clear it, and does NOT point at an
+    // amber outline that a high-confidence unreadable value never gets.
+    expect(await screen.findByText(/we couldn't read some details/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/couldn't read the expiration date on this document/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/outlined in amber are the least certain/i)).toBeNull();
+
+    // Input: carries the raw value AND a highlight border despite full confidence.
+    const input = screen.getByDisplayValue("2020-01-01 (per endorsement)");
+    expect(input.className).toMatch(/border-amber/);
+    expect(
+      screen.getByText(/we couldn't read this — enter the correct value/i),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the confidence-outline copy for a low-confidence ManualRequired with no unreadable fields (#383)", async () => {
+    // The other branch must be untouched: a document flagged for LOW CONFIDENCE (the pre-#383 cause)
+    // still gets the "outlined in amber" copy and no "we couldn't read" naming.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_lowconf",
+            extractionStatus: "ManualRequired",
+            complianceStatus: "Pending",
+            unreadableFields: [],
+            fields: [
+              {
+                id: "f-low",
+                fieldName: "policy_number",
+                fieldValue: "POL-1",
+                fieldType: "string",
+                confidence: 0.5,
+                isManuallyEdited: false,
+                originalValue: null,
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_lowconf" },
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/double-check these details/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/outlined in amber are the least certain/i)).toBeInTheDocument();
+    expect(screen.queryByText(/we couldn't read some details/i)).toBeNull();
+  });
 });
 
 describe("DocumentDetailPage — View file streams through the authenticated proxy (#254)", () => {

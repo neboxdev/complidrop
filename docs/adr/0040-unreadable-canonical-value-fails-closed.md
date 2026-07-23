@@ -232,6 +232,43 @@ parsed its column correctly and was still routed to review over a value the docu
 Now de-duped by name, last value wins. Fail-safe direction, so this was a consistency fix rather than
 a defect.
 
+## Amendment 2 — the unreadable state has a FRONTEND surface of its own (2026-07-23)
+
+From the #383 round-2 verified review, which found the three parts above correct on the server but a
+**dead end in the UI**: the backend now holds a document at `ManualRequired` while a canonical value
+stays unreadable, but the detail page was written for the ONLY previous cause of that status — low
+extraction confidence — and had no way to render this one.
+
+The amber field-outline and its "double-check these details / the ones outlined in amber are the least
+certain" copy key on **confidence**. An unreadable value is typically read with HIGH confidence, and
+`UpdateFields` pins an edited field's confidence to `1.0`, so `fieldBorderClass(1.0)` returns `""` and
+nothing is outlined — yet the card told the user to fix the amber fields, `Save` toasted "Fields
+updated" while the flag re-raised, and the failing rule rendered its catalog `errorMessage` ("No
+expiration date was found …") immediately beside the value that WAS found. Three contradictions, no
+exit. Fixed as one change:
+
+- **The DTO carries the field names.** `DocumentDetail.UnreadableFields` (`string[]`) is populated from
+  `DocumentFieldReadability.UnreadableCanonicalFields(doc)` — the SAME walk over
+  `CanonicalDocumentFields.All` that raises the flag. The client never re-derives "can this parse?": a
+  TypeScript copy of that parse would drift from the .NET one it mirrors, and drift here marks the wrong
+  field or none.
+- **The review card has an unreadable variant.** When `unreadableFields` is non-empty, `ManualReviewCard`
+  NAMES the field(s) ("We couldn't read the expiration date on this document …") and tells the user to
+  correct the highlighted value, instead of pointing at an outline that isn't there. The low-confidence
+  variant is unchanged.
+- **The input is highlighted independently of confidence.** A field in `unreadableFields` gets an amber
+  border + `aria-invalid` + an inline "We couldn't read this — enter the correct value" hint even at
+  confidence `1.0`.
+- **The failure sentence follows the check's note.** `complianceFailureReason` keys on the server's
+  `check.notes === UnreadableValueNote` (a byte-mirror constant `UNREADABLE_VALUE_NOTE`, pinned on both
+  sides) and renders "We couldn't read the {field} — this document shows {raw}." — never the catalog's
+  "was found" claim. (The sentence is audience-neutral — no owner-only "edit it here" CTA — because it
+  is reused verbatim in the vendor-email body; the CTA lives in the card.) **Compliance-claim accuracy:** "we couldn't read this value" is the honest
+  statement; "no expiration date was found" is false when one was found but unreadable.
+
+No behaviour on the server changed; this is the read-side rendering ADR 0040 §Consequences/Neutral
+anticipated ("available to the UI if a future ticket wants to surface it").
+
 ## References
 
 - Tickets: [#383](https://github.com/neboxdev/complidrop/issues/383), [#48](https://github.com/neboxdev/complidrop/issues/48)
@@ -244,4 +281,7 @@ a defect.
   `UnreadableCanonicalFields`, `HasUnreadableCanonicalValue`),
   `Services/ComplianceCheckService.cs` (`EvaluateRule` guard, `LookupValue`),
   `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`),
-  `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview` — shared by `UpdateFields` and `MarkVerified`)
+  `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview` — shared by `UpdateFields` and `MarkVerified`;
+  `GetDocument` — `DocumentDetail.UnreadableFields`),
+  `frontend/src/lib/display-labels.ts` (`complianceFailureReason`, `UNREADABLE_VALUE_NOTE`),
+  `frontend/src/app/(dashboard)/documents/[id]/page.tsx` (`ManualReviewCard` variant + input highlight)

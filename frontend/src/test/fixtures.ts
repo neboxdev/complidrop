@@ -226,6 +226,7 @@ export type DocumentDetailFixture = {
   generalLiabilityLimit: number | null;
   fields: DocumentDetailField[];
   complianceChecks: ComplianceCheckFixture[];
+  unreadableFields: string[];
   extractionFields: unknown;
   extractionPromptVersion: string | null;
   processingError: string | null;
@@ -253,6 +254,7 @@ const DOCUMENT_DETAIL_BASE: Readonly<DocumentDetailFixture> = {
   generalLiabilityLimit: null,
   fields: [],
   complianceChecks: [],
+  unreadableFields: [],
   extractionFields: null,
   extractionPromptVersion: null,
   processingError: null,
