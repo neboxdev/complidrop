@@ -123,8 +123,10 @@ function additionalInsuredName(value: string | null, fallback: string): string {
   return (value ?? "").trim() || fallback;
 }
 
-/** The additional-insured read-view sentence. `corrected=false` is today's exact copy. */
-export function additionalInsuredSentence(value: string | null, corrected: boolean): string {
+/** The additional-insured read-view sentence. `corrected=false` is today's exact copy.
+ *  Module-private: consumed only by the catalog closure and `requirementSentence` below —
+ *  callers reach it through those, never directly (keeps Knip's no-unused-exports gate green). */
+function additionalInsuredSentence(value: string | null, corrected: boolean): string {
   const name = additionalInsuredName(value, "your company");
   return corrected
     ? `Certificate indicates “${name}” as additional insured`
@@ -132,8 +134,8 @@ export function additionalInsuredSentence(value: string | null, corrected: boole
 }
 
 /** The additional-insured failure message (also the errorMessage stored on the rule).
- *  `corrected=false` is today's exact copy. */
-export function additionalInsuredError(value: string | null, corrected: boolean): string {
+ *  `corrected=false` is today's exact copy. Module-private (see `additionalInsuredSentence`). */
+function additionalInsuredError(value: string | null, corrected: boolean): string {
   const name = additionalInsuredName(value, "Your company");
   return corrected
     ? `The certificate does not indicate “${name}” as an additional insured.`
