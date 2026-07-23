@@ -49,3 +49,4 @@ Use `/adr <title>` to scaffold a new one.
 - [0039](0039-documents-url-source-of-truth-overlay.md) — Documents filters read the URL through a pending-write overlay; `useSearchParams()` is the base, never `window.location` unconditionally
 - [0040](0040-unreadable-canonical-value-fails-closed.md) — An unreadable canonical value fails closed; "absent" and "unreadable" are different facts
 - [0041](0041-future-effective-not-yet-in-force-reads-pending.md) — A not-yet-in-force (future-effective) certificate reads Pending, via a read-only overlay (companion to 0033 Amendment 2)
+- [0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) — A distrusted extraction (per-field confidence gate) routes to review and does not roll up to "Covered" (dovetails with 0040/0041)
