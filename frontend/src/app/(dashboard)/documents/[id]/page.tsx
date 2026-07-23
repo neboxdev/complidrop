@@ -73,6 +73,11 @@ type DocDetail = {
   generalLiabilityLimit: number | null;
   fields: DocField[];
   complianceChecks: ComplianceCheck[];
+  // Canonical field names whose stored value is non-blank but unreadable
+  // (#383 / ADR 0040), from the backend's DocumentFieldReadability walk. The
+  // page can't re-derive this: an unreadable value is high-confidence (1.0
+  // after a manual edit), so the confidence-based amber outline never marks it.
+  unreadableFields: string[];
   extractionFields: unknown;
   extractionPromptVersion: string | null;
   processingError: string | null;
@@ -107,6 +112,21 @@ function fieldBorderClass(confidence: number): string {
   if (confidence >= 0.9) return "";
   if (confidence >= 0.7) return "border-amber-400 focus-visible:ring-amber-400/40";
   return "border-rose-400 focus-visible:ring-rose-400/40";
+}
+
+// The unreadable-value highlight (#383 / ADR 0040), applied INDEPENDENTLY of
+// confidence: a value we couldn't parse is typically read with high confidence
+// (1.0 after a manual edit), so fieldBorderClass returns "" for it and the
+// review card would otherwise point at an outline that isn't there.
+const UNREADABLE_FIELD_BORDER = "border-amber-500 focus-visible:ring-amber-500/40";
+
+// Joins field labels into a natural-language list, lowercased for mid-sentence
+// use: [a] → "a"; [a, b] → "a and b"; [a, b, c] → "a, b and c".
+function joinFieldLabels(fieldNames: string[]): string {
+  const labels = fieldNames.map((n) => fieldLabel(n).toLowerCase()).filter(Boolean);
+  if (labels.length <= 1) return labels[0] ?? "";
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+  return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
 }
 
 // Build a `mailto:` that opens the user's mail client pre-filled with the vendor
@@ -247,21 +267,38 @@ function WhatWeCheckedCard({ doc }: { doc: DocDetail }) {
   );
 }
 
-// Amber call-to-action for the ManualRequired state: tells the user exactly what
-// to do (review the amber-bordered fields, fix, Save). (#193)
-function ManualReviewCard() {
+// Amber call-to-action for the ManualRequired state. TWO causes, two messages
+// (#193, #383): low extraction confidence points the user at the amber-outlined
+// fields; an UNREADABLE canonical value (ADR 0040) has no such outline — it's
+// high-confidence — so that variant NAMES the field we couldn't read and says
+// how to clear it. Getting this wrong is a dead end: the confidence copy tells
+// the user to fix "the ones outlined in amber" when nothing is outlined, on a
+// document whose flag they can't clear until the named value is corrected.
+function ManualReviewCard({ unreadableFields }: { unreadableFields: string[] }) {
+  const unreadable = unreadableFields.length > 0;
   return (
     <Card className="border-amber-300 bg-amber-50">
       <CardContent className="p-4 sm:p-6 space-y-1">
         <div className="flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" aria-hidden />
-          <h2 className="font-semibold text-amber-900">Please double-check these details</h2>
+          <h2 className="font-semibold text-amber-900">
+            {unreadable ? "We couldn't read some details" : "Please double-check these details"}
+          </h2>
         </div>
-        <p className="text-sm text-amber-800">
-          We weren&apos;t fully confident reading this document. Check the values below —
-          the ones outlined in amber are the least certain — fix anything that looks
-          wrong, then click <span className="font-medium">Save changes</span>.
-        </p>
+        {unreadable ? (
+          <p className="text-sm text-amber-800">
+            We couldn&apos;t read the {joinFieldLabels(unreadableFields)} on this document, so we
+            can&apos;t confirm it&apos;s compliant. Open the file to check, then correct the
+            highlighted {unreadableFields.length === 1 ? "value" : "values"} below and click{" "}
+            <span className="font-medium">Save changes</span> to clear this.
+          </p>
+        ) : (
+          <p className="text-sm text-amber-800">
+            We weren&apos;t fully confident reading this document. Check the values below —
+            the ones outlined in amber are the least certain — fix anything that looks
+            wrong, then click <span className="font-medium">Save changes</span>.
+          </p>
+        )}
       </CardContent>
     </Card>
   );
@@ -669,6 +706,9 @@ export default function DocumentDetailPage() {
 
   const doc = detail.data;
   const hasEdits = Object.keys(edits).length > 0;
+  // Fields the backend flagged unreadable (#383 / ADR 0040) — highlighted below
+  // regardless of confidence, since an unreadable value reads with high confidence.
+  const unreadableSet = new Set(doc.unreadableFields ?? []);
   // "Read again" re-extracts from scratch, overwriting hand-corrected fields AND
   // any unsaved edits. Count the unique fields that would be lost so we can warn
   // before discarding them (FP-062). Manually-edited-saved + pending-edited.
@@ -859,7 +899,9 @@ export default function DocumentDetailPage() {
 
       <WhatWeCheckedCard doc={doc} />
 
-      {doc.extractionStatus === "ManualRequired" && <ManualReviewCard />}
+      {doc.extractionStatus === "ManualRequired" && (
+        <ManualReviewCard unreadableFields={doc.unreadableFields ?? []} />
+      )}
 
       {/* Only show the "we couldn't read this / contact support" card once
           extraction has terminally Failed — not while a transient error sits
@@ -873,8 +915,10 @@ export default function DocumentDetailPage() {
             <Button
               size="sm"
               // In ManualRequired, allow Save even with no edits so the user can
-              // confirm "these look right" — the backend flips the doc to
-              // Completed on save, clearing the review state. Other states keep
+              // confirm "these look right" — on save the backend clears the
+              // review state UNLESS a canonical value is still unreadable
+              // (#383 / ADR 0040), in which case it re-raises the flag and the
+              // amber card above names the field to correct. Other states keep
               // the edits-required gate. (#193)
               disabled={
                 saveFields.isPending ||
@@ -950,10 +994,18 @@ export default function DocumentDetailPage() {
                   <Input
                     id={`docfield-${f.id}`}
                     value={edits[f.fieldName] ?? f.fieldValue ?? ""}
-                    className={fieldBorderClass(f.confidence)}
+                    className={cn(
+                      fieldBorderClass(f.confidence),
+                      unreadableSet.has(f.fieldName) && UNREADABLE_FIELD_BORDER,
+                    )}
                     onChange={(e) => setEdits((prev) => ({ ...prev, [f.fieldName]: e.target.value }))}
                   />
                   <div className="flex items-center gap-2 text-xs">
+                    {unreadableSet.has(f.fieldName) && (
+                      <span className="px-2 py-0.5 rounded font-medium text-amber-800 bg-amber-100">
+                        We couldn&apos;t read this — enter the correct value
+                      </span>
+                    )}
                     <ConfidenceHint confidence={f.confidence} />
                     {f.isManuallyEdited && <span className="text-sky-700">✎ Manually edited</span>}
                     {f.originalValue && f.originalValue !== f.fieldValue && (

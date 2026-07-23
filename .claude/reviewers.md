@@ -96,6 +96,52 @@ Both are defined in this repo's `.claude/agents/`.
   `totalDocuments` still COUNTS the sample — that asymmetry is deliberate ("what's in
   my account" vs "what do I owe for"), so a 4-real+1-sample org showing "5 documents"
   on the dashboard and "4 / 5" in Settings is correct (ADR 0028 Amendment 1, #367).
+- An UNREADABLE canonical value (non-blank, won't parse into its typed column) fails
+  CLOSED everywhere (ADR 0040, #383). The review-time facts that follow are pointers
+  into it, not a second copy of the rationale.
+  - `LookupValue`'s raw-string fallback is narrowed ON PURPOSE — a canonical field whose
+    typed column is null falls back only when the raw value RE-PARSES. That is the
+    fail-open path that let a `required` rule pass off text nothing else could read;
+    it is not an oversight and must not be "restored".
+  - The `EvaluateRule` guard sits AHEAD of the operator switch deliberately: `contains`
+    would otherwise substring-match the raw text of an unparseable date. Do not push it
+    down into the individual operators.
+  - The unreadable note is deliberately NOT `"Field missing."` — the two assert opposite
+    facts about the certificate. Do not unify them.
+  - The request-side escalation to `ManualRequired` lives in ONE place —
+    `DocumentEndpoints.ResolveManualReview`, which BOTH `UpdateFields` and `MarkVerified`
+    call — and is computed from the document's RESULTING state, never from the field names
+    the request submitted. A request that doesn't mention the unreadable field (empty-fields
+    save, unrelated-field save, bare `PUT /verify`) must NOT resolve the review; a version
+    keyed on the submitted names IS a bug.
+  - That escalation fires only from a SETTLED status (`Completed`/`ManualRequired`), measured
+    BEFORE the resolve. Load-bearing: overwriting `Pending` de-queues the document (the worker
+    claims on `ExtractionStatus == Pending`), and `Processing`/`Failed` are the worker's own
+    states. A missing-status-guard version IS a bug — all three exclusions are pinned by a
+    Theory, so a loosened `!= Pending` goes red.
+  - A JSON `null` in `ExtractionFields` is an ABSENCE on both sides: `RawFieldValue` maps
+    `JsonValueKind.Null`/`Undefined` to null. Its old `GetRawText()` fallback returned the
+    literal 4-character string `"null"`, which the reader called unreadable while the writer
+    called it Blank — the same value, two verdicts. Restoring that arm re-opens the split.
+  - There is ONE mechanism for "does this document carry an unreadable canonical value?" —
+    `Services/DocumentFieldReadability.cs` (`TryGetUnreadableValue` /
+    `UnreadableCanonicalFields` / `HasUnreadableCanonicalValue`), a dedicated static class in
+    the `DocumentSupersession` / `PlanDocumentScope` shape. All four askers go through it:
+    `EvaluateRule`'s guard, `LookupValue`'s narrowed fallback, `ResolveManualReview`, and
+    `GetDocument` (the `unreadableFields` DTO field). `ExtractionWorker.PersistSuccess`
+    asks it too, of the document it just wrote — it used to accumulate its own per-field
+    `TypedColumnResult` set, a second mechanism nothing pinned equal. A re-introduced
+    independent copy IS a finding. Last-value-wins now falls out structurally (the JSON
+    mirror and the typed columns are both last-wins and the predicate reads only those);
+    accumulating per occurrence sent a document to review over a value it no longer holds.
+  - `DocumentDetail.UnreadableFields` exists because the detail page CANNOT re-derive it:
+    the amber field outline keys on confidence, and an unreadable value is high-confidence
+    (1.0 after a manual edit), so nothing gets outlined. A TypeScript re-implementation of
+    "can this parse?" would drift from the .NET parse it mirrors — sourcing the names from
+    the backend walk is the point, not incidental.
+  - Deliberately NOT done: a new `ComplianceStatus` value, softening a computed verdict
+    to `Pending`, rejecting the edit with a 400, or extending the flag to non-canonical
+    fields. All four are recorded rejections in ADR 0040 § Alternatives.
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).

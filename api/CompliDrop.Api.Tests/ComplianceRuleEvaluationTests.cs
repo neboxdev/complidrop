@@ -308,6 +308,170 @@ public class ComplianceRuleEvaluationTests
         note.Should().Be("Unable to parse numeric comparison.");
     }
 
+    // ---------------- #383: an unreadable canonical value certifies nothing ----------------
+
+    /// <summary>
+    /// Builds the document state a real writer produces for an unparseable canonical value: the raw
+    /// text in the ExtractionFields JSON, and the typed column cleared by the shared
+    /// <see cref="CanonicalDocumentFields.ApplyToTypedColumn"/> parse. Driving the column through the
+    /// production writer (rather than hand-nulling it) is what makes these tests pin the real state —
+    /// if the parse ever starts accepting one of these values, the test tells us instead of silently
+    /// asserting against a shape that no longer occurs.
+    /// </summary>
+    private static Document DocWithUnreadable(string field, string rawValue)
+    {
+        var doc = DocWithField(field, rawValue);
+        CanonicalDocumentFields.ApplyToTypedColumn(doc, field, rawValue)
+            .Should().Be(TypedColumnResult.Unreadable, "the fixture must actually be the unreadable case");
+        return doc;
+    }
+
+    [Theory]
+    [InlineData("12/31/2026 (per endorsement)")]
+    [InlineData("continuous until cancelled")]
+    [InlineData("2020-01-01 (per endorsement)")]
+    public void Required_FAILS_on_an_expiration_date_we_could_not_read(string rawValue)
+    {
+        // THE #383 REGRESSION. `required` used to pass here: the typed ExpirationDate column was null,
+        // so LookupValue fell through to the non-empty raw string and reported the field present. The
+        // document then rendered "Insurance has not expired" with a green check — on a certificate a
+        // human reads as expired in 2020 — while the date windows and the reminder queries, both keyed
+        // on that same null column, could never fire. A value we can't read certifies NOTHING.
+        var (passed, actual, note) = ComplianceCheckService.EvaluateRule(
+            DocWithUnreadable("expiration_date", rawValue), Rule("required", "expiration_date"));
+
+        passed.Should().BeFalse("an expiration date we couldn't read must never satisfy the requirement");
+        actual.Should().Be(rawValue, "the check row shows the raw text so the user can correct it");
+        note.Should().Be(ComplianceCheckService.UnreadableValueNote);
+    }
+
+    [Fact]
+    public void An_unreadable_value_reads_differently_from_an_absent_one()
+    {
+        // The two notes assert OPPOSITE facts about the certificate, so they must not collapse into
+        // one message: "Field missing." says the document shows no expiration; the unreadable note
+        // says it shows one we couldn't parse. Only the second is a cue to go correct a value.
+        var absent = ComplianceCheckService.EvaluateRule(
+            DocWithField("other", "x"), Rule("required", "expiration_date"));
+        var unreadable = ComplianceCheckService.EvaluateRule(
+            DocWithUnreadable("expiration_date", "continuous until cancelled"), Rule("required", "expiration_date"));
+
+        absent.passed.Should().BeFalse();
+        unreadable.passed.Should().BeFalse();
+        absent.note.Should().Be("Field missing.");
+        unreadable.note.Should().Be(ComplianceCheckService.UnreadableValueNote);
+        unreadable.note.Should().NotBe(absent.note);
+    }
+
+    [Theory]
+    [InlineData("required", null)]
+    [InlineData("equals", "2026-12-31")]
+    [InlineData("contains", "2026")]
+    [InlineData("min_value", "1000000")]
+    public void EVERY_operator_fails_closed_on_an_unreadable_canonical_value(string op, string? expected)
+    {
+        // The guard sits ahead of the operator switch on purpose. `contains "2026"` would otherwise
+        // MATCH the raw text "12/31/2026 (per endorsement)" — a substring hit on a date we can't
+        // actually evaluate — so a per-operator fix would have left that door open.
+        var (passed, _, note) = ComplianceCheckService.EvaluateRule(
+            DocWithUnreadable("expiration_date", "12/31/2026 (per endorsement)"),
+            Rule(op, "expiration_date", expected));
+
+        passed.Should().BeFalse();
+        note.Should().Be(ComplianceCheckService.UnreadableValueNote);
+    }
+
+    [Fact]
+    public void An_unreadable_effective_date_and_gl_limit_fail_closed_too()
+    {
+        // All three typed columns share the ambiguity, so all three share the guard — expiration_date
+        // is just the one with the loudest failure mode.
+        ComplianceCheckService.EvaluateRule(
+            DocWithUnreadable("effective_date", "see attached endorsement"),
+            Rule("required", "effective_date")).passed.Should().BeFalse();
+
+        ComplianceCheckService.EvaluateRule(
+            DocWithUnreadable("general_liability_limit", "1M per occurrence"),
+            Rule("required", "general_liability_limit")).passed.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Required_FAILS_on_a_NON_canonical_field_whose_JSON_value_is_null()
+    {
+        // The second half of the JsonValueKind.Null arm, and a PRE-EXISTING fail-open in its own right
+        // (#383 review round 2, S2). The arm was added for the canonical fields — where the reader
+        // called a stored JSON null "unreadable" while the writer called it Blank — but the generic
+        // GetRawText() fallback it replaced returned the literal 4-character string "null" for EVERY
+        // field, canonical or not. `required` is !IsNullOrWhiteSpace, so a non-canonical field stored
+        // as JSON null (PUT /fields with fieldValue: null, since FieldUpdateRequest.FieldValue is
+        // string?) SATISFIED its requirement off that string — a passing check on a value the document
+        // does not have. This path never goes through the canonical guard, so only a non-canonical
+        // field can prove it.
+        var doc = new Document { ExtractionFields = JsonDocument.Parse("""{"policy_number":null}""") };
+
+        var (passed, actual, note) = ComplianceCheckService.EvaluateRule(doc, Rule("required", "policy_number"));
+
+        passed.Should().BeFalse("a JSON null is an absence — it must not satisfy `required`");
+        actual.Should().BeNull("the user must never be shown the 4-character string \"null\"");
+        note.Should().Be("Field missing.", "an absence is missing, never unreadable — this field has no typed column at all");
+    }
+
+    [Fact]
+    public void LookupValue_returns_null_for_an_unreadable_canonical_value()
+    {
+        // The fail-open path the ticket names. LookupValue is `internal` and reachable from outside
+        // EvaluateRule, so it is closed at the source too rather than only behind the guard.
+        ComplianceCheckService.LookupValue(
+            DocWithUnreadable("expiration_date", "continuous until cancelled"), "expiration_date")
+            .Should().BeNull();
+    }
+
+    [Fact]
+    public void LookupValue_still_falls_back_to_a_READABLE_raw_value()
+    {
+        // The narrowing is surgical: only values that fail to parse lose the fallback. A row whose
+        // typed column is null but whose JSON holds a readable date (a legacy row written before both
+        // writers funneled through CanonicalDocumentFields) keeps resolving exactly as before — this
+        // fix must not quietly un-grade historical documents.
+        var legacy = DocWithField("expiration_date", "2027-01-15"); // JSON only; column left null
+
+        legacy.ExpirationDate.Should().BeNull("this fixture is the legacy shape: JSON set, column unset");
+        ComplianceCheckService.LookupValue(legacy, "expiration_date").Should().Be("2027-01-15");
+        ComplianceCheckService.EvaluateRule(legacy, Rule("required", "expiration_date")).passed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void LookupValue_prefers_the_typed_column_when_it_is_set()
+    {
+        // Unchanged precedence: a parsed column wins over the raw JSON, so the value a rule compares
+        // is the same value the date windows and reminders use.
+        var doc = DocWithField("expiration_date", "December 31st, 2026");
+        doc.ExpirationDate = new DateTime(2026, 12, 31, 0, 0, 0, DateTimeKind.Utc);
+
+        ComplianceCheckService.LookupValue(doc, "expiration_date").Should().Be("2026-12-31");
+        ComplianceCheckService.EvaluateRule(doc, Rule("required", "expiration_date")).passed.Should().BeTrue();
+    }
+
+    // ---------------- #383 secondary: currency-symbol amounts ----------------
+
+    [Theory]
+    [InlineData("$1,500,000", "1000000", true)]
+    [InlineData("1500000", "$1,000,000", true)]   // the owner-typed minimum side
+    [InlineData("$1,500,000", "$1,000,000", true)]
+    [InlineData("$999,999", "$1,000,000", false)]
+    public void MinValue_compares_currency_formatted_amounts(string actualValue, string min, bool shouldPass)
+    {
+        // Pre-#383 every row here reported "Unable to parse numeric comparison" and FAILED, because
+        // NumberStyles.Any under InvariantCulture allows ¤ and not $ — so a $1.5M certificate read as
+        // non-compliant against a $1M floor. Non-canonical money fields (auto/umbrella/liquor limits)
+        // have no typed column and reach this comparison as raw text, which is why the fix belongs on
+        // both sides of the comparison and not only in the typed-column parse.
+        var (passed, _, _) = ComplianceCheckService.EvaluateRule(
+            DocWithField("auto_liability_limit", actualValue), Rule("min_value", "auto_liability_limit", min));
+
+        passed.Should().Be(shouldPass);
+    }
+
     // ---------------- operator fallbacks ----------------
 
     [Fact]
