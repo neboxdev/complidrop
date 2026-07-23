@@ -79,9 +79,12 @@ The wording, taken verbatim from `TEMPLATE-REQUIREMENTS-REVIEW.md` §3 (not inve
 ## Consequences
 
 ### Positive
-- Once CLM-1 clears, one config flip retires the categorical overclaim across the rules page, the
-  document detail page, and the persisted check notes — with the honest "indicates, not grants —
-  request the endorsement" framing (and the CG 20 26 pointer) in its place.
+- Once CLM-1 clears, one config flip retires the categorical overclaim on the **read-view** surfaces —
+  the rules page, the document-detail "What we checked" sentence, and the vendor-detail requirement
+  list — with the honest "indicates, not grants — request the endorsement" framing (and the CG 20 26
+  pointer) in its place. Persisted state (the stored `errorMessage` and the affirmative-flag check note)
+  does NOT reframe on the flip itself; it reframes per-document on that document's next evaluation — see
+  Negative.
 - Merge-safe: the deployed product is behaviorally identical to pre-#396 prod while the flag is off,
   pinned by tests on the note (both hit and miss), the me feature (default-off + on), and the catalog
   copy (byte-identical legacy strings).
@@ -90,11 +93,20 @@ The wording, taken verbatim from `TEMPLATE-REQUIREMENTS-REVIEW.md` §3 (not inve
 ### Negative
 - One more merged-inert flag to eventually retire after the sign-off (collapse the helper's legacy
   branch + the flag, like the `TemplateCorrections` cleanup step). Tracked with CLM-1.
-- The `errorMessage` is **stored on the rule at author time**, so an additional-insured rule authored
-  while the flag is off keeps its legacy "was not found" message until edited after a flip. Acceptable:
-  the primary honest-framing surface is the **read-view sentence** (re-derived on every read and fully
-  gated); the stored message is secondary, and the check **note** (also read-derived) reframes for all
-  documents immediately on flip.
+- Two surfaces carry the wording into **persisted** state, so neither reframes on the flip alone. The
+  rule `errorMessage` is **stored at author time** (an additional-insured rule authored while the flag is
+  off keeps its legacy "was not found" message until edited after a flip). The affirmative-flag check
+  **note** is **persisted at evaluation time** — `ComplianceCheckService` writes `Notes = ClampToColumn(note)`
+  on the `ComplianceCheck` row — and nothing re-grades a document when this flag flips: unlike
+  `TemplateCorrections`, the ComplianceClaims flag touches no seed and fires no re-grade fan-out, and the
+  hourly `ComplianceSweepBackgroundService` only runs date-transition `ExecuteUpdate`s on `ComplianceStatus`
+  (never rule evaluation, never the note). So an already-graded document keeps its legacy note until it is
+  **independently re-evaluated** (a manual field edit, re-extraction, "Check again", or a template/vendor
+  rule fan-out). Acceptable because the persisted note is **not currently a user-rendered surface** — the
+  frontend reads `check.notes` only to match the #383 unreadable-value sentinel (`complianceFailureReason`),
+  and `ExportService` emits the compliance status but no note — so its post-flip staleness has no UI impact.
+  The only shown honest-framing surfaces are the **read-view sentence** (re-derived on every read, fully
+  gated) and the stored `errorMessage`.
 
 ### Neutral
 - **Marketing-site copy is OUT OF SCOPE here.** The public hero / how-it-works / FAQ lines that carry
