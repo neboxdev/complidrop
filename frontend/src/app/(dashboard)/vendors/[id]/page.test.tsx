@@ -19,6 +19,7 @@ import {
   jsonOk,
   jsonError,
   authedMe,
+  makeMe,
   toastSuccess,
   toastError,
 } from "@/test";
@@ -846,5 +847,83 @@ describe("VendorDetailPage — a vendor whose STORED email is already malformed 
     ).toBeInTheDocument();
     // The right note, not the blank-address one — the address exists, it's just unusable.
     expect(screen.queryByText(/add a contact email above/i)).toBeNull();
+  });
+});
+
+describe("VendorDetailPage — additional-insured claim wording (CLM-1 flag, #396)", () => {
+  // The "We'll check every document for:" list renders each assigned-rule sentence. An assigned
+  // additional-insured rule otherwise reads the categorical "Names 'X' as additional insured"
+  // overclaim; the CLM-1 flag (features.correctedAdditionalInsuredWording) swaps it to the honest
+  // "Certificate indicates …". This is the vendor-page counterpart to the gate already covered on
+  // rules/page.tsx and documents/[id]/page.tsx — before the fix this surface was missed, so a flag
+  // flip left the vendor page still overclaiming while the other two corrected (#396 review).
+  const AI_VENDOR = {
+    ...VENDOR_DETAIL,
+    complianceTemplateId: "t_ai",
+    complianceTemplateName: "Caterer",
+  };
+
+  function mountAi(auth: typeof authedMe = authedMe) {
+    server.use(
+      http.get(url("/api/vendors/:id"), () => jsonOk(AI_VENDOR)),
+      // The page's useSubscription() must NOT hit the default 401 baseline: an
+      // `auth.unauthorized` trips the global QueryCache.onError, which nulls the
+      // seeded me-cache — silently reverting the flag to its off default and
+      // making a flag-ON render read legacy for the wrong reason. Answer it 200
+      // so the seeded `me` (and thus the CLM-1 flag) is the ONLY thing under test.
+      http.get(url("/api/billing/subscription"), () =>
+        jsonOk({
+          plan: "pro",
+          status: "active",
+          documentLimit: null,
+          documentsUsed: 0,
+          hasVendorPortal: true,
+          currentPeriodEnd: null,
+          extractionSpend: 0,
+        }),
+      ),
+      http.get(url("/api/compliance/templates"), () =>
+        jsonOk([{ id: "t_ai", name: "Caterer", isSystemTemplate: true }]),
+      ),
+      http.get(url("/api/compliance/templates/t_ai"), () =>
+        jsonOk({
+          id: "t_ai",
+          name: "Caterer",
+          isSystemTemplate: true,
+          rules: [
+            {
+              id: "r_ai",
+              documentType: "coi",
+              fieldName: "additional_insured",
+              operator: "contains",
+              expectedValue: "Riverside Event Hall",
+              errorMessage: null,
+              sortOrder: 1,
+            },
+          ],
+        }),
+      ),
+    );
+    return renderWithProviders(<VendorDetailPage />, { auth, params: { id: AI_VENDOR.id } });
+  }
+
+  it("reads the LEGACY 'Names …' additional-insured sentence while the CLM-1 flag is off (prod default)", async () => {
+    mountAi(authedMe);
+    expect(await screen.findByText(/we'll check every document for/i)).toBeInTheDocument();
+    expect(
+      screen.getByText("Names “Riverside Event Hall” as additional insured"),
+    ).toBeInTheDocument();
+    // The corrected wording must NOT show while the flag is off.
+    expect(screen.queryByText(/certificate indicates/i)).toBeNull();
+  });
+
+  it("reads the CORRECTED 'certificate indicates …' additional-insured sentence when the flag is on", async () => {
+    mountAi(makeMe({ features: { correctedChecklists: false, correctedAdditionalInsuredWording: true } }));
+    expect(await screen.findByText(/we'll check every document for/i)).toBeInTheDocument();
+    expect(
+      screen.getByText("Certificate indicates “Riverside Event Hall” as additional insured"),
+    ).toBeInTheDocument();
+    // The categorical overclaim is gone.
+    expect(screen.queryByText(/Names “Riverside Event Hall” as additional insured/)).toBeNull();
   });
 });
