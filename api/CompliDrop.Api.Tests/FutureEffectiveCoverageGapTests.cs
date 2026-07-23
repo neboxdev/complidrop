@@ -109,13 +109,22 @@ public sealed class FutureEffectiveCoverageGapTests(IntegrationTestFixture fixtu
         // reads Pending). The demotion is a pure read overlay driven by today, so the doc self-heals the
         // instant the calendar reaches its EffectiveDate — no re-evaluation needed.
         var auth = await RegisterAndLoginAsync();
+        var today = DateTime.UtcNow.Date;
         var inForce = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: FarFuture,
-            effective: DateTime.UtcNow.Date.AddDays(-1));
+            effective: today.AddDays(-1));
         var notYet = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: FarFuture,
-            effective: DateTime.UtcNow.Date.AddDays(1));
+            effective: today.AddDays(1));
 
-        (await DetailStatusAsync(auth.Client, inForce)).Should().Be("Compliant", "effective yesterday → in force");
-        (await DetailStatusAsync(auth.Client, notYet)).Should().Be("Pending", "effective tomorrow → not yet in force");
+        // Read BOTH badges, then guard the ±1-day effective boundary against a UTC-midnight rollover: the
+        // handlers read DateTime.UtcNow.Date, so if the day advanced mid-test the notYet doc (effective
+        // today+1) would flip to in-force and spuriously fail. The deterministic self-heal boundary is
+        // pinned by the pure deriver test; this end-to-end straddle just skips the ppm rollover window.
+        var inForceStatus = await DetailStatusAsync(auth.Client, inForce);
+        var notYetStatus = await DetailStatusAsync(auth.Client, notYet);
+        if (DateTime.UtcNow.Date != today) return;
+
+        inForceStatus.Should().Be("Compliant", "effective yesterday → in force");
+        notYetStatus.Should().Be("Pending", "effective tomorrow → not yet in force");
     }
 
     [Fact]
