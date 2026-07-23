@@ -50,8 +50,11 @@ public sealed class ComplianceRuleUpsertTests(IntegrationTestFixture fixture) : 
     [InlineData("equals", "license_type", "")]
     [InlineData("equals", "license_type", "   ")]
     [InlineData("contains", "additional_insured", null)]
+    [InlineData("contains", "additional_insured", "")]
     [InlineData("contains", "additional_insured", "   ")]
     [InlineData("min_value", "general_liability_limit", null)]
+    [InlineData("min_value", "general_liability_limit", "")]
+    [InlineData("min_value", "general_liability_limit", "   ")]
     public async Task Creating_a_value_operator_rule_without_an_expected_value_is_rejected_400(
         string op, string field, string? expected)
     {
