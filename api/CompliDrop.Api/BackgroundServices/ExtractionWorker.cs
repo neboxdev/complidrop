@@ -36,6 +36,14 @@ public class ExtractionWorker(
     public const int MaxClaims = 15;
 
     /// <summary>
+    /// Confidence bar below which an extraction is routed to <see cref="ExtractionStatus.ManualRequired"/>.
+    /// Shared by BOTH the field-average gate and the per-verdict-bearing-field gate (#401 / ADR 0042) so
+    /// the two can never drift apart. Public so the regression suite asserts against the source of truth,
+    /// not a hard-coded literal.
+    /// </summary>
+    public const double ManualReviewConfidenceThreshold = 0.7;
+
+    /// <summary>
     /// Upper bound (seconds) on the configurable per-attempt timeout. Sits below the 300s
     /// (5-minute) zombie-reclaim threshold baked into <see cref="ClaimSql"/>'s
     /// <c>interval '5 minutes'</c>, with a 60s margin so a timed-out attempt can cancel AND requeue
@@ -459,11 +467,29 @@ public class ExtractionWorker(
             ? extraction.Fields.Average(f => f.Confidence)
             : 0;
         doc.ExtractionConfidence = avgConf;
-        // An unreadable canonical value is a THIRD reason to route a document to a human, alongside
-        // low average confidence and the model's own reprocess signal (#383): neither of those fires
-        // for a confidently-read date in a shape we can't parse, so without this the document looks
-        // completely healthy while a compliance-critical column sits silently null.
-        doc.ExtractionStatus = avgConf < 0.7 || extraction.NeedsReprocessing || unreadableFields.Length > 0
+
+        // Per-field confidence gate on the VERDICT-BEARING fields, ON TOP OF the average gate below
+        // (#401 / ADR 0042). The average hides a single mis-read critical field — one 0.3-confidence
+        // expiration_date among a dozen 0.95 incidental fields still averages well clear of the gate —
+        // yet that lone field is exactly what flips a compliance verdict (a coverage limit, an effective/
+        // expiration date, the additional-insured party). So if ANY verdict-bearing field the model
+        // actually returned came back below the SAME threshold, route the document to a human regardless
+        // of the average, rather than let an extraction the system itself distrusts grade and roll up as
+        // "Covered" (VendorEndpoints.ComputeCoverage drops a ManualRequired doc from in-force coverage).
+        // An ABSENT field never trips this (only a present-but-low-confidence one): the model omits what
+        // it can't find, and a missing required field is the rule engine's concern, not the gate's.
+        var hasLowConfidenceVerdictField = extraction.Fields.Any(f =>
+            VerdictBearingFields.Contains(f.Name) && f.Confidence < ManualReviewConfidenceThreshold);
+
+        // Four independent signals route a document to ManualRequired, each catching a case the others
+        // miss: low AVERAGE confidence; a low-confidence VERDICT-BEARING field the average hid (#401); the
+        // model's own reprocess signal; and an unreadable canonical value (#383) — a confidently-read
+        // date/amount in a shape we can't parse fires none of the other three yet leaves a
+        // compliance-critical column silently null.
+        doc.ExtractionStatus = avgConf < ManualReviewConfidenceThreshold
+                || hasLowConfidenceVerdictField
+                || extraction.NeedsReprocessing
+                || unreadableFields.Length > 0
             ? ExtractionStatus.ManualRequired
             : ExtractionStatus.Completed;
         if (unreadableFields.Length > 0)

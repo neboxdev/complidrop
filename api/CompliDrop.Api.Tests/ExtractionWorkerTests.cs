@@ -496,6 +496,105 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             .Should().BeFalse("a failed extraction must not emit a processed event");
     }
 
+    // ----- #401: per-field confidence gate on the verdict-bearing fields ----------------------
+
+    /// <summary>
+    /// Builds a multi-field extraction with an explicit per-field confidence — the shape the #401 gate
+    /// operates on. NeedsReprocessing false and every value READABLE, so the ONLY thing that can route a
+    /// document to manual review here is the confidence gate (average OR per-verdict-bearing-field), never
+    /// the model's reprocess signal or the #383 unreadable trigger.
+    /// </summary>
+    private static ExtractionResult ResultWithFields(params (string Name, string Value, double Confidence)[] fields) => new(
+        DocumentType: "coi",
+        DocumentSubType: null,
+        Fields: fields.Select(f => new ExtractedField(f.Name, f.Value, "string", f.Confidence)).ToArray(),
+        NeedsReprocessing: false,
+        Usage: new ExtractionUsage(InputTokens: 100, OutputTokens: 50, EstimatedCostUsd: 0.01m));
+
+    [Theory]
+    [InlineData("expiration_date", "2027-03-15")]
+    [InlineData("effective_date", "2026-01-01")]
+    [InlineData("general_liability_limit", "2000000")]
+    [InlineData("additional_insured", "Riverside Event Hall")]
+    public async Task A_low_confidence_verdict_bearing_field_routes_to_manual_review_even_when_the_average_clears_the_gate(
+        string field, string value)
+    {
+        // #401: the field that DECIDES a verdict (a limit, an effective/expiration date, the
+        // additional-insured party) came back at 0.3 — the machine barely read it — but four 0.95 incidental
+        // fields pull the AVERAGE to ~0.82, well clear of the 0.7 gate. Pre-#401 this landed Completed and
+        // rolled up to "Covered"; averaging hid the one field a mis-read flips the verdict on. The value is
+        // READABLE, so the #383 unreadable trigger can't be what fires here — the new per-field gate is.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWithFields(
+            (field, value, 0.3),
+            ("policyholder_name", "Acme Vendor", 0.95),
+            ("insurer_name", "Acme Insurance", 0.95),
+            ("policy_number", "GL-12345", 0.95),
+            ("certificate_holder", "Riverside Event Hall", 0.95));
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionConfidence.Should().BeGreaterThan(ExtractionWorker.ManualReviewConfidenceThreshold,
+            "the field AVERAGE clears the gate — the per-field verdict-bearing trigger is what routes it");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            "a low-confidence verdict-bearing field the average hid must still reach a human (#401)");
+        doc.ProcessingError.Should().BeNull("this is not an extraction FAILURE — the read succeeded, just at low confidence");
+    }
+
+    [Fact]
+    public async Task A_low_confidence_non_verdict_bearing_field_does_not_route_to_manual_review()
+    {
+        // The gate is SCOPED to verdict-bearing fields: an incidental field (certificate_holder, policy
+        // number) that no rule grades doesn't flip a verdict, so a low read on it must NOT drag the document
+        // into review — otherwise every certificate with one fuzzy incidental field would demand attention
+        // and the signal would be worthless. The verdict-bearing fields here are all high-confidence, and the
+        // AVERAGE (~0.79) clears the gate, so the per-field SCOPE is the only thing under test.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWithFields(
+            ("certificate_holder", "Riverside Event Hall", 0.3),
+            ("policy_number", "GL-12345", 0.95),
+            ("expiration_date", "2027-03-15", 0.95),
+            ("general_liability_limit", "2000000", 0.95));
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionConfidence.Should().BeGreaterThan(ExtractionWorker.ManualReviewConfidenceThreshold,
+            "the average clears the gate, so this isolates the per-field SCOPE, not the average trigger");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "a low-confidence field that backs no verdict must not route to manual review (#401 is scoped)");
+    }
+
+    [Theory]
+    [InlineData(0.70, ExtractionStatus.Completed)]      // AT the threshold: the gate is `< 0.7`, so 0.70 is trusted
+    [InlineData(0.69, ExtractionStatus.ManualRequired)] // just below: routed to a human
+    public async Task The_per_field_confidence_gate_is_exclusive_at_the_shared_threshold(
+        double confidence, ExtractionStatus expected)
+    {
+        // The verdict-bearing field (expiration_date) sits AT the boundary; three 0.99 incidental fields keep
+        // the AVERAGE above 0.7 in BOTH rows, so the per-field gate — not the average gate — is the only
+        // thing that can move the 0.69 row to ManualRequired. Pins the threshold as EXCLUSIVE (0.70 trusted,
+        // 0.69 not), matching the average gate's `avgConf < threshold`; both reference the SAME shared
+        // ExtractionWorker.ManualReviewConfidenceThreshold constant so the two gates can't drift apart.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWithFields(
+            ("expiration_date", "2027-03-15", confidence),
+            ("policyholder_name", "Acme Vendor", 0.99),
+            ("insurer_name", "Acme Insurance", 0.99),
+            ("policy_number", "GL-12345", 0.99));
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionConfidence.Should().BeGreaterThan(ExtractionWorker.ManualReviewConfidenceThreshold,
+            "padding keeps the average above the gate in both rows, isolating the per-field trigger");
+        doc.ExtractionStatus.Should().Be(expected);
+    }
+
     // ----- #337: the worker grades inside PersistSuccess (combined unit of work) --------------
 
     // Seeds an org + zero-spend subscription + a vendor on a checklist carrying a single
