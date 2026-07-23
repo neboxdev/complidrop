@@ -30,7 +30,8 @@ public sealed class DocumentSupersessionTests(IntegrationTestFixture fixture) : 
     }
 
     private async Task<Guid> SeedDocAsync(
-        Guid orgId, Guid? vendorId, string docType, DateTime? expiration, DateTime createdAt, DateTime? deletedAt = null)
+        Guid orgId, Guid? vendorId, string docType, DateTime? expiration, DateTime createdAt,
+        DateTime? deletedAt = null, DateTime? effective = null)
     {
         var docId = Guid.NewGuid();
         await using var db = CreateSystemDb();
@@ -41,7 +42,7 @@ public sealed class DocumentSupersessionTests(IntegrationTestFixture fixture) : 
             ContentType = "application/pdf", DocumentType = docType,
             // A null expiry models a still-processing / no-expiry-extracted upload: ExpirationDate unset and
             // ExtractionStatus Pending so the row is realistic (the supersession predicate keys off expiry).
-            ComplianceStatus = ComplianceStatus.Compliant, ExpirationDate = expiration,
+            ComplianceStatus = ComplianceStatus.Compliant, ExpirationDate = expiration, EffectiveDate = effective,
             ExtractionStatus = expiration is null ? ExtractionStatus.Pending : ExtractionStatus.Completed,
             CreatedAt = createdAt, UpdatedAt = createdAt, DeletedAt = deletedAt,
         });
@@ -207,6 +208,77 @@ public sealed class DocumentSupersessionTests(IntegrationTestFixture fixture) : 
     }
 
     [Fact]
+    public async Task A_future_effective_renewal_does_not_supersede_the_old_expired_cert()
+    {
+        // #362 / ADR 0033 Amendment 2 — the effective-date door to the same failure Amendment 1 closed.
+        // The vendor's COI expired, then they bought a policy that does NOT start until next month and
+        // uploaded it today. It extends coverage (later expiry) but opens a live gap: no coverage in force
+        // between now and its effective date. It must NOT supersede the old expired cert — the dashboard
+        // Expired count, the expiry-pipeline expired bucket, and the deep-linked list must all still show it.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId);
+        var t0 = DateTime.UtcNow.AddDays(-100);
+        var old = await SeedDocAsync(auth.OrgId, vendorId, "coi", expiration: DateTime.UtcNow.Date.AddDays(-15), createdAt: t0);
+        await SeedDocAsync(auth.OrgId, vendorId, "coi",
+            expiration: DateTime.UtcNow.Date.AddDays(350), createdAt: t0.AddDays(10),
+            effective: DateTime.UtcNow.Date.AddDays(30)); // effective next month → a live gap now
+
+        (await ExpiredStat(auth.Client)).Should().Be(1, "the renewal is not yet in force — the coverage gap stands");
+        (await ExpiredPipeline(auth.Client)).Should().Be(1);
+        (await ExpiredListIds(auth.Client)).Should().BeEquivalentTo(new[] { old },
+            "the dashboard count and the deep-linked list agree: the old expired cert is still a current liability");
+    }
+
+    [Fact]
+    public async Task A_future_effective_renewal_leaves_the_old_cert_reminder_eligible()
+    {
+        // The reminder worker filters on DocumentSupersession.IsCurrent(db.Documents) — the same predicate.
+        // A future-effective renewal must NOT mark the old cert superseded, so the old cert stays
+        // reminder-eligible (the vendor still needs to close the coverage gap).
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId);
+        var t0 = DateTime.UtcNow.AddDays(-100);
+        var old = await SeedDocAsync(auth.OrgId, vendorId, "coi", expiration: DateTime.UtcNow.Date.AddDays(5), createdAt: t0);
+        await SeedDocAsync(auth.OrgId, vendorId, "coi",
+            expiration: DateTime.UtcNow.Date.AddDays(400), createdAt: t0.AddDays(10),
+            effective: DateTime.UtcNow.Date.AddDays(30));
+
+        await using var db = CreateSystemDb();
+        var currentIds = await db.Documents
+            .Where(d => d.OrganizationId == auth.OrgId)
+            .Where(DocumentSupersession.IsCurrent(db.Documents))
+            .Select(d => d.Id)
+            .ToListAsync();
+        currentIds.Should().Contain(old,
+            "a future-effective renewal doesn't supersede, so the old cert stays reminder-eligible");
+    }
+
+    [Fact]
+    public async Task A_renewal_effective_on_the_old_certs_expiry_supersedes_but_one_day_later_does_not()
+    {
+        // Continuity boundary (#362): the renewal extends coverage (future expiry) in both cases. When it is
+        // effective EXACTLY ON the old cert's expiry date there is no gap → it supersedes (that vendor's
+        // Expired liability clears). When it is effective ONE DAY AFTER, a gap opens → it does NOT supersede
+        // (the old cert stays a current Expired liability). Pins the `o.EffectiveDate <= d.ExpirationDate` edge.
+        var auth = await RegisterAndLoginAsync();
+        var onExpiryVendor = await SeedVendorAsync(auth.OrgId);
+        var gapVendor = await SeedVendorAsync(auth.OrgId);
+        var t0 = DateTime.UtcNow.AddDays(-100);
+        var oldExpiry = DateTime.UtcNow.Date.AddDays(-10);
+        var future = DateTime.UtcNow.Date.AddDays(300);
+
+        await SeedDocAsync(auth.OrgId, onExpiryVendor, "coi", expiration: oldExpiry, createdAt: t0);
+        await SeedDocAsync(auth.OrgId, onExpiryVendor, "coi", expiration: future, createdAt: t0.AddDays(10), effective: oldExpiry);
+
+        var gapOld = await SeedDocAsync(auth.OrgId, gapVendor, "coi", expiration: oldExpiry, createdAt: t0);
+        await SeedDocAsync(auth.OrgId, gapVendor, "coi", expiration: future, createdAt: t0.AddDays(10), effective: oldExpiry.AddDays(1));
+
+        (await ExpiredStat(auth.Client)).Should().Be(1, "only the gapped vendor's old cert remains a current liability");
+        (await ExpiredListIds(auth.Client)).Should().BeEquivalentTo(new[] { gapOld },
+            "effective-on-expiry is continuous (supersedes); effective-one-day-later opens a gap (does not)");
+    }
+
+    [Fact]
     public async Task The_export_supersession_mirror_matches_the_db_predicate()
     {
         // The audit export computes supersession in memory (ExportService.SupersededIds) while the live
@@ -217,6 +289,7 @@ public sealed class DocumentSupersessionTests(IntegrationTestFixture fixture) : 
         var auth = await RegisterAndLoginAsync();
         var v1 = await SeedVendorAsync(auth.OrgId);
         var v2 = await SeedVendorAsync(auth.OrgId);
+        var v3 = await SeedVendorAsync(auth.OrgId);
         var t0 = DateTime.UtcNow.AddDays(-100);
         var pastA = DateTime.UtcNow.Date.AddDays(-20);
         var pastB = DateTime.UtcNow.Date.AddDays(-5);
@@ -231,6 +304,14 @@ public sealed class DocumentSupersessionTests(IntegrationTestFixture fixture) : 
         await SeedDocAsync(auth.OrgId, v2, "coi", expiration: pastA, createdAt: t0);
         await SeedDocAsync(auth.OrgId, v2, "coi", expiration: pastB, createdAt: t0.AddDays(10), deletedAt: DateTime.UtcNow); // deleted would-be superseder
         await SeedDocAsync(auth.OrgId, vendorId: null, "coi", expiration: pastA, createdAt: t0.AddDays(30)); // no vendor — never superseded
+        // #362 continuity clause, exercised on BOTH sides: a future-effective renewal that opens a GAP
+        // (supersedes nothing) vs a continuous renewal (effective before the old cert's expiry, supersedes).
+        await SeedDocAsync(auth.OrgId, v3, "coi", expiration: pastA, createdAt: t0);                                              // stays current — gap renewal can't supersede it
+        await SeedDocAsync(auth.OrgId, v3, "coi", expiration: future, createdAt: t0.AddDays(10),
+            effective: DateTime.UtcNow.Date.AddDays(30));                                                                          // future-effective → GAP → supersedes nothing
+        await SeedDocAsync(auth.OrgId, v3, "license", expiration: pastB, createdAt: t0);                                          // superseded by the continuous renewal below
+        await SeedDocAsync(auth.OrgId, v3, "license", expiration: future, createdAt: t0.AddDays(10),
+            effective: DateTime.UtcNow.Date.AddDays(-25));                                                                         // effective before the old expiry → continuity → supersedes
 
         await using var db = CreateSystemDb();
         var loaded = await db.Documents

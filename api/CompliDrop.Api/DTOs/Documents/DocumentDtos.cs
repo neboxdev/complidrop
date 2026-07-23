@@ -48,6 +48,25 @@ public record DocumentDetail(
     // can explain non-compliance in plain English. Empty when the document has
     // no requirement set or hasn't been evaluated yet. (#193)
     ComplianceCheckDto[] ComplianceChecks,
+    // The canonical field names (effective_date / expiration_date /
+    // general_liability_limit) whose stored value is non-blank but unreadable —
+    // the #383 / ADR 0040 state. Empty for a healthy document.
+    //
+    // The detail page NEEDS this to explain a ManualRequired document it cannot
+    // otherwise account for. Before #383 the only cause of that status was low
+    // average confidence, so the review card told the user to fix "the ones
+    // outlined in amber" and the outline came from fieldBorderClass(confidence).
+    // An unreadable value is typically read with HIGH confidence (and a manual
+    // edit pins the field's confidence to 1.0), so nothing gets outlined and the
+    // card points at a marker that isn't there — a dead end, since the backend
+    // correctly refuses to clear the flag while the value stays unreadable.
+    //
+    // Sourced from the SAME DocumentFieldReadability walk over
+    // CanonicalDocumentFields.All that raises the flag, never re-derived on the
+    // client: a second copy of "can this parse?" in TypeScript would drift from
+    // the .NET parse it is supposed to mirror, and drift here means the UI
+    // marks the wrong field or none at all. (#383 review round 2)
+    string[] UnreadableFields,
     object? ExtractionFields,
     string? ExtractionPromptVersion,
     string? ProcessingError,

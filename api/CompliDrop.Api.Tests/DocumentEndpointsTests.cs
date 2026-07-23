@@ -1525,8 +1525,9 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     public async Task Editing_a_typed_field_to_an_unparseable_value_clears_the_column_and_fails_the_rule()
     {
         // ADR 0017: an unparseable correction nulls the typed column so it can't silently contradict
-        // the field the user now sees. LookupValue then falls back to the raw string in the JSON, and
-        // min_value reports it can't parse — the recomputed check carries the raw value, not a stale one.
+        // the field the user now sees. Since #383 the rule then fails on the UNREADABLE guard (rather
+        // than falling back to the raw string and letting min_value report it can't parse), and the
+        // recomputed check carries the raw value so the user can see what needs correcting.
         var auth = await RegisterAndLoginAsync();
         var docId = await SeedDocWithGlRuleAndLimit(auth.OrgId, 1_500_000m, ComplianceStatus.Compliant);
 
@@ -1540,11 +1541,433 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         var doc = await db.Documents.FirstAsync(d => d.Id == docId);
         doc.GeneralLiabilityLimit.Should().BeNull();
         doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant);
+        // Which guard failed the rule is the whole claim of this test's comment, and isPassed:false
+        // with the raw value cannot tell the new UNREADABLE guard apart from the pre-#383 min_value
+        // "Unable to parse numeric comparison" path — both produced exactly that. The note and the
+        // review flag are what distinguish them, so assert those (#383 review, S2).
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            "an unreadable canonical value also routes the document to a human");
 
         var body = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
         var check = body.GetProperty("data").GetProperty("complianceChecks")[0];
         check.GetProperty("isPassed").GetBoolean().Should().BeFalse();
         check.GetProperty("actualValue").GetString().Should().Be("approximately $1M");
+        check.GetProperty("notes").GetString().Should().Be(ComplianceCheckService.UnreadableValueNote,
+            "the UNREADABLE guard failed this rule, not the min_value comparison");
+    }
+
+    // ---- #383: a manual edit we can't read must not read back as Compliant ----
+
+    /// <summary>
+    /// Seeds a vendor on a COI checklist whose single requirement is
+    /// "expiration_date required" — the catalog's "Document must not be expired" — plus a Compliant
+    /// COI expiring in a year. The starting point of the reported repro.
+    /// </summary>
+    private async Task<Guid> SeedDocWithExpirationRule(Guid orgId)
+    {
+        await using var db = CreateSystemDb();
+        var now = DateTime.UtcNow;
+        var template = new ComplianceTemplate
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            Name = "Venue COI",
+            CreatedAt = now
+        };
+        db.ComplianceTemplates.Add(template);
+        db.ComplianceRules.Add(new ComplianceRule
+        {
+            Id = Guid.NewGuid(),
+            ComplianceTemplateId = template.Id,
+            DocumentType = "coi",
+            FieldName = "expiration_date",
+            Operator = "required",
+            ErrorMessage = "No expiration date was found, so we can't confirm the insurance is current.",
+            SortOrder = 1
+        });
+        var vendor = new Vendor
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            Name = "Acme Catering",
+            ComplianceTemplateId = template.Id,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.Vendors.Add(vendor);
+        var doc = new Document
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            VendorId = vendor.Id,
+            OriginalFileName = "coi.pdf",
+            BlobStorageUrl = "memory://x",
+            FileSizeBytes = 1,
+            ContentType = "application/pdf",
+            DocumentType = "coi",
+            ExtractionStatus = ExtractionStatus.Completed,
+            ComplianceStatus = ComplianceStatus.Compliant,
+            ExpirationDate = DateTime.UtcNow.AddYears(1),
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.Documents.Add(doc);
+        await db.SaveChangesAsync();
+        return doc.Id;
+    }
+
+    [Fact]
+    public async Task Editing_expiration_date_to_an_unreadable_past_value_does_not_stay_Compliant()
+    {
+        // THE REPORTED REPRO, verbatim. Setting the expiration to "2020-01-01 (per endorsement)" used
+        // to flip the badge back to Compliant with the "Expires" tile showing "—" and an affirmative
+        // green "Insurance has not expired": the typed column was nulled (so the Expired branch could
+        // not fire) while the `required` rule passed off the non-empty raw string. Three failures, one
+        // root cause, all pointing at false-Compliant on a certificate that expired in 2020.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "expiration_date", fieldValue = "2020-01-01 (per endorsement)" } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExpirationDate.Should().BeNull("nothing can parse that shape — the column is honestly unknown");
+        doc.ComplianceStatus.Should().NotBe(ComplianceStatus.Compliant,
+            "a certificate whose expiration we cannot read must never certify as compliant");
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            "the document must keep asking for a readable value, not go quiet with a null column");
+
+        // And the detail payload no longer affirms the requirement was met.
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        var check = body.GetProperty("data").GetProperty("complianceChecks")[0];
+        check.GetProperty("isPassed").GetBoolean().Should().BeFalse();
+        check.GetProperty("actualValue").GetString().Should().Be("2020-01-01 (per endorsement)");
+    }
+
+    [Fact]
+    public async Task Correcting_an_unreadable_edit_to_a_real_date_clears_the_manual_review_flag()
+    {
+        // The escape hatch has to work, or the ManualRequired flag becomes a trap: once the user types
+        // a date we CAN read, the document resolves normally and stops nagging.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+
+        await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "expiration_date", fieldValue = "2020-01-01 (per endorsement)" } }
+        });
+        var fix = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "expiration_date", fieldValue = "2020-01-01" } }
+        });
+        fix.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed, "a readable value resolves the review");
+        doc.ExpirationDate.Should().Be(new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.Expired,
+            "and the date the human actually meant now drives the verdict");
+    }
+
+    [Theory]
+    [InlineData(ExtractionStatus.Pending)]
+    [InlineData(ExtractionStatus.Processing)]
+    [InlineData(ExtractionStatus.Failed)]
+    public async Task An_unreadable_edit_does_not_overwrite_an_unsettled_extraction_status(ExtractionStatus seeded)
+    {
+        // The escalation is deliberately scoped to a SETTLED status (Completed / ManualRequired), and
+        // this Theory covers ALL THREE excluded states so the allow-list can't be loosened to a bare
+        // "!= Pending" without going red (#383 review, S1).
+        //   Pending    — ExtractionWorker claims rows on ExtractionStatus == Pending, so overwriting it
+        //                would silently DE-QUEUE the document forever: a bad verdict traded for a
+        //                document that never gets read at all.
+        //   Processing — the worker's in-flight state; it re-decides the flag when it lands.
+        //   Failed     — its own louder error state, with a processing-error card of its own.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+        await using (var seed = CreateSystemDb())
+        {
+            var doc0 = await seed.Documents.FirstAsync(d => d.Id == docId);
+            doc0.ExtractionStatus = seeded;
+            await seed.SaveChangesAsync();
+        }
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "expiration_date", fieldValue = "continuous until cancelled" } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(seeded,
+            "an unsettled extraction status is the worker's, and the manual-edit escalation must not take it");
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant,
+            "the verdict still fails closed regardless of the queue state");
+    }
+
+    /// <summary>
+    /// Drives a seeded document into the #383 state through the real endpoint: an unparseable
+    /// expiration lands in <see cref="Document.ExtractionFields"/>, the typed column is cleared, and
+    /// the document is routed to <see cref="ExtractionStatus.ManualRequired"/>.
+    /// </summary>
+    private async Task PutUnreadableExpirationAsync(HttpClient client, Guid docId)
+    {
+        var put = await client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "expiration_date", fieldValue = "2020-01-01 (per endorsement)" } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.Documents.FirstAsync(d => d.Id == docId)).ExtractionStatus
+            .Should().Be(ExtractionStatus.ManualRequired, "precondition: the review flag is up");
+    }
+
+    [Fact]
+    public async Task An_empty_field_save_does_not_clear_an_unresolved_unreadable_review()
+    {
+        // The detail page deliberately enables Save with NO edits while the amber review card is
+        // showing, and posts an empty fields array. Nothing about that request says the stored
+        // expiration became readable — but the escalation used to be computed from the field names in
+        // THIS request, so an empty save resolved the review and the flag was gone for good (nothing
+        // but a full re-extraction re-raises it; ComplianceCheckService never writes ExtractionStatus).
+        // Under a checklist with no rule on the field, that flag is the ONLY thing left flagging the
+        // document — so two clicks restored the exact silent false-Compliant #383 exists to close.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+        await PutUnreadableExpirationAsync(auth.Client, docId);
+
+        var empty = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields",
+            new { fields = Array.Empty<object>() });
+        empty.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExpirationDate.Should().BeNull();
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            "looking at a document does not make its expiration parseable");
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant);
+    }
+
+    [Fact]
+    public async Task Saving_an_unrelated_field_does_not_clear_an_unresolved_unreadable_review()
+    {
+        // Same root cause, the likelier route: the user fixes the policy number and never touches the
+        // expiration. A request that does not mention expiration_date says nothing about whether the
+        // stored expiration is readable, so it must not resolve the review either.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+        await PutUnreadableExpirationAsync(auth.Client, docId);
+
+        var unrelated = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "policy_number", fieldValue = "GL-99887766" } }
+        });
+        unrelated.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            "an edit to another field leaves the unreadable expiration exactly as unreadable");
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant);
+    }
+
+    [Fact]
+    public async Task Marking_verified_does_not_clear_an_unresolved_unreadable_review()
+    {
+        // The OTHER ResolveManualReview caller. PUT /verify used to downgrade
+        // ManualRequired -> Completed unconditionally, clearing the #383 backstop without the value
+        // ever being corrected — and nothing re-raises it afterwards, so Check-again, a rule edit and
+        // the hourly sweep all leave it cleared until a full re-extraction. Seeded directly (not via
+        // PUT /fields) so this proves the /verify route on its own.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+        await using (var seed = CreateSystemDb())
+        {
+            var doc0 = await seed.Documents.FirstAsync(d => d.Id == docId);
+            doc0.ExpirationDate = null;
+            doc0.ExtractionFields = JsonDocument.Parse("""{"expiration_date":"12/31/2026 (per endorsement)"}""");
+            doc0.ExtractionStatus = ExtractionStatus.ManualRequired;
+            await seed.SaveChangesAsync();
+        }
+
+        var verify = await auth.Client.PutAsync($"/api/documents/{docId}/verify", null);
+        verify.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            "asserting a document is verified cannot make an unreadable expiration readable");
+        doc.IsManuallyVerified.Should().BeTrue("the human did look — that part of the verify still lands");
+    }
+
+    [Fact]
+    public async Task A_null_field_value_reads_as_an_honest_absence_not_an_unreadable_value()
+    {
+        // FieldUpdateRequest.FieldValue is string?, so this stores a JSON null in ExtractionFields.
+        // The writer classifies that as Blank (honestly absent) — but the reader's fallback arm
+        // returned the literal 4-character string "null" for JsonValueKind.Null, so IsUnreadable
+        // called the very same edit UNREADABLE. Writer and reader disagreeing about one value is the
+        // exact ambiguity #383 exists to remove, and ADR 0040 is explicit that Blank stays Blank.
+        // Symptoms: a check row noted "we couldn't read this" with ActualValue "null" — rendered to
+        // the user verbatim — and a document dragged into manual review over a value it does not have.
+        // Sticky, too: the JSON null persists, so every later evaluation re-read "null".
+        // The expectations below are exactly those of the fieldValue: "" case
+        // (Clearing_expiration_date_to_blank_does_not_demand_manual_review).
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "expiration_date", fieldValue = (string?)null } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // What the user is shown first — this is where the disagreement surfaced as user-visible copy.
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        var check = body.GetProperty("data").GetProperty("complianceChecks")[0];
+        check.GetProperty("isPassed").GetBoolean().Should().BeFalse();
+        check.GetProperty("notes").GetString().Should()
+            .Be("Field missing.", "an absence is reported as missing, never as unreadable");
+        check.GetProperty("notes").GetString().Should().NotBe(ComplianceCheckService.UnreadableValueNote);
+        check.GetProperty("actualValue").ValueKind.Should().Be(JsonValueKind.Null,
+            "the user must never be shown the 4-character string \"null\" as what the document says");
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExpirationDate.Should().BeNull();
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant, "required still fails on an absence");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "an absent value is an honest reading of a certificate that shows none, not a read failure");
+    }
+
+    [Fact]
+    public async Task Clearing_expiration_date_to_blank_does_not_demand_manual_review()
+    {
+        // Blank is an honest "this certificate shows no expiration" — it fails the `required` rule on
+        // its own merits, but it is not a value we failed to READ, so it must not raise the review
+        // flag. Without this distinction every COI with a missing field would demand attention.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "expiration_date", fieldValue = "" } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExpirationDate.Should().BeNull();
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant, "required still fails on a blank");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed, "an honest absence is not a read failure");
+    }
+
+    [Theory]
+    [InlineData("effective_date", "effective as of 01/01/2026, see endorsement")]
+    [InlineData("expiration_date", "2020-01-01 (per endorsement)")]
+    [InlineData("general_liability_limit", "$1M per occurrence")]
+    public async Task An_unreadable_value_on_ANY_canonical_field_routes_the_document_to_a_human(
+        string fieldName, string unreadableValue)
+    {
+        // CanonicalDocumentFields.All is the anti-drift device for the escalation — but nothing pinned
+        // its MEMBERSHIP, and the escalation was only ever exercised for expiration_date and
+        // general_liability_limit. Dropping effective_date from All (or adding a fourth field and
+        // forgetting it) left the whole suite green while the flag silently stopped re-raising for that
+        // field, restoring the #383 hole one field at a time. This drives every name in All through the
+        // REAL endpoint, so a shortened list goes red here (#383 review round 2, S1).
+        //
+        // Note the effective_date / general_liability_limit cases also stay COMPLIANT: this checklist
+        // carries a rule on expiration_date only, which still passes. That is precisely the
+        // configuration ADR 0040 part 3 exists to cover — with no rule on the field, the review flag is
+        // the ONLY thing that surfaces the unreadable value at all.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName, fieldValue = unreadableValue } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            $"an unreadable {fieldName} nulls its typed column, which reads downstream as 'the certificate has no such value'");
+
+        // And the same walk reaches the client, so the detail page can name THIS field.
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        body.GetProperty("data").GetProperty("unreadableFields")
+            .EnumerateArray().Select(e => e.GetString()).Should().Equal(fieldName);
+    }
+
+    [Fact]
+    public async Task The_detail_payload_names_the_canonical_field_we_could_not_read()
+    {
+        // The client half of the #383 dead end (review round 2, confirmed bug 2 / S3). The backend
+        // correctly refuses to clear ManualRequired while a value stays unreadable — but the detail
+        // page's review card was written for the ONLY previous cause of that status, low extraction
+        // confidence, and told the user to fix "the ones outlined in amber". An unreadable value is
+        // read with HIGH confidence (and UpdateFields pins an edited field's confidence to 1.0), so
+        // fieldBorderClass outlines NOTHING: the user is told to correct a field nothing marks, on a
+        // document whose flag they cannot clear. The page needs the field NAMES, and they must come
+        // from the same DocumentFieldReadability walk that raises the flag — a TypeScript re-derivation
+        // of "can this parse?" would drift from the .NET parse it mirrors.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+        await PutUnreadableExpirationAsync(auth.Client, docId);
+
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        var data = body.GetProperty("data");
+        data.GetProperty("extractionStatus").GetString().Should().Be("ManualRequired");
+        data.GetProperty("unreadableFields").EnumerateArray().Select(e => e.GetString())
+            .Should().Equal("expiration_date");
+        // The field the page will mark carries FULL confidence — the pre-existing amber mechanism
+        // cannot see this document, which is the whole reason the names have to be sent.
+        data.GetProperty("fields").EnumerateArray()
+            .First(f => f.GetProperty("fieldName").GetString() == "expiration_date")
+            .GetProperty("confidence").GetDouble().Should().Be(1.0);
+    }
+
+    [Fact]
+    public async Task The_detail_payload_reports_no_unreadable_fields_for_a_healthy_document()
+    {
+        // The discriminating other half: unreadableFields must be EMPTY on a document with a perfectly
+        // readable expiration, or the page would raise its "we couldn't read this" copy on every doc.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        body.GetProperty("data").GetProperty("unreadableFields")
+            .EnumerateArray().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Editing_a_gl_limit_with_a_currency_symbol_parses_instead_of_nulling_the_column()
+    {
+        // #383 secondary, through the endpoint: "$1,000,000" is the most natural way to type a
+        // coverage limit, and it used to null the column and fail the min_value comparison — a false
+        // NonCompliant on a certificate that met the floor exactly.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithGlRuleAndLimit(auth.OrgId, null, ComplianceStatus.NonCompliant);
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "general_liability_limit", fieldValue = "$1,000,000" } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.GeneralLiabilityLimit.Should().Be(1_000_000m);
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed, "a value we CAN read needs no review");
     }
 
     [Fact]

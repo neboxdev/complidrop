@@ -1,6 +1,4 @@
-using System.Globalization;
 using System.Linq.Expressions;
-using System.Text.Json;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -438,6 +436,13 @@ public class ComplianceCheckService(
             if (!passed) allPassed = false;
         }
 
+        // Future-effective demotion (#362 / ADR 0041) is DELIBERATELY NOT applied here. The persisted
+        // status keeps the REAL rule verdict; the "not yet in force → Pending" demotion is a READ-ONLY
+        // overlay (ComplianceStatusDeriver.Effective + every SQL read mirror). Storing Pending would
+        // strand the doc at a stale Pending after it becomes effective — nothing re-runs rule evaluation
+        // on an EffectiveDate crossing, so the stored verdict must retain enough to SELF-HEAL on read the
+        // instant today reaches EffectiveDate, exactly as the Expired/ExpiringSoon overlay does. So a
+        // future-effective all-passing COI is stored Compliant here and READS Pending everywhere.
         var status = allPassed
             ? (expiringSoon ? ComplianceStatus.ExpiringSoon : ComplianceStatus.Compliant)
             : ComplianceStatus.NonCompliant;
@@ -446,8 +451,30 @@ public class ComplianceCheckService(
 
     // internal (not private) so the pure rule-evaluation logic can be unit-tested directly
     // without a database — see InternalsVisibleTo in CompliDrop.Api.csproj.
+    /// <summary>
+    /// The note stored on a check that failed because we could not READ the value, as opposed to the
+    /// document not carrying one. Distinct from "Field missing." on purpose — the two say opposite
+    /// things about the certificate, and only one of them is the user's cue to correct a value (#383).
+    /// </summary>
+    internal const string UnreadableValueNote =
+        "We couldn't read this value, so we can't confirm this requirement. Check the document and correct it.";
+
     internal static (bool passed, string? actualValue, string? note) EvaluateRule(Document doc, ComplianceRule rule)
     {
+        // FAIL-CLOSED GUARD (#383, ADR 0040). A canonical field whose raw value is non-blank but
+        // UNPARSEABLE ("12/31/2026 (per endorsement)", "continuous until cancelled") clears its typed
+        // column to null. Every date check downstream reads that column, so the document can never
+        // enter Expired/ExpiringSoon — while the `required` rule USED to pass anyway, satisfied by the
+        // non-empty raw string. That combination rendered the affirmative "Insurance has not expired"
+        // next to a green check on a certificate that expired years ago, and the reminder windows (also
+        // keyed on the null column) never fired: one root cause failing in three places, all toward
+        // false-Compliant. An unreadable value certifies NOTHING, whatever the operator: fail the rule,
+        // show the user the raw text so they can fix it, and say WHY in the note. The document is also
+        // pushed to ExtractionStatus.ManualRequired by both writers, so it surfaces even under a
+        // checklist that carries no rule on the field.
+        if (DocumentFieldReadability.TryGetUnreadableValue(doc, rule.FieldName, out var unreadable))
+            return (false, unreadable, UnreadableValueNote);
+
         string? actual = LookupValue(doc, rule.FieldName);
         var op = rule.Operator?.ToLowerInvariant() ?? "required";
 
@@ -520,8 +547,13 @@ public class ComplianceCheckService(
                 // note "Unable to parse numeric comparison" (#272).
                 if (string.IsNullOrWhiteSpace(actual))
                     return (false, actual, "Field missing.");
-                if (!decimal.TryParse(actual, NumberStyles.Any, CultureInfo.InvariantCulture, out var a)
-                    || !decimal.TryParse(rule.ExpectedValue, NumberStyles.Any, CultureInfo.InvariantCulture, out var min))
+                // Both sides go through the shared money parse so a currency-symbol amount reads the
+                // same everywhere (#383): "$1,000,000" is how a model reads a COI and how an owner
+                // types a minimum, and NumberStyles.Any + InvariantCulture alone rejects it (the
+                // invariant currency symbol is ¤, not $) — which silently failed the comparison on a
+                // certificate that genuinely met the floor.
+                if (!CanonicalDocumentFields.TryParseAmount(actual, out var a)
+                    || !CanonicalDocumentFields.TryParseAmount(rule.ExpectedValue, out var min))
                     return (false, actual, "Unable to parse numeric comparison.");
                 return (a >= min, actual, a >= min ? null : $"Value {a} below required minimum {min}.");
 
@@ -559,23 +591,21 @@ public class ComplianceCheckService(
     internal static string? LookupValue(Document doc, string? fieldName)
     {
         if (string.IsNullOrWhiteSpace(fieldName)) return null;
-        if (string.Equals(fieldName, "expiration_date", StringComparison.OrdinalIgnoreCase) && doc.ExpirationDate is { } ed)
-            return ed.ToString("yyyy-MM-dd");
-        if (string.Equals(fieldName, "effective_date", StringComparison.OrdinalIgnoreCase) && doc.EffectiveDate is { } efd)
-            return efd.ToString("yyyy-MM-dd");
-        if (string.Equals(fieldName, "general_liability_limit", StringComparison.OrdinalIgnoreCase) && doc.GeneralLiabilityLimit is { } gll)
-            return gll.ToString(CultureInfo.InvariantCulture);
 
-        if (doc.ExtractionFields?.RootElement.ValueKind == JsonValueKind.Object
-            && doc.ExtractionFields.RootElement.TryGetProperty(fieldName, out var value))
+        if (CanonicalDocumentFields.IsCanonical(fieldName))
         {
-            return value.ValueKind switch
-            {
-                JsonValueKind.String => value.GetString(),
-                JsonValueKind.Number => value.ToString(),
-                _ => value.GetRawText()
-            };
+            // The typed column is the authority for these three — it is what the date windows, the
+            // dashboard counts and the reminder queries all read.
+            if (DocumentFieldReadability.TypedColumnValue(doc, fieldName) is { } typed) return typed;
+
+            // Column null. The raw JSON is still consulted, but ONLY when it would parse (#383): a
+            // legacy row whose JSON holds a readable value keeps resolving, while a value that failed
+            // to parse — the case that nulled the column in the first place — resolves to null instead
+            // of fail-open-satisfying a `required` rule with text nothing else in the system can read.
+            var raw = DocumentFieldReadability.RawFieldValue(doc, fieldName);
+            return CanonicalDocumentFields.IsUnreadable(fieldName, raw) ? null : raw;
         }
-        return null;
+
+        return DocumentFieldReadability.RawFieldValue(doc, fieldName);
     }
 }

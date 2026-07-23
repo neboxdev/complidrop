@@ -65,6 +65,10 @@ public static class DocumentEndpoints
         // is exp >= today+31. The lower edges (< today / >= today) are already date-equivalent.
         var expiringSoonUpperExclusive =
             ComplianceStatusDeriver.WindowUpperBoundExclusive(today, ComplianceStatusDeriver.ExpiringSoonWindowDays);
+        // #362 / ADR 0041: "not yet in force today" is EffectiveDate.Date > today, i.e. the instant form
+        // EffectiveDate >= today+1 (UTC midnight). Same date↔instant convention as the expiry bound above
+        // (ADR 0027). "In force / no effective date" is (EffectiveDate == null || EffectiveDate < this bound).
+        var notYetEffectiveBound = ComplianceStatusDeriver.NotYetEffectiveLowerBoundInclusive(today);
 
         var query = db.Documents.AsQueryable();
         if (!string.IsNullOrWhiteSpace(status))
@@ -82,20 +86,34 @@ public static class DocumentEndpoints
                     ComplianceStatus.Expired => query
                         .Where(d => d.ExpirationDate != null && d.ExpirationDate < today)
                         .Where(DocumentSupersession.IsCurrent(db.Documents)),
+                    // #362: a future-effective (not-yet-in-force) doc is demoted out of ExpiringSoon/Compliant
+                    // into the effective-Pending arm below — same date↔instant rule the dashboard counts use.
                     ComplianceStatus.ExpiringSoon => query.Where(d =>
                         d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate < expiringSoonUpperExclusive
+                        && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)
                         && (d.ComplianceStatus == ComplianceStatus.Compliant
                             || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
                             || d.ComplianceStatus == ComplianceStatus.Pending)),
                     ComplianceStatus.Compliant => query.Where(d =>
                         d.ComplianceStatus == ComplianceStatus.Compliant
-                        && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive)),
+                        && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive)
+                        && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)),
                     ComplianceStatus.NonCompliant => query.Where(d =>
                         d.ComplianceStatus == ComplianceStatus.NonCompliant
                         && (d.ExpirationDate == null || d.ExpirationDate >= today)),
-                    _ => query.Where(d => // Pending — but not if a date overlay would make it Expiring/Expired
-                        d.ComplianceStatus == ComplianceStatus.Pending
-                        && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive)),
+                    _ => query.Where(d =>
+                        // Genuine Pending — stored Pending, not date-overlaid to ExpiringSoon/Expired.
+                        (d.ComplianceStatus == ComplianceStatus.Pending
+                            && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive))
+                        // OR future-effective demotion (#362): a not-yet-in-force cert whose stored verdict is
+                        // affirmative (Compliant / ExpiringSoon / Pending) and which isn't already Expired
+                        // (Expired wins outright). Mirrors ComplianceStatusDeriver.Effective's demotion set, so
+                        // the ?status=Pending list matches every future-effective row's Pending badge.
+                        || (d.EffectiveDate != null && d.EffectiveDate >= notYetEffectiveBound
+                            && (d.ExpirationDate == null || d.ExpirationDate >= today)
+                            && (d.ComplianceStatus == ComplianceStatus.Compliant
+                                || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
+                                || d.ComplianceStatus == ComplianceStatus.Pending))),
                 };
         }
         if (!string.IsNullOrWhiteSpace(type))
@@ -178,7 +196,7 @@ public static class DocumentEndpoints
             d.VendorId,
             d.ExtractionStatus.ToString(),
             d.ExtractionConfidence,
-            ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today).ToString(),
+            ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today).ToString(),
             d.EffectiveDate,
             d.ExpirationDate,
             DaysUntilExpiry(d.ExpirationDate, today),
@@ -229,7 +247,7 @@ public static class DocumentEndpoints
             doc.VendorId,
             doc.ExtractionStatus.ToString(),
             doc.ExtractionConfidence,
-            ComplianceStatusDeriver.Effective(doc.ComplianceStatus, doc.ExpirationDate, today).ToString(),
+            ComplianceStatusDeriver.Effective(doc.ComplianceStatus, doc.ExpirationDate, doc.EffectiveDate, today).ToString(),
             doc.EffectiveDate,
             doc.ExpirationDate,
             DaysUntilExpiry(doc.ExpirationDate, today),
@@ -247,6 +265,10 @@ public static class DocumentEndpoints
                     c.ComplianceRule.ErrorMessage,
                     c.ActualValue, c.IsPassed, c.Notes, c.CheckedAt))
                 .ToArray(),
+            // The #383 state, from the same walk that raises the review flag in ResolveManualReview —
+            // so the detail page can NAME the field it couldn't read instead of pointing at a
+            // confidence outline an unreadable (high-confidence) value never gets. (ADR 0040 Amendment 2)
+            DocumentFieldReadability.UnreadableCanonicalFields(doc),
             extractionFields,
             doc.ExtractionPromptVersion,
             doc.ProcessingError,
@@ -580,6 +602,8 @@ public static class DocumentEndpoints
         }
 
         doc.ExtractionFields = JsonDocument.Parse(fields.ToJsonString());
+        // Order matters: the JSON mirror and the typed columns above are the state ResolveManualReview
+        // reads to decide whether the review it is clearing is genuinely resolved (#383, ADR 0040).
         ResolveManualReview(doc);
         doc.UpdatedAt = DateTime.UtcNow;
 
@@ -683,11 +707,33 @@ public static class DocumentEndpoints
     // "Needs your review" (ManualRequired) document to Completed so the amber
     // review card on the detail page clears. Other statuses are left untouched —
     // single source of truth for "what manual review resolves". (#193)
+    //
+    // ...unless the document STILL carries a canonical value we can't read (#383, ADR 0040). Looking
+    // at a document does not make its expiration parseable, so re-raise the flag here — inside the
+    // one helper, so EVERY caller inherits it. The question is asked of the document's RESULTING
+    // state, never of the field names one request happened to submit: an empty-fields save (the
+    // detail page deliberately enables Save with no edits while the review card is showing), a save
+    // touching only policy_number, or a bare PUT /verify all say nothing about whether the stored
+    // expiration is readable — yet each used to clear the flag permanently, since nothing but a full
+    // re-extraction ever re-raises it (ComplianceCheckService never writes ExtractionStatus). Under a
+    // checklist with no rule on the field this flag is the ONLY thing left flagging the document, so
+    // clearing it restored the exact silent false-Compliant #383 exists to close.
+    //
+    // Escalate ONLY from a settled status, measured BEFORE the resolve above: Pending/Processing are
+    // the worker's queue states and overwriting Pending would DE-QUEUE the document (ExtractionWorker
+    // claims on ExtractionStatus == Pending), while Failed is its own louder error state with a
+    // processing-error card. Either way the extraction path re-decides this flag when it lands.
     private static void ResolveManualReview(Document doc)
     {
+        var wasSettled = doc.ExtractionStatus
+            is ExtractionStatus.Completed or ExtractionStatus.ManualRequired;
+
         doc.IsManuallyVerified = true;
         if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
             doc.ExtractionStatus = ExtractionStatus.Completed;
+
+        if (wasSettled && DocumentFieldReadability.HasUnreadableCanonicalValue(doc))
+            doc.ExtractionStatus = ExtractionStatus.ManualRequired;
     }
 
     // Best-effort rollback of a blob whose owning Document never committed (lost the concurrent
