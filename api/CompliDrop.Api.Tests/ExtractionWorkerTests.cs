@@ -496,6 +496,159 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             .Should().BeFalse("a failed extraction must not emit a processed event");
     }
 
+    // ----- #401: per-field confidence gate on the verdict-bearing fields ----------------------
+
+    /// <summary>
+    /// Builds a multi-field extraction with an explicit per-field confidence — the shape the #401 gate
+    /// operates on. NeedsReprocessing false and every value READABLE, so the ONLY thing that can route a
+    /// document to manual review here is the confidence gate (average OR per-verdict-bearing-field), never
+    /// the model's reprocess signal or the #383 unreadable trigger.
+    /// </summary>
+    private static ExtractionResult ResultWithFields(params (string Name, string Value, double Confidence)[] fields) => new(
+        DocumentType: "coi",
+        DocumentSubType: null,
+        Fields: fields.Select(f => new ExtractedField(f.Name, f.Value, "string", f.Confidence)).ToArray(),
+        NeedsReprocessing: false,
+        Usage: new ExtractionUsage(InputTokens: 100, OutputTokens: 50, EstimatedCostUsd: 0.01m));
+
+    /// <summary>
+    /// EVERY member of <see cref="VerdictBearingFields.All"/>, each paired with a VALID/parseable sample
+    /// value for its type. Iterating the production set (not a hand-picked few) means a field ADDED to the
+    /// gate in future is auto-covered by the Theory below; a field REMOVED is caught by
+    /// <see cref="Every_expected_verdict_bearing_field_stays_in_the_gate"/> (which pins a fixed baseline,
+    /// independent of the set, so a shrinking set can't silently drop its own coverage).
+    /// </summary>
+    public static IEnumerable<object[]> VerdictBearingFieldSamples() =>
+        VerdictBearingFields.All.Select(name => new object[] { name, SampleValueFor(name) });
+
+    /// <summary>
+    /// A VALID, parseable sample value for a verdict-bearing field, keyed by type: the two date fields
+    /// parse to a DateTime, every <c>*_limit</c> money field to an amount, <c>additional_insured</c> is free
+    /// text. Parseable is the POINT — an unparseable CANONICAL value would route the document via the #383
+    /// unreadable trigger instead of the confidence gate, making the gate test vacuous. A future member of
+    /// <see cref="VerdictBearingFields.All"/> that fits none of these buckets throws loudly here, forcing its
+    /// sample value to be chosen deliberately rather than defaulted to a wrong-typed string.
+    /// </summary>
+    private static string SampleValueFor(string field) => field switch
+    {
+        CanonicalDocumentFields.EffectiveDate or CanonicalDocumentFields.ExpirationDate => "2027-03-15",
+        "additional_insured" => "Riverside Event Hall",
+        _ when field.EndsWith("_limit", StringComparison.OrdinalIgnoreCase) => "2000000",
+        _ => throw new ArgumentOutOfRangeException(nameof(field),
+            $"No sample value mapping for verdict-bearing field '{field}'. Add one when extending VerdictBearingFields.All."),
+    };
+
+    [Theory]
+    [MemberData(nameof(VerdictBearingFieldSamples))]
+    public async Task A_low_confidence_verdict_bearing_field_routes_to_manual_review_even_when_the_average_clears_the_gate(
+        string field, string value)
+    {
+        // #401: the field that DECIDES a verdict (a limit, an effective/expiration date, the
+        // additional-insured party) came back at 0.3 — the machine barely read it — but four 0.95 incidental
+        // fields pull the AVERAGE to ~0.82, well clear of the 0.7 gate. Pre-#401 this landed Completed and
+        // rolled up to "Covered"; averaging hid the one field a mis-read flips the verdict on. Data-driven
+        // over EVERY member of VerdictBearingFields.All (not a hand-picked four), so every coverage-limit
+        // entry is exercised too — the sample value is READABLE (asserted below), so the #383 unreadable
+        // trigger can't be what fires here; the new per-field CONFIDENCE gate is.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWithFields(
+            (field, value, 0.3),
+            ("policyholder_name", "Acme Vendor", 0.95),
+            ("insurer_name", "Acme Insurance", 0.95),
+            ("policy_number", "GL-12345", 0.95),
+            ("certificate_holder", "Riverside Event Hall", 0.95));
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionConfidence.Should().BeGreaterThan(ExtractionWorker.ManualReviewConfidenceThreshold,
+            "the field AVERAGE clears the gate — the per-field verdict-bearing trigger is what routes it");
+        // Rules out the OTHER two ManualRequired triggers so the verdict is attributable ONLY to the
+        // per-field confidence gate: the average is proven clear above, ResultWithFields sets
+        // NeedsReprocessing=false, and the sample value is parseable so there's no #383 unreadable value.
+        DocumentFieldReadability.HasUnreadableCanonicalValue(doc).Should().BeFalse(
+            "the sample value is parseable, so ManualRequired is attributable to the CONFIDENCE gate, not the #383 unreadable trigger");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            "a low-confidence verdict-bearing field the average hid must still reach a human (#401)");
+        doc.ProcessingError.Should().BeNull("this is not an extraction FAILURE — the read succeeded, just at low confidence");
+    }
+
+    [Theory]
+    [InlineData("effective_date")]
+    [InlineData("expiration_date")]
+    [InlineData("general_liability_limit")]
+    [InlineData("auto_liability_limit")]
+    [InlineData("professional_liability_limit")]
+    [InlineData("umbrella_limit")]
+    [InlineData("liquor_liability_limit")]
+    [InlineData("workers_comp_limit")]
+    [InlineData("additional_insured")]
+    public void Every_expected_verdict_bearing_field_stays_in_the_gate(string field)
+    {
+        // The removal backstop for the data-driven gate Theory above. That Theory ITERATES
+        // VerdictBearingFields.All, so it auto-covers a field ADDED to the set — but a field REMOVED from
+        // All simply drops its Theory case and would slip by silently. This fixed baseline (nine literals,
+        // NOT read from the set) catches exactly that: drop any of these from All and its row here goes red,
+        // because the #401 per-field gate would stop protecting that verdict-bearing field. Adding a tenth
+        // member keeps every row green (a superset is fine) while the gate Theory picks the new one up —
+        // both goals at once. Uses the production predicate (VerdictBearingFields.Contains), not a copy.
+        VerdictBearingFields.Contains(field).Should().BeTrue(
+            $"'{field}' must stay gated by the #401 per-field confidence check");
+    }
+
+    [Fact]
+    public async Task A_low_confidence_non_verdict_bearing_field_does_not_route_to_manual_review()
+    {
+        // The gate is SCOPED to verdict-bearing fields: an incidental field (certificate_holder, policy
+        // number) that no rule grades doesn't flip a verdict, so a low read on it must NOT drag the document
+        // into review — otherwise every certificate with one fuzzy incidental field would demand attention
+        // and the signal would be worthless. The verdict-bearing fields here are all high-confidence, and the
+        // AVERAGE (~0.79) clears the gate, so the per-field SCOPE is the only thing under test.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWithFields(
+            ("certificate_holder", "Riverside Event Hall", 0.3),
+            ("policy_number", "GL-12345", 0.95),
+            ("expiration_date", "2027-03-15", 0.95),
+            ("general_liability_limit", "2000000", 0.95));
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionConfidence.Should().BeGreaterThan(ExtractionWorker.ManualReviewConfidenceThreshold,
+            "the average clears the gate, so this isolates the per-field SCOPE, not the average trigger");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "a low-confidence field that backs no verdict must not route to manual review (#401 is scoped)");
+    }
+
+    [Theory]
+    [InlineData(0.70, ExtractionStatus.Completed)]      // AT the threshold: the gate is `< 0.7`, so 0.70 is trusted
+    [InlineData(0.69, ExtractionStatus.ManualRequired)] // just below: routed to a human
+    public async Task The_per_field_confidence_gate_is_exclusive_at_the_shared_threshold(
+        double confidence, ExtractionStatus expected)
+    {
+        // The verdict-bearing field (expiration_date) sits AT the boundary; three 0.99 incidental fields keep
+        // the AVERAGE above 0.7 in BOTH rows, so the per-field gate — not the average gate — is the only
+        // thing that can move the 0.69 row to ManualRequired. Pins the threshold as EXCLUSIVE (0.70 trusted,
+        // 0.69 not), matching the average gate's `avgConf < threshold`; both reference the SAME shared
+        // ExtractionWorker.ManualReviewConfidenceThreshold constant so the two gates can't drift apart.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = ResultWithFields(
+            ("expiration_date", "2027-03-15", confidence),
+            ("policyholder_name", "Acme Vendor", 0.99),
+            ("insurer_name", "Acme Insurance", 0.99),
+            ("policy_number", "GL-12345", 0.99));
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionConfidence.Should().BeGreaterThan(ExtractionWorker.ManualReviewConfidenceThreshold,
+            "padding keeps the average above the gate in both rows, isolating the per-field trigger");
+        doc.ExtractionStatus.Should().Be(expected);
+    }
+
     // ----- #337: the worker grades inside PersistSuccess (combined unit of work) --------------
 
     // Seeds an org + zero-spend subscription + a vendor on a checklist carrying a single

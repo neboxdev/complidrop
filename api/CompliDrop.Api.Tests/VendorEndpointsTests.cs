@@ -126,7 +126,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
 
     private async Task<Guid> SeedVendorDocAsync(
         Guid orgId, Guid vendorId, string documentType, ComplianceStatus status, DateTime? expirationDate = null,
-        decimal? glLimit = null)
+        decimal? glLimit = null, ExtractionStatus extractionStatus = ExtractionStatus.Completed)
     {
         await using var db = CreateSystemDb();
         var now = DateTime.UtcNow;
@@ -145,7 +145,9 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             ComplianceStatus = status,
             ExpirationDate = expirationDate,
             GeneralLiabilityLimit = glLimit,
-            ExtractionStatus = ExtractionStatus.Completed,
+            // Defaults to Completed (trusted) so every existing caller is unchanged; the #401 coverage tests
+            // pass ManualRequired to prove a distrusted extraction is excluded from in-force coverage.
+            ExtractionStatus = extractionStatus,
             CreatedAt = now,
             UpdatedAt = now,
         });
@@ -194,6 +196,91 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         CoverageFor(list, actionV).GetProperty("status").GetString().Should().Be("ActionNeeded");
         CoverageFor(list, expiringV).GetProperty("status").GetString().Should().Be("Covered");
         CoverageFor(list, noReqV).GetProperty("status").GetString().Should().Be("NoRequirements");
+    }
+
+    [Fact]
+    public async Task A_vendor_whose_only_cert_is_ManualRequired_reads_ActionNeeded_not_Covered()
+    {
+        // #401 / ADR 0042: an extraction the SYSTEM ITSELF flagged unreliable (ManualRequired — a
+        // low-confidence verdict-bearing field, an unreadable canonical value, or the model's reprocess
+        // signal) must NOT roll up to Covered, even when its stored rule verdict reads Compliant. The
+        // required COI here is covered ONLY by a ManualRequired+Compliant doc, so the vendor reads
+        // ActionNeeded — a genuine gap surfaces until a human confirms the extraction — exactly like an
+        // expired-only type. Asserted on BOTH the list rollup AND the detail rollup (both projections carry
+        // ExtractionStatus now).
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Distrusted LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        // Stored Compliant, but the extraction is flagged ManualRequired.
+        await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.ManualRequired);
+
+        var list = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+        CoverageFor(list, vendorId).GetProperty("status").GetString().Should().Be("ActionNeeded",
+            "a doc the extraction system distrusts (ManualRequired) is not in-force coverage (#401)");
+
+        var detail = (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/vendors/{vendorId}"))
+            .GetProperty("data").GetProperty("coverage");
+        detail.GetProperty("status").GetString().Should().Be("ActionNeeded",
+            "the detail rollup must exclude a distrusted extraction too (#401)");
+    }
+
+    [Fact]
+    public async Task A_Completed_Compliant_cert_reads_Covered_so_only_extraction_trust_gates_the_rollup()
+    {
+        // Regression guard for #401: the ManualRequired exclusion gates ONLY on extraction trust. The exact
+        // same stored-Compliant COI that reads ActionNeeded when ManualRequired reads Covered when the
+        // extraction is Completed — proving the new clause didn't start dropping genuinely-trusted coverage.
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Trusted LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.Completed);
+
+        var list = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+        CoverageFor(list, vendorId).GetProperty("status").GetString().Should().Be("Covered",
+            "a Completed (trusted) Compliant cert is genuine in-force coverage");
+    }
+
+    [Fact]
+    public async Task A_required_type_with_both_a_ManualRequired_and_a_Completed_Compliant_cert_reads_Covered()
+    {
+        // #401 / ADR 0042: the ManualRequired exclusion is PER DOCUMENT, not per TYPE. A required type
+        // covered by BOTH a distrusted (ManualRequired) cert AND a trusted (Completed + Compliant) cert
+        // is genuinely covered by the trusted one — ComputeCoverage drops only the distrusted doc from the
+        // in-force set, so its trusted sibling still counts and the vendor reads Covered, NOT ActionNeeded.
+        // Guards against a regression that excluded the WHOLE type whenever ANY of its docs was
+        // ManualRequired: the two single-doc #401 tests above can't catch that (each type has exactly one
+        // doc), so this two-doc case is the one that pins the per-document semantics.
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Mixed Trust LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        // Two COI certs for the SAME required type: one the system distrusts, one it trusts.
+        await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.ManualRequired);
+        await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.Completed);
+
+        var list = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+        CoverageFor(list, vendorId).GetProperty("status").GetString().Should().Be("Covered",
+            "the exclusion is per-document — the trusted Completed+Compliant cert still provides in-force coverage (#401)");
+
+        var detail = (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/vendors/{vendorId}"))
+            .GetProperty("data").GetProperty("coverage");
+        detail.GetProperty("status").GetString().Should().Be("Covered",
+            "the detail rollup is per-document too — a distrusted sibling doesn't sink a trusted cert (#401)");
     }
 
     [Fact]
