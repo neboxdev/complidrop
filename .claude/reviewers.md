@@ -158,6 +158,21 @@ Both are defined in this repo's `.claude/agents/`.
   (the merge-safety no-op) — do not flag its outdated floors/messages, and do not
   "fix" them: any edit there rewrites prod rows before the sign-off. Test hosts pin
   the flag ON; prod default stays OFF.
+- The corrected additional-insured claim WORDING (#396 / CLM-1) is behind a SEPARATE
+  default-OFF flag `ComplianceClaims:CorrectedAdditionalInsuredWording`, surfaced as
+  `features.correctedAdditionalInsuredWording` on `/api/auth/me` — merged-but-inert
+  pending the G1-COUNSEL-BRIEF §0 CLM-1 attorney sign-off, same posture as
+  `TemplateCorrections` / `RuleEngine` (ADR 0043). It is COPY-ONLY: flag-OFF keeps the
+  legacy "Names '{name}' as additional insured" sentence, the "was not found" failure
+  message, and the "box is checked" affirmative-flag check note byte-for-byte (the
+  merge-safety no-op — the legacy copy is deliberate, NOT a bug; do not flag or "fix"
+  it), and flag-ON swaps in the honest "certificate indicates… request the endorsement"
+  wording (TRR §3). The flag MUST NOT move any pass/fail verdict — `EvaluateRule`'s
+  `fallbackHit` is computed independently of it and a verdict-parity Theory pins this;
+  a version where the flag changes a verdict IS a real finding. DISTINCT from
+  `TemplateCorrections` on purpose (a different sign-off — do not "unify" them). Test
+  hosts leave it at the prod default OFF; the ON value is pinned by
+  ComplianceClaimsFlagTests (isolated host). The staged corrected copy is not dead code.
 
 ## Sensitive areas (`careful-review` label ⇒ autonomous sessions stop before merge)
 
