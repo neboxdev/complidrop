@@ -75,6 +75,61 @@ public class ComplianceRuleEvaluationTests
         note.Should().Be("Field missing.");
     }
 
+    [Fact]
+    public void Equals_wellformed_still_passes_a_matching_value_with_no_note()
+    {
+        // Guards the #374 fail-closed guard against over-reaching: a real ExpectedValue must behave
+        // EXACTLY as before — a matching value passes, with no note.
+        var (passed, actual, note) = ComplianceCheckService.EvaluateRule(
+            DocWithField("license_type", "CDL"), Rule("equals", "license_type", "CDL"));
+
+        passed.Should().BeTrue();
+        actual.Should().Be("CDL");
+        note.Should().BeNull();
+    }
+
+    [Fact]
+    public void Equals_fails_closed_when_expected_is_null_and_field_missing()
+    {
+        // #374 core regression. A null ExpectedValue made `string.Equals(null, null)` TRUE, so a
+        // document MISSING the field read as PASSING — a wrong-direction (fail-open) verdict, unique
+        // among the operators. It must now FAIL, and NOT with the self-contradicting "Field missing."
+        // note (the field being absent is not why this failed — the rule itself is misconfigured).
+        var (passed, _, note) = ComplianceCheckService.EvaluateRule(
+            DocWithField("other", "x"), Rule("equals", "license_type", expected: null));
+
+        passed.Should().BeFalse();
+        note.Should().NotBe("Field missing.");
+        note.Should().Be("Rule is misconfigured: no expected value.");
+    }
+
+    [Fact]
+    public void Equals_fails_closed_when_expected_is_null_and_field_present()
+    {
+        // The inverse of the fail-open pair: a doc that actually shows the field must not be judged
+        // against a null expected either — the rule is misconfigured, so it fails closed regardless.
+        var (passed, actual, note) = ComplianceCheckService.EvaluateRule(
+            DocWithField("license_type", "CDL"), Rule("equals", "license_type", expected: null));
+
+        passed.Should().BeFalse();
+        actual.Should().Be("CDL");
+        note.Should().Be("Rule is misconfigured: no expected value.");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Equals_fails_closed_when_expected_is_blank(string expected)
+    {
+        // A whitespace-only expected is as meaningless as null — same fail-closed treatment, mirroring
+        // how `min_value` / `contains` already reject a blank expected value.
+        var (passed, _, note) = ComplianceCheckService.EvaluateRule(
+            DocWithField("license_type", "CDL"), Rule("equals", "license_type", expected));
+
+        passed.Should().BeFalse();
+        note.Should().Be("Rule is misconfigured: no expected value.");
+    }
+
     // ---------------- contains ----------------
 
     [Theory]
