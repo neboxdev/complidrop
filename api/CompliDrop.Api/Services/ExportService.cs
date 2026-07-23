@@ -126,7 +126,7 @@ public class ExportService(SystemDbContext db) : IExportService
                                     r.RelativeItem(2).Text(DisplayLabels.DocumentType(d.DocumentType)).FontSize(9);
                                     r.RelativeItem(2).Text(d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "—").FontSize(9);
                                     r.RelativeItem(2).Text(DisplayLabels.Compliance(
-                                        ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today))
+                                        ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today))
                                         + (supersededIds.Contains(d.Id) ? " (superseded)" : "")).FontSize(9);
                                 });
                             }
@@ -282,7 +282,7 @@ public class ExportService(SystemDbContext db) : IExportService
             csv.WriteField(DisplayLabels.DocumentType(d.DocumentType));
             csv.WriteField(DisplayLabels.Extraction(d.ExtractionStatus));
             csv.WriteField(DisplayLabels.Compliance(
-                ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today)));
+                ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today)));
             csv.WriteField(supersededIds.Contains(d.Id) ? "Yes" : "No");
             csv.WriteField(d.EffectiveDate?.ToString("yyyy-MM-dd"));
             csv.WriteField(d.ExpirationDate?.ToString("yyyy-MM-dd"));
@@ -298,13 +298,16 @@ public class ExportService(SystemDbContext db) : IExportService
         return ms.ToArray();
     }
 
-    // #327 / ADR 0033 (as amended by the #327 re-review): the ids of documents superseded by a newer
-    // same-(vendor, type) cert that ALSO extends coverage — the in-memory mirror of
-    // DocumentSupersession.IsSuperseded, computed over the already-loaded org document set (no extra query).
-    // A doc d is superseded when some other doc o in its (vendor, type) group is BOTH a later upload
-    // (o.CreatedAt > d.CreatedAt) AND has a non-null ExpirationDate >= d's. A renewal that doesn't extend
-    // coverage (earlier/absent expiry — e.g. a still-processing upload) does NOT supersede, so it can't hide
-    // an expired liability — exactly the predicate above, so the CSV/PDF annotation matches the dashboard.
+    // #327 / ADR 0033 (as amended by the #327 re-review and #362 / Amendment 2): the ids of documents
+    // superseded by a newer same-(vendor, type) cert that BOTH extends coverage AND is continuous with the
+    // old one — the in-memory mirror of DocumentSupersession.IsSuperseded, computed over the already-loaded
+    // org document set (no extra query). A doc d is superseded when some other doc o in its (vendor, type)
+    // group is a later upload (o.CreatedAt > d.CreatedAt) with a non-null ExpirationDate >= d's (extends
+    // coverage) AND whose EffectiveDate is null or <= d.ExpirationDate (no gap — the renewal picks up on or
+    // before the old cert lapses). A renewal that doesn't extend coverage (earlier/absent expiry — e.g. a
+    // still-processing upload) OR that only becomes effective AFTER the old cert already expired (a future-
+    // effective renewal, leaving a live coverage gap — #362) does NOT supersede, so neither can hide an
+    // expired liability — exactly the predicate above, so the CSV/PDF annotation matches the dashboard.
     // Per-group pairwise: groups are tiny (a vendor's certs of one type), so this stays ~O(n) at SMB scale.
     // internal for a direct unit test pinning it equal to the DB predicate (InternalsVisibleTo).
     internal static HashSet<Guid> SupersededIds(IReadOnlyList<Entities.Document> docs)
@@ -318,7 +321,8 @@ public class ExportService(SystemDbContext db) : IExportService
                 if (d.ExpirationDate is null) continue; // null expiry → never superseded (matches the DB predicate)
                 if (items.Any(o => o.CreatedAt > d.CreatedAt
                         && o.ExpirationDate is not null
-                        && o.ExpirationDate >= d.ExpirationDate))
+                        && o.ExpirationDate >= d.ExpirationDate
+                        && (o.EffectiveDate is null || o.EffectiveDate <= d.ExpirationDate)))
                     superseded.Add(d.Id);
             }
         }
@@ -362,7 +366,7 @@ public class ExportService(SystemDbContext db) : IExportService
                     foreach (var d in vendor.Documents.OrderBy(d => d.ExpirationDate))
                     {
                         var superseded = supersededIds.Contains(d.Id);
-                        col.Item().PaddingTop(6).Text($"• {d.OriginalFileName} — {DisplayLabels.DocumentType(d.DocumentType)} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {DisplayLabels.Compliance(ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, today))}{(superseded ? " (superseded)" : "")}");
+                        col.Item().PaddingTop(6).Text($"• {d.OriginalFileName} — {DisplayLabels.DocumentType(d.DocumentType)} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {DisplayLabels.Compliance(ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today))}{(superseded ? " (superseded)" : "")}");
                     }
                 });
             });
