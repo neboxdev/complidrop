@@ -437,4 +437,53 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
         SupersededFor("old-coi.pdf").Should().Be("Yes", "the older cert is superseded by the newer one");
         SupersededFor("new-coi.pdf").Should().Be("No", "the latest cert is current");
     }
+
+    [Fact]
+    public async Task Csv_export_reads_a_future_effective_compliant_doc_as_Pending_not_Compliant()
+    {
+        // #362 review S1: the audit export is the 5th future-effective READ surface (the CSV/PDF verdict
+        // column runs the stored status through ComplianceStatusDeriver.Effective, ADR 0041), and was the
+        // one left untested. A stored-Compliant cert that is NOT YET in force (EffectiveDate a date strictly
+        // after today) must export as the Pending label — "Awaiting review" (DisplayLabels.Compliance) — and
+        // NEVER "Compliant": an audit-ready export must not certify present-tense coverage a not-yet-active
+        // cert doesn't provide. This mirrors A_standalone_future_effective_compliant_doc_reads_Pending_today
+        // (detail/list/dashboard) for the export surface. CSV only: the PDF is FlateDecode-compressed and not
+        // text-assertable (see Audit_report_generates_a_pdf…), and both PDF sites share this exact overlay.
+        var auth = await RegisterAndLoginAsync();
+        var today = DateTime.UtcNow.Date;
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            db.Documents.Add(new Document
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "future-effective-coi.pdf",
+                BlobStorageUrl = "memory://fe",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed,
+                ComplianceStatus = ComplianceStatus.Compliant, // stored verdict passed every rule…
+                ExpirationDate = today.AddDays(300),            // …far from expiry (so it isn't ExpiringSoon)…
+                EffectiveDate = today.AddDays(30),              // …but not in force until next month → reads Pending
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var csv = await (await auth.Client.GetAsync("/api/export/csv")).Content.ReadAsStringAsync();
+        var lines = csv.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToArray();
+        var header = lines[0].Split(',');
+        var fileIdx = Array.IndexOf(header, "FileName");
+        var compIdx = Array.IndexOf(header, "Compliance");
+        compIdx.Should().BeGreaterThan(-1, "the export has a Compliance column");
+
+        var row = lines.Skip(1).Select(l => l.Split(',')).First(f => f[fileIdx] == "future-effective-coi.pdf");
+        row[compIdx].Should().Be("Awaiting review",
+            "a not-yet-in-force cert exports as the Pending label (DisplayLabels.Compliance), not Compliant");
+        row[compIdx].Should().NotBe("Compliant",
+            "the export must not certify present-tense coverage a future-effective cert doesn't yet provide");
+    }
 }
