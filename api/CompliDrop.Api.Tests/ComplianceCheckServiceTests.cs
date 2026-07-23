@@ -1,9 +1,11 @@
+using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace CompliDrop.Api.Tests;
 
@@ -91,6 +93,56 @@ public sealed class ComplianceCheckServiceTests(IntegrationTestFixture fixture) 
         await using var sysDb = CreateSystemDb();
         return await new ComplianceCheckService(appDb, sysDb, new FixedTimeProvider(FixedNow), NullLogger<ComplianceCheckService>.Instance)
             .EvaluateForSystemAsync(documentId, default);
+    }
+
+    // ---------------- #396 (CLM-1): the ComplianceClaims flag reframes the PERSISTED note ----------------
+
+    // Evaluate through the real DB pipeline with the wording flag set via the constructor's IOptions,
+    // then read back the single persisted ComplianceCheck. Proves the constructor flag threads all the
+    // way to the stored note (constructor field -> ComputeOutcome -> EvaluateRule -> persisted row).
+    private async Task<ComplianceCheck> EvaluateAiAndReadCheck(Guid documentId, bool correctedWording)
+    {
+        var user = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = _orgId };
+        await using (var appDb = CreateAppDb(user))
+        await using (var sysDb = CreateSystemDb())
+        {
+            var svc = new ComplianceCheckService(
+                appDb, sysDb, new FixedTimeProvider(FixedNow), NullLogger<ComplianceCheckService>.Instance,
+                complianceClaims: Options.Create(
+                    new ComplianceClaimsSettings { CorrectedAdditionalInsuredWording = correctedWording }));
+            await svc.EvaluateForSystemAsync(documentId, default);
+        }
+
+        await using var read = CreateSystemDb();
+        return await read.Set<ComplianceCheck>().AsNoTracking().FirstAsync(c => c.DocumentId == documentId);
+    }
+
+    [Fact]
+    public async Task Additional_insured_persisted_note_follows_the_ComplianceClaims_flag_verdict_unchanged()
+    {
+        // A COI whose ADDL INSD column reads "Y" (affirmative flag, no named party) with the venue in
+        // the certificate-holder box — the ACORD-checkbox fallback HIT. The check passes either way;
+        // only the stored note wording changes with ComplianceClaims:CorrectedAdditionalInsuredWording.
+        var fields = System.Text.Json.JsonSerializer.SerializeToDocument(new Dictionary<string, object>
+        {
+            ["additional_insured"] = "Y",
+            ["certificate_holder"] = "Riverside Event Hall",
+        });
+        var docId = await SeedAsync(
+            docType: "coi",
+            extractionFields: fields,
+            rules: ("coi", "additional_insured", "contains", "Riverside Event Hall"));
+
+        // Flag OFF (prod default): the pre-#396 note, byte-for-byte.
+        var legacy = await EvaluateAiAndReadCheck(docId, correctedWording: false);
+        legacy.IsPassed.Should().BeTrue();
+        legacy.Notes.Should().Be("The additional-insured box is checked; matched the name in the certificate holder / description of operations.");
+
+        // Flag ON: the honest "indicates … request the endorsement" framing — SAME verdict.
+        var corrected = await EvaluateAiAndReadCheck(docId, correctedWording: true);
+        corrected.IsPassed.Should().Be(legacy.IsPassed, "the wording flag is copy-only and must never change a verdict");
+        corrected.Notes.Should().Be(ComplianceCheckService.AdditionalInsuredIndicatedHitNote);
+        corrected.Notes.Should().Contain("indicates").And.Contain("endorsement").And.NotContain("box is checked");
     }
 
     // ---------------- expiration boundaries (deterministic via the fixed clock) ----------------
