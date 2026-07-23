@@ -180,6 +180,18 @@ public static class ComplianceEndpoints
             .FirstOrDefaultAsync(t => t.Id == templateId && !t.IsSystemTemplate, ct);
         if (template is null) return NotFound();
 
+        // A value-operator rule (equals / contains / min_value) is meaningless without an
+        // ExpectedValue to compare against, and a null one is actively unsafe: it made the `equals`
+        // arm fail OPEN — a document MISSING the field read Compliant — until #374. Reject it at the
+        // write boundary (both create and update run through here) so only a well-formed rule can be
+        // persisted; ComplianceCheckService.EvaluateRule also fails such a rule closed as a
+        // defense-in-depth net for rows written before this guard. `required` legitimately carries no
+        // expected value, so it stays exempt. Op set + normalization mirror EvaluateRule's switch.
+        var op = req.Operator?.ToLowerInvariant();
+        if (op is "equals" or "contains" or "min_value" && string.IsNullOrWhiteSpace(req.ExpectedValue))
+            return Error(400, "validation.expected_value_required",
+                "This requirement needs a value to check against.");
+
         // Dedupe on (documentType, fieldName, operator) (#319 FP-081): the same requirement added
         // twice produces confusing double sentences and double failures. Excludes the rule being
         // edited (req.Id) so re-saving an existing rule is fine. The frontend also grays out
