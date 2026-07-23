@@ -75,6 +75,61 @@ public class ComplianceRuleEvaluationTests
         note.Should().Be("Field missing.");
     }
 
+    [Fact]
+    public void Equals_wellformed_still_passes_a_matching_value_with_no_note()
+    {
+        // Guards the #374 fail-closed guard against over-reaching: a real ExpectedValue must behave
+        // EXACTLY as before — a matching value passes, with no note.
+        var (passed, actual, note) = ComplianceCheckService.EvaluateRule(
+            DocWithField("license_type", "CDL"), Rule("equals", "license_type", "CDL"));
+
+        passed.Should().BeTrue();
+        actual.Should().Be("CDL");
+        note.Should().BeNull();
+    }
+
+    [Fact]
+    public void Equals_fails_closed_when_expected_is_null_and_field_missing()
+    {
+        // #374 core regression. A null ExpectedValue made `string.Equals(null, null)` TRUE, so a
+        // document MISSING the field read as PASSING — a wrong-direction (fail-open) verdict, unique
+        // among the operators. It must now FAIL, and NOT with the self-contradicting "Field missing."
+        // note (the field being absent is not why this failed — the rule itself is misconfigured).
+        var (passed, _, note) = ComplianceCheckService.EvaluateRule(
+            DocWithField("other", "x"), Rule("equals", "license_type", expected: null));
+
+        passed.Should().BeFalse();
+        note.Should().NotBe("Field missing.");
+        note.Should().Be("Rule is misconfigured: no expected value.");
+    }
+
+    [Fact]
+    public void Equals_fails_closed_when_expected_is_null_and_field_present()
+    {
+        // The inverse of the fail-open pair: a doc that actually shows the field must not be judged
+        // against a null expected either — the rule is misconfigured, so it fails closed regardless.
+        var (passed, actual, note) = ComplianceCheckService.EvaluateRule(
+            DocWithField("license_type", "CDL"), Rule("equals", "license_type", expected: null));
+
+        passed.Should().BeFalse();
+        actual.Should().Be("CDL");
+        note.Should().Be("Rule is misconfigured: no expected value.");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Equals_fails_closed_when_expected_is_blank(string expected)
+    {
+        // A whitespace-only expected is as meaningless as null — same fail-closed treatment, mirroring
+        // how `min_value` and `contains` also fail closed on a blank expected value.
+        var (passed, _, note) = ComplianceCheckService.EvaluateRule(
+            DocWithField("license_type", "CDL"), Rule("equals", "license_type", expected));
+
+        passed.Should().BeFalse();
+        note.Should().Be("Rule is misconfigured: no expected value.");
+    }
+
     // ---------------- contains ----------------
 
     [Theory]
@@ -260,6 +315,45 @@ public class ComplianceRuleEvaluationTests
         note.Should().Be("Expected to contain 'Riverside Event Hall'.");
     }
 
+    // ---------------- contains: misconfigured (blank/empty expected) fails closed (#374 re-review) ----------------
+
+    [Fact]
+    public void Contains_fails_closed_when_expected_is_empty_and_field_present()
+    {
+        // #374 re-review CORE regression. `"Acme".Contains("")` is TRUE in .NET, so a persisted
+        // `contains` rule with an EMPTY expected value graded any document that HAS the field as
+        // PASSING — a vacuous false-Compliant. Empty is non-null, so it slipped past the plain-path
+        // `rule.ExpectedValue is not null` guard. It must now FAIL closed with the misconfig note —
+        // NOT pass, and NOT a fallback-hit note.
+        var (passed, actual, note) = ComplianceCheckService.EvaluateRule(
+            DocWithField("additional_insured", "Acme"), Rule("contains", "additional_insured", ""));
+
+        passed.Should().BeFalse();
+        actual.Should().Be("Acme");
+        note.Should().Be("Rule is misconfigured: no expected value.");
+    }
+
+    [Theory]
+    [InlineData("Acme", "   ")]   // plain substring path, whitespace expected
+    [InlineData("Acme", null)]    // plain substring path, null expected
+    [InlineData("Y", "")]         // affirmative-flag fallback path, empty expected (holder.Contains("") is otherwise TRUE)
+    [InlineData("Y", "   ")]      // affirmative-flag fallback path, whitespace expected
+    [InlineData("Y", null)]       // affirmative-flag fallback path, null expected
+    public void Contains_fails_closed_on_a_blank_expected_across_both_paths(string additionalInsured, string? expected)
+    {
+        // The guard sits at the TOP of the contains arm, so a null/blank/empty expected fails closed on
+        // BOTH the plain substring path (actual = "Acme") and the additional_insured affirmative-flag
+        // fallback (actual = "Y", where `holder.Contains("")` would otherwise vacuously pass). Same
+        // misconfig note as `equals` — never a pass, never a fallback-hit note.
+        var doc = CoiWith(additionalInsured, certificateHolder: "Riverside Event Hall");
+
+        var (passed, _, note) = ComplianceCheckService.EvaluateRule(
+            doc, Rule("contains", "additional_insured", expected));
+
+        passed.Should().BeFalse();
+        note.Should().Be("Rule is misconfigured: no expected value.");
+    }
+
     // ---------------- min_value ----------------
 
     [Theory]
@@ -303,6 +397,24 @@ public class ComplianceRuleEvaluationTests
     {
         var (passed, _, note) = ComplianceCheckService.EvaluateRule(
             DocWithField("gl", "1500000"), Rule("min_value", "gl", "lots"));
+
+        passed.Should().BeFalse();
+        note.Should().Be("Unable to parse numeric comparison.");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public void MinValue_fails_closed_when_expected_is_blank(string? min)
+    {
+        // Pin (#374 re-review): a min_value rule with a null/blank/empty expected fails closed —
+        // `decimal.TryParse` rejects each, so the runtime net catches a misconfigured min_value row
+        // persisted before the UpsertRule write guard. Pinned so a future refactor of the parse path
+        // can't silently reopen the door. The actual is a valid number, so the failure is due to the
+        // EXPECTED, not the actual.
+        var (passed, _, note) = ComplianceCheckService.EvaluateRule(
+            DocWithField("gl", "1500000"), Rule("min_value", "gl", min));
 
         passed.Should().BeFalse();
         note.Should().Be("Unable to parse numeric comparison.");

@@ -1,3 +1,4 @@
+using System.Globalization;
 using CompliDrop.Api.Auth;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.DTOs.Compliance;
@@ -179,6 +180,31 @@ public static class ComplianceEndpoints
         var template = await db.ComplianceTemplates.Include(t => t.Rules)
             .FirstOrDefaultAsync(t => t.Id == templateId && !t.IsSystemTemplate, ct);
         if (template is null) return NotFound();
+
+        // A value-operator rule (equals / contains / min_value) is meaningless without an
+        // ExpectedValue to compare against, and a null one is actively unsafe: it made the `equals`
+        // arm fail OPEN — a document MISSING the field read Compliant — until #374. Reject it at the
+        // write boundary (both create and update run through here) so only a well-formed rule can be
+        // persisted; ComplianceCheckService.EvaluateRule also fails such a rule closed as a
+        // defense-in-depth net for rows written before this guard. `required` legitimately carries no
+        // expected value, so it stays exempt. Op set + normalization mirror EvaluateRule's switch.
+        var op = req.Operator?.ToLowerInvariant();
+        if (op is "equals" or "contains" or "min_value" && string.IsNullOrWhiteSpace(req.ExpectedValue))
+            return Error(400, "validation.expected_value_required",
+                "This requirement needs a value to check against.");
+
+        // A NON-blank min_value threshold that isn't a number is just as broken as a blank one: it
+        // passes the guard above but can never be satisfied — ComplianceCheckService.EvaluateRule's
+        // min_value arm parses ExpectedValue and, on a parse failure, fails EVERY document closed with
+        // the note "Unable to parse numeric comparison." That's fail-closed (never a false Compliant),
+        // but it's still a misconfiguration, so reject it at the write boundary too. Runs only for a
+        // non-blank min_value — the blank case already returned above — and mirrors EvaluateRule's
+        // parse call byte-for-byte (NumberStyles.Any + CultureInfo.InvariantCulture) so a threshold the
+        // eval can parse is never rejected here and vice versa. Distinct code from the blank case (#374).
+        if (op == "min_value"
+            && !decimal.TryParse(req.ExpectedValue, NumberStyles.Any, CultureInfo.InvariantCulture, out _))
+            return Error(400, "validation.expected_value_not_numeric",
+                "This requirement needs a number to compare against.");
 
         // Dedupe on (documentType, fieldName, operator) (#319 FP-081): the same requirement added
         // twice produces confusing double sentences and double failures. Excludes the rule being
