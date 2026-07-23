@@ -1,3 +1,4 @@
+using System.Globalization;
 using CompliDrop.Api.Auth;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.DTOs.Compliance;
@@ -191,6 +192,19 @@ public static class ComplianceEndpoints
         if (op is "equals" or "contains" or "min_value" && string.IsNullOrWhiteSpace(req.ExpectedValue))
             return Error(400, "validation.expected_value_required",
                 "This requirement needs a value to check against.");
+
+        // A NON-blank min_value threshold that isn't a number is just as broken as a blank one: it
+        // passes the guard above but can never be satisfied — ComplianceCheckService.EvaluateRule's
+        // min_value arm parses ExpectedValue and, on a parse failure, fails EVERY document closed with
+        // the note "Unable to parse numeric comparison." That's fail-closed (never a false Compliant),
+        // but it's still a misconfiguration, so reject it at the write boundary too. Runs only for a
+        // non-blank min_value — the blank case already returned above — and mirrors EvaluateRule's
+        // parse call byte-for-byte (NumberStyles.Any + CultureInfo.InvariantCulture) so a threshold the
+        // eval can parse is never rejected here and vice versa. Distinct code from the blank case (#374).
+        if (op == "min_value"
+            && !decimal.TryParse(req.ExpectedValue, NumberStyles.Any, CultureInfo.InvariantCulture, out _))
+            return Error(400, "validation.expected_value_not_numeric",
+                "This requirement needs a number to compare against.");
 
         // Dedupe on (documentType, fieldName, operator) (#319 FP-081): the same requirement added
         // twice produces confusing double sentences and double failures. Excludes the rule being
