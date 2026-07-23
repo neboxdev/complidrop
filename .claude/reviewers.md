@@ -49,7 +49,14 @@ Both are defined in this repo's `.claude/agents/`.
   vendor rollup, CSV/PDF export via `ComplianceStatusDeriver.Effective`). A read site
   that decides Compliant/ExpiringSoon from `.ComplianceStatus` WITHOUT the EffectiveDate
   demotion IS a real finding (a #294-class count-vs-badge split). Expired still wins
-  outright; a hard fail stays NonCompliant (never masked to Pending).
+  outright; a hard fail stays NonCompliant (never masked to Pending). The vendor rollup
+  (`VendorEndpoints.ComputeCoverage`) consults the best CURRENTLY-IN-FORCE cert per
+  required type (ANY doc reading Compliant/ExpiringSoon via the overlay), NOT strictly
+  the newest upload (#362 review / ADR 0041): a vendor still covered by an in-force
+  earlier cert who pre-uploads a future-effective renewal (reads Pending) stays Covered,
+  while an expired-only / non-compliant-only / future-effective-only type still reads
+  ActionNeeded. Do NOT "simplify" it back to latest-upload-only — that reintroduces the
+  false-uncovered regression the review caught.
 - A normal document delete RETAINS its blob (ADR 0013); the sample-demo clear DELETES
   its blob (ADR 0028). Both directions are deliberate.
 - Vendor contact-email validation is ADR 0038; the review-time facts that follow are

@@ -67,6 +67,21 @@ The SQL sites use the provably-equivalent instant test `effectiveDate >= today +
 `EffectiveDate` is a face date stored at UTC midnight, so the comparison stays a plain `timestamptz`-vs-
 `timestamptz` test — no `::date`, no `date_trunc`, no `AT TIME ZONE`, no session-TimeZone dependence.
 
+**The vendor coverage rollup consults the best currently-in-force cert, not strictly the latest upload.**
+`VendorEndpoints.ComputeCoverage` judges each required document type as "covered" when it has **at least one**
+document whose *effective* status reads Compliant or ExpiringSoon — i.e. a cert in force today
+(`EffectiveDate <= today`) and not expired. Because the overlay returns an affirmative status **only** for an
+in-force, non-expired doc, "reads affirmative" already means "in-force coverage," so the rollup does **not**
+judge a type by its newest upload alone. Otherwise a vendor still covered today by an in-force earlier cert who
+**pre-uploads a future-effective renewal** — the textbook insurance-renewal flow, the new policy effective the
+day the old one lapses, uploaded in advance — would see that renewal read Pending and the vendor flip from
+**Covered** to **ActionNeeded**, a false lapse (the mirror of the standalone-verdict false-Compliant this ADR
+fixes; the #362 review found the read overlay had swung the rollup the other way). A type whose only documents
+are expired / non-compliant / not-yet-in-force still has no in-force cert, so a genuine gap still surfaces as
+ActionNeeded — never masked; a future-effective-**only** vendor still reads not-Covered. The "covered through"
+horizon (#399) is the in-force cert's expiry, never the not-yet-in-force renewal's far-future date. (Added in
+the #362 review.)
+
 ## Consequences
 
 ### Positive
