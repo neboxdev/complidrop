@@ -511,19 +511,45 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         NeedsReprocessing: false,
         Usage: new ExtractionUsage(InputTokens: 100, OutputTokens: 50, EstimatedCostUsd: 0.01m));
 
+    /// <summary>
+    /// EVERY member of <see cref="VerdictBearingFields.All"/>, each paired with a VALID/parseable sample
+    /// value for its type. Iterating the production set (not a hand-picked few) means a field ADDED to the
+    /// gate in future is auto-covered by the Theory below; a field REMOVED is caught by
+    /// <see cref="Every_expected_verdict_bearing_field_stays_in_the_gate"/> (which pins a fixed baseline,
+    /// independent of the set, so a shrinking set can't silently drop its own coverage).
+    /// </summary>
+    public static IEnumerable<object[]> VerdictBearingFieldSamples() =>
+        VerdictBearingFields.All.Select(name => new object[] { name, SampleValueFor(name) });
+
+    /// <summary>
+    /// A VALID, parseable sample value for a verdict-bearing field, keyed by type: the two date fields
+    /// parse to a DateTime, every <c>*_limit</c> money field to an amount, <c>additional_insured</c> is free
+    /// text. Parseable is the POINT — an unparseable CANONICAL value would route the document via the #383
+    /// unreadable trigger instead of the confidence gate, making the gate test vacuous. A future member of
+    /// <see cref="VerdictBearingFields.All"/> that fits none of these buckets throws loudly here, forcing its
+    /// sample value to be chosen deliberately rather than defaulted to a wrong-typed string.
+    /// </summary>
+    private static string SampleValueFor(string field) => field switch
+    {
+        CanonicalDocumentFields.EffectiveDate or CanonicalDocumentFields.ExpirationDate => "2027-03-15",
+        "additional_insured" => "Riverside Event Hall",
+        _ when field.EndsWith("_limit", StringComparison.OrdinalIgnoreCase) => "2000000",
+        _ => throw new ArgumentOutOfRangeException(nameof(field),
+            $"No sample value mapping for verdict-bearing field '{field}'. Add one when extending VerdictBearingFields.All."),
+    };
+
     [Theory]
-    [InlineData("expiration_date", "2027-03-15")]
-    [InlineData("effective_date", "2026-01-01")]
-    [InlineData("general_liability_limit", "2000000")]
-    [InlineData("additional_insured", "Riverside Event Hall")]
+    [MemberData(nameof(VerdictBearingFieldSamples))]
     public async Task A_low_confidence_verdict_bearing_field_routes_to_manual_review_even_when_the_average_clears_the_gate(
         string field, string value)
     {
         // #401: the field that DECIDES a verdict (a limit, an effective/expiration date, the
         // additional-insured party) came back at 0.3 — the machine barely read it — but four 0.95 incidental
         // fields pull the AVERAGE to ~0.82, well clear of the 0.7 gate. Pre-#401 this landed Completed and
-        // rolled up to "Covered"; averaging hid the one field a mis-read flips the verdict on. The value is
-        // READABLE, so the #383 unreadable trigger can't be what fires here — the new per-field gate is.
+        // rolled up to "Covered"; averaging hid the one field a mis-read flips the verdict on. Data-driven
+        // over EVERY member of VerdictBearingFields.All (not a hand-picked four), so every coverage-limit
+        // entry is exercised too — the sample value is READABLE (asserted below), so the #383 unreadable
+        // trigger can't be what fires here; the new per-field CONFIDENCE gate is.
         var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
         Extraction.Result = ResultWithFields(
             (field, value, 0.3),
@@ -538,9 +564,37 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         var doc = await GetDocAsync(docId);
         doc.ExtractionConfidence.Should().BeGreaterThan(ExtractionWorker.ManualReviewConfidenceThreshold,
             "the field AVERAGE clears the gate — the per-field verdict-bearing trigger is what routes it");
+        // Rules out the OTHER two ManualRequired triggers so the verdict is attributable ONLY to the
+        // per-field confidence gate: the average is proven clear above, ResultWithFields sets
+        // NeedsReprocessing=false, and the sample value is parseable so there's no #383 unreadable value.
+        DocumentFieldReadability.HasUnreadableCanonicalValue(doc).Should().BeFalse(
+            "the sample value is parseable, so ManualRequired is attributable to the CONFIDENCE gate, not the #383 unreadable trigger");
         doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
             "a low-confidence verdict-bearing field the average hid must still reach a human (#401)");
         doc.ProcessingError.Should().BeNull("this is not an extraction FAILURE — the read succeeded, just at low confidence");
+    }
+
+    [Theory]
+    [InlineData("effective_date")]
+    [InlineData("expiration_date")]
+    [InlineData("general_liability_limit")]
+    [InlineData("auto_liability_limit")]
+    [InlineData("professional_liability_limit")]
+    [InlineData("umbrella_limit")]
+    [InlineData("liquor_liability_limit")]
+    [InlineData("workers_comp_limit")]
+    [InlineData("additional_insured")]
+    public void Every_expected_verdict_bearing_field_stays_in_the_gate(string field)
+    {
+        // The removal backstop for the data-driven gate Theory above. That Theory ITERATES
+        // VerdictBearingFields.All, so it auto-covers a field ADDED to the set — but a field REMOVED from
+        // All simply drops its Theory case and would slip by silently. This fixed baseline (nine literals,
+        // NOT read from the set) catches exactly that: drop any of these from All and its row here goes red,
+        // because the #401 per-field gate would stop protecting that verdict-bearing field. Adding a tenth
+        // member keeps every row green (a superset is fine) while the gate Theory picks the new one up —
+        // both goals at once. Uses the production predicate (VerdictBearingFields.Contains), not a copy.
+        VerdictBearingFields.Contains(field).Should().BeTrue(
+            $"'{field}' must stay gated by the #401 per-field confidence check");
     }
 
     [Fact]
