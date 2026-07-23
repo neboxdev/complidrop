@@ -237,6 +237,36 @@ public sealed class FutureEffectiveCoverageGapTests(IntegrationTestFixture fixtu
     }
 
     [Fact]
+    public async Task Vendor_coveredThrough_is_the_latest_expiry_among_a_required_types_in_force_certs()
+    {
+        // #362 review S2: coverage is judged by the best CURRENTLY-IN-FORCE cert per required type, and a
+        // type's "covered through" horizon is the MAX expiry among its in-force certs (MIN across types,
+        // #399). Two in-force COIs — both effective a year ago (→ read Compliant) — with different expiries,
+        // one ~day+50 and one ~day+200, must roll up to coveredThrough == the LATER expiry (day+200): the
+        // vendor stays covered until the LAST of its in-force certs lapses, not the first. Pins the
+        // MAX-within-type selection (VendorEndpoints.ComputeCoverage) that was otherwise unpinned.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorRequiringCoiAsync(auth.OrgId);
+        var today = DateTime.UtcNow.Date;
+
+        // Both in force today (effective long ago, not expired), differing only in expiry — so both land in
+        // `inForce` and the horizon is decided purely by the MAX-vs-MIN choice under test.
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: today.AddDays(50),
+            effective: today.AddDays(-365), vendorId: vendorId);
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: today.AddDays(200),
+            effective: today.AddDays(-365), vendorId: vendorId);
+
+        var vendors = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+        var coverage = vendors.Single(v => v.GetProperty("id").GetGuid() == vendorId).GetProperty("coverage");
+
+        coverage.GetProperty("status").GetString().Should().Be("Covered",
+            "two in-force certs cover the required type");
+        coverage.GetProperty("coveredThrough").GetDateTime().Date.Should().Be(today.AddDays(200),
+            "coveredThrough is the MAX expiry among a required type's in-force certs, not the earliest");
+    }
+
+    [Fact]
     public async Task A_future_effective_doc_expiring_within_the_window_is_excluded_from_ExpiringSoon_everywhere()
     {
         // #362 review S1: a future-effective cert whose expiry falls INSIDE the 30-day ExpiringSoon window
