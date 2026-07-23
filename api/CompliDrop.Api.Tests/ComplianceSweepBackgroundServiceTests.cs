@@ -25,7 +25,7 @@ public sealed class ComplianceSweepBackgroundServiceTests(IntegrationTestFixture
             new FixedTimeProvider(FixedNow),
             NullLogger<ComplianceSweepBackgroundService>.Instance);
 
-    private async Task<Guid> SeedAsync(ComplianceStatus status, DateTime? expiration, bool deleted = false)
+    private async Task<Guid> SeedAsync(ComplianceStatus status, DateTime? expiration, bool deleted = false, DateTime? effective = null)
     {
         var orgId = Guid.NewGuid();
         var docId = Guid.NewGuid();
@@ -43,6 +43,7 @@ public sealed class ComplianceSweepBackgroundServiceTests(IntegrationTestFixture
             DocumentType = "coi",
             ComplianceStatus = status,
             ExpirationDate = expiration,
+            EffectiveDate = effective,
             DeletedAt = deleted ? now : null,
             CreatedAt = now,
             UpdatedAt = now
@@ -176,6 +177,22 @@ public sealed class ComplianceSweepBackgroundServiceTests(IntegrationTestFixture
 
         (await StatusAsync(id)).Should().Be(ComplianceStatus.Compliant,
             "day 31 is outside the 30-day window — the exclusive bound is today+31, not today+32");
+    }
+
+    [Fact]
+    public async Task Sweep_does_not_persist_the_future_effective_demotion_leaving_the_real_verdict_intact()
+    {
+        // #362 / ADR 0041: the future-effective → Pending demotion is a READ-only overlay, deliberately
+        // NOT swept. A far-future-expiry Compliant doc that isn't in force yet (effective next month) must
+        // keep its STORED Compliant verdict through the sweep — storing Pending would erase the rule
+        // verdict the read overlay needs to reveal the day the doc becomes effective (the self-heal). The
+        // read surfaces demote it to Pending while it's future-effective; the stored column stays Compliant.
+        var id = await SeedAsync(ComplianceStatus.Compliant, Anchor.AddDays(300), effective: Anchor.AddDays(30));
+
+        await BuildSweep().SweepAsync(CancellationToken.None);
+
+        (await StatusAsync(id)).Should().Be(ComplianceStatus.Compliant,
+            "the sweep must not persist the future-effective demotion — the stored verdict self-heals on read");
     }
 
     [Fact]

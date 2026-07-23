@@ -1,0 +1,197 @@
+using System.Net.Http.Json;
+using System.Text.Json;
+using CompliDrop.Api.Entities;
+using CompliDrop.Api.Tests.TestHelpers;
+using FluentAssertions;
+
+namespace CompliDrop.Api.Tests;
+
+/// <summary>
+/// End-to-end HTTP tests for the future-effective coverage-gap fix (#362 / ADR 0041): a certificate that
+/// is not yet in force (EffectiveDate a date strictly after today) must NOT read Compliant/ExpiringSoon
+/// today — it reads Pending on every surface (detail badge, list filter + badge, dashboard counts, vendor
+/// rollup) so the product never asserts present-tense coverage that isn't in force. Expired still wins and
+/// a hard fail is never masked. Docs are seeded with a stored verdict + a future EffectiveDate so the
+/// read-overlay demotion is what's under test.
+/// </summary>
+public sealed class FutureEffectiveCoverageGapTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
+{
+    private async Task<Guid> SeedDocAsync(
+        Guid orgId, ComplianceStatus stored, DateTime? expiration, DateTime? effective,
+        Guid? vendorId = null, string docType = "coi")
+    {
+        var now = DateTime.UtcNow;
+        var docId = Guid.NewGuid();
+        await using var db = CreateSystemDb();
+        db.Documents.Add(new Document
+        {
+            Id = docId,
+            OrganizationId = orgId,
+            VendorId = vendorId,
+            OriginalFileName = $"doc-{docId:N}.pdf",
+            BlobStorageUrl = "blob://d",
+            FileSizeBytes = 1,
+            ContentType = "application/pdf",
+            DocumentType = docType,
+            ComplianceStatus = stored,
+            ExpirationDate = expiration,
+            EffectiveDate = effective,
+            ExtractionStatus = ExtractionStatus.Completed,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        return docId;
+    }
+
+    // Seeds a vendor on a checklist that requires a COI, so ListVendors rolls up coverage.
+    private async Task<Guid> SeedVendorRequiringCoiAsync(Guid orgId)
+    {
+        var now = DateTime.UtcNow;
+        var vendorId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        await using var db = CreateSystemDb();
+        db.ComplianceTemplates.Add(new ComplianceTemplate { Id = templateId, OrganizationId = orgId, Name = "T", CreatedAt = now });
+        db.ComplianceRules.Add(new ComplianceRule
+        {
+            Id = Guid.NewGuid(), ComplianceTemplateId = templateId, DocumentType = "coi",
+            FieldName = "general_liability_limit", Operator = "min_value", ExpectedValue = "1000000", SortOrder = 0
+        });
+        db.Vendors.Add(new Vendor
+        {
+            Id = vendorId, OrganizationId = orgId, Name = "V", ComplianceTemplateId = templateId,
+            CreatedAt = now, UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        return vendorId;
+    }
+
+    private static async Task<string> DetailStatusAsync(HttpClient client, Guid id) =>
+        (await client.GetFromJsonAsync<JsonElement>($"/api/documents/{id}"))
+            .GetProperty("data").GetProperty("complianceStatus").GetString()!;
+
+    private static async Task<Guid[]> ListIdsAsync(HttpClient client, string status) =>
+        (await client.GetFromJsonAsync<JsonElement>($"/api/documents/?status={status}"))
+            .GetProperty("data").GetProperty("items").EnumerateArray()
+            .Select(i => i.GetProperty("id").GetGuid()).ToArray();
+
+    private static async Task<JsonElement> StatsAsync(HttpClient client) =>
+        (await client.GetFromJsonAsync<JsonElement>("/api/dashboard/stats")).GetProperty("data");
+
+    private static DateTime FarFuture => DateTime.UtcNow.Date.AddDays(300);
+    private static DateTime NextMonth => DateTime.UtcNow.Date.AddDays(30);
+
+    [Fact]
+    public async Task A_standalone_future_effective_compliant_doc_reads_Pending_today()
+    {
+        // AC (a): the narrow standalone case the owner comment flags — a vendor's FIRST-ever policy starts
+        // next month. It passed every rule (stored Compliant) but is not in force today, so it reads Pending
+        // on the detail badge, appears under ?status=Pending (not ?status=Compliant), and the dashboard
+        // counts it in NEITHER compliant NOR expiringSoon.
+        var auth = await RegisterAndLoginAsync();
+        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: FarFuture, effective: NextMonth);
+
+        (await DetailStatusAsync(auth.Client, id)).Should().Be("Pending",
+            "a future-effective compliant doc is not yet in force — it reads Pending, not Compliant");
+        (await ListIdsAsync(auth.Client, "Pending")).Should().Contain(id);
+        (await ListIdsAsync(auth.Client, "Compliant")).Should().NotContain(id);
+
+        var stats = await StatsAsync(auth.Client);
+        stats.GetProperty("compliant").GetInt32().Should().Be(0, "no coverage is in force today");
+        stats.GetProperty("expiringSoon").GetInt32().Should().Be(0);
+    }
+
+    [Fact]
+    public async Task The_verdict_self_heals_the_day_the_policy_takes_effect()
+    {
+        // AC (f), end to end across the effective boundary: two docs with the SAME stored Compliant verdict,
+        // one effective yesterday (in force → reads Compliant) and one effective tomorrow (not in force →
+        // reads Pending). The demotion is a pure read overlay driven by today, so the doc self-heals the
+        // instant the calendar reaches its EffectiveDate — no re-evaluation needed.
+        var auth = await RegisterAndLoginAsync();
+        var inForce = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: FarFuture,
+            effective: DateTime.UtcNow.Date.AddDays(-1));
+        var notYet = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: FarFuture,
+            effective: DateTime.UtcNow.Date.AddDays(1));
+
+        (await DetailStatusAsync(auth.Client, inForce)).Should().Be("Compliant", "effective yesterday → in force");
+        (await DetailStatusAsync(auth.Client, notYet)).Should().Be("Pending", "effective tomorrow → not yet in force");
+    }
+
+    [Fact]
+    public async Task A_future_effective_doc_that_fails_its_rules_stays_NonCompliant()
+    {
+        // AC (d): a not-yet-active deficient cert is accurately not-compliant — never masked to Pending.
+        var auth = await RegisterAndLoginAsync();
+        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.NonCompliant, expiration: FarFuture, effective: NextMonth);
+
+        (await DetailStatusAsync(auth.Client, id)).Should().Be("NonCompliant");
+        (await ListIdsAsync(auth.Client, "NonCompliant")).Should().Contain(id);
+        (await ListIdsAsync(auth.Client, "Pending")).Should().NotContain(id);
+        (await StatsAsync(auth.Client)).GetProperty("nonCompliant").GetInt32().Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Expired_wins_for_a_malformed_future_effective_but_already_expired_doc()
+    {
+        // AC (e): a malformed cert (EffectiveDate after today AND ExpirationDate before today). Expired is
+        // top precedence — it must read Expired, never Pending.
+        var auth = await RegisterAndLoginAsync();
+        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant,
+            expiration: DateTime.UtcNow.Date.AddDays(-1), effective: NextMonth);
+
+        (await DetailStatusAsync(auth.Client, id)).Should().Be("Expired");
+        (await ListIdsAsync(auth.Client, "Expired")).Should().Contain(id);
+        (await ListIdsAsync(auth.Client, "Pending")).Should().NotContain(id);
+    }
+
+    [Fact]
+    public async Task Dashboard_compliant_count_equals_the_deep_linked_list_with_a_future_effective_doc()
+    {
+        // AC (g): the headline consistency contract (dashboard count == deep-linked ?status= list),
+        // extended to the future-effective case. One in-force compliant + one future-effective compliant:
+        // the dashboard shows compliant == 1, the ?status=Compliant list returns exactly that one doc, and
+        // the future-effective doc lands under ?status=Pending — count and list never disagree.
+        var auth = await RegisterAndLoginAsync();
+        var inForce = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: FarFuture, effective: null);
+        var future = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: FarFuture, effective: NextMonth);
+
+        var stats = await StatsAsync(auth.Client);
+        var compliantList = await ListIdsAsync(auth.Client, "Compliant");
+
+        stats.GetProperty("compliant").GetInt32().Should().Be(compliantList.Length,
+            "the dashboard compliant count must equal the deep-linked Compliant list length");
+        compliantList.Should().BeEquivalentTo(new[] { inForce });
+        (await ListIdsAsync(auth.Client, "Pending")).Should().Contain(future).And.NotContain(inForce);
+    }
+
+    [Fact]
+    public async Task The_compliance_rate_excludes_a_future_effective_doc_from_the_denominator()
+    {
+        // A future-effective doc reads Pending, so — like any Pending doc (#318) — it is excluded from the
+        // compliance-rate denominator, not counted as a graded non-compliant one. One in-force Compliant +
+        // one future-effective Compliant → 100% (1 of 1 graded), never a misleading 50%.
+        var auth = await RegisterAndLoginAsync();
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: FarFuture, effective: null);
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: FarFuture, effective: NextMonth);
+
+        (await StatsAsync(auth.Client)).GetProperty("complianceRate").GetDouble().Should().Be(100.0,
+            "the not-yet-in-force doc is treated as Pending, excluded from the rate denominator");
+    }
+
+    [Fact]
+    public async Task A_vendor_whose_only_cert_is_future_effective_is_not_Covered()
+    {
+        // Vendor coverage rollup: a required COI whose latest doc is not yet in force provides no coverage
+        // today, so the vendor reads ActionNeeded, not Covered.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorRequiringCoiAsync(auth.OrgId);
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, expiration: FarFuture, effective: NextMonth, vendorId: vendorId);
+
+        var vendors = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+        var vendor = vendors.Single(v => v.GetProperty("id").GetGuid() == vendorId);
+        vendor.GetProperty("coverage").GetProperty("status").GetString().Should().Be("ActionNeeded",
+            "a future-effective cert is not coverage in force — the vendor needs action");
+    }
+}
