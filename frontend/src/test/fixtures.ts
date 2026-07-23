@@ -59,11 +59,12 @@ export const authedMe: Readonly<Me> = {
   // Onboarded by default so the first-run welcome modal (#191) stays closed in
   // the bulk of tests; use makeMe({ hasCompletedOnboarding: false }) to exercise it.
   hasCompletedOnboarding: true,
-  // Server feature flags (#416, ADR 0036 Amendment 3): corrected checklists default OFF — the
-  // production posture pending the G1 legal sign-off — so the bulk of tests exercise today's
-  // visible product; use makeMe({ features: { correctedChecklists: true } }) to exercise the
-  // gated liquor add-menu option / additional-insured nudge.
-  features: { correctedChecklists: false },
+  // Server feature flags: both default OFF — the production posture pending the G1 sign-offs — so the
+  // bulk of tests exercise today's visible product. `correctedChecklists` (#416, ADR 0036 Amendment 3)
+  // gates the liquor add-menu option / additional-insured nudge; `correctedAdditionalInsuredWording`
+  // (#396 / CLM-1, ADR 0042) gates the corrected additional-insured claim copy. Flip either via
+  // makeMe({ features: { correctedChecklists: true, correctedAdditionalInsuredWording: false } }).
+  features: { correctedChecklists: false, correctedAdditionalInsuredWording: false },
 };
 
 export function makeMe(overrides: Partial<Me> = {}): Me {

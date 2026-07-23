@@ -14,6 +14,7 @@ import {
   parseMoneyInput,
   isSuspiciouslyLowMoney,
   requirementSentence,
+  requirementErrorMessage,
   findRequirementType,
   type RequirementType,
 } from "@/lib/requirements";
@@ -111,6 +112,10 @@ export default function RulesPage() {
   // receive a me-payload from an old backend instance that predates the additive `features` field.
   // The gate must fall back to hidden (the safe default), never crash the page (pass-3 review).
   const correctedChecklistsEnabled = me?.features?.correctedChecklists === true;
+  // #396 (CLM-1): the corrected additional-insured claim wording. Same strict `=== true` / optional-
+  // chain-through-features posture — a loading/undefined/old-backend me defaults to the LEGACY copy
+  // (the safe, prod-identical flag-off state). Distinct flag from correctedChecklists (ADR 0042).
+  const correctedAdditionalInsuredWording = me?.features?.correctedAdditionalInsuredWording === true;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // On phones the editor renders ~2 screens below the rail, so tapping a checklist
   // looked like nothing happened (#319 FP-080). Scroll the editor into view on
@@ -358,6 +363,7 @@ export default function RulesPage() {
               detail={detail.data}
               vendorCount={all.find((t) => t.id === detail.data!.id)?.vendorCount ?? 0}
               correctedChecklistsEnabled={correctedChecklistsEnabled}
+              correctedAdditionalInsuredWording={correctedAdditionalInsuredWording}
               onAddRequirement={(rule) =>
                 upsertRule.mutate({
                   templateId: detail.data!.id,
@@ -513,6 +519,7 @@ function ChecklistEditor({
   detail,
   vendorCount,
   correctedChecklistsEnabled,
+  correctedAdditionalInsuredWording,
   onAddRequirement,
   onEditRequirement,
   onRemoveRequirement,
@@ -524,6 +531,9 @@ function ChecklistEditor({
   vendorCount: number;
   /** Server flag (#416): gates the liquor add-menu option + the additional-insured nudge. */
   correctedChecklistsEnabled: boolean;
+  /** Server flag (#396 / CLM-1): swaps the additional-insured sentence + stored errorMessage to the
+   *  corrected "certificate indicates…" wording. Independent of correctedChecklistsEnabled. */
+  correctedAdditionalInsuredWording: boolean;
   onAddRequirement: (rule: RulePayload) => void;
   onEditRequirement: (ruleId: string, rule: RulePayload, sortOrder: number) => void;
   onRemoveRequirement: (ruleId: string) => void;
@@ -598,6 +608,7 @@ function ChecklistEditor({
                   key={r.id}
                   rule={r}
                   readOnly={readOnly}
+                  correctedAdditionalInsuredWording={correctedAdditionalInsuredWording}
                   onEdit={(payload) => onEditRequirement(r.id, payload, r.sortOrder)}
                   onRemove={() => onRemoveRequirement(r.id)}
                 />
@@ -610,6 +621,7 @@ function ChecklistEditor({
               onAdd={onAddRequirement}
               existingRules={rules}
               correctedChecklistsEnabled={correctedChecklistsEnabled}
+              correctedAdditionalInsuredWording={correctedAdditionalInsuredWording}
             />
           )}
         </CardContent>
@@ -622,10 +634,20 @@ function ChecklistEditor({
         governsCoi &&
         ADDITIONAL_INSURED != null &&
         !hasAdditionalInsured && (
-          <AdditionalInsuredNudge type={ADDITIONAL_INSURED} onAdd={onAddRequirement} />
+          <AdditionalInsuredNudge
+            type={ADDITIONAL_INSURED}
+            onAdd={onAddRequirement}
+            correctedAdditionalInsuredWording={correctedAdditionalInsuredWording}
+          />
         )}
 
-      {rules.length > 0 && <ComplianceSummary name={detail.name} rules={rules} />}
+      {rules.length > 0 && (
+        <ComplianceSummary
+          name={detail.name}
+          rules={rules}
+          correctedAdditionalInsuredWording={correctedAdditionalInsuredWording}
+        />
+      )}
 
       {/* Editor dead-ended after authoring — the tip promises assignment but offered no
           path to it (#319 FP-086). Surface the next step for an editable checklist. */}
@@ -659,9 +681,11 @@ function ChecklistEditor({
 function AdditionalInsuredNudge({
   type,
   onAdd,
+  correctedAdditionalInsuredWording,
 }: {
   type: RequirementType;
   onAdd: (rule: RulePayload) => void;
+  correctedAdditionalInsuredWording: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -672,6 +696,7 @@ function AdditionalInsuredNudge({
           type={type}
           initialValue={null}
           submitLabel="Add requirement"
+          correctedAdditionalInsuredWording={correctedAdditionalInsuredWording}
           onSubmit={(payload) => {
             onAdd(payload);
             setExpanded(false);
@@ -712,7 +737,15 @@ function joinClauses(clauses: string[]): string {
     : `${clauses.slice(0, -1).join("; ")}; and ${clauses[clauses.length - 1]}`;
 }
 
-function ComplianceSummary({ name, rules }: { name: string; rules: TemplateRule[] }) {
+function ComplianceSummary({
+  name,
+  rules,
+  correctedAdditionalInsuredWording,
+}: {
+  name: string;
+  rules: TemplateRule[];
+  correctedAdditionalInsuredWording: boolean;
+}) {
   // Group by document type (#319 FP-083): the engine scopes each rule to its type, so a
   // certificate of insurance is NEVER checked for a license requirement. The old "every
   // document proves: [all rules]" taught a false model (a single COI can't satisfy a
@@ -724,7 +757,7 @@ function ComplianceSummary({ name, rules }: { name: string; rules: TemplateRule[
       byType.set(r.documentType, []);
       order.push(r.documentType);
     }
-    byType.get(r.documentType)!.push(requirementSentence(r));
+    byType.get(r.documentType)!.push(requirementSentence(r, { correctedAdditionalInsuredWording }));
   }
   return (
     <div className="space-y-1.5 rounded-lg border border-emerald-100 bg-emerald-50/60 px-4 py-3 text-sm text-emerald-900">
@@ -743,16 +776,21 @@ function ComplianceSummary({ name, rules }: { name: string; rules: TemplateRule[
 function RequirementRow({
   rule,
   readOnly,
+  correctedAdditionalInsuredWording,
   onEdit,
   onRemove,
 }: {
   rule: TemplateRule;
   readOnly: boolean;
+  /** Server flag (#396 / CLM-1): renders the corrected additional-insured sentence when on. */
+  correctedAdditionalInsuredWording: boolean;
   onEdit: (payload: RulePayload) => void;
   onRemove: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const type = findRequirementType(rule);
+  // Compute once so the visible sentence and both aria-labels stay in lockstep (incl. the #396 copy).
+  const sentence = requirementSentence(rule, { correctedAdditionalInsuredWording });
 
   if (editing && type) {
     return (
@@ -761,6 +799,7 @@ function RequirementRow({
           type={type}
           initialValue={rule.expectedValue}
           submitLabel="Save"
+          correctedAdditionalInsuredWording={correctedAdditionalInsuredWording}
           onSubmit={(payload) => {
             onEdit(payload);
             setEditing(false);
@@ -774,14 +813,14 @@ function RequirementRow({
   return (
     <li className="flex items-start gap-2.5 rounded-md border border-slate-100 px-3 py-2.5">
       <Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" aria-hidden="true" />
-      <span className="min-w-0 flex-1 text-sm text-slate-800">{requirementSentence(rule)}</span>
+      <span className="min-w-0 flex-1 text-sm text-slate-800">{sentence}</span>
       {!readOnly && (
         <div className="flex shrink-0 items-center gap-0.5">
           {type && type.valueKind !== "none" && (
             <Button
               size="sm"
               variant="ghost"
-              aria-label={`Edit requirement: ${requirementSentence(rule)}`}
+              aria-label={`Edit requirement: ${sentence}`}
               onClick={() => setEditing(true)}
             >
               <Pencil className="h-4 w-4 text-slate-500 hover:text-sky-600" />
@@ -790,7 +829,7 @@ function RequirementRow({
           <Button
             size="sm"
             variant="ghost"
-            aria-label={`Remove requirement: ${requirementSentence(rule)}`}
+            aria-label={`Remove requirement: ${sentence}`}
             onClick={onRemove}
           >
             <Trash2 className="h-4 w-4 text-slate-500 hover:text-rose-600" />
@@ -805,7 +844,11 @@ function RequirementRow({
 // Add a requirement (the menu + value form)
 // --------------------------------------------------------------------------
 
-function buildPayload(type: RequirementType, rawValue: string): RulePayload {
+function buildPayload(
+  type: RequirementType,
+  rawValue: string,
+  correctedAdditionalInsuredWording: boolean,
+): RulePayload {
   let expectedValue: string | null = null;
   if (type.valueKind === "money") {
     const n = parseMoneyInput(rawValue);
@@ -818,7 +861,9 @@ function buildPayload(type: RequirementType, rawValue: string): RulePayload {
     fieldName: type.fieldName,
     operator: type.operator,
     expectedValue,
-    errorMessage: type.errorMessage(expectedValue),
+    // #396 (CLM-1): the additional-insured errorMessage is staged corrected copy behind the flag;
+    // every other requirement's message is flag-independent (requirementErrorMessage handles both).
+    errorMessage: requirementErrorMessage(type, expectedValue, { correctedAdditionalInsuredWording }),
   };
 }
 
@@ -826,11 +871,15 @@ function AddRequirement({
   onAdd,
   existingRules,
   correctedChecklistsEnabled,
+  correctedAdditionalInsuredWording,
 }: {
   onAdd: (rule: RulePayload) => void;
   existingRules: TemplateRule[];
   /** Server flag (#416): while false, CORRECTIONS_GATED_MENU_KEYS entries are hidden from the menu. */
   correctedChecklistsEnabled: boolean;
+  /** Server flag (#396 / CLM-1): forwarded to the value form so a new/edited additional-insured
+   *  rule stores the corrected errorMessage when on. */
+  correctedAdditionalInsuredWording: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [picked, setPicked] = useState<RequirementType | null>(null);
@@ -864,6 +913,7 @@ function AddRequirement({
           type={picked}
           initialValue={null}
           submitLabel="Add"
+          correctedAdditionalInsuredWording={correctedAdditionalInsuredWording}
           onSubmit={(payload) => {
             onAdd(payload);
             setPicked(null);
@@ -920,12 +970,15 @@ function RequirementValueForm({
   type,
   initialValue,
   submitLabel,
+  correctedAdditionalInsuredWording,
   onSubmit,
   onCancel,
 }: {
   type: RequirementType;
   initialValue: string | null;
   submitLabel: string;
+  /** Server flag (#396 / CLM-1): folded into the built payload's errorMessage for additional insured. */
+  correctedAdditionalInsuredWording: boolean;
   onSubmit: (payload: RulePayload) => void;
   onCancel: () => void;
 }) {
@@ -952,7 +1005,7 @@ function RequirementValueForm({
 
   const submit = () => {
     if (!ready) return;
-    onSubmit(buildPayload(type, value));
+    onSubmit(buildPayload(type, value, correctedAdditionalInsuredWording));
   };
 
   return (

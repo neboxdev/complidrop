@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { StaleDataBanner } from "@/components/StaleDataBanner";
 import { DocumentTypeSelect } from "@/components/DocumentTypeSelect";
 import { useUpdateDocument, useDeleteDocument } from "@/hooks/useDocuments";
+import { useMe } from "@/hooks/useAuth";
 import { VendorPicker, type VendorOption } from "@/components/VendorPicker";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ClearSampleButton } from "@/components/onboarding/SampleData";
@@ -237,7 +238,18 @@ function NonComplianceExplainer({ doc }: { doc: DocDetail }) {
 // verdict with no "what we checked" breakdown — Pat saw "Compliant" but never the rules
 // that produced it. Renders only when EVERY check passed (the failing case is owned by
 // NonComplianceExplainer), listing each met requirement as a plain sentence (#192 rendering).
-function WhatWeCheckedCard({ doc }: { doc: DocDetail }) {
+//
+// #396 (CLM-1): the additional-insured line here is the "separate assertion" the ticket names —
+// a passing additional-insured check otherwise reads the categorical "Names 'X' as additional
+// insured". correctedAdditionalInsuredWording (from the me feature flag) swaps it to the honest
+// "certificate indicates…" wording; off/absent keeps today's copy.
+function WhatWeCheckedCard({
+  doc,
+  correctedAdditionalInsuredWording,
+}: {
+  doc: DocDetail;
+  correctedAdditionalInsuredWording: boolean;
+}) {
   const checks = doc.complianceChecks ?? [];
   if (checks.length === 0 || checks.some((c) => !c.isPassed)) return null;
   return (
@@ -252,12 +264,15 @@ function WhatWeCheckedCard({ doc }: { doc: DocDetail }) {
             <li key={c.id} className="flex gap-2">
               <Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" aria-hidden />
               <span>
-                {requirementSentence({
-                  documentType: doc.documentType,
-                  fieldName: c.ruleFieldName,
-                  operator: c.ruleOperator ?? "required",
-                  expectedValue: c.ruleExpectedValue,
-                })}
+                {requirementSentence(
+                  {
+                    documentType: doc.documentType,
+                    fieldName: c.ruleFieldName,
+                    operator: c.ruleOperator ?? "required",
+                    expectedValue: c.ruleExpectedValue,
+                  },
+                  { correctedAdditionalInsuredWording },
+                )}
               </span>
             </li>
           ))}
@@ -429,6 +444,10 @@ export default function DocumentDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const qc = useQueryClient();
+  // #396 (CLM-1): gates the additional-insured "What we checked" sentence. Optional-chain through
+  // features so a loading/undefined/old-backend me defaults to the legacy copy (the safe flag-off).
+  const { data: me } = useMe();
+  const correctedAdditionalInsuredWording = me?.features?.correctedAdditionalInsuredWording === true;
   const [edits, setEdits] = useState<Record<string, string>>({});
   const updateDoc = useUpdateDocument();
   const del = useDeleteDocument();
@@ -897,7 +916,7 @@ export default function DocumentDetailPage() {
 
       <NonComplianceExplainer doc={doc} />
 
-      <WhatWeCheckedCard doc={doc} />
+      <WhatWeCheckedCard doc={doc} correctedAdditionalInsuredWording={correctedAdditionalInsuredWording} />
 
       {doc.extractionStatus === "ManualRequired" && (
         <ManualReviewCard unreadableFields={doc.unreadableFields ?? []} />

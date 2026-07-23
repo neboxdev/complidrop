@@ -31,7 +31,9 @@ import {
 // surfaces — the liquor "+ Add a requirement" menu option and the additional-insured nudge. The
 // default `authedMe` fixture carries the flag OFF (the production posture pending the G1 legal
 // sign-off), so tests exercising the gated surfaces arrange this explicitly.
-const correctedChecklistsMe = makeMe({ features: { correctedChecklists: true } });
+const correctedChecklistsMe = makeMe({
+  features: { correctedChecklists: true, correctedAdditionalInsuredWording: false },
+});
 
 const EDITABLE = {
   id: "t_user_01",
