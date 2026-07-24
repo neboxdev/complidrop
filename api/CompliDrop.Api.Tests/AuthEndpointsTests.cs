@@ -253,6 +253,23 @@ public sealed class AuthEndpointsTests(IntegrationTestFixture fixture) : Integra
     }
 
     [Fact]
+    public async Task Me_reports_the_corrected_additional_insured_wording_feature_flag_off_by_default()
+    {
+        // #396 (CLM-1, ADR 0043): the additive feature the SPA reads to pick the additional-insured
+        // claim copy. The shared test host does NOT set ComplianceClaims:CorrectedAdditionalInsuredWording,
+        // so it surfaces its prod DEFAULT — OFF (legacy copy) — here. The flag-ON value is pinned by
+        // ComplianceClaimsFlagTests against an isolated host, mirroring TemplateCorrectionsFlagTests.
+        var auth = await RegisterAndLoginAsync();
+
+        var resp = await auth.Client.GetAsync("/api/auth/me");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("data").GetProperty("features").GetProperty("correctedAdditionalInsuredWording").GetBoolean()
+            .Should().BeFalse("ComplianceClaims:CorrectedAdditionalInsuredWording defaults OFF and the shared host doesn't set it");
+    }
+
+    [Fact]
     public async Task Logout_clears_cookies_so_me_is_then_unauthorized()
     {
         var auth = await RegisterAndLoginAsync();

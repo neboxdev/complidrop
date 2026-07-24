@@ -93,7 +93,7 @@ const ME: Me = {
   timeZone: "UTC",
   emailVerified: true,
   hasCompletedOnboarding: true,
-  features: { correctedChecklists: false },
+  features: { correctedChecklists: false, correctedAdditionalInsuredWording: false },
 };
 
 describe("hasSessionHint() — gate primitive (#69)", () => {

@@ -8,6 +8,7 @@ import {
   parseMoneyInput,
   isSuspiciouslyLowMoney,
   requirementSentence,
+  requirementErrorMessage,
   findRequirementType,
   REQUIREMENT_TYPES,
   REQUIREMENT_GROUPS,
@@ -166,6 +167,76 @@ describe("requirementSentence (#192)", () => {
     });
     expect(s).not.toMatch(/in_range/);
     expect(s).toMatch(/custom rule/i);
+  });
+});
+
+describe("additional-insured claim copy — CLM-1 flag (#396)", () => {
+  const aiRule = {
+    documentType: "coi",
+    fieldName: "additional_insured",
+    operator: "contains",
+    expectedValue: "Riverside Event Hall",
+  };
+  const aiType = findRequirementType(aiRule)!;
+
+  // The two authoritative copy strings (TRR §3). Kept as literals so a drift in either the legacy
+  // (prod-default) or the researched-corrected wording goes red.
+  const LEGACY_SENTENCE = "Names “Riverside Event Hall” as additional insured";
+  const CORRECTED_SENTENCE = "Certificate indicates “Riverside Event Hall” as additional insured";
+  const LEGACY_ERROR = "“Riverside Event Hall” was not found as an additional insured.";
+  const CORRECTED_ERROR = "The certificate does not indicate “Riverside Event Hall” as an additional insured.";
+
+  it("requirementSentence: flag off / absent / undefined = today's EXACT copy (prod-identical)", () => {
+    expect(requirementSentence(aiRule)).toBe(LEGACY_SENTENCE);
+    expect(requirementSentence(aiRule, {})).toBe(LEGACY_SENTENCE);
+    expect(requirementSentence(aiRule, { correctedAdditionalInsuredWording: false })).toBe(LEGACY_SENTENCE);
+    // empty name → "your company", still the legacy verb.
+    expect(requirementSentence({ ...aiRule, expectedValue: null })).toBe(
+      "Names “your company” as additional insured",
+    );
+  });
+
+  it("requirementSentence: flag on = the researched 'certificate indicates…' copy", () => {
+    expect(requirementSentence(aiRule, { correctedAdditionalInsuredWording: true })).toBe(CORRECTED_SENTENCE);
+    expect(
+      requirementSentence({ ...aiRule, expectedValue: null }, { correctedAdditionalInsuredWording: true }),
+    ).toBe("Certificate indicates “your company” as additional insured");
+  });
+
+  it("the catalog sentence/errorMessage stay byte-identical to pre-#396 (the flag-off default source)", () => {
+    expect(aiType.sentence("Riverside Event Hall")).toBe(LEGACY_SENTENCE);
+    expect(aiType.sentence(null)).toBe("Names “your company” as additional insured");
+    expect(aiType.errorMessage("Riverside Event Hall")).toBe(LEGACY_ERROR);
+    expect(aiType.errorMessage(null)).toBe("“Your company” was not found as an additional insured.");
+  });
+
+  it("requirementErrorMessage: flag off = legacy 'not found', flag on = 'does not indicate'", () => {
+    expect(requirementErrorMessage(aiType, "Riverside Event Hall")).toBe(LEGACY_ERROR);
+    expect(requirementErrorMessage(aiType, "Riverside Event Hall", { correctedAdditionalInsuredWording: false })).toBe(
+      LEGACY_ERROR,
+    );
+    expect(requirementErrorMessage(aiType, "Riverside Event Hall", { correctedAdditionalInsuredWording: true })).toBe(
+      CORRECTED_ERROR,
+    );
+    expect(requirementErrorMessage(aiType, null, { correctedAdditionalInsuredWording: true })).toBe(
+      "The certificate does not indicate “Your company” as an additional insured.",
+    );
+  });
+
+  it("the flag is scoped to additional insured — every other requirement is unchanged when it's on", () => {
+    const glRule = {
+      documentType: "coi",
+      fieldName: "general_liability_limit",
+      operator: "min_value",
+      expectedValue: "1000000",
+    };
+    const glType = findRequirementType(glRule)!;
+    expect(requirementSentence(glRule, { correctedAdditionalInsuredWording: true })).toBe(
+      "Carries at least $1,000,000 in general liability insurance",
+    );
+    expect(requirementErrorMessage(glType, "1000000", { correctedAdditionalInsuredWording: true })).toBe(
+      glType.errorMessage("1000000"),
+    );
   });
 });
 

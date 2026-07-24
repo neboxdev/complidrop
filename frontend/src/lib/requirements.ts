@@ -107,6 +107,42 @@ const NOT_EXPIRED_HELPER =
   "This requirement makes sure the date is on file in the first place.";
 
 // ---------------------------------------------------------------------------
+// Additional-insured claim copy (#396 / CLM-1).
+//
+// An ACORD 25 face confers no rights and only INDICATES additional-insured status; the status
+// itself lives in a policy endorsement (CG 20 26-class). The corrected copy therefore says
+// "certificate indicates…", not the categorical "Names…". It is STAGED behind the server flag
+// `features.correctedAdditionalInsuredWording` (ComplianceClaims:CorrectedAdditionalInsuredWording,
+// default OFF) pending the TX-attorney sign-off on CLM-1 (docs/rule-engine/G1-COUNSEL-BRIEF.md §0,
+// TRR §3, ADR 0043). `corrected=false` returns TODAY'S EXACT copy byte-for-byte — the flag-off /
+// flag-unknown default that keeps prod unchanged — and the catalog entry below delegates to it so
+// the legacy strings live in exactly one place.
+// ---------------------------------------------------------------------------
+
+function additionalInsuredName(value: string | null, fallback: string): string {
+  return (value ?? "").trim() || fallback;
+}
+
+/** The additional-insured read-view sentence. `corrected=false` is today's exact copy.
+ *  Module-private: consumed only by the catalog closure and `requirementSentence` below —
+ *  callers reach it through those, never directly (keeps Knip's no-unused-exports gate green). */
+function additionalInsuredSentence(value: string | null, corrected: boolean): string {
+  const name = additionalInsuredName(value, "your company");
+  return corrected
+    ? `Certificate indicates “${name}” as additional insured`
+    : `Names “${name}” as additional insured`;
+}
+
+/** The additional-insured failure message (also the errorMessage stored on the rule).
+ *  `corrected=false` is today's exact copy. Module-private (see `additionalInsuredSentence`). */
+function additionalInsuredError(value: string | null, corrected: boolean): string {
+  const name = additionalInsuredName(value, "Your company");
+  return corrected
+    ? `The certificate does not indicate “${name}” as an additional insured.`
+    : `“${name}” was not found as an additional insured.`;
+}
+
+// ---------------------------------------------------------------------------
 // The catalog. documentType is implied by the group, so the user never sees it.
 // ---------------------------------------------------------------------------
 
@@ -198,8 +234,11 @@ export const REQUIREMENT_TYPES: RequirementType[] = [
     valueLabel: "Name to look for",
     valuePlaceholder: "e.g. Riverside Event Hall",
     helper: "Enter your venue or company name exactly as it should appear on the certificate.",
-    sentence: (v) => `Names “${(v ?? "").trim() || "your company"}” as additional insured`,
-    errorMessage: (v) => `“${(v ?? "").trim() || "Your company"}” was not found as an additional insured.`,
+    // #396 (CLM-1): the catalog copy is the LEGACY (flag-off) wording — byte-identical to pre-#396.
+    // The corrected "certificate indicates…" variant is served by requirementSentence /
+    // requirementErrorMessage when the server flag is on. Single-sourced via the helpers above.
+    sentence: (v) => additionalInsuredSentence(v, false),
+    errorMessage: (v) => additionalInsuredError(v, false),
   },
 
   // ---- Dates ----
@@ -323,18 +362,37 @@ export function findRequirementType(rule: {
 const PHRASED_OPERATORS: readonly string[] = ["equals", "contains", "min_value"];
 
 /**
+ * Options carried by {@link requirementSentence} / {@link requirementErrorMessage}. #396 (CLM-1):
+ * `correctedAdditionalInsuredWording` mirrors the server flag `features.correctedAdditionalInsuredWording`;
+ * when true the additional-insured copy uses the honest "certificate indicates…" wording. Absent /
+ * undefined (the flag-off / flag-unknown default) keeps today's exact copy.
+ */
+export type RequirementCopyOptions = { correctedAdditionalInsuredWording?: boolean };
+
+/**
  * The read-view sentence for a stored rule. A catalog match produces the curated
  * sentence; an unknown/legacy rule falls back to a readable generic sentence built
  * from the display-label maps — never a raw snake_case token or operator.
+ *
+ * `opts.correctedAdditionalInsuredWording` (#396 / CLM-1) swaps ONLY the additional-insured
+ * sentence to its staged corrected wording; every other requirement is flag-independent.
  */
-export function requirementSentence(rule: {
-  documentType: string;
-  fieldName: string | null;
-  operator: string;
-  expectedValue: string | null;
-}): string {
+export function requirementSentence(
+  rule: {
+    documentType: string;
+    fieldName: string | null;
+    operator: string;
+    expectedValue: string | null;
+  },
+  opts?: RequirementCopyOptions,
+): string {
   const type = findRequirementType(rule);
-  if (type) return type.sentence(rule.expectedValue);
+  if (type) {
+    if (type.key === "additional_insured") {
+      return additionalInsuredSentence(rule.expectedValue, opts?.correctedAdditionalInsuredWording === true);
+    }
+    return type.sentence(rule.expectedValue);
+  }
 
   const field = fieldLabel(rule.fieldName) || "This document";
   if (rule.operator === "required") return `${field} must be present`;
@@ -345,4 +403,21 @@ export function requirementSentence(rule: {
   const op = operatorLabel(rule.operator).toLowerCase();
   const value = rule.expectedValue?.trim();
   return value ? `${field} ${op} ${value}` : `${field} ${op}`;
+}
+
+/**
+ * The errorMessage stored on a rule when it is created / edited — the `type.errorMessage(value)` a
+ * caller would otherwise inline. #396 (CLM-1): `opts.correctedAdditionalInsuredWording` swaps ONLY
+ * the additional-insured message to its staged corrected wording; every other requirement's catalog
+ * errorMessage is flag-independent. Absent / undefined keeps today's exact copy.
+ */
+export function requirementErrorMessage(
+  type: RequirementType,
+  value: string | null,
+  opts?: RequirementCopyOptions,
+): string {
+  if (type.key === "additional_insured") {
+    return additionalInsuredError(value, opts?.correctedAdditionalInsuredWording === true);
+  }
+  return type.errorMessage(value);
 }

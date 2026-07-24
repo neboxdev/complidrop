@@ -24,6 +24,7 @@ import {
 } from "@/hooks/useVendors";
 import { useDocuments } from "@/hooks/useDocuments";
 import { useSubscription } from "@/hooks/useSubscription";
+import { useMe } from "@/hooks/useAuth";
 import { useQuery } from "@tanstack/react-query";
 import { api, GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
 import { useId, useState } from "react";
@@ -85,6 +86,12 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
   const emailLink = useEmailPortalLink(vendorId);
   const revoke = useRevokePortalLink(vendorId);
   const del = useDeleteVendor();
+  // #396 (CLM-1): gates the additional-insured sentence in the "We'll check every document for:"
+  // list below. Same strict `=== true` / optional-chain-through-features posture as rules/page.tsx
+  // and documents/[id]/page.tsx — a loading/undefined/old-backend me defaults to the LEGACY copy
+  // (the safe, prod-identical flag-off state). Distinct flag from correctedChecklists (ADR 0043).
+  const { data: me } = useMe();
+  const correctedAdditionalInsuredWording = me?.features?.correctedAdditionalInsuredWording === true;
   // FP-071: the vendor's own documents, surfaced on its home page. Recent few; "View all"
   // deep-links to the filtered documents list.
   const vendorDocs = useDocuments({ vendorId, pageSize: 5 });
@@ -342,7 +349,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                           .map((r) => (
                             <li key={r.id} className="flex gap-1.5">
                               <Check className="mt-0.5 h-3 w-3 shrink-0 text-emerald-600" aria-hidden="true" />
-                              <span>{requirementSentence(r)}</span>
+                              <span>{requirementSentence(r, { correctedAdditionalInsuredWording })}</span>
                             </li>
                           ))}
                       </ul>

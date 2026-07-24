@@ -1,7 +1,9 @@
 using System.Linq.Expressions;
+using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace CompliDrop.Api.Services;
 
@@ -117,9 +119,20 @@ public class ComplianceCheckService(
     // large the vendor base on a shared template (#293). Injectable so a test can force multi-page
     // paging without seeding hundreds of rows; the DI container uses the default (an unresolved int
     // parameter with a default value falls back to that default).
-    int reevaluationPageSize = ComplianceCheckService.DefaultReevaluationPageSize) : IComplianceCheckService
+    int reevaluationPageSize = ComplianceCheckService.DefaultReevaluationPageSize,
+    // #396 (CLM-1): the corrected additional-insured claim WORDING flag. Optional + defaulting null so
+    // the many unit/integration tests that construct this service directly (some passing pageSize
+    // positionally) keep compiling unchanged — DI still injects the registered IOptions in production
+    // (a registered service wins over the null default), while a direct `new(...)` without options
+    // resolves to false = today's copy. It changes ONLY the affirmative-flag (ACORD checkbox
+    // fallback) check NOTE string, never the pass/fail verdict. Behind
+    // ComplianceClaims:CorrectedAdditionalInsuredWording, default OFF (ADR 0043).
+    IOptions<ComplianceClaimsSettings>? complianceClaims = null) : IComplianceCheckService
 {
     public const int DefaultReevaluationPageSize = 200;
+
+    private readonly bool _correctedAdditionalInsuredWording =
+        complianceClaims?.Value.CorrectedAdditionalInsuredWording ?? false;
 
     public Task<ComplianceStatus> EvaluateAsync(Guid documentId, CancellationToken ct) =>
         EvaluateInternalAsync(db, documentId, ct);
@@ -270,7 +283,7 @@ public class ComplianceCheckService(
 
         var outcomes = new List<(Document Doc, EvaluationOutcome Outcome)>(docs.Count);
         foreach (var doc in docs)
-            outcomes.Add((doc, ComputeOutcome(doc, nowUtc)));
+            outcomes.Add((doc, ComputeOutcome(doc, nowUtc, _correctedAdditionalInsuredWording)));
 
         // The id set is drawn from the Documents query above — tenant-filtered on AppDbContext, or
         // cross-org BY DESIGN on SystemDbContext (#400) — so this delete over the ComplianceChecks
@@ -321,7 +334,7 @@ public class ComplianceCheckService(
         // nowUtc comes from TimeProvider (not DateTime.UtcNow) so the expiration / expiring-soon date
         // boundaries in ComputeOutcome are deterministically testable.
         var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
-        var outcome = ComputeOutcome(doc, nowUtc);
+        var outcome = ComputeOutcome(doc, nowUtc, _correctedAdditionalInsuredWording);
 
         if (outcome.ClearExistingChecks)
         {
@@ -365,7 +378,10 @@ public class ComplianceCheckService(
     // batched fan-out (ReevaluateWhereAsync) share one source of truth and cannot drift. No DB I/O:
     // returns the status to store, the check rows to insert, and whether the document's existing
     // check rows should be cleared first.
-    internal static EvaluationOutcome ComputeOutcome(Document doc, DateTime nowUtc)
+    // correctedAdditionalInsuredWording (#396 / CLM-1, default false) is passed straight through to
+    // EvaluateRule; it only ever changes the affirmative-flag check's NOTE string, never a verdict —
+    // so the EvaluationOutcome's Status and pass/fail are identical regardless of its value.
+    internal static EvaluationOutcome ComputeOutcome(Document doc, DateTime nowUtc, bool correctedAdditionalInsuredWording = false)
     {
         var today = nowUtc.Date;
 
@@ -418,7 +434,7 @@ public class ComplianceCheckService(
         var allPassed = true;
         foreach (var rule in applicableRules)
         {
-            var (passed, actualValue, note) = EvaluateRule(doc, rule);
+            var (passed, actualValue, note) = EvaluateRule(doc, rule, correctedAdditionalInsuredWording);
             newChecks.Add(new ComplianceCheck
             {
                 Id = Guid.NewGuid(),
@@ -459,7 +475,23 @@ public class ComplianceCheckService(
     internal const string UnreadableValueNote =
         "We couldn't read this value, so we can't confirm this requirement. Check the document and correct it.";
 
-    internal static (bool passed, string? actualValue, string? note) EvaluateRule(Document doc, ComplianceRule rule)
+    // #396 (CLM-1, ADR 0043): the honest "a certificate only INDICATES additional-insured status; it
+    // does not GRANT coverage — request the endorsement" reminder appended to the affirmative-flag
+    // (ACORD checkbox fallback) check note WHEN the ComplianceClaims:CorrectedAdditionalInsuredWording
+    // flag is ON. Flag OFF keeps the pre-#396 note ("The additional-insured box is checked…")
+    // byte-for-byte. The reminder never changes a verdict — copy only (TRR §3).
+    internal const string AdditionalInsuredEndorsementReminder =
+        "A certificate only indicates this — request the endorsement (e.g. CG 20 26) to confirm coverage.";
+    internal const string AdditionalInsuredIndicatedHitNote =
+        "The certificate indicates additional insured and shows this name in the certificate holder / description of operations. "
+        + AdditionalInsuredEndorsementReminder;
+
+    // correctedAdditionalInsuredWording (#396 / CLM-1, default false) selects ONLY the affirmative-flag
+    // branch's NOTE wording (legacy "box is checked" vs the honest "certificate indicates… request the
+    // endorsement"). It is threaded, never read from config here, so the pure logic stays unit-testable
+    // both ways. It NEVER affects the returned `passed` bool — the verdict is identical for either value.
+    internal static (bool passed, string? actualValue, string? note) EvaluateRule(
+        Document doc, ComplianceRule rule, bool correctedAdditionalInsuredWording = false)
     {
         // FAIL-CLOSED GUARD (#383, ADR 0040). A canonical field whose raw value is non-blank but
         // UNPARSEABLE ("12/31/2026 (per endorsement)", "continuous until cancelled") clears its typed
@@ -533,9 +565,18 @@ public class ComplianceCheckService(
                     var fallbackHit = rule.ExpectedValue is not null
                         && (holder?.Contains(rule.ExpectedValue, StringComparison.OrdinalIgnoreCase) == true
                             || operations?.Contains(rule.ExpectedValue, StringComparison.OrdinalIgnoreCase) == true);
-                    return (fallbackHit, actual, fallbackHit
-                        ? "The additional-insured box is checked; matched the name in the certificate holder / description of operations."
-                        : $"The additional-insured box is checked, but '{rule.ExpectedValue}' was not found in the certificate holder or description of operations.");
+                    // #396 (CLM-1): fallbackHit — the pass/fail — is computed ABOVE and is identical
+                    // regardless of the flag; only the NOTE wording is staged. Flag OFF keeps the
+                    // pre-#396 "box is checked" note byte-for-byte; flag ON states the honest
+                    // "certificate INDICATES… request the endorsement" framing (ADR 0043, TRR §3).
+                    var note = correctedAdditionalInsuredWording
+                        ? (fallbackHit
+                            ? AdditionalInsuredIndicatedHitNote
+                            : $"The certificate indicates additional insured, but '{rule.ExpectedValue}' was not found in the certificate holder or description of operations. {AdditionalInsuredEndorsementReminder}")
+                        : (fallbackHit
+                            ? "The additional-insured box is checked; matched the name in the certificate holder / description of operations."
+                            : $"The additional-insured box is checked, but '{rule.ExpectedValue}' was not found in the certificate holder or description of operations.");
+                    return (fallbackHit, actual, note);
                 }
                 var hasValue = actual is not null && rule.ExpectedValue is not null
                     && actual.Contains(rule.ExpectedValue, StringComparison.OrdinalIgnoreCase);

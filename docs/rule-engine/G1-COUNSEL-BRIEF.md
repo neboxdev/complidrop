@@ -56,7 +56,7 @@ confirmation · ✅ confirmed. **Gate:** launch-blocking unless marked *(refine 
 | **TPL-B6** | Is a Damage-to-Rented-Premises minimum worth demanding, or is it better handled by contract/deposit? | B | Rental template | ⬜ *(refine later)* | TRR §8 B-6 |
 | **TPL-B7** | Sanity-check dropping photographer **E&O** from the default — do any TX venue packets require it? | B | Photographer template | ⬜ *(refine later)* | TRR §8 B-7 |
 | **TPL-B8** | How often does bar-service **liquor liability** appear on the main ACORD 25 vs a separate certificate? (calibrates the liquor rule's fail-closed rate) | B | Liquor rule tuning | ⬜ *(refine later)* | TRR §8 B-8 |
-| **CLM-1** | Additional-insured copy: reword "Names you as additional insured" → "Certificate indicates…"; the certificate cannot prove AI status (endorsement needed). | A | Marketing + UI (#396) | ⬜ | §C, TRR §3/§7 |
+| **CLM-1** | Additional-insured copy: reword "Names you as additional insured" → "Certificate indicates…"; the certificate cannot prove AI status (endorsement needed). **UI/API copy now STAGED** behind `ComplianceClaims:CorrectedAdditionalInsuredWording` (default OFF, copy-only, ADR 0043); marketing-site copy still to do at flip. | A | Marketing + UI (#396) | ⬜ | §C, TRR §3/§7 |
 | **CLM-2** | "Coverage dates that include the event" is currently unbacked (no event-date check exists); soften until the feature is built. | A | Marketing (#399 tier b) | ⬜ | §C, TRR §2.6/§7 |
 | **CLM-3** | Exported audit PDF / vendor package carry no disclaimer while printing bare "Compliant". | A | Export (#402) | ⬜ | §C |
 | **CLM-4** | FAQ "We don't sell or share your data" vs the 7 disclosed subprocessors (document contents to Google). | A | Marketing/privacy (#403) | ⬜ | §C |
@@ -67,10 +67,14 @@ confirmation · ✅ confirmed. **Gate:** launch-blocking unless marked *(refine 
 dollar minimums), CLM-1..CLM-6 (copy/privacy). *Refine-later:* TPL-B4..B8.
 `TRR` = [TEMPLATE-REQUIREMENTS-REVIEW.md](TEMPLATE-REQUIREMENTS-REVIEW.md).
 
-**What sign-off unlocks (the two switches, both merged & inert today):**
+**What sign-off unlocks (the three switches, all merged & inert today):**
 - Rule engine → set `RuleEngine:Enabled=true` (+ `EnabledRuleSets`) after RE-1..RE-5.
 - Template corrections → set `TemplateCorrections__Enabled=true` after TPL-A1..A4 +
   TPL-B1..B3 — full runbook in §B.3.
+- Additional-insured wording (CLM-1) → set
+  `ComplianceClaims__CorrectedAdditionalInsuredWording=true` after CLM-1 clears. Copy-only
+  (UI sentence + failure message + the ACORD-checkbox check note); no verdict change. The
+  marketing-site copy has no flag and is edited at the same time (§C, ADR 0043).
 
 ---
 

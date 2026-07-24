@@ -354,6 +354,90 @@ public class ComplianceRuleEvaluationTests
         note.Should().Be("Rule is misconfigured: no expected value.");
     }
 
+    // ---------------- #396 (CLM-1): additional-insured claim WORDING staged behind a flag ----------------
+
+    [Fact]
+    public void Additional_insured_note_keeps_the_legacy_wording_when_the_flag_is_OFF()
+    {
+        // Flag OFF (the default arg) MUST be byte-identical to pre-#396 — this is the merge-safety
+        // guarantee for the note. Both the hit and the miss notes are pinned so a drift in the
+        // prod-default copy goes red.
+        var hit = ComplianceCheckService.EvaluateRule(
+            CoiWith("Y", certificateHolder: "Riverside Event Hall"),
+            Rule("contains", "additional_insured", "Riverside Event Hall"));
+        hit.passed.Should().BeTrue();
+        hit.note.Should().Be("The additional-insured box is checked; matched the name in the certificate holder / description of operations.");
+
+        var miss = ComplianceCheckService.EvaluateRule(
+            CoiWith("Y", certificateHolder: "Somebody Else LLC"),
+            Rule("contains", "additional_insured", "Riverside Event Hall"));
+        miss.passed.Should().BeFalse();
+        miss.note.Should().Be("The additional-insured box is checked, but 'Riverside Event Hall' was not found in the certificate holder or description of operations.");
+    }
+
+    [Fact]
+    public void Additional_insured_note_reframes_to_indicates_not_grants_when_the_flag_is_ON()
+    {
+        // Flag ON swaps ONLY the NOTE wording to the honest "certificate indicates… request the
+        // endorsement" framing (CLM-1 / ADR 0043 / TRR §3): the categorical "box is checked" copy that
+        // overstated additional-insured coverage is gone, on BOTH the hit and the miss note.
+        var hit = ComplianceCheckService.EvaluateRule(
+            CoiWith("Y", certificateHolder: "Riverside Event Hall"),
+            Rule("contains", "additional_insured", "Riverside Event Hall"),
+            correctedAdditionalInsuredWording: true);
+        hit.passed.Should().BeTrue();
+        hit.note.Should().Be(ComplianceCheckService.AdditionalInsuredIndicatedHitNote);
+        hit.note.Should().Contain("indicates").And.Contain("endorsement");
+        hit.note.Should().NotContain("box is checked");
+
+        var miss = ComplianceCheckService.EvaluateRule(
+            CoiWith("Y", certificateHolder: "Somebody Else LLC"),
+            Rule("contains", "additional_insured", "Riverside Event Hall"),
+            correctedAdditionalInsuredWording: true);
+        miss.passed.Should().BeFalse();
+        miss.note.Should().Contain("indicates").And.Contain("endorsement");
+        miss.note.Should().Contain(ComplianceCheckService.AdditionalInsuredEndorsementReminder);
+        miss.note.Should().NotContain("box is checked");
+    }
+
+    [Theory]
+    [InlineData("Y", "Riverside Event Hall", true)]   // affirmative flag, name in holder -> pass
+    [InlineData("Y", "Somebody Else LLC", false)]     // affirmative flag, name absent  -> fail
+    [InlineData("N", "Riverside Event Hall", false)]  // negative flag -> fail, no fallback (strong path)
+    public void Additional_insured_verdict_is_IDENTICAL_regardless_of_the_wording_flag(
+        string flag, string holder, bool expectedPass)
+    {
+        // THE merge-safety proof for #396: flipping the wording flag must NEVER move the pass/fail bool —
+        // the change is copy-only. Same inputs graded BOTH ways; the verdict is pinned equal to itself
+        // across the flag AND to the independently-stated expectation, while the note is free to differ.
+        var doc = CoiWith(flag, certificateHolder: holder);
+        var rule = Rule("contains", "additional_insured", "Riverside Event Hall");
+
+        var off = ComplianceCheckService.EvaluateRule(doc, rule, correctedAdditionalInsuredWording: false);
+        var on = ComplianceCheckService.EvaluateRule(doc, rule, correctedAdditionalInsuredWording: true);
+
+        off.passed.Should().Be(expectedPass);
+        on.passed.Should().Be(off.passed, "the wording flag is copy-only and must never change a verdict");
+        on.actualValue.Should().Be(off.actualValue, "only the note string may differ between flag states");
+    }
+
+    [Fact]
+    public void Wording_flag_does_not_touch_the_strong_contains_path_note()
+    {
+        // The plain-substring (party-name text) path is deliberately NOT reworded — its hit note is null
+        // either way. Guards against the flag leaking beyond the affirmative-flag (ACORD checkbox) branch.
+        var doc = CoiWith("Riverside Event Hall; Acme Property Mgmt", certificateHolder: "Unrelated Co");
+        var rule = Rule("contains", "additional_insured", "riverside event hall");
+
+        var off = ComplianceCheckService.EvaluateRule(doc, rule, correctedAdditionalInsuredWording: false);
+        var on = ComplianceCheckService.EvaluateRule(doc, rule, correctedAdditionalInsuredWording: true);
+
+        off.passed.Should().BeTrue();
+        on.passed.Should().BeTrue();
+        off.note.Should().BeNull();
+        on.note.Should().BeNull();
+    }
+
     // ---------------- min_value ----------------
 
     [Theory]
