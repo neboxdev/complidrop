@@ -11,8 +11,10 @@ public class CurrentUserService(IHttpContextAccessor accessor) : ICurrentUser
     public string? Plan => Principal?.FindFirstValue("plan");
     public bool IsAuthenticated => Principal?.Identity?.IsAuthenticated ?? false;
 
-    // These three are the ONLY client-controlled values that reach an AuditLog row, and the audit
-    // row is written in the SAME SaveChanges as the business mutation — so an over-length one used
+    // These three are the only client-controlled values that reach a BOUNDED AuditLog column
+    // (Before/AfterJson carry client content too, but into unbounded jsonb; Action/EntityType are
+    // always a literal or a nameof). The audit row is written in the SAME SaveChanges as the
+    // business mutation — so an over-length value here used
     // to fail the whole unit of work with Postgres 22001 -> 500 (#372). A vendor could hand the
     // PUBLIC portal-upload route a 600-char User-Agent and take the upload down with it, and an
     // attacker could suppress their own `user.login_failed` audit row (the lockout increment had

@@ -161,6 +161,20 @@ Both are defined in this repo's `.claude/agents/`.
     compliance badge, and demoting the counts too would create a #294-class count-vs-badge
     split. The vendor rollup is the one surface with no room for the separate badge. Do NOT
     flag the untouched document-level counts as a missed demotion — that inversion is the bug.
+- Client-controlled input reaching a BOUNDED `AuditLog` column is clamped at ONE boundary —
+  `CurrentUserService` (`UserAgent` 500, `IpAddress`/`CorrelationId` 64) — not at each sink,
+  because the audit row commits in the same `SaveChanges` as the business mutation and Npgsql
+  does not truncate (#372). `AuditColumnLengths` is pinned equal to the EF model by
+  `AuditClientInputClampTests`; `ComplianceCheckService.ClampToColumn` is deliberately a
+  one-line delegate to the shared `ColumnClamp` (one surrogate-safe truncation, not one per
+  column) — do not re-inline it. An unusable inbound `X-Trace-Id` (blank, >64, or carrying a
+  control/non-ASCII character) is REPLACED with a fresh id, NOT clamped: a truncated prefix
+  correlates nothing while looking like it does, and it would manufacture collisions in the
+  activity feed's `(CorrelationId, EntityType, EntityId)` collapse. The echoed response header,
+  `HttpContext.Items`, the log scope and the stored column must always agree — a version that
+  clamps one of them independently IS a real finding. The SYSTEMIC length-validation sweep over
+  the upload / register / waitlist / idempotency-key paths is
+  [#389](https://github.com/neboxdev/complidrop/issues/389), deliberately not done here.
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).
