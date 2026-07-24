@@ -142,6 +142,25 @@ Both are defined in this repo's `.claude/agents/`.
   - Deliberately NOT done: a new `ComplianceStatus` value, softening a computed verdict
     to `Pending`, rejecting the edit with a 400, or extending the flag to non-canonical
     fields. All four are recorded rejections in ADR 0040 § Alternatives.
+- A DISTRUSTED extraction is ADR 0042 (#401); the review-time facts that follow are
+  pointers into it, dovetailing with ADR 0040/0041.
+  - `ExtractionWorker.PersistSuccess` routes to `ManualRequired` when ANY VERDICT-BEARING
+    field (`Services/VerdictBearingFields.cs` — the dates + insurance coverage-limit / flag
+    fields, NOT the license/cert identity fields) came back below the gate, EVEN IF the
+    field average clears it. Both gates reference ONE shared
+    `ExtractionWorker.ManualReviewConfidenceThreshold` (0.7) — a per-field gate on a
+    DIFFERENT threshold is a real finding. An ABSENT field never trips it (only a
+    present-but-low-confidence one).
+  - `VendorEndpoints.ComputeCoverage` excludes a `ManualRequired` doc from in-force
+    coverage, so a required type covered ONLY by distrusted docs reads ActionNeeded (like
+    an expired-only type). READ-TIME only — the stored `ComplianceStatus` is untouched (no
+    persisted `Pending`), extraction-trust and rule-verdict are separate axes.
+  - Deliberately NOT applied to the document-level surfaces (dashboard compliant/
+    expiringSoon counts, `?status=` list/badges, CSV/PDF export, per-doc compliance badge):
+    the list already shows a separate `ManualRequired` extraction badge beside the
+    compliance badge, and demoting the counts too would create a #294-class count-vs-badge
+    split. The vendor rollup is the one surface with no room for the separate badge. Do NOT
+    flag the untouched document-level counts as a missed demotion — that inversion is the bug.
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).
