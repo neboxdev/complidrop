@@ -1,9 +1,13 @@
+using System.Net;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Services.Extraction;
+using CompliDrop.Api.Tests.ExtractionFixtures;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.AspNetCore.TestHost;
@@ -662,7 +666,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     /// "the over-length type did not throw 22001" a real assertion rather than an accident.
     /// </summary>
     private static ExtractionResult TypedResult(string? documentType, string? subType = null) => new(
-        DocumentType: documentType!,
+        DocumentType: documentType,
         DocumentSubType: subType,
         Fields: [new ExtractedField("policy_number", "POL-1", "string", 0.95)],
         NeedsReprocessing: false,
@@ -751,6 +755,81 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         await worker.ProcessDocumentAsync(docId, CancellationToken.None);
 
         (await GetDocAsync(docId)).DocumentType.Should().Be("coi");
+    }
+
+    /// <summary>
+    /// Parses a RAW provider payload through the real client's own <c>MapResult</c> (stub HTTP handler,
+    /// no network) and hands the parsed result to the worker's extraction seam. The shapes under test
+    /// have to travel this path: an OMITTED property and a JSON null are what a provider actually emits
+    /// when it violates its schema's <c>required</c>, and a hand-built <see cref="ExtractionResult"/>
+    /// cannot express the difference between "the provider said nothing" and "the provider said other".
+    /// </summary>
+    private static async Task<ExtractionResult> MapThroughProviderAsync(string provider, JsonObject payload) =>
+        provider == "gemini"
+            ? await ExtractionClientBuilder
+                .Gemini(new StubHttpMessageHandler(HttpStatusCode.OK,
+                    ExtractionFixtureHarness.GeminiResponseFromPayload(payload).ToJsonString()))
+                .ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default)
+            : await ExtractionClientBuilder
+                .Anthropic(new StubHttpMessageHandler(HttpStatusCode.OK,
+                    ExtractionFixtureHarness.AnthropicResponseFromPayload(payload).ToJsonString()))
+                .ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
+
+    private static JsonObject PayloadWithDocumentTypeShape(string shape)
+    {
+        var payload = new JsonObject
+        {
+            ["needsReprocessing"] = false,
+            ["fields"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["name"] = "permit_number", ["value"] = "P-1", ["type"] = "text", ["confidence"] = 0.95,
+                },
+            },
+        };
+        switch (shape)
+        {
+            case "absent": break;                              // the property is simply not there
+            case "null": payload["documentType"] = null; break; // present, JSON null
+            case "empty": payload["documentType"] = ""; break;
+            case "other": payload["documentType"] = "other"; break;
+            default: throw new ArgumentOutOfRangeException(nameof(shape), shape, "unknown payload shape");
+        }
+        return payload;
+    }
+
+    [Theory]
+    // The shape a provider ACTUALLY produces when it violates `required`: the property is omitted. Both
+    // clients used to coerce that into the literal "other" (`dt.GetString() ?? "other" : "other"`) BEFORE
+    // the worker saw it, so the blank-answer fallback could only ever fire for an explicit empty string —
+    // a shape no provider emits. Upload a permit, pick "permit" in the dropdown, get a tool_use input
+    // without documentType, and the uploader's deliberate type was overwritten with "other": zero
+    // applicable permit rules, permanently Pending. That is the silent-never-graded outcome #373 closes.
+    [InlineData("gemini", "absent", null, "permit")]
+    [InlineData("anthropic", "absent", null, "permit")]
+    // Same non-answer, different encoding.
+    [InlineData("gemini", "null", null, "permit")]
+    [InlineData("anthropic", "null", null, "permit")]
+    // An explicit empty string is likewise no answer (this is the one shape the pre-fix code handled).
+    [InlineData("gemini", "empty", "", "permit")]
+    [InlineData("anthropic", "empty", "", "permit")]
+    // …but a POSITIVE "other" is a real classification the model made, so it must still overwrite. This
+    // is the case that stops the fix from becoming "never trust the model about `other`".
+    [InlineData("gemini", "other", "other", "other")]
+    [InlineData("anthropic", "other", "other", "other")]
+    public async Task An_absent_documentType_keeps_the_uploaders_type_but_a_positive_other_overwrites(
+        string provider, string shape, string? expectedMapped, string expectedStored)
+    {
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m, documentType: "permit");
+        Extraction.Result = await MapThroughProviderAsync(provider, PayloadWithDocumentTypeShape(shape));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        // The contract that matters: what got STORED, since that is what grades and supersedes.
+        (await GetDocAsync(docId)).DocumentType.Should().Be(expectedStored);
+        // …and the client-level shape it rests on, pinned separately so a regression names its own cause.
+        Extraction.Result.DocumentType.Should().Be(expectedMapped);
     }
 
     [Fact]
@@ -884,16 +963,192 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     }
 
     [Fact]
+    public async Task A_sub_type_of_exactly_the_column_width_round_trips_verbatim()
+    {
+        // The bound is EXCLUSIVE: MaxLength fits the column and must survive untouched; only MaxLength+1
+        // is dropped. Tested at the boundary itself because the guard is a `>` — a `>=` slip would start
+        // silently nulling legal 100-character sub-types, and neither the MaxLength+1 case above nor an
+        // 8-character one would notice. (Same reason
+        // The_per_field_confidence_gate_is_exclusive_at_the_shared_threshold pins its own bound.)
+        var exact = new string('s', ExtractionWorker.DocumentSubTypeMaxLength);
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = TypedResult("coi", subType: exact);
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.DocumentSubType.Should().Be(exact, "a sub-type that FITS the column must never be dropped");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        doc.ProcessingError.Should().BeNull("a 22001 would surface here as a counted extraction failure");
+    }
+
+    [Fact]
+    public async Task Normalizing_the_stored_type_leaves_the_provider_answer_in_the_forensic_trail()
+    {
+        // The invariant the normalization rests on: it changes only the PERSISTED type. ExtractionRawJson
+        // is the audit record of what the provider actually said, so it must still carry the verbatim
+        // "COI" — otherwise a provider that went off-spec becomes undiagnosable, and nothing would stop a
+        // future refactor from normalizing ExtractionResult BEFORE PersistSuccess (every other #373 test
+        // would stay green while the evidence was destroyed).
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = TypedResult("COI", subType: "General Liability");
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.DocumentType.Should().Be("coi", "the STORED type is canonical");
+
+        // Parsed, not substring-matched: the column is jsonb, so Postgres hands the text back reformatted.
+        doc.ExtractionRawJson.Should().NotBeNull();
+        JsonDocument.Parse(doc.ExtractionRawJson!).RootElement
+            .GetProperty("llm").GetProperty("documentType").GetString()
+            .Should().Be("COI", "the raw trail records what the provider answered, not what we stored");
+    }
+
+    // ----- #373: the OTHER untrusted strings in the same SaveChanges (partially addresses #385) ----
+
+    private static ExtractionResult FieldResult(params ExtractedField[] fields) => new(
+        DocumentType: "coi",
+        DocumentSubType: null,
+        Fields: fields,
+        NeedsReprocessing: false,
+        Usage: new ExtractionUsage(InputTokens: 100, OutputTokens: 50, EstimatedCostUsd: 0.01m));
+
+    [Fact]
+    public async Task A_long_extracted_field_value_is_truncated_instead_of_throwing_22001()
+    {
+        // The 22001 hazard #373 closed for DocumentType/DocumentSubType was still wide open in the SAME
+        // SaveChanges through the DocumentField rows, written verbatim from the same untrusted response
+        // into varchar(200)/varchar(2000)/varchar(50). And description_of_operations — which the prompt
+        // explicitly asks for — is routinely long on an ACORD 25 with an ACORD 101 continuation, so this
+        // is an ordinary certificate, not an adversarial one.
+        //
+        // The failure did NOT degrade gracefully: PersistSuccess's SaveChanges throws, and
+        // ProcessDocumentAsync's catch calls SaveChangesAsync on the SAME context, which still tracks the
+        // poisoned inserts — so the bookkeeping write throws too, FailedAttempts never increments, and the
+        // document is zombie-reclaimed every 5 minutes until ProcessingAttempts exceeds MaxClaims: ~15
+        // re-paid Document AI + LLM runs. Reachable from the unauthenticated portal upload route.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(
+            new ExtractedField("description_of_operations", new string('d', 2_500), "text", 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed, "the persist must not throw");
+        doc.ProcessingError.Should().BeNull("a 22001 would surface here as a counted extraction failure");
+        doc.FailedAttempts.Should().Be(0);
+
+        await using var db = CreateSystemDb();
+        var stored = await db.DocumentFields.SingleAsync(f => f.DocumentId == docId);
+        stored.FieldValue.Should().HaveLength(ExtractionWorker.FieldValueMaxLength)
+            .And.Be(new string('d', ExtractionWorker.FieldValueMaxLength),
+                "the value is TRUNCATED, not dropped — it is user-facing extracted content");
+    }
+
+    [Fact]
+    public async Task A_long_extracted_field_name_and_type_are_truncated_instead_of_throwing_22001()
+    {
+        // The sibling columns from the same untrusted response. FieldType is the tightest (varchar(50))
+        // and is NOT enum-constrained on the Anthropic side, so an off-spec provider can overflow it with
+        // far less text than the value column needs.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(
+            new ExtractedField(new string('n', 400), "v", new string('t', 120), 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        await using var db = CreateSystemDb();
+        var stored = await db.DocumentFields.SingleAsync(f => f.DocumentId == docId);
+        stored.FieldName.Should().Be(new string('n', ExtractionWorker.FieldNameMaxLength));
+        stored.FieldType.Should().Be(new string('t', ExtractionWorker.FieldTypeMaxLength));
+    }
+
+    [Fact]
+    public async Task Field_values_at_exactly_the_column_width_round_trip_verbatim()
+    {
+        // The exclusive bound, for the same reason the sub-type has one: the clamp must not clip a value
+        // that FITS. An off-by-one here would silently shave the last character off every long
+        // description_of_operations on the document detail page.
+        var name = new string('n', ExtractionWorker.FieldNameMaxLength);
+        var value = new string('v', ExtractionWorker.FieldValueMaxLength);
+        var type = new string('t', ExtractionWorker.FieldTypeMaxLength);
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(new ExtractedField(name, value, type, 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        await using var db = CreateSystemDb();
+        var stored = await db.DocumentFields.SingleAsync(f => f.DocumentId == docId);
+        stored.FieldName.Should().Be(name);
+        stored.FieldValue.Should().Be(value);
+        stored.FieldType.Should().Be(type);
+    }
+
+    [Fact]
+    public async Task A_truncated_field_value_never_ends_in_a_lone_surrogate()
+    {
+        // Cutting between the halves of a surrogate pair leaves a lone surrogate, which is not a
+        // character: depending on the encoder Npgsql is using it either throws on the write or silently
+        // stores U+FFFD — one write hazard traded for a second, or for corruption. The pair is placed so
+        // that a naive cut at exactly MaxLength would land INSIDE it (an odd number of BMP chars before
+        // it); the emoji stands in for any astral character an OCR'd description box can carry.
+        var padding = new string('d', ExtractionWorker.FieldValueMaxLength - 1);
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(
+            new ExtractedField("description_of_operations", padding + "\U0001F600" + "tail", "text", 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "a lone surrogate would fail the insert as invalid UTF-8");
+        await using var db = CreateSystemDb();
+        var stored = await db.DocumentFields.SingleAsync(f => f.DocumentId == docId);
+        stored.FieldValue.Should().Be(padding, "the cut backs off to before the split pair");
+        char.IsSurrogate(stored.FieldValue![^1]).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_long_failure_message_is_truncated_instead_of_throwing_22001()
+    {
+        // ProcessingError is varchar(2000) and carries an arbitrary exception message (a provider body
+        // echoed back, an EF error listing every parameter). A 22001 HERE is the worst kind: this IS the
+        // failure-bookkeeping write, so an overflow means the retry budget never advances and the document
+        // is reclaimed forever.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.ThrowOnExtract = true;
+        Extraction.ThrowMessage = new string('e', 5_000);
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.FailedAttempts.Should().Be(1, "the failure must be counted, not lost to a second throw");
+        doc.ProcessingError.Should().NotBeNull()
+            .And.HaveLength(ExtractionWorker.ProcessingErrorMaxLength);
+    }
+
+    [Fact]
     public async Task The_column_length_constants_match_the_EF_model()
     {
-        // Both length guarantees are pinned against the EF model rather than a hand-copied literal, so
-        // shrinking either column in ModelConfiguration reddens here instead of surfacing as a 22001 in
+        // Every length guarantee is pinned against the EF model rather than a hand-copied literal, so
+        // shrinking a column in ModelConfiguration reddens here instead of surfacing as a 22001 in
         // production. The vocabulary needs no clamp precisely because its longest literal fits.
         await using var db = CreateSystemDb();
         var document = db.Model.FindEntityType(typeof(Document))!;
+        var field = db.Model.FindEntityType(typeof(DocumentField))!;
 
         document.FindProperty(nameof(Document.DocumentSubType))!.GetMaxLength()
             .Should().Be(ExtractionWorker.DocumentSubTypeMaxLength);
+        document.FindProperty(nameof(Document.ProcessingError))!.GetMaxLength()
+            .Should().Be(ExtractionWorker.ProcessingErrorMaxLength);
+        field.FindProperty(nameof(DocumentField.FieldName))!.GetMaxLength()
+            .Should().Be(ExtractionWorker.FieldNameMaxLength);
+        field.FindProperty(nameof(DocumentField.FieldValue))!.GetMaxLength()
+            .Should().Be(ExtractionWorker.FieldValueMaxLength);
+        field.FindProperty(nameof(DocumentField.FieldType))!.GetMaxLength()
+            .Should().Be(ExtractionWorker.FieldTypeMaxLength);
         CanonicalDocumentTypes.All.Max(t => t.Length)
             .Should().BeLessThanOrEqualTo(document.FindProperty(nameof(Document.DocumentType))!.GetMaxLength()!.Value,
                 "Normalize is length-safe by construction only while every vocabulary literal fits the column");

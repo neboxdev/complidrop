@@ -63,6 +63,27 @@ public class ExtractionWorker(
     internal const int DocumentSubTypeMaxLength = 100;
 
     /// <summary>
+    /// Widths of the columns <see cref="PersistSuccess"/> writes VERBATIM from the provider's response
+    /// (<c>ModelConfiguration</c>: <c>DocumentField.FieldName</c> <c>varchar(200)</c>,
+    /// <c>FieldValue</c> <c>varchar(2000)</c>, <c>FieldType</c> <c>varchar(50)</c>), plus
+    /// <see cref="Document.ProcessingError"/> (<c>varchar(2000)</c>), which carries an arbitrary
+    /// exception message. Internal so a test pins each equal to the EF model's own max length instead
+    /// of trusting a hand-copied literal — the same treatment <see cref="DocumentSubTypeMaxLength"/>
+    /// gets. See <see cref="Clamp"/> for why these are truncated rather than dropped (#373; partially
+    /// addresses #385).
+    /// </summary>
+    internal const int FieldNameMaxLength = 200;
+
+    /// <inheritdoc cref="FieldNameMaxLength"/>
+    internal const int FieldValueMaxLength = 2000;
+
+    /// <inheritdoc cref="FieldNameMaxLength"/>
+    internal const int FieldTypeMaxLength = 50;
+
+    /// <inheritdoc cref="FieldNameMaxLength"/>
+    internal const int ProcessingErrorMaxLength = 2000;
+
+    /// <summary>
     /// Per-attempt wall-clock bound (from <c>Extraction:AttemptTimeoutSeconds</c>), clamped into
     /// [<see cref="AttemptTimeoutFloorSeconds"/>, <see cref="AttemptTimeoutCeilingSeconds"/>] so it
     /// stays below the 5-minute zombie-reclaim threshold and a timed-out attempt cancels and
@@ -314,7 +335,10 @@ public class ExtractionWorker(
     private static void RecordFailedAttempt(Document doc, string code, string message)
     {
         doc.FailedAttempts += 1;
-        doc.ProcessingError = $"{code}: {message}";
+        // Clamped for the same reason the extracted fields are: `message` is an arbitrary exception
+        // message (a provider body echoed back, an EF error listing parameters) and ProcessingError is
+        // varchar(2000). A 22001 HERE is the worst place for one — this IS the failure-bookkeeping write.
+        doc.ProcessingError = Clamp($"{code}: {message}", ProcessingErrorMaxLength);
         doc.UpdatedAt = DateTime.UtcNow;
         if (doc.FailedAttempts >= MaxAttempts)
         {
@@ -386,9 +410,41 @@ public class ExtractionWorker(
         CancellationToken ct)
     {
         doc.ExtractionStatus = ExtractionStatus.Failed;
-        doc.ProcessingError = $"{code}: {message}";
+        doc.ProcessingError = Clamp($"{code}: {message}", ProcessingErrorMaxLength);
         doc.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Truncates an untrusted string to a column's width, so a value the provider (or an exception
+    /// message) made too long can't throw Postgres 22001 out of a <c>SaveChanges</c> (#373; partially
+    /// addresses <see href="https://github.com/neboxdev/complidrop/issues/385">#385</see>). That throw is
+    /// not a graceful degrade: <see cref="ProcessDocumentAsync"/>'s catch calls <c>SaveChangesAsync</c> on
+    /// the SAME context, which still tracks the poisoned inserts, so the bookkeeping write throws again —
+    /// <see cref="Document.FailedAttempts"/> never increments, and the document is zombie-reclaimed every
+    /// 5 minutes until <see cref="Document.ProcessingAttempts"/> exceeds <see cref="MaxClaims"/>, re-paying
+    /// Document AI + LLM cost on every doomed run. Reachable from the unauthenticated portal upload route.
+    /// <para/>
+    /// TRUNCATES rather than drops: unlike <c>DocumentSubType</c> (matchable-or-nothing metadata), an
+    /// extracted field is user-facing content shown on the document detail page — a clipped
+    /// <c>description_of_operations</c> beats a vanished one. The verdict path is unaffected either way:
+    /// <c>ExtractionFields</c> (jsonb, no width) and the typed columns are both written from the FULL
+    /// value, so grading still reads exactly what the model returned.
+    /// <para/>
+    /// Surrogate-safe: cutting between the halves of a surrogate pair would emit a lone surrogate, which
+    /// Postgres rejects as invalid UTF-8 (22021) — trading one write failure for another.
+    /// <para/>
+    /// Intended shared home is <c>Services/ColumnClamp.cs</c>, added by the in-flight
+    /// <see href="https://github.com/neboxdev/complidrop/issues/372">#372</see> branch; this private copy
+    /// is a DELIBERATE, visible duplicate until that branch lands, not an accidental one. Collapse the two
+    /// when it merges.
+    /// </summary>
+    private static string? Clamp(string? value, int maxLength)
+    {
+        if (value is null || value.Length <= maxLength) return value;
+        var cut = maxLength;
+        if (char.IsHighSurrogate(value[cut - 1]) && char.IsLowSurrogate(value[cut])) cut -= 1;
+        return value[..cut];
     }
 
     private static async Task PersistSuccess(
@@ -410,16 +466,19 @@ public class ExtractionWorker(
         // ordinal `r.DocumentType == doc.DocumentType` filter — a "COI" matches zero "coi" rules and
         // grades nothing, forever) and WHICH documents share a supersession group (DocumentSupersession
         // keys on (VendorId, DocumentType) — a "COI" renewal never supersedes the "coi" cert it
-        // replaces). Every value this can yield is one of six short vocabulary literals, so the
-        // varchar(100) column is length-safe by construction — a runaway type can no longer throw 22001
-        // out of the SaveChanges below and burn the retry budget on paid OCR + LLM re-runs.
+        // replaces). Every value this can yield is one of six short vocabulary literals, so THIS column
+        // is length-safe by construction: a runaway documentType no longer throws 22001. It is not the
+        // only untrusted string in this unit of work, though — the DocumentField rows below carry three
+        // more, clamped there (see Clamp) — so "the SaveChanges below cannot 22001" is a guarantee that
+        // holds only because every such writer is guarded, not because of this line.
         //
         // Only the PERSISTED type is normalized; ExtractionRawJson below still records what the provider
         // actually said, so the forensic trail stays honest about a provider that went off-spec.
         //
-        // A BLANK answer falls back to the STORED type rather than to "other" — see
+        // A BLANK or ABSENT answer falls back to the STORED type rather than to "other" — see
         // CanonicalDocumentTypes.NormalizeExtracted for why demoting a type we already believe would
-        // re-create the very silent-never-graded state this fixes.
+        // re-create the very silent-never-graded state this fixes. The clients map an absent/JSON-null
+        // documentType to null (not to the literal "other") precisely so it reaches that branch.
         doc.DocumentType = CanonicalDocumentTypes.NormalizeExtracted(extraction.DocumentType, doc.DocumentType);
         // The sub-type has no vocabulary (it's free text the model coins per document), but it lands in
         // another varchar(100) from the same untrusted response — so guard only the crash: an over-length
@@ -483,13 +542,18 @@ public class ExtractionWorker(
         db.DocumentFields.RemoveRange(db.DocumentFields.Where(df => df.DocumentId == doc.Id));
         foreach (var f in extraction.Fields)
         {
+            // Clamped to the DocumentField column widths (#373). These three strings come VERBATIM from
+            // the same untrusted provider response the documentType does, and land in varchar(200) /
+            // varchar(2000) / varchar(50) — and `description_of_operations`, which the prompt asks for, is
+            // routinely long on an ACORD 25 with an ACORD 101 continuation. See Clamp for why an overflow
+            // here is not a graceful failure but ~15 re-paid OCR + LLM runs.
             db.DocumentFields.Add(new DocumentField
             {
                 Id = Guid.NewGuid(),
                 DocumentId = doc.Id,
-                FieldName = f.Name,
-                FieldValue = f.Value,
-                FieldType = f.Type,
+                FieldName = Clamp(f.Name, FieldNameMaxLength)!,
+                FieldValue = Clamp(f.Value, FieldValueMaxLength),
+                FieldType = Clamp(f.Type, FieldTypeMaxLength),
                 Confidence = f.Confidence,
                 IsManuallyEdited = false,
                 OriginalValue = null

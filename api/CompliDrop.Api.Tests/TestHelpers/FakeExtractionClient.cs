@@ -33,6 +33,16 @@ public sealed class FakeExtractionClient : IExtractionClient
     public bool ThrowOnExtract { get; set; }
 
     /// <summary>
+    /// Message carried by the <see cref="ThrowOnExtract"/> exception. Overridden when the message's own
+    /// LENGTH is the contract under test — <c>ProcessingError</c> is <c>varchar(2000)</c> and stores
+    /// <c>"{code}: {message}"</c>, so a long provider/EF message used to 22001 the failure-bookkeeping
+    /// write itself (#373).
+    /// </summary>
+    public string ThrowMessage { get; set; } = DefaultThrowMessage;
+
+    private const string DefaultThrowMessage = "Simulated extraction failure.";
+
+    /// <summary>
     /// When true, every call throws a <see cref="NonRetryableExtractionException"/> — simulates a
     /// deterministic failure (e.g. token-cap truncation) the worker must fail fast on, not retry.
     /// </summary>
@@ -60,7 +70,7 @@ public sealed class FakeExtractionClient : IExtractionClient
         if (ExtractDelay > TimeSpan.Zero)
             await Task.Delay(ExtractDelay, ct); // throws OperationCanceledException when the attempt times out
         if (ThrowOnExtract)
-            throw new InvalidOperationException("Simulated extraction failure.");
+            throw new InvalidOperationException(ThrowMessage);
         return Result;
     }
 
@@ -68,6 +78,7 @@ public sealed class FakeExtractionClient : IExtractionClient
     {
         ExtractCallCount = 0;
         ThrowOnExtract = false;
+        ThrowMessage = DefaultThrowMessage;
         ThrowNonRetryable = false;
         ExtractDelay = TimeSpan.Zero;
         Result = DefaultResult;
