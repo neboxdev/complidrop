@@ -33,11 +33,12 @@ public sealed class ComplianceRuleUpsertTests(IntegrationTestFixture fixture) : 
     }
 
     private static Task<HttpResponseMessage> PostRuleAsync(
-        HttpClient client, Guid templateId, string fieldName, string @operator, string? expectedValue, Guid? id = null) =>
+        HttpClient client, Guid templateId, string fieldName, string @operator, string? expectedValue,
+        Guid? id = null, string? documentType = "coi") =>
         client.PostAsJsonAsync($"/api/compliance/templates/{templateId}/rules", new
         {
             id,
-            documentType = "coi",
+            documentType,
             fieldName,
             @operator,
             expectedValue,
@@ -152,5 +153,77 @@ public sealed class ComplianceRuleUpsertTests(IntegrationTestFixture fixture) : 
         // The stored rule keeps its valid expected value — the rejected edit did not land.
         await using var db = CreateSystemDb();
         (await db.ComplianceRules.SingleAsync(r => r.Id == ruleId)).ExpectedValue.Should().Be("CDL");
+    }
+
+    // ---- #373 / ADR 0045: the rule side of the ordinal documentType comparison --------------------
+
+    [Theory]
+    [InlineData("coi", "coi")]           // already canonical — passes through unmangled
+    [InlineData("license", "license")]
+    [InlineData("COI", "coi")]           // the headline shape: folded, not rejected
+    [InlineData("  Permit  ", "permit")] // mixed case + padding
+    public async Task A_rules_document_type_is_stored_canonically(string sent, string stored)
+    {
+        // ComplianceCheckService's applicable-rules filter is `r.DocumentType == doc.DocumentType`, an
+        // ORDINAL comparison, and ExtractionWorker.PersistSuccess now guarantees the DOCUMENT side is
+        // always canonical (#373) — so a rule stored verbatim as "COI" governs literally nothing and can
+        // no longer even accidentally match a document the upload path once stored as "COI". /api/compliance
+        // is reachable without the rules page, so the API is the authoritative guard.
+        var auth = await RegisterAndLoginAsync();
+        var templateId = await CreateTemplateAsync(auth.Client);
+
+        var resp = await PostRuleAsync(
+            auth.Client, templateId, "general_liability_limit", "min_value", "1000000", documentType: sent);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.ComplianceRules.SingleAsync(r => r.ComplianceTemplateId == templateId))
+            .DocumentType.Should().Be(stored);
+    }
+
+    [Theory]
+    [InlineData("banana")]
+    [InlineData("Certificate of Insurance")] // plausible prose that is still not the vocabulary
+    [InlineData("")]
+    [InlineData(null)]
+    public async Task A_rule_with_an_unrecognized_document_type_is_rejected_400(string? sent)
+    {
+        // REJECTED, not folded to "other" — the deliberate asymmetry with the extraction worker. A worker
+        // parsing a model response has no one to ask; a human editing a checklist does, and silently
+        // retyping a compliance RULE would change WHAT IT GOVERNS (a requirement that quietly stops
+        // applying is exactly the silent-never-graded class #373 exists to close).
+        var auth = await RegisterAndLoginAsync();
+        var templateId = await CreateTemplateAsync(auth.Client);
+
+        var resp = await PostRuleAsync(
+            auth.Client, templateId, "general_liability_limit", "min_value", "1000000", documentType: sent);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(resp)).Should().Be("validation.document_type");
+
+        // The reject blocks the write — no rule row lands.
+        await using var db = CreateSystemDb();
+        (await db.ComplianceRules.CountAsync(r => r.ComplianceTemplateId == templateId)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Editing_a_rule_to_an_unrecognized_document_type_is_rejected_400()
+    {
+        // The guard covers the UPDATE path too (same endpoint): a well-formed "coi" rule cannot be edited
+        // into a type that governs nothing.
+        var auth = await RegisterAndLoginAsync();
+        var templateId = await CreateTemplateAsync(auth.Client);
+
+        var create = await PostRuleAsync(auth.Client, templateId, "license_type", "equals", "CDL");
+        create.StatusCode.Should().Be(HttpStatusCode.OK);
+        var ruleId = (await Data(create)).GetProperty("id").GetGuid();
+
+        var update = await PostRuleAsync(
+            auth.Client, templateId, "license_type", "equals", "CDL", id: ruleId, documentType: "banana");
+
+        update.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorCode(update)).Should().Be("validation.document_type");
+        await using var db = CreateSystemDb();
+        (await db.ComplianceRules.SingleAsync(r => r.Id == ruleId)).DocumentType.Should().Be("coi");
     }
 }
