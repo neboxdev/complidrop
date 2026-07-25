@@ -15,7 +15,9 @@ Npgsql does not truncate. An over-length string written to a bounded column fail
 `SaveChanges` with Postgres `22001`, and the audit row is deliberately added to the SAME unit of work
 as the business mutation (`AuditSaveChangesInterceptor`) or committed inside the endpoint's own
 transaction (`IAuditLogger`). So a long header did not merely lose an audit row — it took the
-mutation down with it as an unhandled `DbUpdateException` → 500. Three concrete instances:
+mutation down with it as an unhandled `DbUpdateException` → 500. Four concrete instances — the
+first three are routes where an over-length `User-Agent` did it, the fourth is the other header
+reaching the same insert:
 
 1. **The PUBLIC portal upload.** `POST /api/portal/{token}/upload` is unauthenticated, so a THIRD
    party controls the header. Its `audit.LogAsync("vendorPortalLink.upload_processed", …)` sits
@@ -27,18 +29,34 @@ mutation down with it as an unhandled `DbUpdateException` → 500. Three concret
    counted against the account, but vanished from the audit trail. An attacker could erase their own
    failed-login evidence by sending a long `User-Agent`.
 3. **Any authenticated mutation**, e.g. a corporate proxy appending product tokens to the UA.
+4. **The same 22001 through `X-Trace-Id`.** `AuditLog.CorrelationId` is `varchar(64)`, and the
+   inbound header was stored verbatim, so a 65-character `X-Trace-Id` failed the very same audit
+   insert — on any of the three routes above — with no over-length `User-Agent` involved at all.
 
-A second, independent problem sat on the same value. `X-Trace-Id` was accepted verbatim whenever it
-was non-blank, ≤64 chars and visible ASCII. That value is echoed back in the response header, becomes
-`error.correlationId` in the error envelope and `ApiError.correlationId` in the frontend, and is
-shipped to Sentry as the `correlation_id` tag by `tagCorrelationId`
+A second, independent problem sat on the same value. The whole of `CorrelationIdMiddleware`'s
+handling of the inbound header was:
+
+```csharp
+var correlationId = context.Request.Headers[HeaderName].FirstOrDefault()
+    ?? Guid.NewGuid().ToString("N");
+```
+
+A present header was echoed and stored **verbatim, at any length and with any characters**; an id was
+minted only when the header was absent. There was no length check (hence vector 4), no charset check
+and no blank check — a blank header blanked the echoed response header, and a CR/LF in it was header
+injection.
+
+That one value then fans out: it is echoed back in the response header, becomes `error.correlationId`
+in the error envelope and `ApiError.correlationId` in the frontend, and is shipped to Sentry as the
+`correlation_id` tag by `tagCorrelationId`
 ([ADR 0037](0037-frontend-sentry-pii-scrubbing-and-gating.md)) — which by deliberate design runs
 **after** `scrubEvent` and does **not** redact the tag, on the premise that a correlation id is an
-opaque identifier rather than user content. Under a visible-ASCII rule, `X-Trace-Id:
-pat@gardenhall.com` is 18 legal characters, so a client could land an email address in Sentry
-un-redacted and break ADR 0037's invariant at its source. The same arbitrary id is also the
-activity-feed collapse key (`(CorrelationId, EntityType, EntityId)` in `DashboardEndpoints`), so a
-client repeating one id could merge two distinct events into a single feed row.
+opaque identifier rather than user content. So any client could put arbitrary text — an email
+address, a customer name, a phone number — straight into that un-redacted tag and break ADR 0037's
+invariant at its source. (ADR 0037's own wording called the id "server-minted", which this
+header-honoring path had never made true.) The same arbitrary id is also the activity-feed collapse
+key (`(CorrelationId, EntityType, EntityId)` in `DashboardEndpoints`), so a client repeating one id
+could merge two distinct events into a single feed row.
 
 ## Decision
 
@@ -74,8 +92,10 @@ trace id. Truncating instead would be worse than useless:
 via `ICurrentUser.CorrelationId` — the stored `AuditLog.CorrelationId` column. What we hand a customer
 for a bug report must be exactly what we stored, or pasting the header finds nothing. A change that
 clamps or rewrites any ONE of the four independently breaks the invariant and is a real defect, not a
-style question. The `CurrentUserService` clamp on `CorrelationId` is therefore a deliberate **no-op**:
-it keeps the boundary rule total and independent of middleware ordering without ever being reached.
+style question. The `CurrentUserService` clamp on `CorrelationId` — new here, like the middleware
+bound itself — is therefore a deliberate **no-op from the moment both land**: `Resolve` has already
+bounded the value before `ICurrentUser` reads it. It is kept anyway so the §1 boundary rule stays
+total and independent of middleware ordering, rather than because it is ever reached.
 
 ### 3. The trace-id charset is narrow, and the reason is the Sentry tag
 
@@ -85,7 +105,13 @@ characters, no non-ASCII, no other punctuation.
 
 The load-bearing reason is the un-redacted Sentry `correlation_id` tag described above (and,
 secondarily, that this value goes straight into a response header, where a CR/LF is header injection
-and its own self-inflicted 500). Narrowing the charset makes an email-shaped or free-text id
+and its own self-inflicted 500).
+
+The obvious lighter rule — accept any **visible ASCII**, i.e. reject only blanks, spaces and control
+characters — is the one this section exists to rule out. It would fix the response-header and length
+halves and leave the PII half wide open: `X-Trace-Id: pat@gardenhall.com` is 18 visible-ASCII
+characters, so an email address would still reach the un-redacted tag, and so would a customer name
+or a phone number. Narrowing to `[A-Za-z0-9_-]` instead makes an email-shaped or free-text id
 **structurally impossible to inject**, so ADR 0037's "no email reaches Sentry" invariant holds by
 construction rather than by trusting the client. It costs nothing real: 32-hex ids, W3C `traceparent`
 hex-and-dash, UUIDs, ULIDs and `_`-prefixed vendor ids all pass verbatim.
@@ -126,10 +152,11 @@ client-fed bounded columns — the upload filename path, register, waitlist, the
 - New audit writers inherit the clamp for free — there is one boundary, not N sinks.
 
 ### Negative
-- A client that today sends a trace id containing `.`, `:`, `/` or `+` silently stops having it
-  honored: it gets a minted id back in the response header instead. That is the intended trade (the
-  echoed header still tells the caller exactly which id was used), but it is a behavior change for any
-  such caller. No known caller does this — the frontend never sets `X-Trace-Id`.
+- Before this change ANY non-empty `X-Trace-Id` was honored, so a client sending one containing `.`,
+  `:`, `/` or `+` silently stops having it honored: it gets a minted id back in the response header
+  instead. That is the intended trade (the echoed header still tells the caller exactly which id was
+  used), but it is a behavior change for any such caller. No known caller does this — the frontend
+  never sets `X-Trace-Id`.
 - Truncation is lossy by definition: a >500-char `User-Agent` is stored head-first and the tail is
   gone. Judged strictly better than storing nothing and losing the mutation.
 
@@ -152,7 +179,7 @@ first read from the request.
 Replacement keeps the four-way agreement, and the echoed response header still tells the caller which
 id actually got used.
 
-### Option C — Keep the visible-ASCII charset and redact the tag on the frontend instead
+### Option C — Accept any visible ASCII and redact the tag on the frontend instead
 **Rejected**: ADR 0037's post-scrub, un-redacted tag is a deliberate design (a correlation id must
 survive the redactor to be usable), and re-scrubbing it there would defeat its purpose while leaving
 the same free text in the response header, the log scope and the audit column. Fix it at the source:
