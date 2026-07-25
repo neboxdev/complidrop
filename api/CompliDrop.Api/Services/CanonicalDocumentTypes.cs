@@ -82,6 +82,11 @@ internal static class CanonicalDocumentTypes
     /// classification of <see cref="Fallback"/>, falling back to the type already stored (itself
     /// normalized).
     /// <para/>
+    /// "Absent" reaches this method only because both clients' <c>MapResult</c> map a missing or
+    /// JSON-null <c>documentType</c> to <c>null</c> instead of to the literal <c>"other"</c> — the shape a
+    /// provider ACTUALLY produces when it violates <c>required</c> is an omitted property, not an empty
+    /// string, so coercing it there would forge a positive answer this branch could never see.
+    /// <para/>
     /// Blank is off-spec — <c>documentType</c> is <c>required</c> in both providers' structured-output
     /// schemas — so it carries no information, and overwriting with <c>other</c> on the strength of it
     /// would DISCARD information: the stored type is typically the uploader's own pick from the document

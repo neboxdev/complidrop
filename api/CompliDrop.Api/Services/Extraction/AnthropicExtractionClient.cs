@@ -176,7 +176,15 @@ public class AnthropicExtractionClient(
 
     private static ExtractionResult MapResult(JsonElement root)
     {
-        var documentType = root.TryGetProperty("documentType", out var dt) ? dt.GetString() ?? "other" : "other";
+        // #373: an ABSENT or JSON-null documentType maps to NULL, not to the literal "other". The tool's
+        // input_schema marks documentType `required`, so its absence is the provider going off-spec — a
+        // non-answer, not a classification. Coercing it here forged a positive "other" that
+        // ExtractionWorker.PersistSuccess could no longer tell apart from a real one, so it overwrote the
+        // uploader's deliberate "permit"/"license" with "other": zero applicable compliance rules, and the
+        // document sits at Pending forever (the silent-never-graded outcome #373 exists to close). Null
+        // reaches CanonicalDocumentTypes.NormalizeExtracted's blank branch, which keeps the stored type.
+        // A model that POSITIVELY answers "other" still arrives as "other" and still overwrites.
+        var documentType = root.TryGetProperty("documentType", out var dt) ? dt.GetString() : null;
         var documentSubType = root.TryGetProperty("documentSubType", out var dst) ? dst.GetString() : null;
         var needsReprocessing = root.TryGetProperty("needsReprocessing", out var nr) && nr.GetBoolean();
 

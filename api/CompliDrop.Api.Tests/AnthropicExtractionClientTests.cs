@@ -255,13 +255,17 @@ public sealed class AnthropicExtractionClientTests
     }
 
     [Fact]
-    public async Task Valid_but_empty_tool_input_degrades_to_empty_other_extraction()
+    public async Task Valid_but_empty_tool_input_degrades_to_an_empty_untyped_extraction()
     {
         var handler = new StubHttpMessageHandler(HttpStatusCode.OK, Json(ExtractionFixtureHarness.AnthropicResponseFromPayload(new JsonObject())));
 
         var result = await ExtractionClientBuilder.Anthropic(handler).ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
 
-        result.DocumentType.Should().Be("other");
+        // NULL, not "other" (#373): documentType is `required` in this tool's input_schema, so its
+        // absence is the provider going off-spec — a non-answer, not a classification. Coercing it to
+        // "other" here forged an answer the model never gave, and ExtractionWorker.PersistSuccess then
+        // overwrote the uploader's deliberate type with it. Null reaches the blank branch instead.
+        result.DocumentType.Should().BeNull();
         result.DocumentSubType.Should().BeNull();
         result.Fields.Should().BeEmpty();
         result.NeedsReprocessing.Should().BeFalse();

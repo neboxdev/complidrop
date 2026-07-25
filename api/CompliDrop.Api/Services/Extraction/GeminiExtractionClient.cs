@@ -205,7 +205,11 @@ public class GeminiExtractionClient(
 
     private static ExtractionResult MapResult(JsonElement root)
     {
-        var documentType = root.TryGetProperty("documentType", out var dt) ? dt.GetString() ?? "other" : "other";
+        // #373: an ABSENT or JSON-null documentType maps to NULL, not to the literal "other" — identical
+        // to the Anthropic client (see the longer note there). The responseSchema marks documentType
+        // `required`, so its absence is a non-answer; forging "other" out of it let PersistSuccess
+        // overwrite the uploader's deliberate type and strand the document at zero applicable rules.
+        var documentType = root.TryGetProperty("documentType", out var dt) ? dt.GetString() : null;
         var documentSubType = root.TryGetProperty("documentSubType", out var dst) ? dst.GetString() : null;
         var needsReprocessing = root.TryGetProperty("needsReprocessing", out var nr) && nr.GetBoolean();
 
