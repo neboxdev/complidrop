@@ -170,7 +170,10 @@ public class GeminiExtractionClient(
             ["documentType"] = new JsonObject
             {
                 ["type"] = "string",
-                ["enum"] = new JsonArray { "coi", "license", "permit", "certification", "contract", "other" }
+                // Sourced from the shared vocabulary rather than a literal list (#373): the Anthropic
+                // tool schema pins the SAME CanonicalDocumentTypes.SchemaEnum(), so the two providers'
+                // allowed sets are one definition and cannot drift apart.
+                ["enum"] = CanonicalDocumentTypes.SchemaEnum()
             },
             ["documentSubType"] = new JsonObject { ["type"] = "string" },
             ["needsReprocessing"] = new JsonObject { ["type"] = "boolean" },

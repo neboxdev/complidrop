@@ -142,7 +142,16 @@ public class AnthropicExtractionClient(
             ["required"] = new JsonArray { "documentType", "fields", "needsReprocessing" },
             ["properties"] = new JsonObject
             {
-                ["documentType"] = new JsonObject { ["type"] = "string" },
+                // #373: pin documentType to the canonical vocabulary, the way the Gemini
+                // responseSchema always has. Left free, this provider could answer "COI" or
+                // "Certificate of Insurance" against a prompt asking for "coi" — a value that matches
+                // zero compliance rules and splits the supersession group. Both clients build the enum
+                // from the SAME CanonicalDocumentTypes.SchemaEnum(), so the two contracts cannot drift.
+                ["documentType"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["enum"] = CanonicalDocumentTypes.SchemaEnum()
+                },
                 ["documentSubType"] = new JsonObject { ["type"] = "string" },
                 ["needsReprocessing"] = new JsonObject { ["type"] = "boolean" },
                 ["fields"] = new JsonObject

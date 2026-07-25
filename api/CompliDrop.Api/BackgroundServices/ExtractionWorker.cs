@@ -55,6 +55,14 @@ public class ExtractionWorker(
     private const int AttemptTimeoutFloorSeconds = 60;
 
     /// <summary>
+    /// Length of the <c>DocumentSubType</c> column (<c>ModelConfiguration</c>: <c>varchar(100)</c>),
+    /// above which an extracted sub-type is dropped rather than allowed to throw a 22001 out of
+    /// <c>PersistSuccess</c>'s single <c>SaveChanges</c> (#373). Internal so a test pins it equal to the
+    /// EF model's own max length instead of trusting a hand-copied literal.
+    /// </summary>
+    internal const int DocumentSubTypeMaxLength = 100;
+
+    /// <summary>
     /// Per-attempt wall-clock bound (from <c>Extraction:AttemptTimeoutSeconds</c>), clamped into
     /// [<see cref="AttemptTimeoutFloorSeconds"/>, <see cref="AttemptTimeoutCeilingSeconds"/>] so it
     /// stays below the 5-minute zombie-reclaim threshold and a timed-out attempt cancels and
@@ -394,8 +402,33 @@ public class ExtractionWorker(
     {
         var now = DateTime.UtcNow;
 
-        doc.DocumentType = extraction.DocumentType;
-        doc.DocumentSubType = extraction.DocumentSubType;
+        // #373: the model's documentType is UNTRUSTED input — coerce it to the canonical vocabulary
+        // BEFORE it overwrites the stored type. A structured-output schema pins the enum on both
+        // providers (this change added the Anthropic half), but a schema is the provider's promise, not
+        // ours: an off-spec response, a provider bug, or a future client would otherwise write a raw
+        // string straight into the column that decides WHICH rules apply (ComplianceCheckService's
+        // ordinal `r.DocumentType == doc.DocumentType` filter — a "COI" matches zero "coi" rules and
+        // grades nothing, forever) and WHICH documents share a supersession group (DocumentSupersession
+        // keys on (VendorId, DocumentType) — a "COI" renewal never supersedes the "coi" cert it
+        // replaces). Every value this can yield is one of six short vocabulary literals, so the
+        // varchar(100) column is length-safe by construction — a runaway type can no longer throw 22001
+        // out of the SaveChanges below and burn the retry budget on paid OCR + LLM re-runs.
+        //
+        // Only the PERSISTED type is normalized; ExtractionRawJson below still records what the provider
+        // actually said, so the forensic trail stays honest about a provider that went off-spec.
+        //
+        // A BLANK answer falls back to the STORED type rather than to "other" — see
+        // CanonicalDocumentTypes.NormalizeExtracted for why demoting a type we already believe would
+        // re-create the very silent-never-graded state this fixes.
+        doc.DocumentType = CanonicalDocumentTypes.NormalizeExtracted(extraction.DocumentType, doc.DocumentType);
+        // The sub-type has no vocabulary (it's free text the model coins per document), but it lands in
+        // another varchar(100) from the same untrusted response — so guard only the crash: an over-length
+        // value is off-spec noise, not a sub-type, and storing null beats both a 22001 and a truncated
+        // half-value that no obligation could match anyway. Anything within the column passes through
+        // verbatim, exactly as before.
+        doc.DocumentSubType = extraction.DocumentSubType is { Length: > DocumentSubTypeMaxLength }
+            ? null
+            : extraction.DocumentSubType;
 
         var fieldsDict = new Dictionary<string, object?>();
         foreach (var f in extraction.Fields)
