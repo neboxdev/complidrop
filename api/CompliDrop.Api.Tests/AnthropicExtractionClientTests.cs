@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CompliDrop.Api.Configuration;
+using CompliDrop.Api.Services;
 using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Tests.ExtractionFixtures;
 using CompliDrop.Api.Tests.TestHelpers;
@@ -68,6 +69,13 @@ public sealed class AnthropicExtractionClientTests
         tool["name"]!.GetValue<string>().Should().Be("record_extraction");
         tool["input_schema"]!["required"]!.AsArray().Select(n => n!.GetValue<string>())
             .Should().Contain(new[] { "documentType", "fields", "needsReprocessing" });
+        // #373: documentType is pinned to the canonical vocabulary here, exactly as the Gemini
+        // responseSchema pins it. Left free (the pre-#373 shape), this provider could answer "COI" or
+        // "Certificate of Insurance" against a prompt asking for "coi" — a value that matches zero
+        // compliance rules and splits the supersession group. CanonicalDocumentTypeTests pins the two
+        // providers' arrays EQUAL to each other and to the shared vocabulary.
+        tool["input_schema"]!["properties"]!["documentType"]!["enum"]!.AsArray().Select(n => n!.GetValue<string>())
+            .Should().Equal(CanonicalDocumentTypes.All);
 
         body["messages"]![0]!["role"]!.GetValue<string>().Should().Be("user");
         body["messages"]![0]!["content"]![0]!["text"]!.GetValue<string>()
