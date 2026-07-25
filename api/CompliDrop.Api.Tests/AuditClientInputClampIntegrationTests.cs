@@ -114,6 +114,41 @@ public sealed class AuditClientInputClampIntegrationTests(IntegrationTestFixture
     }
 
     [Fact]
+    public async Task A_pii_shaped_inbound_trace_id_never_reaches_the_echoed_header_or_the_stored_column()
+    {
+        // The CHARSET half of IsUsableTraceId, driven through the REAL middleware rather than only
+        // through Resolve. Every other HTTP-level trace-id case here sends an OVER-LENGTH value, so
+        // they pin only the LENGTH half: a plausible "normalize only when it doesn't fit"
+        // refactor keeps all of them green while silently re-opening the PII door. This id is 18
+        // characters — it fits varchar(64) comfortably — and the charset is the ONLY thing that
+        // stops it, which is exactly why ADR 0044 §3 calls the charset the load-bearing rule.
+        //
+        // What it protects: an ACCEPTED id is echoed in the X-Trace-Id response header, becomes
+        // ApiError.correlationId in the frontend and is shipped to Sentry as the `correlation_id`
+        // tag, which ADR 0037 deliberately applies AFTER scrubEvent and does NOT redact.
+        var auth = await RegisterAndLoginAsync();
+        const string pii = "pat@gardenhall.com";
+        auth.Client.DefaultRequestHeaders.TryAddWithoutValidation(TraceHeader, pii);
+
+        var resp = await CreateVendorAsync(auth.Client, "Emailtrace Co");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK, "a junk trace id is replaced, never a 500");
+
+        var echoed = resp.Headers.GetValues(TraceHeader).Single();
+        echoed.Should().NotBe(pii);
+        echoed.Should().NotContain("@", "an email address must not survive into the Sentry tag");
+
+        var rows = (await AuditRowsAsync(auth.OrgId))
+            .Where(a => a.EntityType == nameof(Vendor))
+            .ToList();
+        rows.Should().NotBeEmpty("the vendor mutation must still be audited");
+        rows.Should().OnlyContain(a => a.CorrelationId != pii);
+        rows.Should().OnlyContain(a => !a.CorrelationId!.Contains('@'));
+        // And the replacement kept the four-way agreement: echoed header == stored column.
+        rows.Should().OnlyContain(a => a.CorrelationId == echoed);
+    }
+
+    [Fact]
     public async Task A_well_formed_inbound_trace_id_is_still_honored_end_to_end()
     {
         // The clamp must not cost the feature: a caller supplying its own tracing id keeps it.
