@@ -51,3 +51,4 @@ Use `/adr <title>` to scaffold a new one.
 - [0041](0041-future-effective-not-yet-in-force-reads-pending.md) — A not-yet-in-force (future-effective) certificate reads Pending, via a read-only overlay (companion to 0033 Amendment 2)
 - [0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) — A distrusted extraction (per-field confidence gate) routes to review and does not roll up to "Covered" (dovetails with 0040/0041)
 - [0043](0043-additional-insured-claim-wording-staged-behind-flag.md) — Corrected additional-insured claim wording staged behind a default-OFF flag (CLM-1); copy-only, verdict unchanged, distinct from TemplateCorrections
+- [0045](0045-canonical-document-type-vocabulary.md) — One canonical document-type vocabulary, coerced at the extraction choke point and validated at the rule write boundary (0044 is claimed by an in-flight branch)

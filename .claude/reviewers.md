@@ -162,22 +162,43 @@ Both are defined in this repo's `.claude/agents/`.
     split. The vendor rollup is the one surface with no room for the separate badge. Do NOT
     flag the untouched document-level counts as a missed demotion — that inversion is the bug.
 - The canonical document-type vocabulary is ONE list — `Services/CanonicalDocumentTypes.cs`
-  (#373) — and `ExtractionWorker.PersistSuccess` coerces the model's `documentType` through it
-  before that string overwrites `Document.DocumentType`. Two facts here look like bugs and are not:
-  - A BLANK/absent extracted type falls back to the STORED type (itself normalized), NOT to
+  (#373, [ADR 0045](../docs/adr/0045-canonical-document-type-vocabulary.md)) — and
+  `ExtractionWorker.PersistSuccess` coerces the model's `documentType` through it before that
+  string overwrites `Document.DocumentType`. Facts here that look like bugs and are not:
+  - A BLANK/ABSENT extracted type falls back to the STORED type (itself normalized), NOT to
     `other`. `documentType` is `required` in both providers' structured-output schemas, so a blank
     is off-spec and carries no information, while the stored type is usually the uploader's own
     dropdown pick (and the model's own type hint) — demoting a deliberate `license` to `other`
     would drop every license rule and strand the document at the zero-applicable-rules `Pending`
-    #373 exists to close. Only a NON-blank answer overwrites.
-  - `DocumentEndpoints`' private `AllowedDocumentTypes` is still a second literal, pinned EQUAL to
-    the vocabulary by `CanonicalDocumentTypeTests` rather than deleted: those endpoint files are
-    owned by [#389](https://github.com/neboxdev/complidrop/issues/389) (the upload-path
-    allow-list/clamp and the oversize-type 500), which should collapse it. DRIFT between the two
-    IS a real finding; the duplication itself is not.
+    #373 exists to close. Only a NON-blank answer overwrites, and a POSITIVE `"other"` counts as
+    an answer. "Absent" is reachable because both clients' `MapResult` map a missing/JSON-null
+    `documentType` to `null` rather than to the literal `"other"` — a clean-looking `?? "other"`
+    there is the bug, not the fix.
+  - `ComplianceEndpoints.UpsertRule` — the OTHER operand of the ordinal comparison — REJECTS an
+    unknown type with `400 validation.document_type` instead of coercing it. Deliberate asymmetry
+    with the worker: silently retyping a compliance RULE would change what it governs. Mis-cased
+    input is still folded (spelling, not meaning).
+  - `DocumentEndpoints`' `AllowedDocumentTypes` is still a second literal, made `internal` and
+    pinned EQUAL to the vocabulary by `CanonicalDocumentTypeTests` rather than deleted: those
+    endpoint files are owned by [#389](https://github.com/neboxdev/complidrop/issues/389) (the
+    upload-path allow-list/clamp and the oversize-type 500), which should collapse it. DRIFT
+    between the two IS a real finding; the duplication itself is not.
   `Normalize` needs no length clamp — it only ever returns a member of the vocabulary, so the
   `varchar(100)` column is safe by construction (pinned against the EF model). The sibling
-  `DocumentSubType` has no vocabulary and is guarded only against the 22001 (over-length ⇒ null).
+  `DocumentSubType` has no vocabulary and is DROPPED when over-length (nothing could match a
+  truncated half-value); the `DocumentField` columns and `ProcessingError` are TRUNCATED instead
+  (an extracted field is user-facing content). `ExtractionWorker.Clamp` is a deliberate private
+  duplicate of the `Services/ColumnClamp.cs` that #372 adds — collapse when that lands.
+  Two KNOWN GAPS, recorded in ADR 0045 — do not re-report them as new findings:
+  - **Legacy rows are not laundered.** Coercion runs only on the next EXTRACTION and nothing
+    re-extracts a processed row, so a pre-deploy non-canonical type persists (grades against zero
+    rules, own supersession group, invisible to `?type=coi`) until a human re-types it. #389 does
+    not touch stored rows either. Deliberately NOT fixed by a data migration — measure the
+    population first.
+  - **One unpinned mirror:** `frontend/src/lib/document-types.ts`. A .NET test cannot reach it
+    (no shared fixture, unlike ADR 0038's contact-email corpus). The five in-repo mirrors that CAN
+    be reached are pinned: both provider schemas, the extraction prompt's DOCUMENT TYPES block,
+    `DocumentEndpoints.AllowedDocumentTypes`, and `DisplayLabels.DocumentTypes`.
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).

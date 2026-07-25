@@ -5,7 +5,8 @@ namespace CompliDrop.Api.Services;
 
 /// <summary>
 /// The canonical <see cref="Document.DocumentType"/> vocabulary — ONE source of truth for every place
-/// that has to answer "is this a document type we understand?" (#373). Companion to
+/// that has to answer "is this a document type we understand?" (#373, ADR 0045
+/// <c>docs/adr/0045-canonical-document-type-vocabulary.md</c>). Companion to
 /// <see cref="CanonicalDocumentFields"/>, which does the same job for extracted FIELD names.
 /// <para/>
 /// The vocabulary is load-bearing, not cosmetic: <c>Document.DocumentType</c> is compared with ORDINAL
@@ -24,12 +25,24 @@ namespace CompliDrop.Api.Services;
 /// </list>
 /// <para/>
 /// Callers: <c>ExtractionWorker.PersistSuccess</c> (coerces the model's answer before it overwrites the
-/// stored type) and both extraction clients' structured-output schemas, which pin <c>documentType</c> to
-/// this exact list via <see cref="SchemaEnum"/> so the Gemini and Anthropic contracts cannot drift apart.
-/// <c>DocumentEndpoints</c>' PATCH validation speaks the same vocabulary and is pinned equal to
-/// <see cref="All"/> by <c>CanonicalDocumentTypeTests</c> (the endpoint files are owned by
-/// <see href="https://github.com/neboxdev/complidrop/issues/389">#389</see> and deliberately untouched
-/// here; #389 should collapse that literal into this class).
+/// stored type), <c>ComplianceEndpoints.UpsertRule</c> (the OTHER operand of that ordinal comparison — it
+/// REJECTS an unknown type with a 400 rather than coercing, because retyping a compliance RULE would
+/// change what it governs), and both extraction clients' structured-output schemas, which pin
+/// <c>documentType</c> to this exact list via <see cref="SchemaEnum"/> so the Gemini and Anthropic
+/// contracts cannot drift apart.
+/// <para/>
+/// Mirrors pinned equal to <see cref="All"/> by <c>CanonicalDocumentTypeTests</c>: both provider schemas,
+/// the extraction prompt's DOCUMENT TYPES block, <c>DocumentEndpoints.AllowedDocumentTypes</c> (still a
+/// second literal — those endpoint files are owned by
+/// <see href="https://github.com/neboxdev/complidrop/issues/389">#389</see>, which should collapse it) and
+/// <see cref="DisplayLabels"/>' label map (which renders the type on the audit export). One mirror a .NET
+/// test cannot reach stays unpinned and is named in <c>.claude/reviewers.md</c> + ADR 0045:
+/// <c>frontend/src/lib/document-types.ts</c>.
+/// <para/>
+/// KNOWN GAP (ADR 0045): coercion happens only on the next EXTRACTION, and nothing re-extracts an
+/// already-processed row — so a pre-deploy row carrying a non-canonical type keeps grading against zero
+/// rules until a human re-types it or triggers a re-extraction. Deliberately not laundered by a data
+/// migration; see the ADR for why.
 /// <para/>
 /// Exposed as <c>internal</c> for direct unit testing via <c>InternalsVisibleTo CompliDrop.Api.Tests</c>,
 /// matching <see cref="CanonicalDocumentFields"/> / <see cref="VerdictBearingFields"/>.
