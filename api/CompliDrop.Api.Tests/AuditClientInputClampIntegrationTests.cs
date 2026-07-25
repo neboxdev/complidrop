@@ -5,6 +5,7 @@ using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using static CompliDrop.Api.Tests.TestHelpers.UploadFixtures;
 
 namespace CompliDrop.Api.Tests;
 
@@ -17,8 +18,10 @@ namespace CompliDrop.Api.Tests;
 /// <c>DbUpdateException</c> -> 500. These tests pin the two halves of that: the mutation still
 /// succeeds, and (the audit-suppression half) the row it should have written is actually there.
 ///
-/// Every assertion here runs through the real host, so it covers the interceptor writer AND the
-/// explicit <c>IAuditLogger</c> writer at once — both read the same clamped <c>ICurrentUser</c>.
+/// Every assertion here runs through the real host, so it covers the interceptor writer (the
+/// <c>/api/vendors</c> cases) AND the explicit <c>IAuditLogger</c> writer (the failed login, and the
+/// PUBLIC <c>/api/portal/{token}/upload</c> whose <c>audit.LogAsync</c> sits inside the permit
+/// reservation's transaction) — all three read the same clamped <c>ICurrentUser</c>.
 /// </summary>
 public sealed class AuditClientInputClampIntegrationTests(IntegrationTestFixture fixture)
     : IntegrationTestBase(fixture)
@@ -39,6 +42,11 @@ public sealed class AuditClientInputClampIntegrationTests(IntegrationTestFixture
             category = (string?)null,
             complianceTemplateId = (Guid?)null,
         });
+
+    /// <summary>Mirrors <c>VendorPortalEndpointsTests.UploadAsync</c> — the PUBLIC upload route.</summary>
+    private static Task<HttpResponseMessage> UploadAsync(
+        HttpClient client, string token, byte[] bytes, string fileName, string contentType) =>
+        client.PostAsync($"/api/portal/{token}/upload", UploadForm(bytes, fileName, contentType));
 
     private async Task<List<AuditLog>> AuditRowsAsync(Guid orgId)
     {
@@ -120,6 +128,42 @@ public sealed class AuditClientInputClampIntegrationTests(IntegrationTestFixture
         (await AuditRowsAsync(auth.OrgId))
             .Where(a => a.EntityType == nameof(Vendor))
             .Should().OnlyContain(a => a.CorrelationId == supplied);
+    }
+
+    [Fact]
+    public async Task The_public_portal_upload_survives_an_oversize_user_agent_intact()
+    {
+        // The ticket's headline scenario, and the worst instance of it: /api/portal/{token}/upload
+        // is PUBLIC and unauthenticated, so the header is controlled by a THIRD PARTY (the vendor,
+        // or anyone holding the link). It is also the one audited path where the 22001 landed
+        // inside an explicit transaction that had already burned a PAID permit and uploaded a blob
+        // — `audit.LogAsync("vendorPortalLink.upload_processed", ...)` sits between the
+        // ExecuteUpdateAsync reservation and the CommitAsync — so the failure cost the customer a
+        // quota slot AND left the vendor staring at a 500 with no way to retry successfully.
+        var seeded = await SeedLinkAsync(maxUploads: 20);
+        var client = CreateClient();
+        client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", OversizeUserAgent);
+
+        var resp = await UploadAsync(client, seeded.Token, PdfBytes(), "coi.pdf", "application/pdf");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK, "a long User-Agent is not the vendor's fault");
+
+        await using var db = CreateSystemDb();
+
+        // The document landed exactly once.
+        (await db.Documents.CountAsync(d => d.OrganizationId == seeded.OrgId)).Should().Be(1);
+
+        // The audit row that the transaction used to die on is present, and truncated rather than
+        // dropped — the forensic head still names the browser/proxy.
+        var uploads = (await AuditRowsAsync(seeded.OrgId))
+            .Where(a => a.Action == "vendorPortalLink.upload_processed")
+            .ToList();
+        uploads.Should().HaveCount(1);
+        uploads[0].UserAgent.Should().HaveLength(AuditColumnLengths.UserAgent);
+        uploads[0].UserAgent.Should().StartWith("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+
+        // And the paid permit stayed spent-once: not rolled back by a failed commit, not double-burned.
+        (await db.VendorPortalLinks.SingleAsync(l => l.Id == seeded.LinkId)).UploadCount.Should().Be(1);
     }
 
     [Fact]
