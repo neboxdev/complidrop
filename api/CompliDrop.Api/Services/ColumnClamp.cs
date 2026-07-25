@@ -13,11 +13,24 @@ public static class ColumnClamp
 {
     /// <summary>
     /// Returns <paramref name="value"/> unchanged when it fits <paramref name="maxLength"/>,
-    /// otherwise its first <paramref name="maxLength"/> characters.
+    /// otherwise its first <paramref name="maxLength"/> characters. <c>null</c> passes through as
+    /// <c>null</c> at every width — an absent value is not an over-length one.
     /// </summary>
+    /// <param name="maxLength">
+    /// The target column's width. Zero is legal and yields <see cref="string.Empty"/> (nothing fits,
+    /// so keep nothing). A NEGATIVE width is a caller bug, not a narrow column — there is no such
+    /// column — so it throws rather than silently returning empty: this helper is the last thing
+    /// standing between untrusted input and a bounded column, and a mistyped width that quietly
+    /// blanked every audited value would erase the evidence this clamp exists to preserve.
+    /// </param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxLength"/> is negative.</exception>
     public static string? To(string? value, int maxLength)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxLength);
         if (value is null || value.Length <= maxLength) return value;
+        // Nothing fits a zero-width target. Handled before the surrogate probe below, which would
+        // otherwise index value[-1].
+        if (maxLength == 0) return string.Empty;
         // Back off one code unit when the cut would split a surrogate pair (an emoji straddling
         // the boundary): a lone high surrogate is an invalid string that Npgsql's strict UTF-8
         // encoder rejects at SaveChangesAsync — the very write-path failure this clamp removes.

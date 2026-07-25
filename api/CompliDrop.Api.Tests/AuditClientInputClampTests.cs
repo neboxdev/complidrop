@@ -82,6 +82,37 @@ public class AuditClientInputClampTests
         ColumnClamp.To(ending, 500).Should().HaveLength(500).And.EndWith("\U0001F600");
     }
 
+    [Theory]
+    [InlineData(null, 0, null)]
+    [InlineData("", 0, "")]
+    [InlineData("a", 0, "")]
+    [InlineData("abc", 0, "")]
+    [InlineData("a", 1, "a")]
+    [InlineData("ab", 1, "a")]
+    [InlineData("\U0001F600x", 1, "")]  // the pair can't fit; backing off lands on index 0
+    public void Clamp_handles_the_degenerate_widths_without_indexing_out_of_range(
+        string? value, int maxLength, string? expected)
+    {
+        // The class doc invites new callers, and `To(value, 0)` used to throw
+        // IndexOutOfRangeException: `1 <= 0` is false, then the surrogate probe read value[-1].
+        // Zero is a legal width meaning "nothing fits" -> string.Empty, and null still passes
+        // through as null (an absent value is not an over-length one).
+        ColumnClamp.To(value, maxLength).Should().Be(expected);
+    }
+
+    [Fact]
+    public void Clamp_refuses_a_negative_width_instead_of_silently_blanking_the_value()
+    {
+        // A negative width is a caller bug, not a narrow column — there is no such column. Returning
+        // empty would quietly erase every audited value the mistyped call touched, which is exactly
+        // the forensic evidence this clamp exists to preserve.
+        var act = () => ColumnClamp.To("Mozilla/5.0", -1);
+
+        act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName("maxLength");
+        // Even for a value that would have "fit" trivially: fail on the bad width, not on the input.
+        ((Action)(() => ColumnClamp.To(null, -1))).Should().Throw<ArgumentOutOfRangeException>();
+    }
+
     // ---------------- the widths themselves ----------------
 
     [Fact]
