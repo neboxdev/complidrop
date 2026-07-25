@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Middleware;
@@ -120,10 +121,13 @@ public class AuditClientInputClampTests
     {
         // Since #372's structural wiring these widths agree BY CONSTRUCTION — ModelConfiguration
         // calls HasMaxLength(AuditColumnLengths.X) / HasMaxLength(CheckColumnMaxLength) rather than
-        // re-declaring a number (the #369 ContactEmail.MaxLength pattern). What this test still
-        // catches is the regression that UNDOES that: a literal hand-typed back into
-        // ModelConfiguration. It reads the built EF model, so `HasMaxLength(200)` fails here even
-        // though both "copies" would compile and the reflection would still find a width.
+        // re-declaring a number (the #369 ContactEmail.MaxLength pattern).
+        //
+        // Scope, precisely: this test reads the BUILT EF model and compares it to the constant, so
+        // it catches a DIVERGENT literal (`HasMaxLength(200)`) — but an EQUAL-valued re-inline
+        // (`HasMaxLength(500)`) passes here and only goes red once the constant later moves. The
+        // structural binding itself is pinned at the source-text level by
+        // ModelConfiguration_names_the_width_constants_rather_than_a_numeric_literal below.
         using var db = new SystemDbContext(new DbContextOptionsBuilder<SystemDbContext>()
             .UseNpgsql("Host=model-only;Database=none")
             .Options);
@@ -151,6 +155,57 @@ public class AuditClientInputClampTests
             .Should().BeLessThanOrEqualTo(Width<ComplianceCheck>(nameof(ComplianceCheck.Notes)));
         CorrelationIdMiddleware.Resolve(hostile).Length
             .Should().BeLessThanOrEqualTo(Width<AuditLog>(nameof(AuditLog.CorrelationId)));
+    }
+
+    [Fact]
+    public void ModelConfiguration_names_the_width_constants_rather_than_a_numeric_literal()
+    {
+        // The model-width test above cannot catch an EQUAL-valued re-inline: it compares the built
+        // model to the same constant, so `HasMaxLength(500)` hand-typed back over
+        // `HasMaxLength(AuditColumnLengths.UserAgent)` stays green until the constant moves — at
+        // which point the column and the clamp that feeds it silently disagree, which is exactly
+        // the 22001 that #372 removed. So pin the BINDING itself, at the source-text level, the way
+        // CleanupGateConfigTests pins the repo-root .editorconfig that drives the format gate.
+        // reviewers.md calls a re-inlined literal here a real finding; this is what makes it one.
+        var source = ReadModelConfigurationSource();
+
+        AssertWidthNamesConstant(source, nameof(AuditLog.IpAddress), "AuditColumnLengths.IpAddress");
+        AssertWidthNamesConstant(source, nameof(AuditLog.UserAgent), "AuditColumnLengths.UserAgent");
+        AssertWidthNamesConstant(source, nameof(AuditLog.CorrelationId), "AuditColumnLengths.CorrelationId");
+        AssertWidthNamesConstant(
+            source, nameof(ComplianceCheck.ActualValue), "ComplianceCheckService.CheckColumnMaxLength");
+        AssertWidthNamesConstant(
+            source, nameof(ComplianceCheck.Notes), "ComplianceCheckService.CheckColumnMaxLength");
+    }
+
+    /// <summary>
+    /// Asserts that <c>ModelConfiguration</c> configures <paramref name="property"/>'s width by
+    /// NAMING <paramref name="constant"/>, not by restating its number. All five property names are
+    /// unique within the file, so the match is unambiguous.
+    /// </summary>
+    private static void AssertWidthNamesConstant(string source, string property, string constant)
+    {
+        var match = Regex.Match(
+            source, @$"\.Property\(\w+ => \w+\.{Regex.Escape(property)}\)\.HasMaxLength\(([^)]*)\)");
+
+        match.Success.Should().BeTrue($"ModelConfiguration must still bound {property}");
+        match.Groups[1].Value.Trim().Should().EndWith(
+            constant,
+            "the width of {0} must NAME {1}, not restate its number — a hand-typed literal makes the "
+                + "column and CurrentUserService's clamp two copies that can drift", property, constant);
+    }
+
+    private static string ReadModelConfigurationSource()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 8 && dir != null; i++, dir = dir.Parent)
+        {
+            var path = Path.Combine(dir.FullName, "api", "CompliDrop.Api", "Data", "ModelConfiguration.cs");
+            if (File.Exists(path)) return File.ReadAllText(path);
+        }
+
+        throw new FileNotFoundException(
+            $"Could not locate ModelConfiguration.cs from {AppContext.BaseDirectory}");
     }
 
     // ---------------- inbound X-Trace-Id ----------------
