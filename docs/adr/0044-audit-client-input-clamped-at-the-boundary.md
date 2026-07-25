@@ -203,6 +203,9 @@ and it would not touch the trace-id/PII half of the problem at all.
   `Auth/CurrentUserService.cs`, `Middleware/CorrelationIdMiddleware.cs`, `Data/ModelConfiguration.cs`,
   `Services/ComplianceCheckService.cs` (`CheckColumnMaxLength` / `ClampToColumn`),
   `frontend/src/lib/sentry/scrub.ts` (`tagCorrelationId`)
-- Tests: `AuditClientInputClampTests` (charset walk, PII-shaped ids, degenerate widths, the
-  structural width binding), `AuditClientInputClampIntegrationTests` (public portal upload, failed
-  login, echoed-header-equals-stored-column)
+- Tests: `AuditClientInputClampTests` (charset walk, PII-shaped ids, degenerate widths, and the
+  structural width binding pinned twice — against the built EF model for a divergent literal, and
+  against `ModelConfiguration.cs` source text for an equal-valued re-inline the model check cannot
+  see), `AuditClientInputClampIntegrationTests` (public portal upload, failed login,
+  echoed-header-equals-stored-column, and — through the real middleware rather than `Resolve` — the
+  charset half via an email-shaped `X-Trace-Id` that FITS the column)
