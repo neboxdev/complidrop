@@ -161,6 +161,23 @@ Both are defined in this repo's `.claude/agents/`.
     compliance badge, and demoting the counts too would create a #294-class count-vs-badge
     split. The vendor rollup is the one surface with no room for the separate badge. Do NOT
     flag the untouched document-level counts as a missed demotion — that inversion is the bug.
+- The canonical document-type vocabulary is ONE list — `Services/CanonicalDocumentTypes.cs`
+  (#373) — and `ExtractionWorker.PersistSuccess` coerces the model's `documentType` through it
+  before that string overwrites `Document.DocumentType`. Two facts here look like bugs and are not:
+  - A BLANK/absent extracted type falls back to the STORED type (itself normalized), NOT to
+    `other`. `documentType` is `required` in both providers' structured-output schemas, so a blank
+    is off-spec and carries no information, while the stored type is usually the uploader's own
+    dropdown pick (and the model's own type hint) — demoting a deliberate `license` to `other`
+    would drop every license rule and strand the document at the zero-applicable-rules `Pending`
+    #373 exists to close. Only a NON-blank answer overwrites.
+  - `DocumentEndpoints`' private `AllowedDocumentTypes` is still a second literal, pinned EQUAL to
+    the vocabulary by `CanonicalDocumentTypeTests` rather than deleted: those endpoint files are
+    owned by [#389](https://github.com/neboxdev/complidrop/issues/389) (the upload-path
+    allow-list/clamp and the oversize-type 500), which should collapse it. DRIFT between the two
+    IS a real finding; the duplication itself is not.
+  `Normalize` needs no length clamp — it only ever returns a member of the vocabulary, so the
+  `varchar(100)` column is safe by construction (pinned against the EF model). The sibling
+  `DocumentSubType` has no vocabulary and is guarded only against the 22001 (over-length ⇒ null).
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).
