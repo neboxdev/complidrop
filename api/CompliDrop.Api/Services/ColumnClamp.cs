@@ -41,11 +41,13 @@ public static class ColumnClamp
 
 /// <summary>
 /// Widths of the <c>AuditLog</c> columns fed by UNTRUSTED, client-controlled input — the inbound
-/// <c>User-Agent</c> / <c>X-Trace-Id</c> headers and the connection's remote address. Mirrors
-/// <c>ModelConfiguration</c>'s <c>HasMaxLength</c> calls; pinned equal to the EF model by
-/// <c>AuditClientInputClampTests</c> so a widened column can't silently leave the boundary clamp
-/// behind. (<c>Action</c> / <c>EntityType</c> are excluded on purpose: every value written to them
-/// is a compile-time literal or a <c>nameof</c>, never client input.)
+/// <c>User-Agent</c> / <c>X-Trace-Id</c> headers and the connection's remote address. These are the
+/// SOURCE of the widths, not a mirror of them: <c>ModelConfiguration</c> calls
+/// <c>HasMaxLength(AuditColumnLengths.X)</c> (the <c>ContactEmail.MaxLength</c> pattern from #369),
+/// so the column and the boundary clamp that feeds it agree by construction and a widened column
+/// cannot silently leave the clamp behind. (<c>Action</c> / <c>EntityType</c> are excluded on
+/// purpose: every value written to them is a compile-time literal or a <c>nameof</c>, never client
+/// input.) See ADR 0044.
 /// </summary>
 public static class AuditColumnLengths
 {

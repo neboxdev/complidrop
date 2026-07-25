@@ -603,8 +603,14 @@ public class ComplianceCheckService(
         }
     }
 
-    // Matches ComplianceCheck.ActualValue / .Notes HasMaxLength(500) in ModelConfiguration.
-    private const int CheckColumnMaxLength = 500;
+    /// <summary>
+    /// Width of <c>ComplianceCheck.ActualValue</c> / <c>.Notes</c>. <c>ModelConfiguration</c>
+    /// CONSUMES this constant (#372) instead of re-declaring 500, so the column and the clamp that
+    /// feeds it cannot drift: the check rows commit in the same <c>SaveChanges</c> as the verdict
+    /// and its inputs (ADR 0030), and Npgsql does not truncate — a drifted width would fail that
+    /// whole unit of work with Postgres 22001, not just lose a note.
+    /// </summary>
+    internal const int CheckColumnMaxLength = 500;
 
     // Delegates to the shared surrogate-safe truncation (#372) so the codebase carries ONE
     // implementation, not a copy per bounded column. Behavior is unchanged — pinned by the

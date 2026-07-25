@@ -116,22 +116,41 @@ public class AuditClientInputClampTests
     // ---------------- the widths themselves ----------------
 
     [Fact]
-    public void The_clamp_widths_equal_the_audit_columns_they_protect()
+    public void Every_clamped_column_takes_its_width_from_the_shared_constant()
     {
-        // The mechanical pin: these constants exist only to mirror ModelConfiguration. If a column
-        // is ever widened or narrowed without the boundary following, the clamp either truncates
-        // usable evidence or stops preventing the 22001 — so pin them equal rather than trusting
-        // two hand-copied numbers (the #367 PlanDocumentScope lesson).
+        // Since #372's structural wiring these widths agree BY CONSTRUCTION — ModelConfiguration
+        // calls HasMaxLength(AuditColumnLengths.X) / HasMaxLength(CheckColumnMaxLength) rather than
+        // re-declaring a number (the #369 ContactEmail.MaxLength pattern). What this test still
+        // catches is the regression that UNDOES that: a literal hand-typed back into
+        // ModelConfiguration. It reads the built EF model, so `HasMaxLength(200)` fails here even
+        // though both "copies" would compile and the reflection would still find a width.
         using var db = new SystemDbContext(new DbContextOptionsBuilder<SystemDbContext>()
             .UseNpgsql("Host=model-only;Database=none")
             .Options);
-        var audit = db.Model.FindEntityType(typeof(AuditLog))!;
 
-        int? Width(string prop) => audit.FindProperty(prop)!.GetMaxLength();
+        int Width<TEntity>(string prop) =>
+            db.Model.FindEntityType(typeof(TEntity))!.FindProperty(prop)!.GetMaxLength()
+            ?? throw new InvalidOperationException($"{typeof(TEntity).Name}.{prop} is unbounded");
 
-        Width(nameof(AuditLog.UserAgent)).Should().Be(AuditColumnLengths.UserAgent);
-        Width(nameof(AuditLog.IpAddress)).Should().Be(AuditColumnLengths.IpAddress);
-        Width(nameof(AuditLog.CorrelationId)).Should().Be(AuditColumnLengths.CorrelationId);
+        Width<AuditLog>(nameof(AuditLog.UserAgent)).Should().Be(AuditColumnLengths.UserAgent);
+        Width<AuditLog>(nameof(AuditLog.IpAddress)).Should().Be(AuditColumnLengths.IpAddress);
+        Width<AuditLog>(nameof(AuditLog.CorrelationId)).Should().Be(AuditColumnLengths.CorrelationId);
+        Width<ComplianceCheck>(nameof(ComplianceCheck.ActualValue))
+            .Should().Be(ComplianceCheckService.CheckColumnMaxLength);
+        Width<ComplianceCheck>(nameof(ComplianceCheck.Notes))
+            .Should().Be(ComplianceCheckService.CheckColumnMaxLength);
+
+        // The consequence that actually matters, asserted against the MODEL's width rather than the
+        // constant: whatever the clamp emits fits the column EF will create.
+        var hostile = new string('x', 100_000);
+        ColumnClamp.To(hostile, AuditColumnLengths.UserAgent)!.Length
+            .Should().BeLessThanOrEqualTo(Width<AuditLog>(nameof(AuditLog.UserAgent)));
+        ColumnClamp.To(hostile, AuditColumnLengths.IpAddress)!.Length
+            .Should().BeLessThanOrEqualTo(Width<AuditLog>(nameof(AuditLog.IpAddress)));
+        ComplianceCheckService.ClampToColumn(hostile)!.Length
+            .Should().BeLessThanOrEqualTo(Width<ComplianceCheck>(nameof(ComplianceCheck.Notes)));
+        CorrelationIdMiddleware.Resolve(hostile).Length
+            .Should().BeLessThanOrEqualTo(Width<AuditLog>(nameof(AuditLog.CorrelationId)));
     }
 
     // ---------------- inbound X-Trace-Id ----------------
