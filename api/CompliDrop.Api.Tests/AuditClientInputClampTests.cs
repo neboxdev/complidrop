@@ -108,10 +108,52 @@ public class AuditClientInputClampTests
     [Theory]
     [InlineData("a1b2c3d4e5f6")]
     [InlineData("4bf92f3577b34da6a3ce929d0e0e4736")]                  // W3C trace-id
+    [InlineData("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")] // W3C traceparent
     [InlineData("f47ac10b-58cc-4372-a567-0e02b2c3d479")]              // UUID
-    [InlineData("req_01HQ8Z/edge-2.upstream:9")]                      // punctuation is fine
+    [InlineData("01ARZ3NDEKTSV4RRFFQ69G5FAV")]                        // ULID
+    [InlineData("req_01HQ8Z-edge_2")]                                 // vendor id: '-' and '_'
     public void A_usable_inbound_trace_id_is_honored_verbatim(string inbound) =>
         CorrelationIdMiddleware.Resolve(inbound).Should().Be(inbound);
+
+    [Theory]
+    [InlineData("pat@gardenhall.com")]              // an EMAIL is 18 visible-ASCII chars
+    [InlineData("pat.owner+coi@gardenhall.com")]
+    [InlineData("(512) 555-0134")]                  // a phone number
+    [InlineData("Bluebonnet Events, LLC")]          // free text / a customer name
+    [InlineData("req_01HQ8Z/edge-2.upstream:9")]    // any other punctuation
+    [InlineData("<script>alert(1)</script>")]
+    [InlineData("'; DROP TABLE audit_logs; --")]
+    public void A_pii_shaped_inbound_trace_id_is_replaced_never_echoed_back(string inbound)
+    {
+        // LOAD-BEARING, not aesthetics. An accepted id is echoed in the X-Trace-Id response header,
+        // becomes ApiError.correlationId in the frontend, and is shipped to Sentry as the
+        // `correlation_id` tag — which ADR 0037 deliberately applies AFTER scrubEvent and does NOT
+        // redact, on the premise that a correlation id is an opaque identifier. Under a
+        // visible-ASCII charset a client could put an email address in that tag. This test goes RED
+        // the moment IsUsableTraceId is widened back.
+        var resolved = CorrelationIdMiddleware.Resolve(inbound);
+
+        resolved.Should().NotBe(inbound);
+        resolved.Should().NotContain("@").And.NotContain(" ");
+        CorrelationIdMiddleware.IsUsableTraceId(inbound)
+            .Should().BeFalse("only [A-Za-z0-9_-] may reach the un-redacted Sentry correlation_id tag");
+    }
+
+    [Fact]
+    public void The_trace_id_charset_is_exactly_ascii_alphanumerics_plus_dash_and_underscore()
+    {
+        // Walk every BMP code point rather than trusting a hand-listed sample: the class the
+        // predicate accepts must be exactly the documented one, in both directions.
+        for (var cp = 0; cp <= 0xFFFF; cp++)
+        {
+            var c = (char)cp;
+            var expected = c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '-' or '_';
+
+            CorrelationIdMiddleware.IsUsableTraceId(c.ToString())
+                .Should().Be(expected, "U+{0:X4} must {1} be a legal trace-id character",
+                    cp, expected ? "" : "not");
+        }
+    }
 
     [Fact]
     public void An_inbound_trace_id_that_would_not_fit_the_column_is_replaced_not_truncated()
