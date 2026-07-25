@@ -37,7 +37,10 @@ public static class DocumentEndpoints
     /// that silently excludes every compliance rule. Case-insensitive; stored
     /// lower-case.
     /// </summary>
-    private static readonly HashSet<string> AllowedDocumentTypes = new(StringComparer.OrdinalIgnoreCase)
+    // internal (not private) so CanonicalDocumentTypeTests compares this set to the shared vocabulary
+    // DIRECTLY instead of reflecting on the field NAME — a rename must be a build error here, not a
+    // runtime test failure whose message reads like an invitation to delete the drift guard (#373).
+    internal static readonly HashSet<string> AllowedDocumentTypes = new(StringComparer.OrdinalIgnoreCase)
     {
         "coi", "license", "permit", "certification", "contract", "other"
     };

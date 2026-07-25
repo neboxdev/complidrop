@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text.Json.Nodes;
 using CompliDrop.Api.Endpoints;
 using CompliDrop.Api.Services;
+using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Tests.ExtractionFixtures;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
@@ -10,10 +11,16 @@ using FluentAssertions;
 namespace CompliDrop.Api.Tests;
 
 /// <summary>
-/// Pins the canonical document-type vocabulary (#373) and the three places that must all speak it:
-/// <see cref="CanonicalDocumentTypes"/> itself, the two providers' structured-output schemas (asserted on
-/// the WIRE payload, not the C# source), and the PATCH endpoint's own allow-list. No web host, no
-/// network — the extraction clients run against a stub HTTP handler.
+/// Pins the canonical document-type vocabulary (#373, ADR 0045) and every in-repo mirror that must speak
+/// it: <see cref="CanonicalDocumentTypes"/> itself, the two providers' structured-output schemas
+/// (asserted on the WIRE payload, not the C# source), the extraction system prompt's DOCUMENT TYPES block
+/// (the thing that actually teaches the model the vocabulary), the PATCH endpoint's allow-list, and
+/// <see cref="DisplayLabels"/> (which renders the type on the auditor-facing PDF/CSV export). No web
+/// host, no network — the extraction clients run against a stub HTTP handler.
+/// <para/>
+/// One mirror is deliberately NOT pinned here because a .NET test cannot reach it:
+/// <c>frontend/src/lib/document-types.ts</c>. It is named in <c>.claude/reviewers.md</c> and ADR 0045 so
+/// "ONE list" is never read as "no other copies exist".
 /// <para/>
 /// The vocabulary is compliance-critical rather than cosmetic: <c>Document.DocumentType</c> is compared
 /// with ordinal equality by <c>ComplianceCheckService</c>'s applicable-rules filter and by
@@ -85,11 +92,14 @@ public sealed class CanonicalDocumentTypeTests
     [InlineData("banana", false)]
     [InlineData("", false)]
     [InlineData(null, false)]
-    public void IsAllowed_answers_the_membership_question_the_request_paths_ask(string? input, bool expected)
+    public void IsAllowed_answers_the_membership_question_UpsertRule_asks(string? input, bool expected)
     {
-        // IsAllowed and Normalize are deliberately DIFFERENT operations on the same vocabulary: a request
-        // path rejects unrecognized input with a 400 (there's a human to correct it), a background worker
-        // parsing a model response has to coerce. They must never disagree about membership, though.
+        // IsAllowed and Normalize are deliberately DIFFERENT operations on the same vocabulary: the rule
+        // write boundary (ComplianceEndpoints.UpsertRule — the production caller, exercised end-to-end by
+        // ComplianceRuleUpsertTests) rejects unrecognized input with a 400, because there's a human to
+        // correct it and silently retyping a compliance RULE would change what it governs; a background
+        // worker parsing a model response has no one to ask, so it coerces. They must never disagree about
+        // membership, though.
         CanonicalDocumentTypes.IsAllowed(input).Should().Be(expected);
         if (!expected)
             CanonicalDocumentTypes.Normalize(input).Should().Be(CanonicalDocumentTypes.Fallback,
@@ -172,27 +182,83 @@ public sealed class CanonicalDocumentTypeTests
 
     private static string[] Values(JsonArray array) => [.. array.Select(n => n!.GetValue<string>())];
 
+    // ---- The system prompt: the mirror that actually teaches the model the vocabulary -------------
+
+    [Fact]
+    public void The_extraction_prompt_offers_the_model_exactly_the_canonical_vocabulary()
+    {
+        // The provider SCHEMAS are pinned above, but the schema only constrains what the model may
+        // RETURN — the prompt's DOCUMENT TYPES block is what tells it what the words MEAN. A type added
+        // to the vocabulary (and to both schemas) but not to the prompt is a type the model is never
+        // taught to emit; a type dropped from the vocabulary but left in the prompt invites an answer the
+        // schema rejects, i.e. a hard extraction failure. Parsed out of the prompt rather than
+        // content-pinned as a literal block, so a re-worded description doesn't redden this — only a
+        // changed SET does. (ExtractionPromptVersionTests content-pins prompt bullets; this is the
+        // set-equality half.)
+        PromptDocumentTypes().Should().BeEquivalentTo(CanonicalDocumentTypes.All,
+            "the prompt's DOCUMENT TYPES block and the shared vocabulary are one list");
+    }
+
+    /// <summary>Extracts the leading token of each bullet in the prompt's DOCUMENT TYPES block.</summary>
+    private static string[] PromptDocumentTypes()
+    {
+        // Line endings normalized first: a C# raw string literal keeps the SOURCE file's endings, which
+        // differ between a Windows checkout (CRLF) and CI (LF) — the same reason
+        // ExtractionPromptVersionTests normalizes before hashing.
+        const string header = "DOCUMENT TYPES\n";
+        var prompt = ExtractionPrompts.SystemPrompt.ReplaceLineEndings("\n");
+        var start = prompt.IndexOf(header, StringComparison.Ordinal);
+        start.Should().BeGreaterThanOrEqualTo(0, "the prompt must still carry a DOCUMENT TYPES block");
+
+        var rest = prompt[(start + header.Length)..];
+        var end = rest.IndexOf("\n\n", StringComparison.Ordinal);
+        end.Should().BeGreaterThanOrEqualTo(0, "the DOCUMENT TYPES block must end at a blank line");
+
+        return [.. rest[..end]
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("- ", StringComparison.Ordinal))
+            .Select(line => line[2..].Split(' ', StringSplitOptions.RemoveEmptyEntries)[0])];
+    }
+
     // ---- The PATCH endpoint's allow-list -----------------------------------------------------------
 
     [Fact]
     public void The_document_PATCH_allow_list_speaks_the_same_vocabulary()
     {
-        // DocumentEndpoints validates a manual type edit against its own private set. Those endpoint files
-        // are owned by #389 (the upload-path allow-list + the oversize 22001) and are deliberately NOT
-        // edited here, so the drift guarantee is mechanical instead: the two sets are pinned EQUAL.
+        // DocumentEndpoints validates a manual type edit against its own literal set. That file is owned
+        // by #389 (the upload-path allow-list + the oversize 22001) and is otherwise NOT edited here, so
+        // the drift guarantee is mechanical instead: the two sets are pinned EQUAL. The field is
+        // `internal` rather than `private` for exactly this — compared directly, so a rename is a BUILD
+        // error rather than a runtime failure whose message reads like a suggestion to delete the guard.
         //
-        // If #389 collapses that literal into CanonicalDocumentTypes — the desired end state — this test
-        // goes red on a missing field, which is the correct prompt to delete it rather than a silent gap.
-        var field = typeof(DocumentEndpoints).GetField("AllowedDocumentTypes",
-            BindingFlags.NonPublic | BindingFlags.Static);
-
-        field.Should().NotBeNull(
-            "DocumentEndpoints must still declare AllowedDocumentTypes — if it now reuses " +
-            "CanonicalDocumentTypes instead, delete this test, it has been superseded by the reuse");
-        var endpointVocabulary = (IEnumerable<string>)field!.GetValue(null)!;
-
-        endpointVocabulary.Should().BeEquivalentTo(CanonicalDocumentTypes.All,
+        // If #389 collapses that literal into CanonicalDocumentTypes — the desired end state — this stops
+        // compiling, which is the correct prompt to delete it rather than a silent gap.
+        DocumentEndpoints.AllowedDocumentTypes.Should().BeEquivalentTo(CanonicalDocumentTypes.All,
             "a type the PATCH endpoint accepts but extraction normalizes away (or vice versa) is exactly " +
             "the drift #373 closes");
+    }
+
+    // ---- The export's display labels ---------------------------------------------------------------
+
+    [Fact]
+    public void Every_vocabulary_member_has_a_human_label_for_the_export()
+    {
+        // DisplayLabels.DocumentType renders the type on the auditor-facing PDF and CSV export
+        // (ExportService). Its fallback returns the RAW TOKEN, so a vocabulary member with no entry
+        // doesn't fail — it silently prints "coi" to an auditor. Behavioural half first (the dangerous
+        // direction), through the public API rather than the private dictionary.
+        foreach (var type in CanonicalDocumentTypes.All)
+            DisplayLabels.DocumentType(type).Should().NotBe(type,
+                $"'{type}' would otherwise print as a raw token on the audit export");
+
+        // Set-equality half, which also catches a STALE label for a type no longer in the vocabulary.
+        var field = typeof(DisplayLabels).GetField("DocumentTypes", BindingFlags.NonPublic | BindingFlags.Static);
+        field.Should().NotBeNull(
+            "DisplayLabels must still declare its DocumentTypes label map — if it now derives the keys " +
+            "from CanonicalDocumentTypes instead, drop this half, the reuse supersedes it");
+        ((IReadOnlyDictionary<string, string>)field!.GetValue(null)!).Keys
+            .Should().BeEquivalentTo(CanonicalDocumentTypes.All,
+                "the export's label map and the shared vocabulary are one list");
     }
 }
