@@ -19,18 +19,17 @@ equality** on two compliance-critical paths:
 **Never-graded is not a fail-safe silence — it is an affirmative-coverage overclaim.** Trace the four
 links:
 
-- `ComputeOutcome`'s zero-applicable-rules branch stores `expiringSoon ? ComplianceStatus.ExpiringSoon :
-  ComplianceStatus.Pending` (`ComplianceCheckService.cs:428-431`). A never-graded document whose expiry is
+- `ComplianceCheckService.ComputeOutcome`'s zero-applicable-rules branch stores `expiringSoon ?
+  ComplianceStatus.ExpiringSoon : ComplianceStatus.Pending`. A never-graded document whose expiry is
   inside the 30-day window is stored **`ExpiringSoon`**, not `Pending`.
-- The read overlay promotes even a stored `Pending`: `expiry <= todayDate.AddDays(ExpiringSoonWindowDays)
-  && stored is Compliant or ExpiringSoon or Pending ? ExpiringSoon : stored`
-  (`ComplianceStatusDeriver.cs:105-107`).
-- `VendorEndpoints.ComputeCoverage` counts `Compliant or ExpiringSoon` as **in-force coverage**
-  (`VendorEndpoints.cs:131-135`) and returns `new VendorCoverage("Covered", [], coveredThrough)`
-  (`:162`).
-- `ExportService.cs:369` prints `— Certificate of Insurance — expires {date} — Expiring soon` into the
-  **auditor-facing vendor package** — while the document-detail "What we checked" panel is EMPTY for that
-  same document, because no rule ever ran.
+- `ComplianceStatusDeriver.Effective`'s read overlay promotes even a stored `Pending`: `expiry <=
+  todayDate.AddDays(ExpiringSoonWindowDays) && stored is Compliant or ExpiringSoon or Pending ?
+  ExpiringSoon : stored`.
+- `VendorEndpoints.ComputeCoverage` counts `Compliant or ExpiringSoon` as **in-force coverage** (its
+  `inForce` filter) and so returns `new VendorCoverage("Covered", [], coveredThrough)`.
+- `ExportService`'s vendor-package line prints `— Certificate of Insurance — expires {date} — Expiring
+  soon` into the **auditor-facing PDF** — while the document-detail "What we checked" panel is EMPTY for
+  that same document, because no rule ever ran.
 
 So the product tells the customer, the vendor rollup and the auditor that a document is covered when
 nothing has been checked. That raises the priority of the un-laundered legacy population below: the reason
