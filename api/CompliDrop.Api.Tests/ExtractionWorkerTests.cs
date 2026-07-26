@@ -794,6 +794,12 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             case "null": payload["documentType"] = null; break; // present, JSON null
             case "empty": payload["documentType"] = ""; break;
             case "other": payload["documentType"] = "other"; break;
+            // Present, but not a STRING. JsonElement.GetString() throws InvalidOperationException on a
+            // number/bool/object, so this shape used to escape the "a schema is the provider's promise,
+            // not ours" hardening entirely: the extraction threw, the worker counted a failure and
+            // retried, and the full paid Document AI + LLM retry budget burned before the document
+            // landed Failed. A non-string is a non-answer, exactly like an absent property.
+            case "wrongType": payload["documentType"] = 7; break;
             default: throw new ArgumentOutOfRangeException(nameof(shape), shape, "unknown payload shape");
         }
         return payload;
@@ -814,6 +820,11 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     // An explicit empty string is likewise no answer (this is the one shape the pre-fix code handled).
     [InlineData("gemini", "empty", "", "permit")]
     [InlineData("anthropic", "empty", "", "permit")]
+    // A non-STRING documentType (`"documentType": 7`) is a non-answer too — and, before the ValueKind
+    // guard, the only shape that THREW out of MapResult instead of degrading, burning the whole paid
+    // retry budget. It must land exactly where "absent" lands: mapped null, stored type KEPT.
+    [InlineData("gemini", "wrongType", null, "permit")]
+    [InlineData("anthropic", "wrongType", null, "permit")]
     // …but a POSITIVE "other" is a real classification the model made, so it must still overwrite. This
     // is the case that stops the fix from becoming "never trust the model about `other`".
     [InlineData("gemini", "other", "other", "other")]
@@ -841,7 +852,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         // (r.DocumentType == doc.DocumentType) matched ZERO rules, so the document returned the
         // zero-applicable-rules Pending with no ComplianceCheck rows at all — fail-safe, but a checklist
         // that silently never grades. Normalized, the same document reaches the real verdict.
-        var (_, docId, blobPath) = await SeedGradableDocAsync(minLimit: "2000000");
+        var (_, docId, blobPath) = await SeedGradableDocAsync(expectedValue: "2000000");
         await Fixture.Factory.Services.GetRequiredService<IBlobStorageService>()
             .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
         Extraction.Result = GlResult("3000000", documentType: "COI");
@@ -1111,6 +1122,94 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     }
 
     [Fact]
+    public async Task A_truncated_field_value_never_ends_in_an_ALREADY_UNPAIRED_high_surrogate()
+    {
+        // The sibling of the test above, and the one the "never ends in a lone surrogate" NAME actually
+        // promises. The back-off used to be conditional — `IsHighSurrogate(value[cut - 1]) &&
+        // IsLowSurrogate(value[cut])` — so it only fired when the clamp itself SPLIT a well-formed pair.
+        // An input that already carries an UNPAIRED high surrogate at index MaxLength-1 (nothing after it
+        // is a low surrogate) sailed straight through and was cut to a string ENDING in a lone surrogate:
+        // the exact 22021 the guard exists to remove, reached by a different door. The condition is now
+        // unconditional on a trailing high surrogate, matching the ColumnClamp.To shape #372 adds so the
+        // two collapse to ONE body when that branch lands.
+        var padding = new string('d', ExtractionWorker.FieldValueMaxLength - 1);
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(
+            // '\uD83D' with NO low surrogate after it — the char at MaxLength-1 is a bare high half.
+            new ExtractedField("description_of_operations", padding + "\uD83D" + "tail", "text", 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "a lone surrogate would fail the insert as invalid UTF-8");
+        await using var db = CreateSystemDb();
+        var stored = await db.DocumentFields.SingleAsync(f => f.DocumentId == docId);
+        stored.FieldValue.Should().Be(padding, "the cut backs off past the unpaired high surrogate");
+        char.IsSurrogate(stored.FieldValue![^1]).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task The_json_mirror_keeps_the_full_value_when_the_field_row_is_truncated()
+    {
+        // THE invariant the whole clamp rests on: truncation is DISPLAY-only. PersistSuccess writes the
+        // DocumentField row through Clamp but writes ExtractionFields (jsonb, no width) from the FULL
+        // value — and ExtractionFields is the CANONICAL compliance input every read goes through
+        // (ComplianceCheckService.LookupValue -> DocumentFieldReadability.RawFieldValue reads
+        // doc.ExtractionFields, never the DocumentField rows). Nothing pinned it, so a future
+        // "let's make the JSON mirror consistent with the row" edit would silently narrow every
+        // verdict input with the #373 suite still green. See the verdict-level sibling below.
+        var full = new string('d', 2_500);
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(new ExtractedField("description_of_operations", full, "text", 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionFields.Should().NotBeNull();
+        doc.ExtractionFields!.RootElement.GetProperty("description_of_operations").GetString()
+            .Should().Be(full, "the jsonb mirror is the canonical verdict input and has no width limit");
+
+        await using var db = CreateSystemDb();
+        (await db.DocumentFields.SingleAsync(f => f.DocumentId == docId)).FieldValue
+            .Should().HaveLength(ExtractionWorker.FieldValueMaxLength,
+                "only the varchar(2000) display row is clipped — that asymmetry IS the invariant");
+    }
+
+    [Fact]
+    public async Task A_contains_rule_still_matches_text_past_the_field_row_width()
+    {
+        // The VERDICT-level half of the invariant above: pinning the stored JSON alone would not prove
+        // that GRADING reads it. The checklist carries `description_of_operations contains "<venue>"`
+        // (the real shape — it is the additional-insured contains fallback's other operand), and the
+        // extraction returns a description whose only occurrence of the venue name lands PAST character
+        // 2000, i.e. outside the clamped DocumentField row. It must still read Compliant, because
+        // EvaluateRule -> LookupValue -> RawFieldValue resolves against doc.ExtractionFields.
+        //
+        // Clamp the jsonb write too and this flips to NonCompliant: an ordinary ACORD 25 + ACORD 101
+        // continuation would silently stop satisfying the requirement it actually satisfies.
+        const string venue = "GARDEN-HALL-SENTINEL";
+        var (_, docId, blobPath) = await SeedGradableDocAsync(
+            expectedValue: venue, ruleFieldName: "description_of_operations", ruleOperator: "contains");
+        await Fixture.Factory.Services.GetRequiredService<IBlobStorageService>()
+            .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
+        var description = new string('d', ExtractionWorker.FieldValueMaxLength + 100) + venue;
+        Extraction.Result = FieldResult(
+            new ExtractedField("description_of_operations", description, "text", 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant,
+            "grading reads the FULL value from ExtractionFields, not the clamped DocumentField row");
+
+        await using var db = CreateSystemDb();
+        (await db.DocumentFields.SingleAsync(f => f.DocumentId == docId)).FieldValue
+            .Should().NotContain(venue, "the clipped display row genuinely does NOT carry the match — " +
+                                        "which is what makes the Compliant above discriminating");
+    }
+
+    [Fact]
     public async Task A_long_failure_message_is_truncated_instead_of_throwing_22001()
     {
         // ProcessingError is varchar(2000) and carries an arbitrary exception message (a provider body
@@ -1156,11 +1255,16 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
 
     // ----- #337: the worker grades inside PersistSuccess (combined unit of work) --------------
 
-    // Seeds an org + zero-spend subscription + a vendor on a checklist carrying a single
-    // "general_liability_limit >= minLimit" COI rule + a Pending document assigned to that vendor, with a
-    // far-future expiry so the verdict is purely rule-driven. The blob is NOT uploaded here — each test
-    // uploads it to the fakes of the host whose worker it drives (the default host, or a derived one).
-    private async Task<(Guid OrgId, Guid DocId, string BlobPath)> SeedGradableDocAsync(string minLimit)
+    // Seeds an org + zero-spend subscription + a vendor on a checklist carrying a SINGLE COI rule + a
+    // Pending document assigned to that vendor, with a far-future expiry so the verdict is purely
+    // rule-driven. The rule defaults to "general_liability_limit >= expectedValue"; #373's clamp test
+    // overrides it with a `description_of_operations contains` rule to grade text that only exists in
+    // the un-clamped jsonb mirror. The blob is NOT uploaded here — each test uploads it to the fakes of
+    // the host whose worker it drives (the default host, or a derived one).
+    private async Task<(Guid OrgId, Guid DocId, string BlobPath)> SeedGradableDocAsync(
+        string expectedValue,
+        string ruleFieldName = "general_liability_limit",
+        string ruleOperator = "min_value")
     {
         var orgId = Guid.NewGuid();
         var docId = Guid.NewGuid();
@@ -1182,7 +1286,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         db.ComplianceRules.Add(new ComplianceRule
         {
             Id = Guid.NewGuid(), ComplianceTemplateId = templateId, DocumentType = "coi",
-            FieldName = "general_liability_limit", Operator = "min_value", ExpectedValue = minLimit, SortOrder = 0,
+            FieldName = ruleFieldName, Operator = ruleOperator, ExpectedValue = expectedValue, SortOrder = 0,
         });
         db.Documents.Add(new Document
         {
@@ -1216,7 +1320,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         // REAL verdict (Compliant / NonCompliant), never the intermediate Pending the old separate
         // EvaluateForSystemAsync pass briefly left. If PersistSuccess ever dropped the ApplyEvaluationAsync
         // call, this catches the silent loss of grading.
-        var (_, docId, blobPath) = await SeedGradableDocAsync(minLimit: "2000000");
+        var (_, docId, blobPath) = await SeedGradableDocAsync(expectedValue: "2000000");
         await Fixture.Factory.Services.GetRequiredService<IBlobStorageService>()
             .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
         Extraction.Result = GlResult(extractedGl);
@@ -1247,7 +1351,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
                 s.RemoveAll<IComplianceCheckService>();
                 s.AddScoped<IComplianceCheckService, ThrowingComplianceCheckService>();
             }));
-        var (_, docId, blobPath) = await SeedGradableDocAsync(minLimit: "2000000");
+        var (_, docId, blobPath) = await SeedGradableDocAsync(expectedValue: "2000000");
         // The derived host has its OWN singleton fakes — upload the blob and set the extraction result there.
         await factory.Services.GetRequiredService<IBlobStorageService>()
             .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);

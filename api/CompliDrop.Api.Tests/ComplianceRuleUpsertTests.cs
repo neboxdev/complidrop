@@ -206,6 +206,37 @@ public sealed class ComplianceRuleUpsertTests(IntegrationTestFixture fixture) : 
         (await db.ComplianceRules.CountAsync(r => r.ComplianceTemplateId == templateId)).Should().Be(0);
     }
 
+    [Theory]
+    [InlineData("LICENSE", "license")] // the headline shape: an EDIT folds the casing too
+    [InlineData("  Coi  ", "coi")]     // mixed case + padding on the update branch
+    public async Task Editing_a_rule_stores_its_document_type_canonically(string sent, string stored)
+    {
+        // UpsertRule canonicalizes on BOTH branches, but only CREATE had a regression-detecting test:
+        // the normalization theory above posts with no id, and the 400 test asserts the PRE-edit value
+        // SURVIVES a rejected edit — so `rule.DocumentType = documentType;` on the update branch never
+        // ran under test. Reverting just that line to `req.DocumentType` kept the whole suite green while
+        // an edited rule stored as "COI" governed zero documents (ComplianceCheckService's applicable-rules
+        // filter is ordinal), i.e. a requirement that silently stops applying — the #373 failure class,
+        // reached through the edit door.
+        var auth = await RegisterAndLoginAsync();
+        var templateId = await CreateTemplateAsync(auth.Client);
+
+        var create = await PostRuleAsync(auth.Client, templateId, "license_type", "equals", "CDL");
+        create.StatusCode.Should().Be(HttpStatusCode.OK);
+        var ruleId = (await Data(create)).GetProperty("id").GetGuid();
+
+        var update = await PostRuleAsync(
+            auth.Client, templateId, "license_type", "equals", "CDL", id: ruleId, documentType: sent);
+
+        update.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        var row = await db.ComplianceRules.SingleAsync(r => r.Id == ruleId);
+        row.DocumentType.Should().Be(stored, "the UPDATE branch canonicalizes too, not just CREATE");
+        // The edit really happened on the existing row rather than inserting a second one — otherwise
+        // "the stored type is canonical" could be satisfied by the untouched create.
+        (await db.ComplianceRules.CountAsync(r => r.ComplianceTemplateId == templateId)).Should().Be(1);
+    }
+
     [Fact]
     public async Task Editing_a_rule_to_an_unrecognized_document_type_is_rejected_400()
     {
