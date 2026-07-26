@@ -427,23 +427,37 @@ public class ExtractionWorker(
     /// <para/>
     /// TRUNCATES rather than drops: unlike <c>DocumentSubType</c> (matchable-or-nothing metadata), an
     /// extracted field is user-facing content shown on the document detail page — a clipped
-    /// <c>description_of_operations</c> beats a vanished one. The verdict path is unaffected either way:
-    /// <c>ExtractionFields</c> (jsonb, no width) and the typed columns are both written from the FULL
-    /// value, so grading still reads exactly what the model returned.
+    /// <c>description_of_operations</c> beats a vanished one.
+    /// <para/>
+    /// AS EXTRACTED, the verdict path is unaffected: <c>ExtractionFields</c> (jsonb, no width) and the
+    /// typed columns are both written from the FULL value in <see cref="PersistSuccess"/>, so grading
+    /// reads exactly what the model returned even when the <c>DocumentField</c> row is clipped (pinned by
+    /// <c>The_json_mirror_keeps_the_full_value_when_the_field_row_is_truncated</c> and its verdict-level
+    /// sibling). That guarantee does NOT survive a MANUAL EDIT: the detail page binds its input to the
+    /// clamped <c>DocumentField.FieldValue</c>, and <c>DocumentEndpoints.UpdateFields</c> writes the
+    /// submitted text back into <c>ExtractionFields</c> — so saving an untouched clipped field narrows the
+    /// canonical value to the clipped one, and <c>description_of_operations</c> IS a verdict input (the
+    /// additional-insured <c>contains</c> fallback in <c>ComplianceCheckService.EvaluateRule</c>). Marking
+    /// a clipped field in the UI so a user can't silently save the truncation is
+    /// <see href="https://github.com/neboxdev/complidrop/issues/444">#444</see>.
     /// <para/>
     /// Surrogate-safe: cutting between the halves of a surrogate pair would emit a lone surrogate, which
-    /// Postgres rejects as invalid UTF-8 (22021) — trading one write failure for another.
+    /// Postgres rejects as invalid UTF-8 (22021) — trading one write failure for another. The back-off is
+    /// UNCONDITIONAL on a trailing high surrogate rather than conditional on the next char being a low
+    /// one: an input that already carries an UNPAIRED high surrogate at <c>maxLength - 1</c> would
+    /// otherwise be cut to a string ending in a lone surrogate — the exact 22021 this guard exists to
+    /// remove. (Only <see cref="Document.ProcessingError"/> can realistically carry one, via an arbitrary
+    /// .NET exception message; <c>JsonElement.GetString()</c> cannot return an unpaired surrogate.)
     /// <para/>
     /// Intended shared home is <c>Services/ColumnClamp.cs</c>, added by the in-flight
     /// <see href="https://github.com/neboxdev/complidrop/issues/372">#372</see> branch; this private copy
-    /// is a DELIBERATE, visible duplicate until that branch lands, not an accidental one. Collapse the two
-    /// when it merges.
+    /// is a DELIBERATE, visible duplicate until that branch lands, not an accidental one — and is written
+    /// in that branch's exact shape so the two collapse to ONE body when it merges.
     /// </summary>
     private static string? Clamp(string? value, int maxLength)
     {
         if (value is null || value.Length <= maxLength) return value;
-        var cut = maxLength;
-        if (char.IsHighSurrogate(value[cut - 1]) && char.IsLowSurrogate(value[cut])) cut -= 1;
+        var cut = char.IsHighSurrogate(value[maxLength - 1]) ? maxLength - 1 : maxLength;
         return value[..cut];
     }
 
