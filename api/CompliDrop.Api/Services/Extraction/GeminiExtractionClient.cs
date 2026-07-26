@@ -209,7 +209,12 @@ public class GeminiExtractionClient(
         // to the Anthropic client (see the longer note there). The responseSchema marks documentType
         // `required`, so its absence is a non-answer; forging "other" out of it let PersistSuccess
         // overwrite the uploader's deliberate type and strand the document at zero applicable rules.
-        var documentType = root.TryGetProperty("documentType", out var dt) ? dt.GetString() : null;
+        // The ValueKind guard is the same hardening one step further out: `GetString()` THROWS on a
+        // number/bool/object, so an off-spec `"documentType": 7` would burn the full paid retry budget
+        // instead of degrading. A non-string is a non-answer, exactly like an omitted property.
+        var documentType = root.TryGetProperty("documentType", out var dt) && dt.ValueKind == JsonValueKind.String
+            ? dt.GetString()
+            : null;
         var documentSubType = root.TryGetProperty("documentSubType", out var dst) ? dst.GetString() : null;
         var needsReprocessing = root.TryGetProperty("needsReprocessing", out var nr) && nr.GetBoolean();
 

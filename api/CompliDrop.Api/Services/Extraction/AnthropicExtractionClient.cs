@@ -184,7 +184,15 @@ public class AnthropicExtractionClient(
         // document sits at Pending forever (the silent-never-graded outcome #373 exists to close). Null
         // reaches CanonicalDocumentTypes.NormalizeExtracted's blank branch, which keeps the stored type.
         // A model that POSITIVELY answers "other" still arrives as "other" and still overwrites.
-        var documentType = root.TryGetProperty("documentType", out var dt) ? dt.GetString() : null;
+        //
+        // The ValueKind guard covers the same class one step further out: `GetString()` THROWS
+        // InvalidOperationException on a number/bool/object, and an off-spec `"documentType": 7` would
+        // escape "a schema is the provider's promise, not ours" entirely — the extraction throws, the
+        // worker counts a failure and retries, and the whole paid Document AI + LLM budget burns before
+        // the document lands Failed. A non-string is a non-answer, exactly like an omitted property.
+        var documentType = root.TryGetProperty("documentType", out var dt) && dt.ValueKind == JsonValueKind.String
+            ? dt.GetString()
+            : null;
         var documentSubType = root.TryGetProperty("documentSubType", out var dst) ? dst.GetString() : null;
         var needsReprocessing = root.TryGetProperty("needsReprocessing", out var nr) && nr.GetBoolean();
 
