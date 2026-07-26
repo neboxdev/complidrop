@@ -11,11 +11,33 @@ equality** on two compliance-critical paths:
 
 1. **`ComplianceCheckService.ComputeOutcome`'s applicable-rules filter** — `r.DocumentType ==
    doc.DocumentType`. A document stored as `"COI"` matches zero `"coi"` rules, so the checklist yields
-   **zero applicable rules** and the document sits at `Pending` forever. That is fail-SAFE (nothing is
-   certified) but **silent**: the customer sees a checklist that never grades, with no error anywhere.
+   **zero applicable rules** and the document is **never graded against anything**, with no error anywhere.
 2. **`DocumentSupersession`** (ADR 0033), which groups on `(VendorId, DocumentType)`. A renewal stored as
    `"COI"` forms its own group and never supersedes the `"coi"` cert it replaces — so the old expired copy
    keeps inflating the Expired liability and keeps drawing reminders at a vendor who already renewed.
+
+**Never-graded is not a fail-safe silence — it is an affirmative-coverage overclaim.** Trace the four
+links:
+
+- `ComputeOutcome`'s zero-applicable-rules branch stores `expiringSoon ? ComplianceStatus.ExpiringSoon :
+  ComplianceStatus.Pending` (`ComplianceCheckService.cs:428-431`). A never-graded document whose expiry is
+  inside the 30-day window is stored **`ExpiringSoon`**, not `Pending`.
+- The read overlay promotes even a stored `Pending`: `expiry <= todayDate.AddDays(ExpiringSoonWindowDays)
+  && stored is Compliant or ExpiringSoon or Pending ? ExpiringSoon : stored`
+  (`ComplianceStatusDeriver.cs:105-107`).
+- `VendorEndpoints.ComputeCoverage` counts `Compliant or ExpiringSoon` as **in-force coverage**
+  (`VendorEndpoints.cs:131-135`) and returns `new VendorCoverage("Covered", [], coveredThrough)`
+  (`:162`).
+- `ExportService.cs:369` prints `— Certificate of Insurance — expires {date} — Expiring soon` into the
+  **auditor-facing vendor package** — while the document-detail "What we checked" panel is EMPTY for that
+  same document, because no rule ever ran.
+
+So the product tells the customer, the vendor rollup and the auditor that a document is covered when
+nothing has been checked. That raises the priority of the un-laundered legacy population below: the reason
+not to launder is that it is a destructive data operation needing human sign-off, **not** that the residue
+is harmless. Hardening the read surfaces so a never-graded document cannot read as coverage is
+[#443](https://github.com/neboxdev/complidrop/issues/443) — out of scope here; this ADR's job is to stop
+NEW documents from joining that population.
 
 Nothing guaranteed the value was in any particular vocabulary. `ExtractionWorker.PersistSuccess` assigned
 the model's `documentType` **verbatim** into the column:
@@ -57,8 +79,9 @@ pinned against the EF model by a test.
 `required` in both providers' structured-output schemas, so a non-answer is off-spec and carries **no
 information**, while the stored type is normally the uploader's own pick from the document-type dropdown
 (and is passed to the model as its type hint). Demoting a deliberate `license` to `other` on the strength of
-a protocol violation would drop every license rule from the checklist and strand the document at the
-zero-applicable-rules `Pending` — recreating the exact failure this decision closes. The fallback is itself
+a protocol violation would drop every license rule from the checklist and strand the document in the
+zero-applicable-rules never-graded state (which reads as coverage inside the 30-day window — see
+Context) — recreating the exact failure this decision closes. The fallback is itself
 normalized, so a non-canonical stored value is laundered on the way through rather than preserved.
 
 For that branch to be reachable, **both clients' `MapResult` map a missing or JSON-null `documentType` to
@@ -76,10 +99,23 @@ The sub-type has no vocabulary — it is free text the model coins per document 
 coerce to; an over-length value is off-spec noise, not a sub-type, and no obligation could match a truncated
 half-value anyway. The `DocumentField` columns and `Document.ProcessingError` are the opposite case: an
 extracted field is **user-facing content** shown on the detail page, so a clipped
-`description_of_operations` beats a vanished one. Truncation is surrogate-safe (cutting between the halves
-of a surrogate pair leaves a lone surrogate, which is not a character). The verdict path is unaffected
-either way — `ExtractionFields` (jsonb, no width) and the typed columns are both written from the FULL
-value, so grading still reads exactly what the model returned. Every width is pinned against the EF model.
+`description_of_operations` beats a vanished one. Truncation is surrogate-safe: the cut backs off
+whenever the character at `maxLength - 1` is a high surrogate — **unconditionally**, not only when the
+next character is its low half, so an input already carrying an unpaired high surrogate there cannot be
+clipped into the very 22021 the guard exists to remove. (Same shape as the `Services/ColumnClamp.To` that
+#372 adds, so the two collapse to one body when it lands.)
+
+**AS EXTRACTED, the verdict path is unaffected** — `ExtractionFields` (jsonb, no width) and the typed
+columns are both written from the FULL value in the same `PersistSuccess`, so grading reads exactly what
+the model returned even when the `DocumentField` row is clipped (pinned by a JSON-mirror test and by a
+verdict-level test whose `contains` match lands past character 2000). That guarantee stops at the first
+**manual edit**: the detail page binds its editable input to the clamped `DocumentField.FieldValue` and
+`DocumentEndpoints.UpdateFields` writes the submitted text back into `ExtractionFields`, so saving an
+untouched clipped field narrows the canonical value — and `description_of_operations` IS a verdict input
+(the additional-insured `contains` fallback). Marking a clipped field in the UI so a user cannot silently
+save the truncation is [#444](https://github.com/neboxdev/complidrop/issues/444).
+
+Every width is pinned against the EF model.
 
 **5. The rule write boundary VALIDATES rather than coerces.** `ComplianceEndpoints.UpsertRule` rejects a
 `documentType` outside the vocabulary with `400 validation.document_type` and stores the `Normalize`d
@@ -100,6 +136,15 @@ actually said, so a provider that went off-spec stays diagnosable. Pinned by a t
   length caps. `DocumentEndpoints`' private `AllowedDocumentTypes` literal therefore SURVIVES here, made
   `internal` and pinned EQUAL to the vocabulary by a compile-checked test rather than deleted; #389 should
   collapse it. **Drift between the two is a real finding; the duplication itself is not.**
+- **It does not delete `ComputeOutcome`'s blank-`DocumentType` wildcard arm.** `applicableRules` still
+  treats `string.IsNullOrEmpty(r.DocumentType)` as "applies to every document type", so the two layers now
+  narrow at different points: for any rule created or edited from here on, a blank type is **impossible**
+  (`UpsertRule` 400s), while a rule row that predates this decision keeps its wildcard meaning. That
+  asymmetry is deliberate — deleting the arm would silently change grading for existing blank-type rules,
+  a live-data behaviour change, not a code fix. A legacy blank-type rule must be **re-typed before it can
+  be saved again**, and the arm carries a comment saying it exists only for those rows.
+- **It does not touch the read surfaces that make a never-graded document read as coverage.** See
+  Context; that is [#443](https://github.com/neboxdev/complidrop/issues/443).
 - **It adds no new `ComplianceStatus` value, no schema change and no migration.**
 
 ## Consequences
@@ -126,17 +171,27 @@ actually said, so a provider that went off-spec stays diagnosable. Pinned by a t
 ### Known limitation — legacy rows are NOT laundered
 
 Normalization happens only the next time a document is **extracted**, and nothing re-extracts an
-already-processed row. So a row written before this deploy with a non-canonical `DocumentType` keeps grading
-against zero rules, stays out of its supersession group, and is invisible to the documents list's
-exact-match `?type=coi` filter — **forever**, unless a human re-types it via the PATCH endpoint or triggers
-a re-extraction. #389 (the ingress fix) does not touch already-stored rows either.
+already-processed row. So a row written before this deploy with a non-canonical `DocumentType` is never
+graded, stays out of its supersession group, and is invisible to the documents list's exact-match
+`?type=coi` filter — **forever**, unless a human re-types it via the PATCH endpoint or triggers a
+re-extraction. #389 (the ingress fix) does not touch already-stored rows either.
 
-This was left deliberately: laundering them means an ad-hoc `UPDATE` over production `Documents` rows, a
-destructive data operation with no dry-run and no per-row review, to fix a population whose size is
-currently unknown (the upload path has always lower-cased its own writes; the exposure is API clients and
-any pre-existing import). The right sequence is to MEASURE first — a read-only query for
-`DocumentType NOT IN (vocabulary)` — and then decide, rather than to bundle a blind data migration into a
-code fix. Tracked as follow-up work, not done here.
+Per Context, that residual population is **not harmless**: any of those rows expiring inside 30 days reads
+"Expiring soon", rolls its vendor up to "Covered", and prints as covered in the auditor package, with an
+empty "What we checked" panel behind it. So this limitation is **not** justified by "it fails safe anyway"
+— it does not.
+
+It is left undone for one reason only: **laundering the rows is a destructive data operation that needs
+human sign-off.** It means an ad-hoc `UPDATE` over production `Documents` rows with no dry-run and no
+per-row review, against a population whose size is currently unknown (the upload path has always
+lower-cased its own writes; the exposure is API clients and any pre-existing import), and the autonomy
+contract stops a session at exactly that boundary. The right sequence is to MEASURE first — a read-only
+query for `DocumentType NOT IN (vocabulary)` — and then decide with a human in the loop, rather than to
+bundle a blind data migration into a code fix.
+
+The overclaim itself does not depend on the laundering happening: **#443 fixes it at the read surfaces**
+(a document with zero applicable rules must not read as in-force coverage), which covers every ungraded
+row regardless of how its type got there. Laundering is the follow-on cleanup, not the mitigation.
 
 ### Known limitation — one unpinned mirror
 
@@ -146,6 +201,14 @@ shared fixture, unlike the contact-email corpus of ADR 0038). It is named explic
 "no other copies exist". The five in-repo mirrors that a .NET test CAN reach are all pinned: both provider
 schemas, the extraction prompt's DOCUMENT TYPES block, `DocumentEndpoints.AllowedDocumentTypes`, and
 `DisplayLabels.DocumentTypes`.
+
+There is a **sixth** in-repo document-type set, and it is deliberately **not a mirror**:
+`RuleEngine/RuleSetLoader`'s private `DocumentTypes` (`coi | license | certification | other`), which
+validates an obligation's `documentType` against the RD-c schema. A .NET test could reach it, so it is
+named here rather than left for a future author to trip over: it is a **SUBSET on purpose** (the
+obligation schema accepts fewer types than the product stores) and **must not be pinned equal to `All`**.
+Concretely, the "add a seventh type" checklist has to ask a question about it — *should the obligation
+schema accept this type?* — and record the answer, instead of mechanically appending the literal.
 
 ## Alternatives considered
 
@@ -169,8 +232,13 @@ extraction choke point has to be guarded regardless.
 
 ### Option D — Launder legacy rows with a data migration
 An `UPDATE Documents SET "DocumentType" = <normalized>` over existing rows. **Rejected for now** — see
-"Known limitation" above. It is a destructive, unreviewable data operation whose target population has not
-been measured; the ADR records the gap so it is a known open item rather than an invisible one.
+"Known limitation" above. Not because the residue is harmless (it is not: an ungraded row inside the
+30-day window reads as in-force coverage on the vendor rollup and in the auditor package), but because
+laundering is a **destructive, unreviewable data operation on production rows** whose target population
+has not been measured — the class of change that needs human sign-off before it runs. The ADR records the
+gap so it is a known open item rather than an invisible one, and the overclaim itself is closed at the
+read surfaces by [#443](https://github.com/neboxdev/complidrop/issues/443), which does not depend on the
+laundering happening at all.
 
 ### Option E — Delete `DocumentEndpoints.AllowedDocumentTypes` and reuse the vocabulary directly
 The desired end state. **Deferred**: those endpoint files are owned by the in-flight #389 branch and editing
@@ -180,6 +248,6 @@ runtime failure whose message invites deleting the guard.
 
 ## References
 
-- Tickets: [#373](https://github.com/neboxdev/complidrop/issues/373), [#389](https://github.com/neboxdev/complidrop/issues/389) (the ingress half), [#385](https://github.com/neboxdev/complidrop/issues/385) (partially addressed by the column clamps), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
+- Tickets: [#373](https://github.com/neboxdev/complidrop/issues/373), [#389](https://github.com/neboxdev/complidrop/issues/389) (the ingress half), [#385](https://github.com/neboxdev/complidrop/issues/385) (partially addressed by the column clamps), [#443](https://github.com/neboxdev/complidrop/issues/443) (a never-graded document must not read as in-force coverage), [#444](https://github.com/neboxdev/complidrop/issues/444) (surface a clipped field so a manual save can't narrow it), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
 - ADRs: [0033](0033-document-supersession-expired-liability.md) (the `(VendorId, DocumentType)` supersession key this protects), [0030](0030-compliance-verdict-combined-unit-of-work.md) (the single unit of work the coercion stays inside), [0040](0040-unreadable-canonical-value-fails-closed.md) (the sibling "absent and unreadable are different facts" decision for FIELD values), [0038](0038-vendor-contact-email-mirrored-validation.md) (the shared-fixture pattern the frontend mirror would need)
 - Code: `Services/CanonicalDocumentTypes.cs` (the vocabulary), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `Clamp`, the width constants), `Services/Extraction/{Gemini,Anthropic}ExtractionClient.cs` (`MapResult`, both schemas), `Endpoints/ComplianceEndpoints.cs` (`UpsertRule`), `Endpoints/DocumentEndpoints.cs` (`AllowedDocumentTypes`), `Services/DisplayLabels.cs`, `frontend/src/lib/document-types.ts` (unpinned mirror)

@@ -15,14 +15,24 @@ namespace CompliDrop.Api.Services;
 /// <list type="bullet">
 ///   <item><description><c>ComplianceCheckService.ComputeOutcome</c>'s <c>applicableRules</c> filter
 ///     (<c>r.DocumentType == doc.DocumentType</c>) — a <c>"COI"</c> matches zero <c>"coi"</c> rules, so
-///     the checklist yields zero applicable rules and the document sits at <c>Pending</c> forever. That
-///     is fail-SAFE (nothing is certified) but silent: the customer sees a checklist that never
-///     grades.</description></item>
+///     the checklist yields zero applicable rules and the document is NEVER GRADED against
+///     anything.</description></item>
 ///   <item><description><see cref="DocumentSupersession"/>, which groups on
 ///     <c>(VendorId, DocumentType)</c> — a <c>"COI"</c> renewal never supersedes the <c>"coi"</c> cert it
 ///     replaces, so the old expired copy keeps inflating the Expired liability and keeps drawing
 ///     reminders (ADR 0033).</description></item>
 /// </list>
+/// <para/>
+/// Never-graded is not a harmless silence — it is an affirmative-coverage OVERCLAIM whenever the
+/// document expires within 30 days. <c>ComputeOutcome</c>'s zero-applicable-rules branch stores
+/// <c>expiringSoon ? ExpiringSoon : Pending</c>; <see cref="ComplianceStatusDeriver"/><c>.Effective</c>
+/// promotes even a stored <c>Pending</c> to <c>ExpiringSoon</c> inside that window; and
+/// <c>VendorEndpoints.ComputeCoverage</c> counts <c>Compliant or ExpiringSoon</c> as IN-FORCE coverage.
+/// So a document no rule ever touched reads "Expiring soon" on the list, rolls its vendor up to
+/// "Covered", and prints as "Expiring soon" in the auditor-facing vendor package — while its own
+/// "What we checked" panel is empty. Hardening those READ surfaces so a never-graded document cannot
+/// read as coverage is <see href="https://github.com/neboxdev/complidrop/issues/443">#443</see>;
+/// this class stops NEW documents from joining that population.
 /// <para/>
 /// Callers: <c>ExtractionWorker.PersistSuccess</c> (coerces the model's answer before it overwrites the
 /// stored type), <c>ComplianceEndpoints.UpsertRule</c> (the OTHER operand of that ordinal comparison — it
@@ -39,10 +49,17 @@ namespace CompliDrop.Api.Services;
 /// test cannot reach stays unpinned and is named in <c>.claude/reviewers.md</c> + ADR 0045:
 /// <c>frontend/src/lib/document-types.ts</c>.
 /// <para/>
+/// NOT a mirror: <c>RuleEngine/RuleSetLoader</c>'s private <c>DocumentTypes</c> set
+/// (<c>coi | license | certification | other</c>) is a deliberate RD-c SUBSET — the obligation schema
+/// accepts fewer types than the product stores — and must NOT be pinned equal to <see cref="All"/>.
+/// Adding a seventh type here is therefore an explicit DECISION for that loader (does the obligation
+/// schema accept it?), not an automatic edit.
+/// <para/>
 /// KNOWN GAP (ADR 0045): coercion happens only on the next EXTRACTION, and nothing re-extracts an
 /// already-processed row — so a pre-deploy row carrying a non-canonical type keeps grading against zero
 /// rules until a human re-types it or triggers a re-extraction. Deliberately not laundered by a data
-/// migration; see the ADR for why.
+/// migration; see the ADR for why — and note that residue is the overclaiming population described
+/// above, owned by <see href="https://github.com/neboxdev/complidrop/issues/443">#443</see>.
 /// <para/>
 /// Exposed as <c>internal</c> for direct unit testing via <c>InternalsVisibleTo CompliDrop.Api.Tests</c>,
 /// matching <see cref="CanonicalDocumentFields"/> / <see cref="VerdictBearingFields"/>.

@@ -477,10 +477,24 @@ public class ExtractionWorker(
         // providers (this change added the Anthropic half), but a schema is the provider's promise, not
         // ours: an off-spec response, a provider bug, or a future client would otherwise write a raw
         // string straight into the column that decides WHICH rules apply (ComplianceCheckService's
-        // ordinal `r.DocumentType == doc.DocumentType` filter — a "COI" matches zero "coi" rules and
-        // grades nothing, forever) and WHICH documents share a supersession group (DocumentSupersession
-        // keys on (VendorId, DocumentType) — a "COI" renewal never supersedes the "coi" cert it
-        // replaces). Every value this can yield is one of six short vocabulary literals, so THIS column
+        // ordinal `r.DocumentType == doc.DocumentType` filter — a "COI" matches zero "coi" rules, so the
+        // checklist yields zero applicable rules and the document is NEVER GRADED against anything) and
+        // WHICH documents share a supersession group (DocumentSupersession keys on
+        // (VendorId, DocumentType) — a "COI" renewal never supersedes the "coi" cert it replaces).
+        //
+        // Never-graded is NOT a harmless no-op. ComputeOutcome's zero-applicable-rules branch stores
+        // `expiringSoon ? ExpiringSoon : Pending`, and ComplianceStatusDeriver.Effective promotes even a
+        // stored Pending to ExpiringSoon inside the 30-day window — so an ungraded document with an
+        // expiry in the next 30 days reads "Expiring soon" on the list, counts as IN-FORCE coverage in
+        // VendorEndpoints.ComputeCoverage (which accepts Compliant or ExpiringSoon), rolls the vendor up
+        // to "Covered", and prints as "Expiring soon" in the auditor-facing vendor package — while the
+        // document's own "What we checked" panel is empty because no rule ever ran. That is an
+        // affirmative-coverage OVERCLAIM, not a fail-safe silence. Fixing the READ surfaces so a
+        // never-graded document can't read as coverage is
+        // https://github.com/neboxdev/complidrop/issues/443; this line stops NEW documents from joining
+        // that population.
+        //
+        // Every value this can yield is one of six short vocabulary literals, so THIS column
         // is length-safe by construction: a runaway documentType no longer throws 22001. It is not the
         // only untrusted string in this unit of work, though — the DocumentField rows below carry three
         // more, clamped there (see Clamp) — so "the SaveChanges below cannot 22001" is a guarantee that

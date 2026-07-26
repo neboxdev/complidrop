@@ -416,6 +416,13 @@ public class ComplianceCheckService(
                 [],
                 ClearExistingChecks: true);
 
+        // The blank-DocumentType arm is a WILDCARD ("applies to every document type") and exists ONLY to
+        // tolerate rows written before #373 / ADR 0045. Nothing can write that state any more:
+        // ComplianceEndpoints.UpsertRule now rejects a blank/unrecognized documentType with
+        // `400 validation.document_type`, so for any rule created or edited from here on, blank is
+        // impossible rather than meaningful. KEEP the arm — deleting it would silently change grading for
+        // any pre-existing blank-type rule (a live-data behavior change, not a code fix), and a legacy
+        // blank-type rule must be re-typed before it can be saved again anyway.
         var applicableRules = template.Rules
             .Where(r => string.IsNullOrEmpty(r.DocumentType) || r.DocumentType == doc.DocumentType)
             .ToList();
