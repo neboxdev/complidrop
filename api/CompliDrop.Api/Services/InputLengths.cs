@@ -23,6 +23,10 @@ namespace CompliDrop.Api.Services;
 /// <see cref="TimeZones"/>) are deliberately absent — adding them here would imply a guard that does
 /// not and need not exist. The extraction worker's own widths stay on
 /// <c>ExtractionWorker</c> (a different writer with a different — truncating — policy, ADR 0045 §4).
+/// <para/>
+/// This file holds the NUMBERS only. The guard that turns one into a 400 — <c>InputLength</c> — lives
+/// in <c>Endpoints/</c>, because it returns an <c>IResult</c> and nothing else in <c>Services/</c>
+/// knows what an HTTP envelope looks like (#389 review).
 /// </summary>
 public static class InputLengths
 {
@@ -31,6 +35,22 @@ public static class InputLengths
     public const int OrganizationIndustry = 100;
     public const int OrganizationCompanySize = 20;
     public const int UserFullName = 200;
+
+    /// <summary>
+    /// <c>User.Email</c> and the pending <c>EmailVerificationToken.NewEmail</c> that becomes it —
+    /// written from the ANONYMOUS register body and from the change-email request. Bounded by
+    /// <c>AuthEndpoints.IsValidEmail</c>, which reads this constant, so the column and its guard are
+    /// one number rather than the two hand-copied 256s they were.
+    /// <para/>
+    /// That guard keeps its OWN error code (<c>validation.email</c>) and is NOT folded into
+    /// <see cref="InputLength.TooLongCode"/>: an unparseable-or-too-long account email is one
+    /// "enter a valid email" answer on a field the user is looking at, and splitting it into two codes
+    /// mid-form would be a worse experience than the single rule it has today. Nor is
+    /// <c>IsValidEmail</c>'s laxness otherwise touched — the lax-account-email vs strict-vendor-contact
+    /// split is deliberate and recorded in ADR 0038 (an account email is proven by the verification
+    /// mail, so a typo self-corrects; a vendor contact email is never proven and fails silently forever).
+    /// </summary>
+    public const int UserEmail = 256;
 
     // Waitlist (anonymous) — POST /api/waitlist
     public const int WaitlistEmail = 256;
@@ -79,59 +99,4 @@ public static class InputLengths
     /// PUBLIC route's safety otherwise depended on a value it does not own. (#389 review)
     /// </summary>
     public const int ClientIdempotencyKey = 128;
-}
-
-/// <summary>
-/// The ONE "is this request string short enough for the column it is about to be written to?" guard
-/// (#389, ADR 0046). The reject-or-clamp split is deliberate and per-field, NOT a blanket rule:
-/// <list type="bullet">
-///   <item><description><b>Reject (this helper)</b> for content the USER TYPED — a company name, a
-///     vendor name, a checklist requirement, a corrected field value. Silently truncating a user's own
-///     words is data loss they never consented to and cannot see, and on a compliance product a
-///     half-stored requirement is worse than a refused save.</description></item>
-///   <item><description><b>Clamp (<see cref="ColumnClamp.To"/>)</b> for incidental machine values the
-///     user did not author and does not read back — an upload's file NAME, a marketing attribution
-///     tag, a client-minted idempotency key. Refusing a vendor's certificate because their phone named
-///     it something long would block the actual job the product exists to do.</description></item>
-/// </list>
-/// Length is measured in UTF-16 code units while <c>varchar(n)</c> counts CODE POINTS, so a string of
-/// astral characters (emoji) is judged conservatively — this can reject a value Postgres would have
-/// accepted, never the reverse. That is the safe direction (a 400 the user can act on, never a 500),
-/// and it matches <see cref="ColumnClamp.To"/>, which cuts by the same measure.
-/// </summary>
-public static class InputLength
-{
-    /// <summary>
-    /// One code across every over-length rejection, so a client has ONE rule. The actionable detail is
-    /// in the message, which the frontend surfaces verbatim (CLAUDE.md § Frontend error-message policy).
-    /// </summary>
-    public const string TooLongCode = "validation.too_long";
-
-    /// <summary>
-    /// Friendly, jargon-free, and it names the limit the user has to get under — the tone of the
-    /// existing guards (<c>UpdateOrganization</c>'s "Organization name must be 200 characters or
-    /// fewer.", <c>ContactEmail.TooLongMessage</c>). "N or fewer", not "under N": exactly N is accepted.
-    /// </summary>
-    public static string TooLongMessage(string label, int maxLength) =>
-        $"{label} must be {maxLength} characters or fewer.";
-
-    /// <summary>
-    /// The ready-to-return 400 envelope for the FIRST over-length field, or <c>null</c> when every
-    /// field fits. Null and blank always fit — an absent value is not an over-length one.
-    /// <para/>
-    /// Pass the value that will actually be WRITTEN (post-<c>Trim()</c> where the endpoint trims), not
-    /// the raw request property: trimming only shortens, so checking the raw value would reject input
-    /// the write would have accepted.
-    /// </summary>
-    public static IResult? FirstViolation(params (string? Value, int MaxLength, string Label)[] fields)
-    {
-        foreach (var (value, maxLength, label) in fields)
-        {
-            if (value is not null && value.Length > maxLength)
-                return Results.Json(
-                    new { data = (object?)null, error = new { code = TooLongCode, message = TooLongMessage(label, maxLength) } },
-                    statusCode: StatusCodes.Status400BadRequest);
-        }
-        return null;
-    }
 }

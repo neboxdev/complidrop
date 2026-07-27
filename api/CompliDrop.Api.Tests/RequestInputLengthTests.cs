@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using CompliDrop.Api.Endpoints;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
@@ -170,6 +171,45 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
         await using var db = CreateSystemDb();
         (await db.Organizations.SingleAsync(o => o.Name.Length == InputLengths.OrganizationName))
             .Name.Should().NotStartWith(" ");
+    }
+
+    // ───────────────────────── Authenticated: the settings org-name edit ─────────────────────────
+
+    [Fact]
+    public async Task Updating_the_organization_refuses_an_over_length_name()
+    {
+        // The only over-length guard that PREDATED this ticket, and the one whose message set the tone
+        // for all of them. #389 rewrote it — swapping its `validation.required` code for the shared
+        // `validation.too_long` and its hand-typed 200 for InputLengths.OrganizationName — with no test
+        // on either side of the boundary, so nothing pinned the code the frontend now sees or the
+        // off-by-one the rewrite could have introduced.
+        var auth = await RegisterAndLoginAsync();
+
+        var resp = await auth.Client.PutAsJsonAsync("/api/auth/organization", new
+        {
+            name = Chars(InputLengths.OrganizationName + 1),
+            timeZone = "America/New_York",
+        });
+
+        await ShouldBeFriendly400(resp, "Organization name", InputLengths.OrganizationName);
+    }
+
+    [Fact]
+    public async Task Updating_the_organization_accepts_a_name_exactly_at_the_column_width()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var atLimit = Chars(InputLengths.OrganizationName);
+
+        var resp = await auth.Client.PutAsJsonAsync("/api/auth/organization", new
+        {
+            name = atLimit,
+            timeZone = "America/New_York",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.Organizations.SingleAsync(o => o.Id == auth.OrgId)).Name
+            .Should().Be(atLimit, "the column takes exactly its width — stored whole, not clipped");
     }
 
     private static Dictionary<string, object?> RegisterBody(string overriddenField, string value)
@@ -642,6 +682,49 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
     }
 
     [Fact]
+    public async Task Creating_a_checklist_accepts_fields_exactly_at_their_column_widths()
+    {
+        // The suite's own doc and ADR 0046 §3 both claim every guarded field is pinned at BOTH
+        // boundaries; TemplateName and TemplateDescription had only the over-length half, so a guard
+        // written with `>=` instead of `>` would have shipped green.
+        var auth = await RegisterAndLoginAsync();
+        var name = Chars(InputLengths.TemplateName);
+        var description = Chars(InputLengths.TemplateDescription);
+
+        var body = TemplateBody("name", name);
+        body["description"] = description;
+        var resp = await auth.Client.PostAsJsonAsync("/api/compliance/templates", body);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        var stored = await db.ComplianceTemplates.SingleAsync(t => t.OrganizationId == auth.OrgId && !t.IsSystemTemplate);
+        stored.Name.Should().Be(name, "the column takes exactly its width — stored whole, not clipped");
+        stored.Description.Should().Be(description);
+    }
+
+    [Fact]
+    public async Task Updating_a_checklist_accepts_fields_exactly_at_their_column_widths()
+    {
+        // Both paths, like the over-length half above: the guards are shared through
+        // TemplateLengthViolation, and a boundary pinned on create alone would not notice the update
+        // path losing its call.
+        var auth = await RegisterAndLoginAsync();
+        var templateId = await CreateTemplateAsync(auth.Client);
+        var name = Chars(InputLengths.TemplateName);
+        var description = Chars(InputLengths.TemplateDescription);
+
+        var body = TemplateBody("name", name);
+        body["description"] = description;
+        var resp = await auth.Client.PutAsJsonAsync($"/api/compliance/templates/{templateId}", body);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        var stored = await db.ComplianceTemplates.SingleAsync(t => t.Id == templateId);
+        stored.Name.Should().Be(name);
+        stored.Description.Should().Be(description);
+    }
+
+    [Fact]
     public async Task Updating_a_checklist_with_a_null_name_is_a_400_not_a_500()
     {
         // Discovered on the line the length guard lands on: UpdateTemplate called req.Name.Trim() with
@@ -706,12 +789,22 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
         var templateId = await CreateTemplateAsync(auth.Client);
 
         var body = RuleBody("fieldName", Chars(InputLengths.RuleFieldName));
+        // Operator too (#389 review): it was the one rule column with only the over-length half, and it
+        // is the narrowest of the four — 50 — so it is where an off-by-one would actually bite.
+        body["operator"] = Chars(InputLengths.RuleOperator);
         body["expectedValue"] = Chars(InputLengths.RuleExpectedValue);
         body["errorMessage"] = Chars(InputLengths.RuleErrorMessage);
 
         var resp = await auth.Client.PostAsJsonAsync($"/api/compliance/templates/{templateId}/rules", body);
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        var stored = await db.ComplianceRules.SingleAsync(r => r.ComplianceTemplateId == templateId);
+        stored.Operator.Should().HaveLength(InputLengths.RuleOperator,
+            "the column takes exactly its width — stored whole, not clipped");
+        stored.FieldName.Should().HaveLength(InputLengths.RuleFieldName);
+        stored.ExpectedValue.Should().HaveLength(InputLengths.RuleExpectedValue);
+        stored.ErrorMessage.Should().HaveLength(InputLengths.RuleErrorMessage);
     }
 
     private static Dictionary<string, object?> TemplateBody(string overriddenField, string value)
@@ -768,6 +861,30 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
         });
 
         await ShouldBeFriendly400(resp, "Email subject", InputLengths.ReminderEmailSubjectTemplate);
+    }
+
+    [Fact]
+    public async Task Updating_a_reminder_accepts_a_subject_exactly_at_the_column_width()
+    {
+        var auth = await RegisterAndLoginAsync();
+        Guid reminderId;
+        await using (var seed = CreateSystemDb())
+            reminderId = await seed.Reminders.Where(r => r.OrganizationId == auth.OrgId)
+                .Select(r => r.Id).FirstAsync();
+        var subject = Chars(InputLengths.ReminderEmailSubjectTemplate);
+
+        var resp = await auth.Client.PutAsJsonAsync($"/api/reminders/{reminderId}", new
+        {
+            notifyInternalUser = true,
+            notifyVendor = false,
+            isActive = true,
+            emailSubjectTemplate = subject,
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.Reminders.SingleAsync(r => r.Id == reminderId)).EmailSubjectTemplate
+            .Should().Be(subject, "the column takes exactly its width — stored whole, not clipped");
     }
 
     [Theory]
@@ -852,18 +969,26 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
         var auth = await RegisterAndLoginAsync();
         var docId = await UploadDocumentAsync(auth.Client);
 
+        // FieldName at its own width too (#389 review): it had only the over-length half, and it is the
+        // column an off-by-one would silently refuse a legitimate long extracted key on.
         var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
         {
             fields = new[]
             {
-                new { fieldName = "policy_number", fieldValue = Chars(InputLengths.DocumentFieldValue) },
+                new
+                {
+                    fieldName = Chars(InputLengths.DocumentFieldName),
+                    fieldValue = Chars(InputLengths.DocumentFieldValue),
+                },
             },
         });
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         await using var db = CreateSystemDb();
-        (await db.DocumentFields.SingleAsync(f => f.DocumentId == docId)).FieldValue
-            .Should().HaveLength(InputLengths.DocumentFieldValue);
+        var stored = await db.DocumentFields.SingleAsync(f => f.DocumentId == docId);
+        stored.FieldName.Should().HaveLength(InputLengths.DocumentFieldName,
+            "the column takes exactly its width — stored whole, not clipped");
+        stored.FieldValue.Should().HaveLength(InputLengths.DocumentFieldValue);
     }
 
     // ───────────────────────── shared upload helpers ─────────────────────────

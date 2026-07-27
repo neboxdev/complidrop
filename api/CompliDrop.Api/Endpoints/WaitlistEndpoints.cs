@@ -3,24 +3,11 @@ using CompliDrop.Api.DTOs.Waitlist;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using Microsoft.EntityFrameworkCore;
-using Npgsql;
 
 namespace CompliDrop.Api.Endpoints;
 
 public static class WaitlistEndpoints
 {
-    /// <summary>
-    /// The database name of the <c>WaitlistEntry.Email</c> unique index, which Npgsql reports as
-    /// <see cref="PostgresException.ConstraintName"/> on a 23505. Consumed by
-    /// <c>ModelConfiguration</c> (so the schema and this matcher agree by construction) and by
-    /// <see cref="IsDuplicateEmail"/>, which turns the concurrent-duplicate violation into the same
-    /// friendly 200 the sequential duplicate already gets. Same shape as
-    /// <see cref="Services.IdempotencyService.KeyIndexName"/>: matching on the INDEX name rather than
-    /// on the SqlState alone means an unrelated unique violation is never swallowed as a duplicate
-    /// signup. Value is EF's own default name for this index, so pinning it needs no migration.
-    /// </summary>
-    public const string EmailUniqueIndexName = "IX_WaitlistEntries_Email";
-
     public static void MapWaitlistEndpoints(this WebApplication app)
     {
         app.MapPost("/api/waitlist", async (WaitlistRequest request, SystemDbContext db) =>
@@ -69,7 +56,7 @@ public static class WaitlistEndpoints
             {
                 await db.SaveChangesAsync();
             }
-            catch (DbUpdateException ex) when (IsDuplicateEmail(ex))
+            catch (DbUpdateException ex) when (WaitlistSignup.IsDuplicateEmail(ex))
             {
                 // The check above is a read-then-write TOCTOU: two concurrent submissions of the same
                 // address both see "not on the list" and both insert, and the loser's commit hits the
@@ -99,8 +86,4 @@ public static class WaitlistEndpoints
             data = new { message = "You're on the list!" },
             error = (object?)null
         });
-
-    private static bool IsDuplicateEmail(DbUpdateException ex) =>
-        ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } pg
-        && string.Equals(pg.ConstraintName, EmailUniqueIndexName, StringComparison.Ordinal);
 }

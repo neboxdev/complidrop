@@ -24,7 +24,12 @@ internal static class ModelConfiguration
 
         builder.Entity<User>(e =>
         {
-            e.Property(u => u.Email).HasMaxLength(256);
+            // Bound to the same edge guard as every other request-fed column (#389 review). This one
+            // is written from the ANONYMOUS register body and from the change-email request, and its
+            // 256 used to be a hand-copied literal on BOTH sides — the exact drift shape ADR 0046 §1
+            // exists to remove, left behind while the identical anonymous-signup email column
+            // (WaitlistEntry.Email, also 256) was bound in the same commit.
+            e.Property(u => u.Email).HasMaxLength(Services.InputLengths.UserEmail);
             e.Property(u => u.PasswordHash).HasMaxLength(500);
             e.Property(u => u.FullName).HasMaxLength(Services.InputLengths.UserFullName);
             e.Property(u => u.Role).HasMaxLength(50).HasDefaultValue("admin");
@@ -43,7 +48,9 @@ internal static class ModelConfiguration
             // single index seek and a (statistically impossible) hash collision
             // surfaces as a write conflict rather than silent ambiguity.
             e.Property(t => t.TokenHash).HasMaxLength(64);
-            e.Property(t => t.NewEmail).HasMaxLength(256);
+            // The pending change-email address, which lands in User.Email on confirm — same guard,
+            // same width, same constant (#389 review).
+            e.Property(t => t.NewEmail).HasMaxLength(Services.InputLengths.UserEmail);
             e.HasIndex(t => t.TokenHash).IsUnique();
             e.HasIndex(t => t.UserId);
             // Cascade so a genuine HARD delete of a user takes its tokens with it
@@ -288,12 +295,14 @@ internal static class ModelConfiguration
             e.Property(w => w.CompanyName).HasMaxLength(Services.InputLengths.WaitlistCompanyName);
             e.Property(w => w.Industry).HasMaxLength(Services.InputLengths.WaitlistIndustry);
             e.Property(w => w.Source).HasMaxLength(Services.InputLengths.WaitlistSource);
-            // Named explicitly rather than left to EF's convention because WaitlistEndpoints matches on
-            // this name to turn the concurrent duplicate-signup 23505 into the friendly "You're on the
-            // list!" 200 instead of a 500 (#389 — the IdempotencyService.KeyIndexName pattern). The name
-            // is the EF default, so no migration: this pins it against a future rename.
+            // Named explicitly rather than left to EF's convention because the waitlist endpoint matches
+            // on this name to turn the concurrent duplicate-signup 23505 into the friendly "You're on
+            // the list!" 200 instead of a 500 (#389 — the IdempotencyService.KeyIndexName pattern). The
+            // name is the EF default, so no migration: this pins it against a future rename. It is read
+            // from Services/, not from the endpoint that catches the violation — this is the DATA layer,
+            // and it must not compile against Endpoints (#389 review).
             e.HasIndex(w => w.Email).IsUnique()
-                .HasDatabaseName(Endpoints.WaitlistEndpoints.EmailUniqueIndexName);
+                .HasDatabaseName(Services.WaitlistSignup.EmailUniqueIndexName);
         });
 
         builder.Entity<AuditLog>(e =>

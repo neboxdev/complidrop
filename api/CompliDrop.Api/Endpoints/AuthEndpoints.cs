@@ -1160,10 +1160,16 @@ public static class AuthEndpoints
                 CorrectedChecklists: templateCorrections.Enabled,
                 CorrectedAdditionalInsuredWording: complianceClaims.CorrectedAdditionalInsuredWording));
 
+    // The length bound reads InputLengths.UserEmail rather than restating 256 (#389 review): it is the
+    // width of BOTH columns this guard protects (User.Email and the pending
+    // EmailVerificationToken.NewEmail), and a hand-copied number on each side is the drift ADR 0046 §1
+    // exists to remove. The LAXNESS is unchanged and deliberate — an account email is proven by the
+    // verification mail, so a typo self-corrects; ADR 0038 records why this must NOT be unified with
+    // ContactEmail's strict rule. The over-length rejection keeps its own `validation.email` code.
     private static bool IsValidEmail(string? email) =>
         !string.IsNullOrWhiteSpace(email)
         && email.Contains('@')
-        && email.Length <= 256;
+        && email.Length <= InputLengths.UserEmail;
 
     private static bool IsStrongPassword(string? password)
     {

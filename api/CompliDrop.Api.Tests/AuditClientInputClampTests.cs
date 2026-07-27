@@ -17,6 +17,13 @@ namespace CompliDrop.Api.Tests;
 /// <c>SaveChanges</c> as the business mutation — so before this clamp an over-length header failed
 /// the whole unit of work (Postgres 22001 -> 500), unauthenticated on the portal-upload route and
 /// on the failed-login path, where it suppressed the attacker's own <c>user.login_failed</c> row.
+///
+/// The two width tests below are shared with <b>ADR 0046 / #389</b>, which generalized the same
+/// structural binding to the request-input columns (<c>Services/InputLengths.cs</c>): ADR 0046 §1's
+/// central decision is "one width source, consumed by the EF model", and reviewers.md calls a
+/// re-inlined literal there a real finding. This is what makes it one — the mechanism is identical
+/// (built-model equality plus a source-text assertion for the equal-valued re-inline the model test
+/// cannot see), so the two constant families are enforced by one pair of tests rather than two.
 /// </summary>
 public class AuditClientInputClampTests
 {
@@ -144,6 +151,40 @@ public class AuditClientInputClampTests
         Width<ComplianceCheck>(nameof(ComplianceCheck.Notes))
             .Should().Be(ComplianceCheckService.CheckColumnMaxLength);
 
+        // ADR 0046 / #389: every REQUEST-input width, same rule. If one of these columns is widened or
+        // narrowed out from under InputLengths, the edge guard that feeds it either re-opens the
+        // 22001-as-500 or starts refusing values the column would have taken.
+        Width<Organization>(nameof(Organization.Name)).Should().Be(InputLengths.OrganizationName);
+        Width<Organization>(nameof(Organization.Industry)).Should().Be(InputLengths.OrganizationIndustry);
+        Width<Organization>(nameof(Organization.CompanySize)).Should().Be(InputLengths.OrganizationCompanySize);
+        Width<User>(nameof(User.FullName)).Should().Be(InputLengths.UserFullName);
+        Width<User>(nameof(User.Email)).Should().Be(InputLengths.UserEmail);
+        Width<EmailVerificationToken>(nameof(EmailVerificationToken.NewEmail)).Should().Be(InputLengths.UserEmail);
+        Width<WaitlistEntry>(nameof(WaitlistEntry.Email)).Should().Be(InputLengths.WaitlistEmail);
+        Width<WaitlistEntry>(nameof(WaitlistEntry.CompanyName)).Should().Be(InputLengths.WaitlistCompanyName);
+        Width<WaitlistEntry>(nameof(WaitlistEntry.Industry)).Should().Be(InputLengths.WaitlistIndustry);
+        Width<WaitlistEntry>(nameof(WaitlistEntry.Source)).Should().Be(InputLengths.WaitlistSource);
+        Width<Document>(nameof(Document.OriginalFileName)).Should().Be(InputLengths.DocumentOriginalFileName);
+        Width<DocumentField>(nameof(DocumentField.FieldName)).Should().Be(InputLengths.DocumentFieldName);
+        Width<DocumentField>(nameof(DocumentField.FieldValue)).Should().Be(InputLengths.DocumentFieldValue);
+        // OriginalValue is only ever a copy of FieldValue, so it shares that width by construction.
+        Width<DocumentField>(nameof(DocumentField.OriginalValue)).Should().Be(InputLengths.DocumentFieldValue);
+        Width<Vendor>(nameof(Vendor.Name)).Should().Be(InputLengths.VendorName);
+        Width<Vendor>(nameof(Vendor.ContactPhone)).Should().Be(InputLengths.VendorContactPhone);
+        Width<Vendor>(nameof(Vendor.Category)).Should().Be(InputLengths.VendorCategory);
+        Width<ComplianceTemplate>(nameof(ComplianceTemplate.Name)).Should().Be(InputLengths.TemplateName);
+        Width<ComplianceTemplate>(nameof(ComplianceTemplate.Description)).Should().Be(InputLengths.TemplateDescription);
+        Width<ComplianceRule>(nameof(ComplianceRule.FieldName)).Should().Be(InputLengths.RuleFieldName);
+        Width<ComplianceRule>(nameof(ComplianceRule.Operator)).Should().Be(InputLengths.RuleOperator);
+        Width<ComplianceRule>(nameof(ComplianceRule.ExpectedValue)).Should().Be(InputLengths.RuleExpectedValue);
+        Width<ComplianceRule>(nameof(ComplianceRule.ErrorMessage)).Should().Be(InputLengths.RuleErrorMessage);
+        Width<Reminder>(nameof(Reminder.EmailSubjectTemplate))
+            .Should().Be(InputLengths.ReminderEmailSubjectTemplate);
+        Width<IdempotencyRecord>(nameof(IdempotencyRecord.Key)).Should().Be(InputLengths.IdempotencyKey);
+        // Not an InputLengths entry on purpose (see that file's summary): ContactEmail owns its own
+        // cap because #369's mirrored validator, not a #389 edge guard, is what bounds this column.
+        Width<Vendor>(nameof(Vendor.ContactEmail)).Should().Be(ContactEmail.MaxLength);
+
         // The consequence that actually matters, asserted against the MODEL's width rather than the
         // constant: whatever the clamp emits fits the column EF will create.
         var hostile = new string('x', 100_000);
@@ -169,30 +210,90 @@ public class AuditClientInputClampTests
         // reviewers.md calls a re-inlined literal here a real finding; this is what makes it one.
         var source = ReadModelConfigurationSource();
 
-        AssertWidthNamesConstant(source, nameof(AuditLog.IpAddress), "AuditColumnLengths.IpAddress");
-        AssertWidthNamesConstant(source, nameof(AuditLog.UserAgent), "AuditColumnLengths.UserAgent");
-        AssertWidthNamesConstant(source, nameof(AuditLog.CorrelationId), "AuditColumnLengths.CorrelationId");
-        AssertWidthNamesConstant(
+        AssertWidthNamesConstant<AuditLog>(source, nameof(AuditLog.IpAddress), "AuditColumnLengths.IpAddress");
+        AssertWidthNamesConstant<AuditLog>(source, nameof(AuditLog.UserAgent), "AuditColumnLengths.UserAgent");
+        AssertWidthNamesConstant<AuditLog>(source, nameof(AuditLog.CorrelationId), "AuditColumnLengths.CorrelationId");
+        AssertWidthNamesConstant<ComplianceCheck>(
             source, nameof(ComplianceCheck.ActualValue), "ComplianceCheckService.CheckColumnMaxLength");
-        AssertWidthNamesConstant(
+        AssertWidthNamesConstant<ComplianceCheck>(
             source, nameof(ComplianceCheck.Notes), "ComplianceCheckService.CheckColumnMaxLength");
+
+        // ADR 0046 / #389 — the same binding for every request-input width. This half is the one that
+        // catches an EQUAL-valued re-inline (`HasMaxLength(200)` typed back over
+        // `HasMaxLength(InputLengths.OrganizationName)`), which the model-width test above cannot see.
+        AssertWidthNamesConstant<Organization>(source, nameof(Organization.Name), "InputLengths.OrganizationName");
+        AssertWidthNamesConstant<Organization>(source, nameof(Organization.Industry), "InputLengths.OrganizationIndustry");
+        AssertWidthNamesConstant<Organization>(source, nameof(Organization.CompanySize), "InputLengths.OrganizationCompanySize");
+        AssertWidthNamesConstant<User>(source, nameof(User.FullName), "InputLengths.UserFullName");
+        AssertWidthNamesConstant<User>(source, nameof(User.Email), "InputLengths.UserEmail");
+        AssertWidthNamesConstant<EmailVerificationToken>(
+            source, nameof(EmailVerificationToken.NewEmail), "InputLengths.UserEmail");
+        AssertWidthNamesConstant<WaitlistEntry>(source, nameof(WaitlistEntry.Email), "InputLengths.WaitlistEmail");
+        AssertWidthNamesConstant<WaitlistEntry>(source, nameof(WaitlistEntry.CompanyName), "InputLengths.WaitlistCompanyName");
+        AssertWidthNamesConstant<WaitlistEntry>(source, nameof(WaitlistEntry.Industry), "InputLengths.WaitlistIndustry");
+        AssertWidthNamesConstant<WaitlistEntry>(source, nameof(WaitlistEntry.Source), "InputLengths.WaitlistSource");
+        AssertWidthNamesConstant<Document>(source, nameof(Document.OriginalFileName), "InputLengths.DocumentOriginalFileName");
+        AssertWidthNamesConstant<DocumentField>(source, nameof(DocumentField.FieldName), "InputLengths.DocumentFieldName");
+        AssertWidthNamesConstant<DocumentField>(source, nameof(DocumentField.FieldValue), "InputLengths.DocumentFieldValue");
+        AssertWidthNamesConstant<DocumentField>(source, nameof(DocumentField.OriginalValue), "InputLengths.DocumentFieldValue");
+        AssertWidthNamesConstant<Vendor>(source, nameof(Vendor.Name), "InputLengths.VendorName");
+        AssertWidthNamesConstant<Vendor>(source, nameof(Vendor.ContactPhone), "InputLengths.VendorContactPhone");
+        AssertWidthNamesConstant<Vendor>(source, nameof(Vendor.Category), "InputLengths.VendorCategory");
+        AssertWidthNamesConstant<Vendor>(source, nameof(Vendor.ContactEmail), "ContactEmail.MaxLength");
+        AssertWidthNamesConstant<ComplianceTemplate>(source, nameof(ComplianceTemplate.Name), "InputLengths.TemplateName");
+        AssertWidthNamesConstant<ComplianceTemplate>(source, nameof(ComplianceTemplate.Description), "InputLengths.TemplateDescription");
+        AssertWidthNamesConstant<ComplianceRule>(source, nameof(ComplianceRule.FieldName), "InputLengths.RuleFieldName");
+        AssertWidthNamesConstant<ComplianceRule>(source, nameof(ComplianceRule.Operator), "InputLengths.RuleOperator");
+        AssertWidthNamesConstant<ComplianceRule>(source, nameof(ComplianceRule.ExpectedValue), "InputLengths.RuleExpectedValue");
+        AssertWidthNamesConstant<ComplianceRule>(source, nameof(ComplianceRule.ErrorMessage), "InputLengths.RuleErrorMessage");
+        AssertWidthNamesConstant<Reminder>(
+            source, nameof(Reminder.EmailSubjectTemplate), "InputLengths.ReminderEmailSubjectTemplate");
+        AssertWidthNamesConstant<IdempotencyRecord>(source, nameof(IdempotencyRecord.Key), "InputLengths.IdempotencyKey");
     }
 
     /// <summary>
-    /// Asserts that <c>ModelConfiguration</c> configures <paramref name="property"/>'s width by
-    /// NAMING <paramref name="constant"/>, not by restating its number. All five property names are
-    /// unique within the file, so the match is unambiguous.
+    /// Asserts that <c>ModelConfiguration</c> configures <typeparamref name="TEntity"/>'s
+    /// <paramref name="property"/> width by NAMING <paramref name="constant"/>, not by restating its
+    /// number. Scoped to the entity's own <c>builder.Entity&lt;T&gt;(...)</c> block because property
+    /// names are NOT unique across the file — <c>Name</c> alone appears on three entities, <c>Email</c>
+    /// and <c>FieldName</c> on two — so a file-wide regex would silently assert against whichever
+    /// entity happened to be configured first.
     /// </summary>
-    private static void AssertWidthNamesConstant(string source, string property, string constant)
+    private static void AssertWidthNamesConstant<TEntity>(string source, string property, string constant)
     {
+        var block = EntityBlock(source, typeof(TEntity).Name);
         var match = Regex.Match(
-            source, @$"\.Property\(\w+ => \w+\.{Regex.Escape(property)}\)\.HasMaxLength\(([^)]*)\)");
+            block, @$"\.Property\(\w+ => \w+\.{Regex.Escape(property)}\)\s*\.HasMaxLength\(([^)]*)\)");
 
-        match.Success.Should().BeTrue($"ModelConfiguration must still bound {property}");
+        match.Success.Should().BeTrue(
+            $"ModelConfiguration must still bound {typeof(TEntity).Name}.{property}");
         match.Groups[1].Value.Trim().Should().EndWith(
             constant,
-            "the width of {0} must NAME {1}, not restate its number — a hand-typed literal makes the "
-                + "column and CurrentUserService's clamp two copies that can drift", property, constant);
+            "the width of {0}.{1} must NAME {2}, not restate its number — a hand-typed literal makes "
+                + "the column and the guard that feeds it two copies that can drift",
+            typeof(TEntity).Name, property, constant);
+    }
+
+    /// <summary>
+    /// The body of <c>builder.Entity&lt;<paramref name="entity"/>&gt;(e =&gt; { … })</c>, brace-matched
+    /// from the first <c>{</c> after the marker.
+    /// </summary>
+    private static string EntityBlock(string source, string entity)
+    {
+        var marker = $"builder.Entity<{entity}>(";
+        var start = source.IndexOf(marker, StringComparison.Ordinal);
+        start.Should().BeGreaterThanOrEqualTo(0, "ModelConfiguration must still configure {0}", entity);
+
+        var open = source.IndexOf('{', start);
+        open.Should().BeGreaterThanOrEqualTo(0);
+        var depth = 0;
+        for (var i = open; i < source.Length; i++)
+        {
+            if (source[i] == '{') depth++;
+            else if (source[i] == '}' && --depth == 0) return source[open..(i + 1)];
+        }
+
+        throw new InvalidOperationException($"Unbalanced braces in the builder.Entity<{entity}> block");
     }
 
     private static string ReadModelConfigurationSource()
