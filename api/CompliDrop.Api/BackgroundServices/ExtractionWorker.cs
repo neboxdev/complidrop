@@ -71,11 +71,16 @@ public class ExtractionWorker(
     /// of trusting a hand-copied literal — the same treatment <see cref="DocumentSubTypeMaxLength"/>
     /// gets. See <see cref="Clamp"/> for why these are truncated rather than dropped (#373; partially
     /// addresses #385).
+    /// <para/>
+    /// The two <c>DocumentField</c> widths ALIAS <see cref="InputLengths"/> rather than repeat the
+    /// numbers (#389): the manual-correction endpoint writes the same two columns from request input,
+    /// and its guard REJECTS where this one truncates — two policies on one width, which only stays
+    /// coherent while there is exactly one width. Same one-line-delegate shape as <see cref="Clamp"/>.
     /// </summary>
-    internal const int FieldNameMaxLength = 200;
+    internal const int FieldNameMaxLength = InputLengths.DocumentFieldName;
 
     /// <inheritdoc cref="FieldNameMaxLength"/>
-    internal const int FieldValueMaxLength = 2000;
+    internal const int FieldValueMaxLength = InputLengths.DocumentFieldValue;
 
     /// <inheritdoc cref="FieldNameMaxLength"/>
     internal const int FieldTypeMaxLength = 50;
