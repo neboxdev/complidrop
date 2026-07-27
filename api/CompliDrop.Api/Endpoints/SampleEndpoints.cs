@@ -47,8 +47,13 @@ public static class SampleEndpoints
         if (currentUser.OrganizationId is null) return Unauthorized();
         var orgId = currentUser.OrganizationId.Value;
 
-        // Idempotency-Key replay, consistent with the document-upload endpoint.
-        var idempotencyKey = http.Request.Headers["Idempotency-Key"].FirstOrDefault();
+        // Idempotency-Key replay, consistent with the document-upload endpoint — including its clamp
+        // (#389): IdempotencyRecord.Key is varchar(200) and Npgsql does not truncate, so a long header
+        // used to 22001 the co-committed record and take the sample seed down with it. Clamped at the
+        // single point the header is READ, so the lookup and the stored key are the same string and a
+        // repeat of a long key still replays instead of re-seeding.
+        var idempotencyKey = ColumnClamp.To(
+            http.Request.Headers["Idempotency-Key"].FirstOrDefault(), InputLengths.ClientIdempotencyKey);
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
         {
             var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
