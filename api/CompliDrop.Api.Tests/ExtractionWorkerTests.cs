@@ -1,9 +1,13 @@
+using System.Net;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Services.Extraction;
+using CompliDrop.Api.Tests.ExtractionFixtures;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.AspNetCore.TestHost;
@@ -72,7 +76,8 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         DateTime? processingStartedAt = null,
         DateTime? createdAt = null,
         decimal? subscriptionSpendUsd = null,
-        string plan = "free")
+        string plan = "free",
+        string? documentType = null)
     {
         var orgId = Guid.NewGuid();
         var docId = Guid.NewGuid();
@@ -112,6 +117,9 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             BlobStoragePath = blobPath,
             FileSizeBytes = 1024,
             ContentType = "application/pdf",
+            // Defaults to the entity's own "other" when unspecified. #373's blank-answer tests pass a
+            // stored type explicitly, because what a blank extraction falls back TO is the contract.
+            DocumentType = documentType ?? new Document().DocumentType,
             ExtractionStatus = status,
             ProcessingAttempts = attempts,
             FailedAttempts = failedAttempts,
@@ -649,13 +657,614 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         doc.ExtractionStatus.Should().Be(expected);
     }
 
+    // ----- #373: the model's documentType is normalized before it overwrites the stored type ----
+
+    /// <summary>
+    /// A minimal successful extraction that returns <paramref name="documentType"/> verbatim. Every field
+    /// is high-confidence and parseable, and NeedsReprocessing is false, so nothing but the type under
+    /// test can move the document off <see cref="ExtractionStatus.Completed"/> — which is what makes
+    /// "the over-length type did not throw 22001" a real assertion rather than an accident.
+    /// </summary>
+    private static ExtractionResult TypedResult(string? documentType, string? subType = null) => new(
+        DocumentType: documentType,
+        DocumentSubType: subType,
+        Fields: [new ExtractedField("policy_number", "POL-1", "string", 0.95)],
+        NeedsReprocessing: false,
+        Usage: new ExtractionUsage(InputTokens: 100, OutputTokens: 50, EstimatedCostUsd: 0.01m));
+
+    [Theory]
+    [InlineData("coi", "coi")]                        // canonical: passes through unmangled
+    [InlineData("license", "license")]
+    [InlineData("COI", "coi")]                        // the ticket's headline shape
+    [InlineData("Coi", "coi")]                        // mixed case
+    [InlineData("  Permit  ", "permit")]              // padded
+    [InlineData("Certificate of Insurance", "other")] // plausible prose from the alternate provider
+    [InlineData("menu", "other")]                     // unknown vocabulary
+    public async Task The_extracted_document_type_is_stored_canonically(string extracted, string expected)
+    {
+        // The stored string decides WHICH rules apply (ComplianceCheckService's ordinal filter) and WHICH
+        // documents share a supersession group (DocumentSupersession's (VendorId, DocumentType) key), so a
+        // verbatim "COI" is not a display wart — it grades against zero rules forever and never supersedes
+        // the cert it renews. Normalizing at the single persist choke point is the fix (#373).
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = TypedResult(extracted);
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.DocumentType.Should().Be(expected);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed, "normalization is not a failure path");
+    }
+
+    [Fact]
+    public async Task An_over_length_document_type_is_coerced_instead_of_throwing_22001()
+    {
+        // DocumentType is varchar(100) (ModelConfiguration): pre-#373 a runaway value went straight into
+        // PersistSuccess's single SaveChanges and threw Postgres 22001, which the worker counts as a
+        // failure and RETRIES — re-paying Document AI + LLM cost on every doomed attempt until the budget
+        // is spent. Because Normalize only ever returns a member of the vocabulary, the column is
+        // length-safe by construction; assert the document actually COMPLETED (not merely that the string
+        // is short), since a 22001 would have left it Pending with a ProcessingError instead.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = TypedResult(new string('x', 5_000));
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.DocumentType.Should().Be(CanonicalDocumentTypes.Fallback);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        doc.ProcessingError.Should().BeNull("a 22001 would surface here as a counted extraction failure");
+        doc.FailedAttempts.Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task A_blank_extracted_type_keeps_the_stored_type_instead_of_demoting_it(string? extracted)
+    {
+        // documentType is `required` in both providers' structured-output schemas, so a blank answer is a
+        // protocol violation carrying no information — NOT a positive classification of "other". The stored
+        // type is normally the uploader's own pick from the type dropdown (and is passed to the model as
+        // its type hint), so overwriting a deliberate "license" with "other" would drop every license rule
+        // from the checklist and strand the document at Pending — the very silent-never-graded outcome
+        // #373 closes. (Pre-#373 this wrote the blank string ITSELF into the column, which matched no
+        // typed rule either.)
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m, documentType: "license");
+        Extraction.Result = TypedResult(extracted);
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        (await GetDocAsync(docId)).DocumentType.Should().Be("license");
+    }
+
+    [Fact]
+    public async Task A_blank_extracted_type_still_launders_a_non_canonical_stored_type()
+    {
+        // The other half of the fallback: preserving the stored type must not preserve a BAD stored type.
+        // A "COI" written by an API client before the ingress paths validated (#389's half) is still
+        // normalized on its way through, so the blank-answer path can never leave a value that grades
+        // against zero rules.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m, documentType: "COI");
+        Extraction.Result = TypedResult(null);
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        (await GetDocAsync(docId)).DocumentType.Should().Be("coi");
+    }
+
+    /// <summary>
+    /// Parses a RAW provider payload through the real client's own <c>MapResult</c> (stub HTTP handler,
+    /// no network) and hands the parsed result to the worker's extraction seam. The shapes under test
+    /// have to travel this path: an OMITTED property and a JSON null are what a provider actually emits
+    /// when it violates its schema's <c>required</c>, and a hand-built <see cref="ExtractionResult"/>
+    /// cannot express the difference between "the provider said nothing" and "the provider said other".
+    /// </summary>
+    private static async Task<ExtractionResult> MapThroughProviderAsync(string provider, JsonObject payload) =>
+        provider == "gemini"
+            ? await ExtractionClientBuilder
+                .Gemini(new StubHttpMessageHandler(HttpStatusCode.OK,
+                    ExtractionFixtureHarness.GeminiResponseFromPayload(payload).ToJsonString()))
+                .ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default)
+            : await ExtractionClientBuilder
+                .Anthropic(new StubHttpMessageHandler(HttpStatusCode.OK,
+                    ExtractionFixtureHarness.AnthropicResponseFromPayload(payload).ToJsonString()))
+                .ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
+
+    private static JsonObject PayloadWithDocumentTypeShape(string shape)
+    {
+        var payload = new JsonObject
+        {
+            ["needsReprocessing"] = false,
+            ["fields"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["name"] = "permit_number", ["value"] = "P-1", ["type"] = "text", ["confidence"] = 0.95,
+                },
+            },
+        };
+        switch (shape)
+        {
+            case "absent": break;                              // the property is simply not there
+            case "null": payload["documentType"] = null; break; // present, JSON null
+            case "empty": payload["documentType"] = ""; break;
+            case "other": payload["documentType"] = "other"; break;
+            // Present, but not a STRING. JsonElement.GetString() throws InvalidOperationException on a
+            // number/bool/object, so this shape used to escape the "a schema is the provider's promise,
+            // not ours" hardening entirely: the extraction threw, the worker counted a failure and
+            // retried, and the full paid Document AI + LLM retry budget burned before the document
+            // landed Failed. A non-string is a non-answer, exactly like an absent property.
+            case "wrongType": payload["documentType"] = 7; break;
+            default: throw new ArgumentOutOfRangeException(nameof(shape), shape, "unknown payload shape");
+        }
+        return payload;
+    }
+
+    [Theory]
+    // The shape a provider ACTUALLY produces when it violates `required`: the property is omitted. Both
+    // clients used to coerce that into the literal "other" (`dt.GetString() ?? "other" : "other"`) BEFORE
+    // the worker saw it, so the blank-answer fallback could only ever fire for an explicit empty string —
+    // a shape no provider emits. Upload a permit, pick "permit" in the dropdown, get a tool_use input
+    // without documentType, and the uploader's deliberate type was overwritten with "other": zero
+    // applicable permit rules, permanently Pending. That is the silent-never-graded outcome #373 closes.
+    [InlineData("gemini", "absent", null, "permit")]
+    [InlineData("anthropic", "absent", null, "permit")]
+    // Same non-answer, different encoding.
+    [InlineData("gemini", "null", null, "permit")]
+    [InlineData("anthropic", "null", null, "permit")]
+    // An explicit empty string is likewise no answer (this is the one shape the pre-fix code handled).
+    [InlineData("gemini", "empty", "", "permit")]
+    [InlineData("anthropic", "empty", "", "permit")]
+    // A non-STRING documentType (`"documentType": 7`) is a non-answer too — and, before the ValueKind
+    // guard, the only shape that THREW out of MapResult instead of degrading, burning the whole paid
+    // retry budget. It must land exactly where "absent" lands: mapped null, stored type KEPT.
+    [InlineData("gemini", "wrongType", null, "permit")]
+    [InlineData("anthropic", "wrongType", null, "permit")]
+    // …but a POSITIVE "other" is a real classification the model made, so it must still overwrite. This
+    // is the case that stops the fix from becoming "never trust the model about `other`".
+    [InlineData("gemini", "other", "other", "other")]
+    [InlineData("anthropic", "other", "other", "other")]
+    public async Task An_absent_documentType_keeps_the_uploaders_type_but_a_positive_other_overwrites(
+        string provider, string shape, string? expectedMapped, string expectedStored)
+    {
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m, documentType: "permit");
+        Extraction.Result = await MapThroughProviderAsync(provider, PayloadWithDocumentTypeShape(shape));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        // The contract that matters: what got STORED, since that is what grades and supersedes.
+        (await GetDocAsync(docId)).DocumentType.Should().Be(expectedStored);
+        // …and the client-level shape it rests on, pinned separately so a regression names its own cause.
+        Extraction.Result.DocumentType.Should().Be(expectedMapped);
+    }
+
+    [Fact]
+    public async Task A_non_canonical_extracted_type_still_finds_its_rules_and_grades()
+    {
+        // The VERDICT consequence, which is the point of the fix — pinning the stored string alone would
+        // miss it. The checklist carries a COI rule ("general_liability_limit >= 2M") and the extraction
+        // returns "COI" with a limit that meets it. Pre-#373 the ordinal applicableRules filter
+        // (r.DocumentType == doc.DocumentType) matched ZERO rules, so the document returned the
+        // zero-applicable-rules Pending with no ComplianceCheck rows at all — fail-safe, but a checklist
+        // that silently never grades. Normalized, the same document reaches the real verdict.
+        var (_, docId, blobPath) = await SeedGradableDocAsync(expectedValue: "2000000");
+        await Fixture.Factory.Services.GetRequiredService<IBlobStorageService>()
+            .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
+        Extraction.Result = GlResult("3000000", documentType: "COI");
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.DocumentType.Should().Be("coi");
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant,
+            "the COI rule must apply to a document the model typed 'COI' (#373)");
+        await using var db = CreateSystemDb();
+        (await db.ComplianceChecks.CountAsync(c => c.DocumentId == docId))
+            .Should().Be(1, "a graded document carries the check row for the rule that applied — " +
+                            "zero rows is the pre-#373 zero-applicable-rules state");
+    }
+
+    [Fact]
+    public async Task A_non_canonical_renewal_supersedes_the_cert_it_renews()
+    {
+        // The second consequence of the same string: DocumentSupersession groups on
+        // (VendorId, DocumentType) with ordinal equality, so a renewal the model typed "COI" formed its
+        // OWN group and left the cert it replaces counted as a live Expired liability (inflated dashboard
+        // count, reminders that keep chasing a vendor who already renewed — ADR 0033). Both documents are
+        // normalized to "coi", so they share a group again.
+        var (orgId, oldDocId, vendorId) = await SeedExpiredCertAsync();
+        var (renewalId, blobPath) = await SeedRenewalAsync(orgId, vendorId);
+        await Fixture.Factory.Services.GetRequiredService<IBlobStorageService>()
+            .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
+        Extraction.Result = new ExtractionResult(
+            DocumentType: "COI",
+            DocumentSubType: null,
+            Fields: [new ExtractedField("expiration_date", DateTime.UtcNow.AddYears(1).ToString("yyyy-MM-dd"), "date", 0.95)],
+            NeedsReprocessing: false,
+            Usage: new ExtractionUsage(100, 50, 0.01m));
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(renewalId, CancellationToken.None);
+
+        await using var db = CreateSystemDb();
+        (await db.Documents.SingleAsync(d => d.Id == renewalId)).DocumentType.Should().Be("coi");
+        var superseded = await db.Documents
+            .Where(d => d.Id == oldDocId)
+            .Where(DocumentSupersession.IsSuperseded(db.Documents))
+            .AnyAsync();
+        superseded.Should().BeTrue(
+            "a renewal the model typed 'COI' must still supersede the 'coi' cert it renews (#373 / ADR 0033)");
+    }
+
+    /// <summary>Seeds an org + vendor + an already-expired COI — the cert a renewal must supersede.</summary>
+    private async Task<(Guid OrgId, Guid DocId, Guid VendorId)> SeedExpiredCertAsync()
+    {
+        var orgId = Guid.NewGuid();
+        var vendorId = Guid.NewGuid();
+        var docId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        await using var db = CreateSystemDb();
+        db.Organizations.Add(new Organization { Id = orgId, Name = $"Org-{orgId:N}", TimeZone = "America/New_York", CreatedAt = now, UpdatedAt = now });
+        db.Subscriptions.Add(new Subscription
+        {
+            Id = Guid.NewGuid(), OrganizationId = orgId, Plan = "free", Status = "active",
+            ExtractionSpendThisMonthUsd = 0m,
+            SpendMonthStart = CostTrackingService.MonthStart(DateOnly.FromDateTime(now)),
+            CreatedAt = now, UpdatedAt = now,
+        });
+        db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = orgId, Name = "V", CreatedAt = now, UpdatedAt = now });
+        db.Documents.Add(new Document
+        {
+            Id = docId, OrganizationId = orgId, VendorId = vendorId,
+            OriginalFileName = "old.pdf", BlobStorageUrl = "blob://old", BlobStoragePath = null,
+            FileSizeBytes = 1024, ContentType = "application/pdf", DocumentType = "coi",
+            ExtractionStatus = ExtractionStatus.Completed, ComplianceStatus = ComplianceStatus.Expired,
+            ExpirationDate = now.AddDays(-10), CreatedAt = now.AddYears(-1), UpdatedAt = now,
+        });
+        await db.SaveChangesAsync();
+        return (orgId, docId, vendorId);
+    }
+
+    /// <summary>Seeds the newer, still-Pending upload for the same vendor — the would-be superseder.</summary>
+    private async Task<(Guid DocId, string BlobPath)> SeedRenewalAsync(Guid orgId, Guid vendorId)
+    {
+        var docId = Guid.NewGuid();
+        var blobPath = $"blob/renewal/{docId:N}.pdf";
+        var now = DateTime.UtcNow;
+        await using var db = CreateSystemDb();
+        db.Documents.Add(new Document
+        {
+            Id = docId, OrganizationId = orgId, VendorId = vendorId,
+            OriginalFileName = "renewal.pdf", BlobStorageUrl = "blob://renewal", BlobStoragePath = blobPath,
+            FileSizeBytes = 1024, ContentType = "application/pdf", DocumentType = "coi",
+            ExtractionStatus = ExtractionStatus.Pending, ComplianceStatus = ComplianceStatus.Pending,
+            CreatedAt = now, UpdatedAt = now,
+        });
+        await db.SaveChangesAsync();
+        return (docId, blobPath);
+    }
+
+    [Fact]
+    public async Task An_over_length_document_sub_type_is_dropped_rather_than_thrown()
+    {
+        // DocumentSubType is free text with no vocabulary, but it lands in another varchar(100) from the
+        // same untrusted response — so it could 22001 the very SaveChanges the type fix just made safe.
+        // Only the crash case changes: an over-length value becomes null (off-spec noise, not a sub-type),
+        // while anything within the column still passes through verbatim.
+        var (_, longId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = TypedResult("coi", subType: new string('s', ExtractionWorker.DocumentSubTypeMaxLength + 1));
+        await BuildWorker().ProcessDocumentAsync(longId, CancellationToken.None);
+
+        var longDoc = await GetDocAsync(longId);
+        longDoc.DocumentSubType.Should().BeNull();
+        longDoc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        longDoc.ProcessingError.Should().BeNull("a 22001 would surface here as a counted extraction failure");
+
+        var (_, okId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = TypedResult("coi", subType: "acord-25");
+        await BuildWorker().ProcessDocumentAsync(okId, CancellationToken.None);
+
+        (await GetDocAsync(okId)).DocumentSubType.Should().Be("acord-25", "an ordinary sub-type is untouched");
+    }
+
+    [Fact]
+    public async Task A_sub_type_of_exactly_the_column_width_round_trips_verbatim()
+    {
+        // The bound is EXCLUSIVE: MaxLength fits the column and must survive untouched; only MaxLength+1
+        // is dropped. Tested at the boundary itself because the guard is a `>` — a `>=` slip would start
+        // silently nulling legal 100-character sub-types, and neither the MaxLength+1 case above nor an
+        // 8-character one would notice. (Same reason
+        // The_per_field_confidence_gate_is_exclusive_at_the_shared_threshold pins its own bound.)
+        var exact = new string('s', ExtractionWorker.DocumentSubTypeMaxLength);
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = TypedResult("coi", subType: exact);
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.DocumentSubType.Should().Be(exact, "a sub-type that FITS the column must never be dropped");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        doc.ProcessingError.Should().BeNull("a 22001 would surface here as a counted extraction failure");
+    }
+
+    [Fact]
+    public async Task Normalizing_the_stored_type_leaves_the_provider_answer_in_the_forensic_trail()
+    {
+        // The invariant the normalization rests on: it changes only the PERSISTED type. ExtractionRawJson
+        // is the audit record of what the provider actually said, so it must still carry the verbatim
+        // "COI" — otherwise a provider that went off-spec becomes undiagnosable, and nothing would stop a
+        // future refactor from normalizing ExtractionResult BEFORE PersistSuccess (every other #373 test
+        // would stay green while the evidence was destroyed).
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = TypedResult("COI", subType: "General Liability");
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.DocumentType.Should().Be("coi", "the STORED type is canonical");
+
+        // Parsed, not substring-matched: the column is jsonb, so Postgres hands the text back reformatted.
+        doc.ExtractionRawJson.Should().NotBeNull();
+        JsonDocument.Parse(doc.ExtractionRawJson!).RootElement
+            .GetProperty("llm").GetProperty("documentType").GetString()
+            .Should().Be("COI", "the raw trail records what the provider answered, not what we stored");
+    }
+
+    // ----- #373: the OTHER untrusted strings in the same SaveChanges (partially addresses #385) ----
+
+    private static ExtractionResult FieldResult(params ExtractedField[] fields) => new(
+        DocumentType: "coi",
+        DocumentSubType: null,
+        Fields: fields,
+        NeedsReprocessing: false,
+        Usage: new ExtractionUsage(InputTokens: 100, OutputTokens: 50, EstimatedCostUsd: 0.01m));
+
+    [Fact]
+    public async Task A_long_extracted_field_value_is_truncated_instead_of_throwing_22001()
+    {
+        // The 22001 hazard #373 closed for DocumentType/DocumentSubType was still wide open in the SAME
+        // SaveChanges through the DocumentField rows, written verbatim from the same untrusted response
+        // into varchar(200)/varchar(2000)/varchar(50). And description_of_operations — which the prompt
+        // explicitly asks for — is routinely long on an ACORD 25 with an ACORD 101 continuation, so this
+        // is an ordinary certificate, not an adversarial one.
+        //
+        // The failure did NOT degrade gracefully: PersistSuccess's SaveChanges throws, and
+        // ProcessDocumentAsync's catch calls SaveChangesAsync on the SAME context, which still tracks the
+        // poisoned inserts — so the bookkeeping write throws too, FailedAttempts never increments, and the
+        // document is zombie-reclaimed every 5 minutes until ProcessingAttempts exceeds MaxClaims: ~15
+        // re-paid Document AI + LLM runs. Reachable from the unauthenticated portal upload route.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(
+            new ExtractedField("description_of_operations", new string('d', 2_500), "text", 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed, "the persist must not throw");
+        doc.ProcessingError.Should().BeNull("a 22001 would surface here as a counted extraction failure");
+        doc.FailedAttempts.Should().Be(0);
+
+        await using var db = CreateSystemDb();
+        var stored = await db.DocumentFields.SingleAsync(f => f.DocumentId == docId);
+        stored.FieldValue.Should().HaveLength(ExtractionWorker.FieldValueMaxLength)
+            .And.Be(new string('d', ExtractionWorker.FieldValueMaxLength),
+                "the value is TRUNCATED, not dropped — it is user-facing extracted content");
+    }
+
+    [Fact]
+    public async Task A_long_extracted_field_name_and_type_are_truncated_instead_of_throwing_22001()
+    {
+        // The sibling columns from the same untrusted response. FieldType is the tightest (varchar(50))
+        // and is NOT enum-constrained on the Anthropic side, so an off-spec provider can overflow it with
+        // far less text than the value column needs.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(
+            new ExtractedField(new string('n', 400), "v", new string('t', 120), 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        await using var db = CreateSystemDb();
+        var stored = await db.DocumentFields.SingleAsync(f => f.DocumentId == docId);
+        stored.FieldName.Should().Be(new string('n', ExtractionWorker.FieldNameMaxLength));
+        stored.FieldType.Should().Be(new string('t', ExtractionWorker.FieldTypeMaxLength));
+    }
+
+    [Fact]
+    public async Task Field_values_at_exactly_the_column_width_round_trip_verbatim()
+    {
+        // The exclusive bound, for the same reason the sub-type has one: the clamp must not clip a value
+        // that FITS. An off-by-one here would silently shave the last character off every long
+        // description_of_operations on the document detail page.
+        var name = new string('n', ExtractionWorker.FieldNameMaxLength);
+        var value = new string('v', ExtractionWorker.FieldValueMaxLength);
+        var type = new string('t', ExtractionWorker.FieldTypeMaxLength);
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(new ExtractedField(name, value, type, 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        await using var db = CreateSystemDb();
+        var stored = await db.DocumentFields.SingleAsync(f => f.DocumentId == docId);
+        stored.FieldName.Should().Be(name);
+        stored.FieldValue.Should().Be(value);
+        stored.FieldType.Should().Be(type);
+    }
+
+    [Fact]
+    public async Task A_truncated_field_value_never_ends_in_a_lone_surrogate()
+    {
+        // Cutting between the halves of a surrogate pair leaves a lone surrogate, which is not a
+        // character: depending on the encoder Npgsql is using it either throws on the write or silently
+        // stores U+FFFD — one write hazard traded for a second, or for corruption. The pair is placed so
+        // that a naive cut at exactly MaxLength would land INSIDE it (an odd number of BMP chars before
+        // it); the emoji stands in for any astral character an OCR'd description box can carry.
+        var padding = new string('d', ExtractionWorker.FieldValueMaxLength - 1);
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(
+            new ExtractedField("description_of_operations", padding + "\U0001F600" + "tail", "text", 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "a lone surrogate would fail the insert as invalid UTF-8");
+        await using var db = CreateSystemDb();
+        var stored = await db.DocumentFields.SingleAsync(f => f.DocumentId == docId);
+        stored.FieldValue.Should().Be(padding, "the cut backs off to before the split pair");
+        char.IsSurrogate(stored.FieldValue![^1]).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_truncated_field_value_never_ends_in_an_ALREADY_UNPAIRED_high_surrogate()
+    {
+        // The sibling of the test above, and the one the "never ends in a lone surrogate" NAME actually
+        // promises. The back-off used to be conditional — `IsHighSurrogate(value[cut - 1]) &&
+        // IsLowSurrogate(value[cut])` — so it only fired when the clamp itself SPLIT a well-formed pair.
+        // An input that already carries an UNPAIRED high surrogate at index MaxLength-1 (nothing after it
+        // is a low surrogate) sailed straight through and was cut to a string ENDING in a lone surrogate:
+        // the exact 22021 the guard exists to remove, reached by a different door. The condition is now
+        // unconditional on a trailing high surrogate, matching the ColumnClamp.To shape #372 adds so the
+        // two collapse to ONE body when that branch lands.
+        var padding = new string('d', ExtractionWorker.FieldValueMaxLength - 1);
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(
+            // '\uD83D' with NO low surrogate after it — the char at MaxLength-1 is a bare high half.
+            new ExtractedField("description_of_operations", padding + "\uD83D" + "tail", "text", 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "a lone surrogate would fail the insert as invalid UTF-8");
+        await using var db = CreateSystemDb();
+        var stored = await db.DocumentFields.SingleAsync(f => f.DocumentId == docId);
+        stored.FieldValue.Should().Be(padding, "the cut backs off past the unpaired high surrogate");
+        char.IsSurrogate(stored.FieldValue![^1]).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task The_json_mirror_keeps_the_full_value_when_the_field_row_is_truncated()
+    {
+        // THE invariant the whole clamp rests on: truncation is DISPLAY-only. PersistSuccess writes the
+        // DocumentField row through Clamp but writes ExtractionFields (jsonb, no width) from the FULL
+        // value — and ExtractionFields is the CANONICAL compliance input every read goes through
+        // (ComplianceCheckService.LookupValue -> DocumentFieldReadability.RawFieldValue reads
+        // doc.ExtractionFields, never the DocumentField rows). Nothing pinned it, so a future
+        // "let's make the JSON mirror consistent with the row" edit would silently narrow every
+        // verdict input with the #373 suite still green. See the verdict-level sibling below.
+        var full = new string('d', 2_500);
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(new ExtractedField("description_of_operations", full, "text", 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionFields.Should().NotBeNull();
+        doc.ExtractionFields!.RootElement.GetProperty("description_of_operations").GetString()
+            .Should().Be(full, "the jsonb mirror is the canonical verdict input and has no width limit");
+
+        await using var db = CreateSystemDb();
+        (await db.DocumentFields.SingleAsync(f => f.DocumentId == docId)).FieldValue
+            .Should().HaveLength(ExtractionWorker.FieldValueMaxLength,
+                "only the varchar(2000) display row is clipped — that asymmetry IS the invariant");
+    }
+
+    [Fact]
+    public async Task A_contains_rule_still_matches_text_past_the_field_row_width()
+    {
+        // The VERDICT-level half of the invariant above: pinning the stored JSON alone would not prove
+        // that GRADING reads it. The checklist carries `description_of_operations contains "<venue>"`
+        // (the real shape — it is the additional-insured contains fallback's other operand), and the
+        // extraction returns a description whose only occurrence of the venue name lands PAST character
+        // 2000, i.e. outside the clamped DocumentField row. It must still read Compliant, because
+        // EvaluateRule -> LookupValue -> RawFieldValue resolves against doc.ExtractionFields.
+        //
+        // Clamp the jsonb write too and this flips to NonCompliant: an ordinary ACORD 25 + ACORD 101
+        // continuation would silently stop satisfying the requirement it actually satisfies.
+        const string venue = "GARDEN-HALL-SENTINEL";
+        var (_, docId, blobPath) = await SeedGradableDocAsync(
+            expectedValue: venue, ruleFieldName: "description_of_operations", ruleOperator: "contains");
+        await Fixture.Factory.Services.GetRequiredService<IBlobStorageService>()
+            .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
+        var description = new string('d', ExtractionWorker.FieldValueMaxLength + 100) + venue;
+        Extraction.Result = FieldResult(
+            new ExtractedField("description_of_operations", description, "text", 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant,
+            "grading reads the FULL value from ExtractionFields, not the clamped DocumentField row");
+
+        await using var db = CreateSystemDb();
+        (await db.DocumentFields.SingleAsync(f => f.DocumentId == docId)).FieldValue
+            .Should().NotContain(venue, "the clipped display row genuinely does NOT carry the match — " +
+                                        "which is what makes the Compliant above discriminating");
+    }
+
+    [Fact]
+    public async Task A_long_failure_message_is_truncated_instead_of_throwing_22001()
+    {
+        // ProcessingError is varchar(2000) and carries an arbitrary exception message (a provider body
+        // echoed back, an EF error listing every parameter). A 22001 HERE is the worst kind: this IS the
+        // failure-bookkeeping write, so an overflow means the retry budget never advances and the document
+        // is reclaimed forever.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.ThrowOnExtract = true;
+        Extraction.ThrowMessage = new string('e', 5_000);
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.FailedAttempts.Should().Be(1, "the failure must be counted, not lost to a second throw");
+        doc.ProcessingError.Should().NotBeNull()
+            .And.HaveLength(ExtractionWorker.ProcessingErrorMaxLength);
+    }
+
+    [Fact]
+    public async Task The_column_length_constants_match_the_EF_model()
+    {
+        // Every length guarantee is pinned against the EF model rather than a hand-copied literal, so
+        // shrinking a column in ModelConfiguration reddens here instead of surfacing as a 22001 in
+        // production. The vocabulary needs no clamp precisely because its longest literal fits.
+        await using var db = CreateSystemDb();
+        var document = db.Model.FindEntityType(typeof(Document))!;
+        var field = db.Model.FindEntityType(typeof(DocumentField))!;
+
+        document.FindProperty(nameof(Document.DocumentSubType))!.GetMaxLength()
+            .Should().Be(ExtractionWorker.DocumentSubTypeMaxLength);
+        document.FindProperty(nameof(Document.ProcessingError))!.GetMaxLength()
+            .Should().Be(ExtractionWorker.ProcessingErrorMaxLength);
+        field.FindProperty(nameof(DocumentField.FieldName))!.GetMaxLength()
+            .Should().Be(ExtractionWorker.FieldNameMaxLength);
+        field.FindProperty(nameof(DocumentField.FieldValue))!.GetMaxLength()
+            .Should().Be(ExtractionWorker.FieldValueMaxLength);
+        field.FindProperty(nameof(DocumentField.FieldType))!.GetMaxLength()
+            .Should().Be(ExtractionWorker.FieldTypeMaxLength);
+        CanonicalDocumentTypes.All.Max(t => t.Length)
+            .Should().BeLessThanOrEqualTo(document.FindProperty(nameof(Document.DocumentType))!.GetMaxLength()!.Value,
+                "Normalize is length-safe by construction only while every vocabulary literal fits the column");
+    }
+
     // ----- #337: the worker grades inside PersistSuccess (combined unit of work) --------------
 
-    // Seeds an org + zero-spend subscription + a vendor on a checklist carrying a single
-    // "general_liability_limit >= minLimit" COI rule + a Pending document assigned to that vendor, with a
-    // far-future expiry so the verdict is purely rule-driven. The blob is NOT uploaded here — each test
-    // uploads it to the fakes of the host whose worker it drives (the default host, or a derived one).
-    private async Task<(Guid OrgId, Guid DocId, string BlobPath)> SeedGradableDocAsync(string minLimit)
+    // Seeds an org + zero-spend subscription + a vendor on a checklist carrying a SINGLE COI rule + a
+    // Pending document assigned to that vendor, with a far-future expiry so the verdict is purely
+    // rule-driven. The rule defaults to "general_liability_limit >= expectedValue"; #373's clamp test
+    // overrides it with a `description_of_operations contains` rule to grade text that only exists in
+    // the un-clamped jsonb mirror. The blob is NOT uploaded here — each test uploads it to the fakes of
+    // the host whose worker it drives (the default host, or a derived one).
+    private async Task<(Guid OrgId, Guid DocId, string BlobPath)> SeedGradableDocAsync(
+        string expectedValue,
+        string ruleFieldName = "general_liability_limit",
+        string ruleOperator = "min_value")
     {
         var orgId = Guid.NewGuid();
         var docId = Guid.NewGuid();
@@ -677,7 +1286,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         db.ComplianceRules.Add(new ComplianceRule
         {
             Id = Guid.NewGuid(), ComplianceTemplateId = templateId, DocumentType = "coi",
-            FieldName = "general_liability_limit", Operator = "min_value", ExpectedValue = minLimit, SortOrder = 0,
+            FieldName = ruleFieldName, Operator = ruleOperator, ExpectedValue = expectedValue, SortOrder = 0,
         });
         db.Documents.Add(new Document
         {
@@ -691,8 +1300,10 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         return (orgId, docId, blobPath);
     }
 
-    private static ExtractionResult GlResult(string generalLiabilityLimit) => new(
-        DocumentType: "coi",
+    // documentType defaults to the canonical "coi"; #373's verdict test overrides it with "COI" to prove
+    // a non-canonical extraction still finds the checklist's COI rules.
+    private static ExtractionResult GlResult(string generalLiabilityLimit, string documentType = "coi") => new(
+        DocumentType: documentType,
         DocumentSubType: null,
         Fields: [new ExtractedField("general_liability_limit", generalLiabilityLimit, "currency", 0.95)],
         NeedsReprocessing: false,
@@ -709,7 +1320,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         // REAL verdict (Compliant / NonCompliant), never the intermediate Pending the old separate
         // EvaluateForSystemAsync pass briefly left. If PersistSuccess ever dropped the ApplyEvaluationAsync
         // call, this catches the silent loss of grading.
-        var (_, docId, blobPath) = await SeedGradableDocAsync(minLimit: "2000000");
+        var (_, docId, blobPath) = await SeedGradableDocAsync(expectedValue: "2000000");
         await Fixture.Factory.Services.GetRequiredService<IBlobStorageService>()
             .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
         Extraction.Result = GlResult(extractedGl);
@@ -740,7 +1351,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
                 s.RemoveAll<IComplianceCheckService>();
                 s.AddScoped<IComplianceCheckService, ThrowingComplianceCheckService>();
             }));
-        var (_, docId, blobPath) = await SeedGradableDocAsync(minLimit: "2000000");
+        var (_, docId, blobPath) = await SeedGradableDocAsync(expectedValue: "2000000");
         // The derived host has its OWN singleton fakes — upload the blob and set the extraction result there.
         await factory.Services.GetRequiredService<IBlobStorageService>()
             .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);

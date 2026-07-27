@@ -142,7 +142,16 @@ public class AnthropicExtractionClient(
             ["required"] = new JsonArray { "documentType", "fields", "needsReprocessing" },
             ["properties"] = new JsonObject
             {
-                ["documentType"] = new JsonObject { ["type"] = "string" },
+                // #373: pin documentType to the canonical vocabulary, the way the Gemini
+                // responseSchema always has. Left free, this provider could answer "COI" or
+                // "Certificate of Insurance" against a prompt asking for "coi" — a value that matches
+                // zero compliance rules and splits the supersession group. Both clients build the enum
+                // from the SAME CanonicalDocumentTypes.SchemaEnum(), so the two contracts cannot drift.
+                ["documentType"] = new JsonObject
+                {
+                    ["type"] = "string",
+                    ["enum"] = CanonicalDocumentTypes.SchemaEnum()
+                },
                 ["documentSubType"] = new JsonObject { ["type"] = "string" },
                 ["needsReprocessing"] = new JsonObject { ["type"] = "boolean" },
                 ["fields"] = new JsonObject
@@ -167,7 +176,23 @@ public class AnthropicExtractionClient(
 
     private static ExtractionResult MapResult(JsonElement root)
     {
-        var documentType = root.TryGetProperty("documentType", out var dt) ? dt.GetString() ?? "other" : "other";
+        // #373: an ABSENT or JSON-null documentType maps to NULL, not to the literal "other". The tool's
+        // input_schema marks documentType `required`, so its absence is the provider going off-spec — a
+        // non-answer, not a classification. Coercing it here forged a positive "other" that
+        // ExtractionWorker.PersistSuccess could no longer tell apart from a real one, so it overwrote the
+        // uploader's deliberate "permit"/"license" with "other": zero applicable compliance rules, and the
+        // document sits at Pending forever (the silent-never-graded outcome #373 exists to close). Null
+        // reaches CanonicalDocumentTypes.NormalizeExtracted's blank branch, which keeps the stored type.
+        // A model that POSITIVELY answers "other" still arrives as "other" and still overwrites.
+        //
+        // The ValueKind guard covers the same class one step further out: `GetString()` THROWS
+        // InvalidOperationException on a number/bool/object, and an off-spec `"documentType": 7` would
+        // escape "a schema is the provider's promise, not ours" entirely — the extraction throws, the
+        // worker counts a failure and retries, and the whole paid Document AI + LLM budget burns before
+        // the document lands Failed. A non-string is a non-answer, exactly like an omitted property.
+        var documentType = root.TryGetProperty("documentType", out var dt) && dt.ValueKind == JsonValueKind.String
+            ? dt.GetString()
+            : null;
         var documentSubType = root.TryGetProperty("documentSubType", out var dst) ? dst.GetString() : null;
         var needsReprocessing = root.TryGetProperty("needsReprocessing", out var nr) && nr.GetBoolean();
 

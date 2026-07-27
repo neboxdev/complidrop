@@ -315,14 +315,17 @@ public sealed class GeminiExtractionClientTests
     }
 
     [Fact]
-    public async Task Valid_but_empty_payload_degrades_to_empty_other_extraction()
+    public async Task Valid_but_empty_payload_degrades_to_an_empty_untyped_extraction()
     {
-        // Valid JSON, no usable content: the client must not crash — it returns an empty "other" result.
+        // Valid JSON, no usable content: the client must not crash — it returns an empty, untyped result.
         var handler = new StubHttpMessageHandler(HttpStatusCode.OK, Json(ExtractionFixtureHarness.GeminiResponseFromPayload(new JsonObject())));
 
         var result = await ExtractionClientBuilder.Gemini(handler).ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
 
-        result.DocumentType.Should().Be("other");
+        // NULL, not "other" (#373): documentType is `required` in the responseSchema, so its absence is a
+        // non-answer, not a classification. Coercing it here forged an answer the model never gave, which
+        // ExtractionWorker.PersistSuccess then wrote over the uploader's deliberate type.
+        result.DocumentType.Should().BeNull();
         result.DocumentSubType.Should().BeNull();
         result.Fields.Should().BeEmpty();
         result.NeedsReprocessing.Should().BeFalse();

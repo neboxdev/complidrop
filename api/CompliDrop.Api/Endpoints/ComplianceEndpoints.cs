@@ -181,6 +181,25 @@ public static class ComplianceEndpoints
             .FirstOrDefaultAsync(t => t.Id == templateId && !t.IsSystemTemplate, ct);
         if (template is null) return NotFound();
 
+        // The OTHER operand of the compliance-critical ordinal comparison (#373, ADR 0045).
+        // ComplianceCheckService's applicable-rules filter is `r.DocumentType == doc.DocumentType`, and
+        // ExtractionWorker.PersistSuccess now guarantees the DOCUMENT side is always canonical — so a rule
+        // stored verbatim as "COI" through this endpoint governs literally nothing, and can no longer even
+        // accidentally match (before normalization it at least matched a document the upload path had
+        // stored as "COI"). Validate at the write boundary and store the canonical spelling, so both sides
+        // of the comparison speak one vocabulary. `/api/compliance` is reachable without the rules page,
+        // so the API is the authoritative guard, not the UI's type picker.
+        //
+        // REJECTS an unrecognized type rather than folding it to "other" the way the worker does — that
+        // asymmetry is deliberate. A background worker parsing a model response has no one to ask; a human
+        // editing a checklist does, and silently retyping a compliance RULE would change WHAT IT GOVERNS
+        // (a "coi" rule quietly demoted to grade only "other" documents is a requirement that stops
+        // applying without anyone being told). Recognized-but-mis-cased input is still folded: that
+        // changes the spelling, not the meaning.
+        if (!CanonicalDocumentTypes.IsAllowed(req.DocumentType))
+            return Error(400, "validation.document_type", "That document type isn't recognized.");
+        var documentType = CanonicalDocumentTypes.Normalize(req.DocumentType);
+
         // A value-operator rule (equals / contains / min_value) is meaningless without an
         // ExpectedValue to compare against, and a null one is actively unsafe: it made the `equals`
         // arm fail OPEN — a document MISSING the field read Compliant — until #374. Reject it at the
@@ -212,7 +231,7 @@ public static class ComplianceEndpoints
         // already-added types, but this is the authoritative guard.
         var isDuplicate = template.Rules.Any(r =>
             r.Id != req.Id &&
-            string.Equals(r.DocumentType, req.DocumentType, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(r.DocumentType, documentType, StringComparison.OrdinalIgnoreCase) &&
             string.Equals(r.FieldName, req.FieldName, StringComparison.OrdinalIgnoreCase) &&
             string.Equals(r.Operator, req.Operator, StringComparison.OrdinalIgnoreCase));
         if (isDuplicate)
@@ -224,7 +243,7 @@ public static class ComplianceEndpoints
         {
             rule = template.Rules.FirstOrDefault(r => r.Id == ruleId)
                    ?? throw new InvalidOperationException("Rule not found.");
-            rule.DocumentType = req.DocumentType;
+            rule.DocumentType = documentType;
             rule.FieldName = req.FieldName;
             rule.Operator = req.Operator;
             rule.ExpectedValue = req.ExpectedValue;
@@ -237,7 +256,7 @@ public static class ComplianceEndpoints
             {
                 Id = Guid.NewGuid(),
                 ComplianceTemplateId = template.Id,
-                DocumentType = req.DocumentType,
+                DocumentType = documentType,
                 FieldName = req.FieldName,
                 Operator = req.Operator,
                 ExpectedValue = req.ExpectedValue,

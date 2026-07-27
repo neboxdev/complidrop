@@ -55,6 +55,35 @@ public class ExtractionWorker(
     private const int AttemptTimeoutFloorSeconds = 60;
 
     /// <summary>
+    /// Length of the <c>DocumentSubType</c> column (<c>ModelConfiguration</c>: <c>varchar(100)</c>),
+    /// above which an extracted sub-type is dropped rather than allowed to throw a 22001 out of
+    /// <c>PersistSuccess</c>'s single <c>SaveChanges</c> (#373). Internal so a test pins it equal to the
+    /// EF model's own max length instead of trusting a hand-copied literal.
+    /// </summary>
+    internal const int DocumentSubTypeMaxLength = 100;
+
+    /// <summary>
+    /// Widths of the columns <see cref="PersistSuccess"/> writes VERBATIM from the provider's response
+    /// (<c>ModelConfiguration</c>: <c>DocumentField.FieldName</c> <c>varchar(200)</c>,
+    /// <c>FieldValue</c> <c>varchar(2000)</c>, <c>FieldType</c> <c>varchar(50)</c>), plus
+    /// <see cref="Document.ProcessingError"/> (<c>varchar(2000)</c>), which carries an arbitrary
+    /// exception message. Internal so a test pins each equal to the EF model's own max length instead
+    /// of trusting a hand-copied literal — the same treatment <see cref="DocumentSubTypeMaxLength"/>
+    /// gets. See <see cref="Clamp"/> for why these are truncated rather than dropped (#373; partially
+    /// addresses #385).
+    /// </summary>
+    internal const int FieldNameMaxLength = 200;
+
+    /// <inheritdoc cref="FieldNameMaxLength"/>
+    internal const int FieldValueMaxLength = 2000;
+
+    /// <inheritdoc cref="FieldNameMaxLength"/>
+    internal const int FieldTypeMaxLength = 50;
+
+    /// <inheritdoc cref="FieldNameMaxLength"/>
+    internal const int ProcessingErrorMaxLength = 2000;
+
+    /// <summary>
     /// Per-attempt wall-clock bound (from <c>Extraction:AttemptTimeoutSeconds</c>), clamped into
     /// [<see cref="AttemptTimeoutFloorSeconds"/>, <see cref="AttemptTimeoutCeilingSeconds"/>] so it
     /// stays below the 5-minute zombie-reclaim threshold and a timed-out attempt cancels and
@@ -306,7 +335,10 @@ public class ExtractionWorker(
     private static void RecordFailedAttempt(Document doc, string code, string message)
     {
         doc.FailedAttempts += 1;
-        doc.ProcessingError = $"{code}: {message}";
+        // Clamped for the same reason the extracted fields are: `message` is an arbitrary exception
+        // message (a provider body echoed back, an EF error listing parameters) and ProcessingError is
+        // varchar(2000). A 22001 HERE is the worst place for one — this IS the failure-bookkeeping write.
+        doc.ProcessingError = Clamp($"{code}: {message}", ProcessingErrorMaxLength);
         doc.UpdatedAt = DateTime.UtcNow;
         if (doc.FailedAttempts >= MaxAttempts)
         {
@@ -378,10 +410,51 @@ public class ExtractionWorker(
         CancellationToken ct)
     {
         doc.ExtractionStatus = ExtractionStatus.Failed;
-        doc.ProcessingError = $"{code}: {message}";
+        doc.ProcessingError = Clamp($"{code}: {message}", ProcessingErrorMaxLength);
         doc.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
     }
+
+    /// <summary>
+    /// Truncates an untrusted string to a column's width, so a value the provider (or an exception
+    /// message) made too long can't throw Postgres 22001 out of a <c>SaveChanges</c> (#373; partially
+    /// addresses <see href="https://github.com/neboxdev/complidrop/issues/385">#385</see>). That throw is
+    /// not a graceful degrade: <see cref="ProcessDocumentAsync"/>'s catch calls <c>SaveChangesAsync</c> on
+    /// the SAME context, which still tracks the poisoned inserts, so the bookkeeping write throws again —
+    /// <see cref="Document.FailedAttempts"/> never increments, and the document is zombie-reclaimed every
+    /// 5 minutes until <see cref="Document.ProcessingAttempts"/> exceeds <see cref="MaxClaims"/>, re-paying
+    /// Document AI + LLM cost on every doomed run. Reachable from the unauthenticated portal upload route.
+    /// <para/>
+    /// TRUNCATES rather than drops: unlike <c>DocumentSubType</c> (matchable-or-nothing metadata), an
+    /// extracted field is user-facing content shown on the document detail page — a clipped
+    /// <c>description_of_operations</c> beats a vanished one.
+    /// <para/>
+    /// AS EXTRACTED, the verdict path is unaffected: <c>ExtractionFields</c> (jsonb, no width) and the
+    /// typed columns are both written from the FULL value in <see cref="PersistSuccess"/>, so grading
+    /// reads exactly what the model returned even when the <c>DocumentField</c> row is clipped (pinned by
+    /// <c>The_json_mirror_keeps_the_full_value_when_the_field_row_is_truncated</c> and its verdict-level
+    /// sibling). That guarantee does NOT survive a MANUAL EDIT: the detail page binds its input to the
+    /// clamped <c>DocumentField.FieldValue</c>, and <c>DocumentEndpoints.UpdateFields</c> writes the
+    /// submitted text back into <c>ExtractionFields</c> — so saving an untouched clipped field narrows the
+    /// canonical value to the clipped one, and <c>description_of_operations</c> IS a verdict input (the
+    /// additional-insured <c>contains</c> fallback in <c>ComplianceCheckService.EvaluateRule</c>). Marking
+    /// a clipped field in the UI so a user can't silently save the truncation is
+    /// <see href="https://github.com/neboxdev/complidrop/issues/444">#444</see>.
+    /// <para/>
+    /// Surrogate-safe: cutting between the halves of a surrogate pair would emit a lone surrogate, which
+    /// Postgres rejects as invalid UTF-8 (22021) — trading one write failure for another. The back-off is
+    /// UNCONDITIONAL on a trailing high surrogate rather than conditional on the next char being a low
+    /// one: an input that already carries an UNPAIRED high surrogate at <c>maxLength - 1</c> would
+    /// otherwise be cut to a string ending in a lone surrogate — the exact 22021 this guard exists to
+    /// remove. (Only <see cref="Document.ProcessingError"/> can realistically carry one, via an arbitrary
+    /// .NET exception message; <c>JsonElement.GetString()</c> cannot return an unpaired surrogate.)
+    /// <para/>
+    /// Delegates to the shared <see cref="ColumnClamp.To"/> (#372,
+    /// <see href="https://github.com/neboxdev/complidrop/issues/372">ADR 0044</see>) so the codebase
+    /// carries ONE surrogate-safe truncation rather than a copy per bounded column — the same one-line
+    /// delegate shape as <c>ComplianceCheckService.ClampToColumn</c>. Do not re-inline the body.
+    /// </summary>
+    private static string? Clamp(string? value, int maxLength) => ColumnClamp.To(value, maxLength);
 
     private static async Task PersistSuccess(
         SystemDbContext db,
@@ -394,8 +467,50 @@ public class ExtractionWorker(
     {
         var now = DateTime.UtcNow;
 
-        doc.DocumentType = extraction.DocumentType;
-        doc.DocumentSubType = extraction.DocumentSubType;
+        // #373: the model's documentType is UNTRUSTED input — coerce it to the canonical vocabulary
+        // BEFORE it overwrites the stored type. A structured-output schema pins the enum on both
+        // providers (this change added the Anthropic half), but a schema is the provider's promise, not
+        // ours: an off-spec response, a provider bug, or a future client would otherwise write a raw
+        // string straight into the column that decides WHICH rules apply (ComplianceCheckService's
+        // ordinal `r.DocumentType == doc.DocumentType` filter — a "COI" matches zero "coi" rules, so the
+        // checklist yields zero applicable rules and the document is NEVER GRADED against anything) and
+        // WHICH documents share a supersession group (DocumentSupersession keys on
+        // (VendorId, DocumentType) — a "COI" renewal never supersedes the "coi" cert it replaces).
+        //
+        // Never-graded is NOT a harmless no-op. ComputeOutcome's zero-applicable-rules branch stores
+        // `expiringSoon ? ExpiringSoon : Pending`, and ComplianceStatusDeriver.Effective promotes even a
+        // stored Pending to ExpiringSoon inside the 30-day window — so an ungraded document with an
+        // expiry in the next 30 days reads "Expiring soon" on the list, counts as IN-FORCE coverage in
+        // VendorEndpoints.ComputeCoverage (which accepts Compliant or ExpiringSoon), rolls the vendor up
+        // to "Covered", and prints as "Expiring soon" in the auditor-facing vendor package — while the
+        // document's own "What we checked" panel is empty because no rule ever ran. That is an
+        // affirmative-coverage OVERCLAIM, not a fail-safe silence. Fixing the READ surfaces so a
+        // never-graded document can't read as coverage is
+        // https://github.com/neboxdev/complidrop/issues/443; this line stops NEW documents from joining
+        // that population.
+        //
+        // Every value this can yield is one of six short vocabulary literals, so THIS column
+        // is length-safe by construction: a runaway documentType no longer throws 22001. It is not the
+        // only untrusted string in this unit of work, though — the DocumentField rows below carry three
+        // more, clamped there (see Clamp) — so "the SaveChanges below cannot 22001" is a guarantee that
+        // holds only because every such writer is guarded, not because of this line.
+        //
+        // Only the PERSISTED type is normalized; ExtractionRawJson below still records what the provider
+        // actually said, so the forensic trail stays honest about a provider that went off-spec.
+        //
+        // A BLANK or ABSENT answer falls back to the STORED type rather than to "other" — see
+        // CanonicalDocumentTypes.NormalizeExtracted for why demoting a type we already believe would
+        // re-create the very silent-never-graded state this fixes. The clients map an absent/JSON-null
+        // documentType to null (not to the literal "other") precisely so it reaches that branch.
+        doc.DocumentType = CanonicalDocumentTypes.NormalizeExtracted(extraction.DocumentType, doc.DocumentType);
+        // The sub-type has no vocabulary (it's free text the model coins per document), but it lands in
+        // another varchar(100) from the same untrusted response — so guard only the crash: an over-length
+        // value is off-spec noise, not a sub-type, and storing null beats both a 22001 and a truncated
+        // half-value that no obligation could match anyway. Anything within the column passes through
+        // verbatim, exactly as before.
+        doc.DocumentSubType = extraction.DocumentSubType is { Length: > DocumentSubTypeMaxLength }
+            ? null
+            : extraction.DocumentSubType;
 
         var fieldsDict = new Dictionary<string, object?>();
         foreach (var f in extraction.Fields)
@@ -450,13 +565,18 @@ public class ExtractionWorker(
         db.DocumentFields.RemoveRange(db.DocumentFields.Where(df => df.DocumentId == doc.Id));
         foreach (var f in extraction.Fields)
         {
+            // Clamped to the DocumentField column widths (#373). These three strings come VERBATIM from
+            // the same untrusted provider response the documentType does, and land in varchar(200) /
+            // varchar(2000) / varchar(50) — and `description_of_operations`, which the prompt asks for, is
+            // routinely long on an ACORD 25 with an ACORD 101 continuation. See Clamp for why an overflow
+            // here is not a graceful failure but ~15 re-paid OCR + LLM runs.
             db.DocumentFields.Add(new DocumentField
             {
                 Id = Guid.NewGuid(),
                 DocumentId = doc.Id,
-                FieldName = f.Name,
-                FieldValue = f.Value,
-                FieldType = f.Type,
+                FieldName = Clamp(f.Name, FieldNameMaxLength)!,
+                FieldValue = Clamp(f.Value, FieldValueMaxLength),
+                FieldType = Clamp(f.Type, FieldTypeMaxLength),
                 Confidence = f.Confidence,
                 IsManuallyEdited = false,
                 OriginalValue = null

@@ -161,6 +161,68 @@ Both are defined in this repo's `.claude/agents/`.
     compliance badge, and demoting the counts too would create a #294-class count-vs-badge
     split. The vendor rollup is the one surface with no room for the separate badge. Do NOT
     flag the untouched document-level counts as a missed demotion — that inversion is the bug.
+- The canonical document-type vocabulary is ONE list — `Services/CanonicalDocumentTypes.cs`
+  (#373, [ADR 0045](../docs/adr/0045-canonical-document-type-vocabulary.md)) — and
+  `ExtractionWorker.PersistSuccess` coerces the model's `documentType` through it before that
+  string overwrites `Document.DocumentType`. Facts here that look like bugs and are not:
+  - A BLANK/ABSENT extracted type falls back to the STORED type (itself normalized), NOT to
+    `other`. `documentType` is `required` in both providers' structured-output schemas, so a blank
+    is off-spec and carries no information, while the stored type is usually the uploader's own
+    dropdown pick (and the model's own type hint) — demoting a deliberate `license` to `other`
+    would drop every license rule and strand the document in the zero-applicable-rules
+    never-graded state #373 exists to close. Only a NON-blank answer overwrites, and a POSITIVE `"other"` counts as
+    an answer. "Absent" is reachable because both clients' `MapResult` map a missing/JSON-null
+    `documentType` to `null` rather than to the literal `"other"` — a clean-looking `?? "other"`
+    there is the bug, not the fix.
+  - `ComplianceEndpoints.UpsertRule` — the OTHER operand of the ordinal comparison — REJECTS an
+    unknown type with `400 validation.document_type` instead of coercing it. Deliberate asymmetry
+    with the worker: silently retyping a compliance RULE would change what it governs. Mis-cased
+    input is still folded (spelling, not meaning).
+  - `DocumentEndpoints`' `AllowedDocumentTypes` is still a second literal, made `internal` and
+    pinned EQUAL to the vocabulary by `CanonicalDocumentTypeTests` rather than deleted: those
+    endpoint files are owned by [#389](https://github.com/neboxdev/complidrop/issues/389) (the
+    upload-path allow-list/clamp and the oversize-type 500), which should collapse it. DRIFT
+    between the two IS a real finding; the duplication itself is not.
+  - `ComputeOutcome`'s blank-`DocumentType` WILDCARD arm survives on purpose even though
+    `UpsertRule` can no longer write a blank type. Deleting it would silently change grading for
+    pre-#373 blank-type rules (live-data behaviour change); a legacy blank-type rule must be
+    re-typed before it can be saved again. Do not flag the arm as dead code, and do not flag the
+    write/read asymmetry as an inconsistency — it is recorded in ADR 0045.
+  `Normalize` needs no length clamp — it only ever returns a member of the vocabulary, so the
+  `varchar(100)` column is safe by construction (pinned against the EF model). The sibling
+  `DocumentSubType` has no vocabulary and is DROPPED when over-length (nothing could match a
+  truncated half-value); the `DocumentField` columns and `ProcessingError` are TRUNCATED instead
+  (an extracted field is user-facing content). `ExtractionWorker.Clamp` is a one-line delegate to the
+  shared `Services/ColumnClamp.cs` (#372 / ADR 0044), the same shape as
+  `ComplianceCheckService.ClampToColumn` — do not re-inline either body.
+  **NEVER-GRADED IS NOT FAIL-SAFE** — do not repeat the old "nothing is certified, so it's safe"
+  framing. `ComputeOutcome`'s zero-applicable-rules branch stores
+  `expiringSoon ? ExpiringSoon : Pending`; `ComplianceStatusDeriver.Effective` promotes even a
+  stored `Pending` to `ExpiringSoon` inside the 30-day window; `VendorEndpoints.ComputeCoverage`
+  counts `Compliant or ExpiringSoon` as in-force and rolls the vendor up to `Covered`; and
+  `ExportService` prints "Expiring soon" in the auditor package — with an EMPTY "What we checked"
+  panel behind it. That is an affirmative-coverage overclaim. Fixing the read surfaces is
+  [#443](https://github.com/neboxdev/complidrop/issues/443) (out of #373's scope, already ticketed —
+  do not re-report).
+  Three KNOWN GAPS, recorded in ADR 0045 — do not re-report them as new findings:
+  - **Legacy rows are not laundered.** Coercion runs only on the next EXTRACTION and nothing
+    re-extracts a processed row, so a pre-deploy non-canonical type persists (never graded, own
+    supersession group, invisible to `?type=coi`) until a human re-types it. #389 does not touch
+    stored rows either. Deliberately NOT fixed by a data migration — because laundering production
+    rows is a destructive operation needing human sign-off (measure the population first), NOT
+    because the residue is harmless. It is not; see #443 above.
+  - **A clamped field can be narrowed by a manual edit.** `ExtractionFields` (jsonb) keeps the FULL
+    value AS EXTRACTED, but the detail page binds its input to the clamped `DocumentField.FieldValue`
+    and `UpdateFields` writes the submitted text back into `ExtractionFields` — so saving an
+    untouched clipped `description_of_operations` (a verdict input via the additional-insured
+    `contains` fallback) narrows the canonical value. Surfacing the clip in the UI is
+    [#444](https://github.com/neboxdev/complidrop/issues/444).
+  - **One unpinned mirror:** `frontend/src/lib/document-types.ts`. A .NET test cannot reach it
+    (no shared fixture, unlike ADR 0038's contact-email corpus). The five in-repo mirrors that CAN
+    be reached are pinned: both provider schemas, the extraction prompt's DOCUMENT TYPES block,
+    `DocumentEndpoints.AllowedDocumentTypes`, and `DisplayLabels.DocumentTypes`.
+    `RuleEngine/RuleSetLoader.DocumentTypes` is a SIXTH set and deliberately NOT a mirror — an RD-c
+    SUBSET (`coi | license | certification | other`) that must NOT be pinned equal to `All`.
 - Client-controlled input in a BOUNDED audit column is ADR 0044 (#372); the review-time facts
   that follow are pointers into it.
   - The clamp lives at ONE boundary — `CurrentUserService` reading `ColumnClamp.To` — not at

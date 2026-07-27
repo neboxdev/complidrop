@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CompliDrop.Api.Configuration;
+using CompliDrop.Api.Services;
 using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Tests.ExtractionFixtures;
 using CompliDrop.Api.Tests.TestHelpers;
@@ -68,6 +69,13 @@ public sealed class AnthropicExtractionClientTests
         tool["name"]!.GetValue<string>().Should().Be("record_extraction");
         tool["input_schema"]!["required"]!.AsArray().Select(n => n!.GetValue<string>())
             .Should().Contain(new[] { "documentType", "fields", "needsReprocessing" });
+        // #373: documentType is pinned to the canonical vocabulary here, exactly as the Gemini
+        // responseSchema pins it. Left free (the pre-#373 shape), this provider could answer "COI" or
+        // "Certificate of Insurance" against a prompt asking for "coi" — a value that matches zero
+        // compliance rules and splits the supersession group. CanonicalDocumentTypeTests pins the two
+        // providers' arrays EQUAL to each other and to the shared vocabulary.
+        tool["input_schema"]!["properties"]!["documentType"]!["enum"]!.AsArray().Select(n => n!.GetValue<string>())
+            .Should().Equal(CanonicalDocumentTypes.All);
 
         body["messages"]![0]!["role"]!.GetValue<string>().Should().Be("user");
         body["messages"]![0]!["content"]![0]!["text"]!.GetValue<string>()
@@ -247,13 +255,17 @@ public sealed class AnthropicExtractionClientTests
     }
 
     [Fact]
-    public async Task Valid_but_empty_tool_input_degrades_to_empty_other_extraction()
+    public async Task Valid_but_empty_tool_input_degrades_to_an_empty_untyped_extraction()
     {
         var handler = new StubHttpMessageHandler(HttpStatusCode.OK, Json(ExtractionFixtureHarness.AnthropicResponseFromPayload(new JsonObject())));
 
         var result = await ExtractionClientBuilder.Anthropic(handler).ExtractAsync(ExtractionClientBuilder.Ocr(), null, "application/pdf", null, default);
 
-        result.DocumentType.Should().Be("other");
+        // NULL, not "other" (#373): documentType is `required` in this tool's input_schema, so its
+        // absence is the provider going off-spec — a non-answer, not a classification. Coercing it to
+        // "other" here forged an answer the model never gave, and ExtractionWorker.PersistSuccess then
+        // overwrote the uploader's deliberate type with it. Null reaches the blank branch instead.
+        result.DocumentType.Should().BeNull();
         result.DocumentSubType.Should().BeNull();
         result.Fields.Should().BeEmpty();
         result.NeedsReprocessing.Should().BeFalse();
