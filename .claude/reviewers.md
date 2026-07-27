@@ -178,11 +178,16 @@ Both are defined in this repo's `.claude/agents/`.
     unknown type with `400 validation.document_type` instead of coercing it. Deliberate asymmetry
     with the worker: silently retyping a compliance RULE would change what it governs. Mis-cased
     input is still folded (spelling, not meaning).
-  - `DocumentEndpoints`' `AllowedDocumentTypes` is still a second literal, made `internal` and
-    pinned EQUAL to the vocabulary by `CanonicalDocumentTypeTests` rather than deleted: those
-    endpoint files are owned by [#389](https://github.com/neboxdev/complidrop/issues/389) (the
-    upload-path allow-list/clamp and the oversize-type 500), which should collapse it. DRIFT
-    between the two IS a real finding; the duplication itself is not.
+  - `DocumentEndpoints`' `AllowedDocumentTypes` literal is GONE — #389 collapsed it (ADR 0046 §7 /
+    ADR 0045 § "Option E"), so the PATCH type edit and BOTH upload paths call the vocabulary
+    directly and `CanonicalDocumentTypeTests`' set-equality pin was retired with it (a pin comparing
+    the vocabulary to itself is vacuous, not a safety net). The contract is now asserted over HTTP in
+    `RequestInputLengthTests`. Re-introducing a second literal in an endpoint IS a real finding.
+  - The two INGRESS paths COERCE an unknown type to `other`; `UpdateDocument` (PATCH) and
+    `UpsertRule` REJECT it with a 400. Deliberate three-way split, not an inconsistency: an upload
+    must not cost a vendor their file over a stray form value (and the portal 400 would arrive after
+    the blob is already stored), while a human deliberately re-typing a document or writing a rule is
+    choosing what gets graded.
   - `ComputeOutcome`'s blank-`DocumentType` WILDCARD arm survives on purpose even though
     `UpsertRule` can no longer write a blank type. Deleting it would silently change grading for
     pre-#373 blank-type rules (live-data behaviour change); a legacy blank-type rule must be
@@ -238,9 +243,42 @@ Both are defined in this repo's `.claude/agents/`.
     un-redacted Sentry `correlation_id` tag (ADR 0037). Widening it is a real finding.
   - The echoed response header, `HttpContext.Items`, the log scope and the stored column must
     always agree — a version that clamps or rewrites one of them independently IS a real finding.
-  - The SYSTEMIC length-validation sweep over the upload / register / waitlist /
-    idempotency-key paths is [#389](https://github.com/neboxdev/complidrop/issues/389),
-    deliberately not done here.
+  - The SYSTEMIC sweep over the upload / register / waitlist / idempotency-key paths landed in
+    [#389](https://github.com/neboxdev/complidrop/issues/389) — see ADR 0046 below.
+- Request strings bound before a bounded column is ADR 0046 (#389); the review-time facts that
+  follow are pointers into it, not a second copy of the rationale.
+  - Reject-vs-clamp is PER-FIELD by design, and the axis is who authored the value. User-TYPED
+    content is REJECTED with a `validation.too_long` 400 (silently truncating a person's words is
+    invisible data loss — and a truncated rule `ErrorMessage` is a CHANGED requirement that still
+    prints whole to an auditor). Machine-chosen incidentals the user never reads back — the uploaded
+    file NAME, the waitlist `Source` tag, the client `Idempotency-Key` — are CLAMPED via
+    `ColumnClamp.To`. "Make it consistent" in either direction is the bug, not the fix.
+  - The SAME two `DocumentField` columns deliberately take BOTH policies: `ExtractionWorker`
+    truncates (ADR 0045 §4), `UpdateFields` rejects. That is why their widths are ONE constant
+    (`ExtractionWorker.FieldName/ValueMaxLength` alias `InputLengths`) — re-inlining either is a
+    real finding.
+  - `Services/InputLengths.cs` is the SOURCE of those widths; `ModelConfiguration` calls
+    `HasMaxLength(InputLengths.X)` (the `AuditColumnLengths` / `ContactEmail.MaxLength` pattern). A
+    re-inlined literal there IS a real finding. Columns NOT listed there (`UploadedBy`,
+    `BlobStoragePath`, `DocumentType`, `TimeZone`) are absent on purpose — each is length-safe by
+    construction, and listing them would imply a guard that need not exist.
+  - The `Idempotency-Key` clamp must sit at the SINGLE point the header is read, before BOTH the
+    lookup and the storage. A version that clamps only one of the two makes a repeat of a long key
+    miss its own record and duplicate the side effect — idempotency silently broken. The PUBLIC
+    portal still IGNORES an oversize key rather than clamping (truncation manufactures collisions an
+    untrusted third party could force on purpose, ADR 0044 §2's reasoning); the three authenticated
+    routes clamp at the same 128. That asymmetry is deliberate.
+  - The dashboard upload's blob cleanup is UNCONDITIONAL (`documentPersisted` + `finally`, the
+    portal's shape). It does not violate ADR 0029/0032: `blobName` embeds the request's own Guid so
+    a concurrent same-key loser deletes only ITS OWN blob, and a sequential replay returns at the
+    fast path before any blob exists. A version that narrows it back to the `IsKeyConflict` catch
+    re-opens the orphan.
+  - The waitlist duplicate race is fixed by CATCHING the existing `(Email)` unique violation (matched
+    on the index NAME, the `IsKeyConflict` shape) and replaying the friendly 200 — NOT by adding an
+    index. Adding one over possibly-duplicated prod rows would fail the startup auto-migration and
+    take prod down (ADR 0016). "Just add a unique index" is a refuted suggestion, not a finding.
+  - The waitlist endpoint has no frontend caller and is KEPT anyway — removing a public endpoint is a
+    product decision. Do not flag it as dead code.
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).
