@@ -65,6 +65,37 @@ than a second pair of literals. Two writers hold opposite policies on those same
 and that only stays coherent while there is exactly one width. Same one-line-delegate shape as
 `ExtractionWorker.Clamp` → `ColumnClamp.To`.
 
+> **Amendment 1 (#389 review) — the binding is now enforced, and two more columns joined it.**
+>
+> This section's decision shipped with no mechanical guard, while sibling ADR 0044 pins exactly the
+> same property with two tests. Those two tests — `AuditClientInputClampTests`'
+> `Every_clamped_column_takes_its_width_from_the_shared_constant` (built EF model vs the constant) and
+> `ModelConfiguration_names_the_width_constants_rather_than_a_numeric_literal` (source text, which is
+> the half that catches an **equal-valued** re-inline) — now cover **every** `InputLengths` width too.
+> The source-text assertion is scoped to each `builder.Entity<T>` block, because property names are not
+> unique across the file (`Name` appears on three entities).
+>
+> `User.Email` and `EmailVerificationToken.NewEmail` were left unbound in the original pass while the
+> identical anonymous-signup email column (`WaitlistEntry.Email`, also 256) was bound in the same
+> commit. Both now read a new `InputLengths.UserEmail`, and `AuthEndpoints.IsValidEmail`'s
+> `email.Length <= 256` reads it as well — one number instead of three hand-copied ones. **Only the
+> number is shared:** that guard keeps its own `validation.email` code (§3 Amendment 1) and its
+> deliberate laxness (ADR 0038 — an account email is proven by the verification mail, a vendor contact
+> email never is). No schema change: 256 was already the width.
+>
+> Two relocations, no behaviour change:
+>
+> - The `IResult`-producing guard `InputLength` moved to `Endpoints/`, beside `IdempotencyResults`. It
+>   was the only type in `Services/` touching `Microsoft.AspNetCore.Http.Results`. It stays a shared
+>   **envelope** rather than a `(code, message)` pair each endpoint shapes itself, because the property
+>   §3 promises is that a client sees ONE code and ONE message shape — returning the finished result
+>   makes that true by construction instead of by eight call sites getting it right. The widths stay in
+>   `Services/`, where `ModelConfiguration` reads them.
+> - `EmailUniqueIndexName` moved off `WaitlistEndpoints` into `Services/WaitlistSignup`, with the
+>   `IsDuplicateEmail` predicate (the `IdempotencyService.KeyIndexName` / `IsKeyConflict` shape). It had
+>   made `ModelConfiguration` compile against `Endpoints` — the only Data→Endpoints dependency in the
+>   assembly. See §6 Amendment 1 for how the name is now verified.
+
 ### 2. Reject vs clamp is **per-field**, and the axis is *who authored the value*
 
 - **REJECT (400)** what the **user typed** — company name, industry, company size, full name, vendor
@@ -92,8 +123,20 @@ would change it (the asymmetry of ADR 0045 §5).
 
 ### 3. Rejection messages follow the frontend error policy
 
-One code — `validation.too_long` — so a client has one rule, with the actionable detail in
-`error.message`, which the frontend renders verbatim (CLAUDE.md § Frontend error-message policy).
+One code — `validation.too_long` — for **every rejection this guard makes**, so a client has one rule
+for the #389 family, with the actionable detail in `error.message`, which the frontend renders verbatim
+(CLAUDE.md § Frontend error-message policy).
+
+> **Amendment 1 (#389 review) — that is "one code for these guards", not "the app's only over-length
+> rejection".** Two older rejections stay separate **on purpose**, and unifying either is the bug:
+>
+> - `ContactEmail`'s `validation.contact_email` (#369 / ADR 0038), reachable on the **same vendor
+>   request** as this guard. Over-length is one of several ways a vendor contact email can be invalid,
+>   and they all answer with one code plus a message naming the specific problem; splitting length off
+>   would give a single field two codes. `.claude/reviewers.md` records unification here as a finding.
+> - `AuthEndpoints.IsValidEmail`'s `validation.email`, likewise one "enter a valid email" answer
+>   covering shape *and* length. Its 256 now reads `InputLengths.UserEmail` (§1 Amendment 1) — the
+>   number is shared, the error code is not.
 `InputLength.TooLongMessage` produces `"{Label} must be {n} characters or fewer."`, which is
 byte-identical to the tone `UpdateOrganization` already set. Never HTTP jargon, never a column-width
 dump. "N or fewer", not "under N": exactly N is a legal value, pinned by a boundary test on every
@@ -140,6 +183,29 @@ ADR 0029/0032 semantics are preserved exactly, and the reasoning is the load-bea
 `TryDeleteBlobAsync` keeps swallowing its own failures (logged loud enough for an operator to find the
 orphan). That is what lets it sit in a `finally` without masking the real exception on the way out.
 
+> **Amendment 1 (#389 review) — the cleanup must not use the REQUEST's `CancellationToken`.**
+>
+> As shipped, the `finally` passed `ct` to the delete. `BlobStorageService.DeleteAsync` forwards it to
+> `BlobClient.DeleteIfExistsAsync`, which throws the moment it sees an **already-cancelled** token — it
+> never issues the DELETE. So a **client abort between the blob upload and the commit** (tab closed,
+> phone loses signal) cancelled `ct`, failed `SaveChangesAsync(ct)`, ran the cleanup, and the cleanup
+> threw and was swallowed. The failure path most likely to strand a blob was the one whose cleanup could
+> not run — which contradicted this section's own "**every** failure path deletes the blob".
+>
+> Both `TryDeleteBlobAsync` helpers (documents + sample) now take **no** `CancellationToken` and pass
+> `CancellationToken.None`, so a caller cannot reintroduce the doomed token. The **portal** twin — the
+> shape this one was mirrored from — carried the identical flaw, plus a
+> `when (ex is not OperationCanceledException)` filter that let the aborted delete's own exception
+> escape the `finally` and **replace** the real one; it now passes `CancellationToken.None` and swallows
+> unfiltered like its sibling. Deleting an orphan is milliseconds of best-effort work that has to
+> outlive the request that triggered it.
+>
+> Pinned by two tests that abort the request the instant the blob is stored, with no timing race: a
+> test-only `IStartupFilter` swaps `HttpContext.RequestAborted` for a token the fake blob store cancels
+> from inside `UploadAsync`, and `FakeBlobStorageService.DeleteAsync` now honours `ct` the way the real
+> client does (a fake that ignored it would report a green cleanup Azure would have refused). The
+> pre-existing 22001-driven orphan test cannot catch this — its token is never cancelled.
+
 ### 6. The waitlist duplicate race is caught, not indexed away
 
 The `(Email)` unique index **already exists**, so the fix is to catch its violation — matched on the
@@ -157,6 +223,19 @@ The waitlist endpoint is **kept and hardened**, not removed. It has no frontend 
 homepage gate was removed), but deleting a public endpoint is a product decision, not an
 implementation one.
 
+> **Amendment 1 (#389 review) — the index name is checked against Postgres, not against itself.**
+>
+> A **wrong** constant silently turns the concurrent-duplicate race back into a 500 on a public
+> marketing form, and the only thing exercising it was the probabilistic five-racer test: if the race
+> does not materialise on a given run, a wrong constant ships green. The EF-model form of the check
+> would be **vacuous**, because `ModelConfiguration` takes the name FROM the same constant
+> (`HasDatabaseName`) — it would compare the constant to itself.
+>
+> So `WaitlistEndpointsTests` now reads `pg_indexes` on the migrated test database and asserts the index
+> Postgres actually carries is the one `WaitlistSignup.IsDuplicateEmail` matches on. That is the only
+> independent witness, and it is deterministic. (The constant itself moved to `Services/` — §1
+> Amendment 1.)
+
 ### 7. The duplicate document-type literal is collapsed
 
 `DocumentEndpoints.AllowedDocumentTypes` — the second copy ADR 0045 § "Option E" deferred to this
@@ -164,6 +243,35 @@ ticket — is **deleted**. All three sites in that file (the PATCH type edit and
 call `CanonicalDocumentTypes` directly. The set-equality test that pinned the duplication is retired
 with it rather than left comparing the vocabulary to itself; the contract is asserted **over HTTP**
 instead, which is strictly stronger than two C# sets being equal.
+
+### 8. A non-nullable DTO property is still nullable on the wire (#389 review)
+
+Added during the review pass, because the length guards themselves surfaced the sibling failure and one
+of them introduced a new instance of it.
+
+System.Text.Json binds a **missing or JSON-null** property to `null` even when the positional record
+parameter is declared non-nullable. So a non-nullable string DTO property that lands in a NOT NULL
+column is a **500 waiting to happen**, and `InputLength.FirstViolation` cannot catch it: it treats null
+as "fits", correctly — *an absent value is not an over-length one*. The two are complementary guards,
+not one.
+
+Every such property now carries a blank guard beside its length check, the shape
+`CreateTemplate` / `CreateVendor` already used:
+
+- `UpdateFields` — `req.Fields` **and** each element's `FieldName`. `{}`, `{"fields": null}`,
+  `{"fields":[null]}` and an element without a name each NRE'd on the new guard's own walk. An **EMPTY
+  array stays legal**: the detail page enables Save with no edits precisely while the manual-review card
+  is showing, and that no-op save is what resolves the review (ADR 0040).
+- `UpsertRule` — `req.Operator`, over a NOT NULL column, on the very block this ticket hardened
+  (`validation.operator`). A blank operator is meaningless anyway: `EvaluateRule`'s switch has no arm
+  for it, so the rule would grade nothing while still printing on the auditor-facing export.
+- `UpdateTemplate` — `req.Name` (found in the original pass, listed here for completeness).
+
+The remaining non-nullable string columns written from request DTOs in the endpoints this ticket
+touched were audited and are already safe: `Organization.Name`, `User.FullName`, `User.Email`,
+`Vendor.Name`, `ComplianceTemplate.Name` and `WaitlistEntry.Email` by blank checks;
+`ComplianceRule.DocumentType`, `Document.DocumentType` and `Organization.TimeZone` by null-tolerant
+normalizers; `Reminder.EmailSubjectTemplate` is a nullable column.
 
 ## Consequences
 

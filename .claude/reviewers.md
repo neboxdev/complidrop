@@ -261,9 +261,30 @@ Both are defined in this repo's `.claude/agents/`.
     real finding.
   - `Services/InputLengths.cs` is the SOURCE of those widths; `ModelConfiguration` calls
     `HasMaxLength(InputLengths.X)` (the `AuditColumnLengths` / `ContactEmail.MaxLength` pattern). A
-    re-inlined literal there IS a real finding. Columns NOT listed there (`UploadedBy`,
-    `BlobStoragePath`, `DocumentType`, `TimeZone`) are absent on purpose — each is length-safe by
-    construction, and listing them would imply a guard that need not exist.
+    re-inlined literal there IS a real finding — and it is MECHANICAL, not just a convention: the two
+    `AuditClientInputClampTests` width tests cover every `InputLengths` width as well as the ADR 0044
+    ones (built-model equality, plus the entity-scoped source-text assertion that is the half catching
+    an EQUAL-valued re-inline). Columns NOT listed there (`UploadedBy`, `BlobStoragePath`,
+    `DocumentType`, `TimeZone`) are absent on purpose — each is length-safe by construction, and
+    listing them would imply a guard that need not exist.
+  - `validation.too_long` is the one code for THESE guards, not the app's only over-length rejection.
+    `ContactEmail`'s `validation.contact_email` (#369 / ADR 0038, reachable on the SAME vendor
+    request) and `AuthEndpoints.IsValidEmail`'s `validation.email` are older, deliberate exceptions —
+    each is ONE answer covering shape AND length on a field with one message. Unifying either IS the
+    bug (see the ADR 0038 entry). Only the NUMBER is shared: `InputLengths.UserEmail` backs
+    `User.Email`, `EmailVerificationToken.NewEmail` and `IsValidEmail`'s cap.
+  - The widths live in `Services/`; the `IResult`-producing guard `InputLength` lives in `Endpoints/`
+    beside `IdempotencyResults` — it is the layer that owns HTTP envelopes. It stays a shared
+    ENVELOPE rather than a `(code, message)` pair each endpoint shapes: "one code, one message shape"
+    is the promise, and returning the finished result is what makes it true by construction.
+    `Services/WaitlistSignup` holds the waitlist index name + duplicate predicate for the mirror
+    reason — `ModelConfiguration` must not compile against `Endpoints`.
+  - A non-nullable POSITIONAL record parameter is STILL null on the wire (System.Text.Json binds a
+    missing/JSON-null property to null), and `InputLength.FirstViolation` treats null as "fits" —
+    correctly, an absent value is not an over-length one. So a NOT NULL column fed from one needs its
+    OWN blank guard beside the length check: `UpdateFields` (`fields` + each `fieldName`),
+    `UpsertRule` (`operator`), `UpdateTemplate` (`name`). An EMPTY `fields` array must stay LEGAL —
+    the detail page's no-edit Save is what resolves the #383 review card (ADR 0040).
   - The `Idempotency-Key` clamp must sit at the SINGLE point the header is read, before BOTH the
     lookup and the storage. A version that clamps only one of the two makes a repeat of a long key
     miss its own record and duplicate the side effect — idempotency silently broken. The PUBLIC
@@ -275,9 +296,18 @@ Both are defined in this repo's `.claude/agents/`.
     a concurrent same-key loser deletes only ITS OWN blob, and a sequential replay returns at the
     fast path before any blob exists. A version that narrows it back to the `IsKeyConflict` catch
     re-opens the orphan.
+  - That cleanup deletes with `CancellationToken.None`, NEVER the request's `ct` — on both upload
+    paths and the sample seed. `BlobStorageService.DeleteAsync` forwards the token to
+    `DeleteIfExistsAsync`, which throws BEFORE issuing the DELETE on an already-cancelled token, so a
+    client abort (the likeliest orphan-maker: tab closed, phone drops mid-upload) was the one failure
+    whose cleanup could not run. Both `TryDeleteBlobAsync` helpers take no token at all so it can't
+    be reintroduced, and the portal's catch is unfiltered — the old
+    `when (ex is not OperationCanceledException)` let the aborted delete's exception escape the
+    `finally` and replace the real one. Passing `ct` back in IS a real finding.
   - The waitlist duplicate race is fixed by CATCHING the existing `(Email)` unique violation (matched
-    on the index NAME, the `IsKeyConflict` shape) and replaying the friendly 200 — NOT by adding an
-    index. Adding one over possibly-duplicated prod rows would fail the startup auto-migration and
+    on the index NAME, the `IsKeyConflict` shape, verified against `pg_indexes` on the migrated test
+    DB because the EF-model form would compare the constant to itself) and replaying the friendly
+    200 — NOT by adding an index. Adding one over possibly-duplicated prod rows would fail the startup auto-migration and
     take prod down (ADR 0016). "Just add a unique index" is a refuted suggestion, not a finding.
   - The waitlist endpoint has no frontend caller and is KEPT anyway — removing a public endpoint is a
     product decision. Do not flag it as dead code.
