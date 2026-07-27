@@ -151,7 +151,7 @@ public static class SampleEndpoints
             // request seeded first: roll our just-uploaded blob back and replay the winner so the caller
             // still lands on a verdict (idempotent). Disambiguate by the violated INDEX (not just the
             // SqlState) so an UNRELATED future 23505 is surfaced, never silently masked as a sample replay.
-            await TryDeleteBlobAsync(blobs, blobName, loggerFactory, ct);
+            await TryDeleteBlobAsync(blobs, blobName, loggerFactory);
             db.ChangeTracker.Clear();
             if (!string.IsNullOrWhiteSpace(idempotencyKey) && idem.IsKeyConflict(ex))
             {
@@ -173,7 +173,7 @@ public static class SampleEndpoints
         catch
         {
             // Any other persistence failure after the blob upload — don't orphan the blob.
-            await TryDeleteBlobAsync(blobs, blobName, loggerFactory, ct);
+            await TryDeleteBlobAsync(blobs, blobName, loggerFactory);
             throw;
         }
 
@@ -293,12 +293,18 @@ public static class SampleEndpoints
         ex.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation } pg
         && string.Equals(pg.ConstraintName, SampleUniqueIndexName, StringComparison.Ordinal);
 
+    // Takes NO CancellationToken, and passes CancellationToken.None to the delete, for the reason
+    // spelled out on DocumentEndpoints.TryDeleteBlobAsync (#389 re-review): the bare `catch` below that
+    // reaches this cleanup ALSO catches the OperationCanceledException of a client abort, and
+    // BlobStorageService.DeleteAsync forwards the token to DeleteIfExistsAsync, which throws before
+    // issuing the DELETE on an already-cancelled token — so the aborted request, the very case that
+    // strands a blob, would be the one whose rollback silently no-ops.
     private static async Task TryDeleteBlobAsync(
-        IBlobStorageService blobs, string blobName, ILoggerFactory loggerFactory, CancellationToken ct)
+        IBlobStorageService blobs, string blobName, ILoggerFactory loggerFactory)
     {
         try
         {
-            await blobs.DeleteAsync(blobName, ct);
+            await blobs.DeleteAsync(blobName, CancellationToken.None);
         }
         catch (Exception ex)
         {

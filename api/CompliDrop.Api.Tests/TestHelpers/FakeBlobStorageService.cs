@@ -35,6 +35,15 @@ public sealed class FakeBlobStorageService : IBlobStorageService
     /// </summary>
     public string? UrlOverride { get; set; }
 
+    /// <summary>
+    /// Cancelled by <see cref="UploadAsync"/> the instant the blob is stored, simulating a client that
+    /// aborts BETWEEN the blob upload and the commit (tab closed, phone loses signal). Installed by
+    /// <see cref="ClientAbortStartupFilter"/>, which is what makes the cancelled token the one the
+    /// endpoint is holding. Lets a test drive the exact failure path whose cleanup used to no-op (#389
+    /// re-review) with no timing race: the cancel happens inside the upload call itself.
+    /// </summary>
+    public CancellationTokenSource? CancelRequestAfterUpload { get; set; }
+
     public async Task<BlobUploadResult> UploadAsync(string blobName, Stream content, string contentType, CancellationToken ct)
     {
         if (ThrowUnavailableOnUpload)
@@ -43,7 +52,11 @@ public sealed class FakeBlobStorageService : IBlobStorageService
         await content.CopyToAsync(ms, ct);
         var bytes = ms.ToArray();
         _blobs[blobName] = bytes;
-        return new BlobUploadResult(blobName, UrlOverride ?? $"memory://{blobName}", bytes.Length, contentType);
+        var result = new BlobUploadResult(blobName, UrlOverride ?? $"memory://{blobName}", bytes.Length, contentType);
+        // AFTER the blob exists: the orphan this simulates is only possible once storage has taken it.
+        if (CancelRequestAfterUpload is { } abort)
+            await abort.CancelAsync();
+        return result;
     }
 
     /// <summary>Clears stored blobs and the behavior knobs between tests (host singleton).</summary>
@@ -53,6 +66,7 @@ public sealed class FakeBlobStorageService : IBlobStorageService
         ThrowUnavailableOnUpload = false;
         ThrowOnDelete = false;
         UrlOverride = null;
+        CancelRequestAfterUpload = null;
     }
 
     // Honest not-found: null for an unknown name, mirroring the interface contract the real
@@ -63,6 +77,11 @@ public sealed class FakeBlobStorageService : IBlobStorageService
 
     public Task DeleteAsync(string blobName, CancellationToken ct)
     {
+        // FAITHFUL to the real service, and load-bearing for the #389 re-review test: BlobStorageService
+        // forwards ct to BlobClient.DeleteIfExistsAsync, which throws the moment it sees an already-
+        // cancelled token — it never issues the DELETE. A fake that ignored ct would report a green
+        // cleanup for a token Azure would have refused, i.e. it could not detect the orphan-on-abort bug.
+        ct.ThrowIfCancellationRequested();
         if (ThrowOnDelete)
             throw new BlobStorageUnavailableException("Simulated storage outage on delete.", new InvalidOperationException("simulated"));
         _blobs.TryRemove(blobName, out _);

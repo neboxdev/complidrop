@@ -556,7 +556,7 @@ public static class DocumentEndpoints
         finally
         {
             if (!documentPersisted)
-                await TryDeleteBlobAsync(blobs, blobName, loggerFactory, ct);
+                await TryDeleteBlobAsync(blobs, blobName, loggerFactory);
         }
 
         // No explicit "document.uploaded": the interceptor already records this owner upload as the
@@ -789,12 +789,20 @@ public static class DocumentEndpoints
     // blob, never a failed request, so it's logged (loud enough for an operator to find the orphan) and
     // swallowed. Swallowing is what lets it sit in a `finally` without masking the real exception on the
     // way out.
+    //
+    // Takes NO CancellationToken, deliberately, and passes CancellationToken.None to the delete. The
+    // REQUEST token is exactly the wrong one here: a client abort between the blob upload and the commit
+    // (tab closed, mobile connection dropped) is itself a failure path that reaches this cleanup, and
+    // BlobStorageService.DeleteAsync forwards the token to DeleteIfExistsAsync, which throws before
+    // issuing the DELETE when it is already cancelled. The catch below would then swallow that and log —
+    // so the ONE failure mode most likely to strand a blob would be the one whose cleanup cannot run.
+    // Deleting an orphan is a few milliseconds of best-effort work that must outlive the request.
     private static async Task TryDeleteBlobAsync(
-        IBlobStorageService blobs, string blobName, ILoggerFactory loggerFactory, CancellationToken ct)
+        IBlobStorageService blobs, string blobName, ILoggerFactory loggerFactory)
     {
         try
         {
-            await blobs.DeleteAsync(blobName, ct);
+            await blobs.DeleteAsync(blobName, CancellationToken.None);
         }
         catch (Exception ex)
         {

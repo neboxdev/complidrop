@@ -323,8 +323,21 @@ public static class VendorPortalEndpoints
         {
             if (!documentPersisted)
             {
-                try { await blobs.DeleteAsync(blobName, ct); }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                // CancellationToken.None, NOT the request's ct (#389 re-review — same fix as
+                // DocumentEndpoints.TryDeleteBlobAsync). A client abort between the blob upload and the
+                // commit — the vendor closing the tab, a phone losing signal mid-upload — cancels ct,
+                // unwinds the transaction and lands HERE; but BlobStorageService.DeleteAsync forwards
+                // the token to DeleteIfExistsAsync, which throws before issuing the DELETE on an
+                // already-cancelled token. So the failure path most likely to strand a blob was the one
+                // whose cleanup could not run. The cleanup is milliseconds of best-effort work that has
+                // to outlive the request that triggered it.
+                //
+                // The catch is unfiltered for the same reason it is in DocumentEndpoints: swallowing is
+                // what lets this sit in a `finally` without replacing the real exception on the way out.
+                // The old `when (ex is not OperationCanceledException)` filter let precisely the abort
+                // case escape and mask it.
+                try { await blobs.DeleteAsync(blobName, CancellationToken.None); }
+                catch (Exception ex)
                 {
                     logger.LogWarning(ex,
                         "Portal upload: best-effort blob cleanup failed for {BlobName} on link {LinkId}",

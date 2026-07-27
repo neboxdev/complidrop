@@ -330,6 +330,63 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
         Blobs.BlobCount.Should().Be(0, "the blob whose Document never committed must not survive the request");
     }
 
+    [Fact]
+    public async Task A_client_abort_between_the_blob_upload_and_the_commit_still_deletes_the_blob()
+    {
+        // The failure path the unconditional cleanup exists FOR — and the one it could not serve until
+        // the #389 re-review. The `finally` used to pass the REQUEST's CancellationToken to the delete,
+        // and BlobStorageService.DeleteAsync forwards it to DeleteIfExistsAsync, which throws before
+        // issuing the DELETE on an already-cancelled token. So a client abort between the blob upload
+        // and the commit (tab closed, mobile connection dropped) cancelled ct, failed
+        // SaveChangesAsync(ct), ran the cleanup, and the cleanup threw and was swallowed — orphaning
+        // exactly the blob the guard was added to reclaim.
+        //
+        // The 22001-driven sibling above cannot catch this: its token is never cancelled, so it passes
+        // with `ct` restored. Only a cancellation discriminates.
+        var auth = await RegisterAndLoginAsync();
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/documents/upload")
+        {
+            Content = UploadForm(PdfBytes(), "coi.pdf", "application/pdf"),
+        };
+        req.Headers.Add(ClientAbortStartupFilter.HeaderName, "1");
+        var resp = await auth.Client.SendAsync(req);
+
+        // The abort surfaces as the generic 500 envelope — proof the request reached the handler and
+        // unwound through the cleanup, rather than being refused by a guard before any blob existed.
+        resp.StatusCode.Should().Be(HttpStatusCode.InternalServerError);
+        await using var db = CreateSystemDb();
+        (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId)).Should().Be(0);
+        Blobs.BlobCount.Should().Be(0,
+            "cleanup must outlive the request that triggered it — a cancelled token cannot delete");
+    }
+
+    [Fact]
+    public async Task A_client_abort_during_a_portal_upload_still_deletes_the_blob()
+    {
+        // The portal twin, which the dashboard's `finally` was mirrored FROM — it carried the same
+        // cancelled-token flaw, plus a `when (ex is not OperationCanceledException)` filter that let the
+        // aborted delete's own exception escape the finally and REPLACE the real one. Untrusted route,
+        // and a vendor uploading from a phone is the likeliest client in the app to drop mid-request.
+        var link = await SeedLinkAsync();
+
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/api/portal/{link.Token}/upload")
+        {
+            Content = UploadForm(PdfBytes(), "coi.pdf", "application/pdf"),
+        };
+        req.Headers.Add(ClientAbortStartupFilter.HeaderName, "1");
+        var resp = await CreateClient().SendAsync(req);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.InternalServerError);
+        await using var db = CreateSystemDb();
+        (await db.Documents.CountAsync(d => d.OrganizationId == link.OrgId)).Should().Be(0);
+        // The permit is rolled back with the transaction — an upload that left nothing behind must not
+        // have cost the customer a paid slot either.
+        (await db.VendorPortalLinks.SingleAsync(l => l.Id == link.LinkId)).UploadCount.Should().Be(0);
+        Blobs.BlobCount.Should().Be(0,
+            "cleanup must outlive the request that triggered it — a cancelled token cannot delete");
+    }
+
     // ───────────────────────── The dashboard upload's own input ─────────────────────────
 
     [Fact]

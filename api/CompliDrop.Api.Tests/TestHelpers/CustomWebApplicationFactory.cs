@@ -134,6 +134,10 @@ public sealed class CustomWebApplicationFactory(
             services.RemoveAll<IStripeService>();
             services.AddScoped<StripeService>();
             services.AddSingleton<IStripeService, FakeStripeService>();
+
+            // Lets a test abort a request mid-handler (#389 re-review). Inert unless the request
+            // carries ClientAbortStartupFilter.HeaderName, so it changes nothing for every other test.
+            services.AddSingleton<IStartupFilter, ClientAbortStartupFilter>();
         });
     }
 }
