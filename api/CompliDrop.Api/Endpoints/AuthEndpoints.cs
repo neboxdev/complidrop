@@ -84,6 +84,24 @@ public static class AuthEndpoints
         if (string.IsNullOrWhiteSpace(req.FullName) || string.IsNullOrWhiteSpace(req.CompanyName))
             return Error(400, "validation.required", "Full name and company name are required.");
 
+        // ANONYMOUS route (#389 / ADR 0046). Every one of these lands verbatim in a bounded varchar —
+        // Organization.Name(200) / Industry(100) / CompanySize(20), User.FullName(200) — and Npgsql does
+        // not truncate, so before this guard an over-length value failed the whole registration
+        // SaveChanges with a Postgres 22001 and surfaced as a generic 500 on the signup form. CompanySize
+        // at 20 is the sharp edge: it is the narrowest column in the app fed by request input. Rejected
+        // rather than clamped because this is the customer's OWN name for their business — silently
+        // storing half of it is data loss they never see. The checked values are the TRIMMED ones the
+        // rows below actually receive. Email is already bounded by IsValidEmail (<= 256), and TimeZone by
+        // NormalizeTimeZone (only ever an IANA id or the default).
+        var fullName = req.FullName.Trim();
+        var companyName = req.CompanyName.Trim();
+        if (InputLength.FirstViolation(
+                (companyName, InputLengths.OrganizationName, "Company name"),
+                (fullName, InputLengths.UserFullName, "Full name"),
+                (req.Industry, InputLengths.OrganizationIndustry, "Industry"),
+                (req.CompanySize, InputLengths.OrganizationCompanySize, "Company size")) is { } tooLong)
+            return tooLong;
+
         var email = req.Email.Trim().ToLowerInvariant();
         if (await db.Users.AnyAsync(u => u.Email == email))
             return Error(409, "auth.email_taken", "An account with that email already exists.");
@@ -92,7 +110,7 @@ public static class AuthEndpoints
         var org = new Organization
         {
             Id = Guid.NewGuid(),
-            Name = req.CompanyName.Trim(),
+            Name = companyName,
             Industry = req.Industry,
             CompanySize = req.CompanySize,
             TimeZone = NormalizeTimeZone(req.TimeZone),
@@ -107,7 +125,7 @@ public static class AuthEndpoints
             OrganizationId = org.Id,
             Email = email,
             PasswordHash = hasher.Hash(req.Password),
-            FullName = req.FullName.Trim(),
+            FullName = fullName,
             Role = "admin",
             // Explicit so the in-memory user (used by IssueCookies below) carries
             // the SAME stamp as the row — otherwise the issued token's stamp would
@@ -510,8 +528,11 @@ public static class AuthEndpoints
         var name = req.Name?.Trim();
         if (string.IsNullOrWhiteSpace(name))
             return Error(400, "validation.required", "Organization name is required.");
-        if (name.Length > 200)
-            return Error(400, "validation.required", "Organization name must be 200 characters or fewer.");
+        // The guard that predated #389 and set its tone — same message, now sharing the one width
+        // constant (and so the column) with the register path that writes the same column, and the one
+        // `validation.too_long` code every over-length rejection in the app now answers with.
+        if (InputLength.FirstViolation((name, InputLengths.OrganizationName, "Organization name")) is { } tooLong)
+            return tooLong;
 
         if (string.IsNullOrWhiteSpace(req.TimeZone) || !IsValidTimeZone(req.TimeZone))
             return Error(400, "validation.timezone", "Choose a valid time zone.");
