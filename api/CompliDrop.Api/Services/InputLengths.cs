@@ -70,6 +70,13 @@ public static class InputLengths
     /// NAMESPACED key rather than the raw header: <c>"portal:{token}:{key}"</c> is 8 + 32 + 128 = 168,
     /// ample headroom under <see cref="IdempotencyKey"/>. A UUID/nonce — what every real client mints —
     /// is 36.
+    /// <para/>
+    /// That arithmetic is NOT load-bearing prose: raising this constant (or lengthening the portal
+    /// token) goes red on <c>VendorPortalEndpointsTests.The_namespaced_portal_key_always_fits_the_
+    /// idempotency_column</c>, which computes the worst case from
+    /// <c>VendorPortalEndpoints.NamespacedIdempotencyKey</c> and the real <c>PortalLink.GenerateToken</c>
+    /// rather than restating the numbers. Three authenticated routes read this constant too, so the
+    /// PUBLIC route's safety otherwise depended on a value it does not own. (#389 review)
     /// </summary>
     public const int ClientIdempotencyKey = 128;
 }

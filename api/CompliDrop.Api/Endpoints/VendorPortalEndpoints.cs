@@ -113,7 +113,7 @@ public static class VendorPortalEndpoints
         var portalOrgId = link.Vendor.OrganizationId;
         var clientKey = http.Request.Headers["Idempotency-Key"].FirstOrDefault();
         var idempotencyKey = !string.IsNullOrWhiteSpace(clientKey) && clientKey.Length <= InputLengths.ClientIdempotencyKey
-            ? $"portal:{token}:{clientKey}"
+            ? NamespacedIdempotencyKey(token, clientKey)
             : null;
         if (idempotencyKey is not null)
         {
@@ -348,6 +348,22 @@ public static class VendorPortalEndpoints
 
         return Results.Ok(response);
     }
+
+    /// <summary>
+    /// The stored form of a PUBLIC portal upload's idempotency key (#333 / ADR 0032): the client's raw
+    /// header namespaced per link, so the same key on two links in one org cannot dedupe against each
+    /// other under the <c>(OrganizationId, Key)</c> index.
+    /// <para/>
+    /// A named method rather than an inline interpolation because the safety property that keeps this
+    /// public route from 22001-ing — <c>"portal:".Length + token + ":" + </c>
+    /// <see cref="InputLengths.ClientIdempotencyKey"/> must fit <see cref="InputLengths.IdempotencyKey"/>
+    /// — used to live only as arithmetic in a doc comment, which nothing checked. It is now pinned by
+    /// <c>VendorPortalEndpointsTests</c> against THIS method and the real
+    /// <c>PortalLink.GenerateToken()</c>, so raising the shared client-key bound (or lengthening the
+    /// token) goes red here instead of failing an untrusted vendor's upload in production. (#389 review)
+    /// </summary>
+    internal static string NamespacedIdempotencyKey(string token, string clientKey) =>
+        $"portal:{token}:{clientKey}";
 
     private static Task<int> DeactivateAsync(SystemDbContext db, Guid linkId, CancellationToken ct) =>
         db.VendorPortalLinks

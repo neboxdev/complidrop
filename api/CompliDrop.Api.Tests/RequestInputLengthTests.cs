@@ -511,6 +511,45 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
         (await auth.Client.SendAsync(req)).StatusCode.Should().Be(HttpStatusCode.Created);
     }
 
+    [Fact]
+    public async Task A_long_idempotency_key_is_clamped_and_still_replays_a_checkout_session()
+    {
+        // The third clamped route, and the one where the pre-fix 500 was worst: the Stripe checkout
+        // session had ALREADY been created when the record insert 22001'd, so the customer saw a server
+        // error for a session that existed — and a retry, missing its own record, minted a second one.
+        // Same both-halves proof as the upload twin: the replay is what shows the LOOKUP was clamped
+        // too, and the stored Key length is what shows the STORAGE was.
+        var auth = await RegisterAndLoginAsync();
+        var key = Chars(300);
+
+        var first = await PostCheckoutWithIdempotency(auth.Client, key);
+        var second = await PostCheckoutWithIdempotency(auth.Client, key);
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        second.StatusCode.Should().Be(HttpStatusCode.OK);
+        var url = await SessionUrl(first);
+        url.Should().NotBeNullOrWhiteSpace();
+        (await SessionUrl(second)).Should().Be(url, "the second call replays the first session, never a new one");
+
+        await using var db = CreateSystemDb();
+        (await db.IdempotencyRecords.SingleAsync(r => r.OrganizationId == auth.OrgId)).Key
+            .Should().HaveLength(InputLengths.ClientIdempotencyKey);
+    }
+
+    private static Task<HttpResponseMessage> PostCheckoutWithIdempotency(HttpClient client, string key)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/billing/checkout")
+        {
+            Content = JsonContent.Create(new { plan = "pro" }),
+        };
+        req.Headers.Add("Idempotency-Key", key);
+        return client.SendAsync(req);
+    }
+
+    private static async Task<string?> SessionUrl(HttpResponseMessage resp) =>
+        (await resp.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("sessionUrl").GetString();
+
     // ───────────────────────── Authenticated: vendors ─────────────────────────
 
     public static TheoryData<string, int, string> VendorFields => new()
