@@ -64,12 +64,14 @@ public static class ComplianceEndpoints
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
         if (string.IsNullOrWhiteSpace(req.Name)) return Error(400, "validation.name", "Template name is required.");
+        var name = req.Name.Trim();
+        if (TemplateLengthViolation(name, req.Description) is { } tooLong) return tooLong;
 
         var template = new ComplianceTemplate
         {
             Id = Guid.NewGuid(),
             OrganizationId = currentUser.OrganizationId.Value,
-            Name = req.Name.Trim(),
+            Name = name,
             Description = req.Description,
             IsSystemTemplate = false,
             CreatedAt = DateTime.UtcNow
@@ -87,9 +89,18 @@ public static class ComplianceEndpoints
         AppDbContext db,
         CancellationToken ct)
     {
+        // Same two guards as CreateTemplate (#389). The blank check is new here and closes a second
+        // 500 on the same line: `req.Name` is a non-nullable record property, so a JSON body carrying
+        // `"name": null` bound null and the `.Trim()` below NRE'd — an unhandled 500 where the create
+        // path has always answered a 400. A blank checklist name renders an unclickable row, exactly
+        // the reason CreateVendor's twin guard exists.
+        if (string.IsNullOrWhiteSpace(req.Name)) return Error(400, "validation.name", "Template name is required.");
+        var name = req.Name.Trim();
+        if (TemplateLengthViolation(name, req.Description) is { } tooLong) return tooLong;
+
         var template = await db.ComplianceTemplates.FirstOrDefaultAsync(t => t.Id == id && !t.IsSystemTemplate, ct);
         if (template is null) return NotFound();
-        template.Name = req.Name.Trim();
+        template.Name = name;
         template.Description = req.Description;
         await db.SaveChangesAsync(ct);
         // Interceptor records "compliancetemplate.updated" — no explicit duplicate (#318 FP-043).
@@ -199,6 +210,20 @@ public static class ComplianceEndpoints
         if (!CanonicalDocumentTypes.IsAllowed(req.DocumentType))
             return Error(400, "validation.document_type", "That document type isn't recognized.");
         var documentType = CanonicalDocumentTypes.Normalize(req.DocumentType);
+
+        // #389: the four free-text rule columns. Each is written verbatim below into a bounded varchar
+        // and Npgsql does not truncate, so an over-length value 22001'd the save — and because a rule
+        // upsert fans out a re-grade over every document on the checklist, the 500 landed on a page
+        // whose whole job is being trusted with the verdict. Rejected, not clamped: ErrorMessage is the
+        // owner's own plain-English requirement text, rendered on the auditor-facing export, and a
+        // truncated requirement is a changed requirement (ADR 0046). DocumentType is absent on purpose —
+        // Normalize above already bounds it by construction (ADR 0045 §1).
+        if (InputLength.FirstViolation(
+                (req.FieldName, InputLengths.RuleFieldName, "Field name"),
+                (req.Operator, InputLengths.RuleOperator, "Operator"),
+                (req.ExpectedValue, InputLengths.RuleExpectedValue, "Expected value"),
+                (req.ErrorMessage, InputLengths.RuleErrorMessage, "Requirement description")) is { } fieldTooLong)
+            return fieldTooLong;
 
         // A value-operator rule (equals / contains / min_value) is meaningless without an
         // ExpectedValue to compare against, and a null one is actively unsafe: it made the `equals`
@@ -441,6 +466,15 @@ public static class ComplianceEndpoints
             .ToListAsync(ct);
         return Results.Ok(new { data = counts, error = (object?)null });
     }
+
+    /// <summary>
+    /// The two bounded checklist columns, in ONE place so create and update cannot drift (#389). Labels
+    /// are the field captions the checklist form shows.
+    /// </summary>
+    private static IResult? TemplateLengthViolation(string name, string? description) =>
+        InputLength.FirstViolation(
+            (name, InputLengths.TemplateName, "Checklist name"),
+            (description, InputLengths.TemplateDescription, "Description"));
 
     private static IResult Unauthorized() =>
         Results.Json(new { data = (object?)null, error = new { code = "auth.unauthorized", message = "Not authenticated." } }, statusCode: 401);

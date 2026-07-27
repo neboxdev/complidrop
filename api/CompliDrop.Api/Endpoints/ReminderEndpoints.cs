@@ -1,6 +1,7 @@
 using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Services;
 using CompliDrop.Api.Webhooks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -44,6 +45,15 @@ public static class ReminderEndpoints
         AppDbContext db,
         CancellationToken ct)
     {
+        // #389: EmailSubjectTemplate is varchar(500) and written verbatim below; Npgsql does not
+        // truncate, so an over-length subject 22001'd this save as a 500. Rejected, not clamped — it is
+        // the owner's own email copy, and a subject line silently cut mid-word would go out to their
+        // vendors that way. Checked before the lookup: nothing about it depends on the reminder.
+        if (InputLength.FirstViolation(
+                (req.EmailSubjectTemplate, InputLengths.ReminderEmailSubjectTemplate, "Email subject"))
+            is { } tooLong)
+            return tooLong;
+
         var r = await db.Reminders.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (r is null) return Results.NotFound();
         r.NotifyInternalUser = req.NotifyInternalUser;
