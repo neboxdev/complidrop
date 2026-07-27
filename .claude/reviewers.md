@@ -192,9 +192,9 @@ Both are defined in this repo's `.claude/agents/`.
   `varchar(100)` column is safe by construction (pinned against the EF model). The sibling
   `DocumentSubType` has no vocabulary and is DROPPED when over-length (nothing could match a
   truncated half-value); the `DocumentField` columns and `ProcessingError` are TRUNCATED instead
-  (an extracted field is user-facing content). `ExtractionWorker.Clamp` is a deliberate private
-  duplicate of the `Services/ColumnClamp.cs` that #372 adds — written in that branch's exact shape
-  (unconditional back-off on a trailing high surrogate) so the two collapse when it lands.
+  (an extracted field is user-facing content). `ExtractionWorker.Clamp` is a one-line delegate to the
+  shared `Services/ColumnClamp.cs` (#372 / ADR 0044), the same shape as
+  `ComplianceCheckService.ClampToColumn` — do not re-inline either body.
   **NEVER-GRADED IS NOT FAIL-SAFE** — do not repeat the old "nothing is certified, so it's safe"
   framing. `ComputeOutcome`'s zero-applicable-rules branch stores
   `expiringSoon ? ExpiringSoon : Pending`; `ComplianceStatusDeriver.Effective` promotes even a
@@ -223,6 +223,24 @@ Both are defined in this repo's `.claude/agents/`.
     `DocumentEndpoints.AllowedDocumentTypes`, and `DisplayLabels.DocumentTypes`.
     `RuleEngine/RuleSetLoader.DocumentTypes` is a SIXTH set and deliberately NOT a mirror — an RD-c
     SUBSET (`coi | license | certification | other`) that must NOT be pinned equal to `All`.
+- Client-controlled input in a BOUNDED audit column is ADR 0044 (#372); the review-time facts
+  that follow are pointers into it.
+  - The clamp lives at ONE boundary — `CurrentUserService` reading `ColumnClamp.To` — not at
+    each sink. `ComplianceCheckService.ClampToColumn` is deliberately a one-line delegate to
+    that same shared helper; do not re-inline it.
+  - The widths bind STRUCTURALLY: `ModelConfiguration` calls
+    `HasMaxLength(AuditColumnLengths.X)` / `HasMaxLength(ComplianceCheckService.CheckColumnMaxLength)`
+    (the `ContactEmail.MaxLength` pattern). A re-inlined literal there is a real finding.
+  - An unusable inbound `X-Trace-Id` is REPLACED with a fresh id, NOT clamped. Usable ==
+    non-blank, ≤64, and EVERY character in `[A-Za-z0-9_-]` — an ASCII space, `.`, `:`, `@`,
+    any other punctuation, any control character and any non-ASCII are all rejected. The
+    narrow charset is load-bearing: it is what keeps client free text out of the deliberately
+    un-redacted Sentry `correlation_id` tag (ADR 0037). Widening it is a real finding.
+  - The echoed response header, `HttpContext.Items`, the log scope and the stored column must
+    always agree — a version that clamps or rewrites one of them independently IS a real finding.
+  - The SYSTEMIC length-validation sweep over the upload / register / waitlist /
+    idempotency-key paths is [#389](https://github.com/neboxdev/complidrop/issues/389),
+    deliberately not done here.
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).

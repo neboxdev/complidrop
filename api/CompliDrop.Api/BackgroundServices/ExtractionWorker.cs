@@ -449,17 +449,12 @@ public class ExtractionWorker(
     /// remove. (Only <see cref="Document.ProcessingError"/> can realistically carry one, via an arbitrary
     /// .NET exception message; <c>JsonElement.GetString()</c> cannot return an unpaired surrogate.)
     /// <para/>
-    /// Intended shared home is <c>Services/ColumnClamp.cs</c>, added by the in-flight
-    /// <see href="https://github.com/neboxdev/complidrop/issues/372">#372</see> branch; this private copy
-    /// is a DELIBERATE, visible duplicate until that branch lands, not an accidental one — and is written
-    /// in that branch's exact shape so the two collapse to ONE body when it merges.
+    /// Delegates to the shared <see cref="ColumnClamp.To"/> (#372,
+    /// <see href="https://github.com/neboxdev/complidrop/issues/372">ADR 0044</see>) so the codebase
+    /// carries ONE surrogate-safe truncation rather than a copy per bounded column — the same one-line
+    /// delegate shape as <c>ComplianceCheckService.ClampToColumn</c>. Do not re-inline the body.
     /// </summary>
-    private static string? Clamp(string? value, int maxLength)
-    {
-        if (value is null || value.Length <= maxLength) return value;
-        var cut = char.IsHighSurrogate(value[maxLength - 1]) ? maxLength - 1 : maxLength;
-        return value[..cut];
-    }
+    private static string? Clamp(string? value, int maxLength) => ColumnClamp.To(value, maxLength);
 
     private static async Task PersistSuccess(
         SystemDbContext db,

@@ -105,8 +105,14 @@ builds with Turbopack, which doesn't support them, and the SDK debug logger is i
 
 `api.ts`'s `ApiError` already carries the server `correlationId`. `beforeSend` duck-types the
 captured exception (no import — keeps the helper runtime-agnostic for server/edge) and, **after**
-scrubbing, copies that id onto a `correlation_id` tag. The id is a server-minted identifier (not
-PII), so a frontend error and the backend request that caused it are cross-referenceable.
+scrubbing, copies that id onto a `correlation_id` tag, so a frontend error and the backend request
+that caused it are cross-referenceable. The id is server-**resolved**, not always server-minted: the
+API honors an inbound `X-Trace-Id` when it is a well-formed trace id and mints a fresh one
+otherwise. What keeps the un-redacted tag safe is therefore its SHAPE, not its origin —
+`CorrelationIdMiddleware.IsUsableTraceId` admits only ASCII alphanumerics, `-` and `_` up to 64
+chars ([ADR 0044](0044-audit-client-input-clamped-at-the-boundary.md) /
+[#372](https://github.com/neboxdev/complidrop/issues/372)), so an email address or any other free
+text cannot be smuggled into this tag by a client.
 
 ### Error-copy policy (#77 / #254) preserved
 
