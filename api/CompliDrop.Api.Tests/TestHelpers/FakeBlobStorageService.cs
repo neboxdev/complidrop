@@ -24,6 +24,17 @@ public sealed class FakeBlobStorageService : IBlobStorageService
     /// path so the sample-clear endpoint's fail-loudly-before-touching-rows behavior can be tested (#238).</summary>
     public bool ThrowOnDelete { get; set; }
 
+    /// <summary>
+    /// When set, <see cref="UploadAsync"/> reports this URL instead of the derived <c>memory://</c> one,
+    /// while still STORING the blob. Exists so a test can drive a genuine Postgres 22001 on
+    /// <c>Document.BlobStorageUrl</c> (<c>varchar(500)</c>) — an insert failure that is NOT an
+    /// idempotency-key conflict — and then assert the upload path's unconditional blob cleanup on the
+    /// blob store itself rather than merely inferring it from a failed request (#389). The one column on
+    /// that insert whose value the SERVER derives, so it is the only lever left once every
+    /// request-controlled column is guarded.
+    /// </summary>
+    public string? UrlOverride { get; set; }
+
     public async Task<BlobUploadResult> UploadAsync(string blobName, Stream content, string contentType, CancellationToken ct)
     {
         if (ThrowUnavailableOnUpload)
@@ -32,15 +43,16 @@ public sealed class FakeBlobStorageService : IBlobStorageService
         await content.CopyToAsync(ms, ct);
         var bytes = ms.ToArray();
         _blobs[blobName] = bytes;
-        return new BlobUploadResult(blobName, $"memory://{blobName}", bytes.Length, contentType);
+        return new BlobUploadResult(blobName, UrlOverride ?? $"memory://{blobName}", bytes.Length, contentType);
     }
 
-    /// <summary>Clears stored blobs and the outage knob between tests (host singleton).</summary>
+    /// <summary>Clears stored blobs and the behavior knobs between tests (host singleton).</summary>
     public void Reset()
     {
         _blobs.Clear();
         ThrowUnavailableOnUpload = false;
         ThrowOnDelete = false;
+        UrlOverride = null;
     }
 
     // Honest not-found: null for an unknown name, mirroring the interface contract the real

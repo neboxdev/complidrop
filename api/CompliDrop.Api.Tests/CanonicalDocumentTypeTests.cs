@@ -1,7 +1,6 @@
 using System.Net;
 using System.Reflection;
 using System.Text.Json.Nodes;
-using CompliDrop.Api.Endpoints;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Tests.ExtractionFixtures;
