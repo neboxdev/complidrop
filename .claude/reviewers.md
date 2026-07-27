@@ -161,6 +161,24 @@ Both are defined in this repo's `.claude/agents/`.
     compliance badge, and demoting the counts too would create a #294-class count-vs-badge
     split. The vendor rollup is the one surface with no room for the separate badge. Do NOT
     flag the untouched document-level counts as a missed demotion — that inversion is the bug.
+- Client-controlled input in a BOUNDED audit column is ADR 0044 (#372); the review-time facts
+  that follow are pointers into it.
+  - The clamp lives at ONE boundary — `CurrentUserService` reading `ColumnClamp.To` — not at
+    each sink. `ComplianceCheckService.ClampToColumn` is deliberately a one-line delegate to
+    that same shared helper; do not re-inline it.
+  - The widths bind STRUCTURALLY: `ModelConfiguration` calls
+    `HasMaxLength(AuditColumnLengths.X)` / `HasMaxLength(ComplianceCheckService.CheckColumnMaxLength)`
+    (the `ContactEmail.MaxLength` pattern). A re-inlined literal there is a real finding.
+  - An unusable inbound `X-Trace-Id` is REPLACED with a fresh id, NOT clamped. Usable ==
+    non-blank, ≤64, and EVERY character in `[A-Za-z0-9_-]` — an ASCII space, `.`, `:`, `@`,
+    any other punctuation, any control character and any non-ASCII are all rejected. The
+    narrow charset is load-bearing: it is what keeps client free text out of the deliberately
+    un-redacted Sentry `correlation_id` tag (ADR 0037). Widening it is a real finding.
+  - The echoed response header, `HttpContext.Items`, the log scope and the stored column must
+    always agree — a version that clamps or rewrites one of them independently IS a real finding.
+  - The SYSTEMIC length-validation sweep over the upload / register / waitlist /
+    idempotency-key paths is [#389](https://github.com/neboxdev/complidrop/issues/389),
+    deliberately not done here.
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
   `AT TIME ZONE` whose result feeds back into a timestamptz comparison/assignment
   (ADR 0009 — output-only conversion for display stays legitimate).

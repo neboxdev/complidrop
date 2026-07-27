@@ -51,3 +51,4 @@ Use `/adr <title>` to scaffold a new one.
 - [0041](0041-future-effective-not-yet-in-force-reads-pending.md) — A not-yet-in-force (future-effective) certificate reads Pending, via a read-only overlay (companion to 0033 Amendment 2)
 - [0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) — A distrusted extraction (per-field confidence gate) routes to review and does not roll up to "Covered" (dovetails with 0040/0041)
 - [0043](0043-additional-insured-claim-wording-staged-behind-flag.md) — Corrected additional-insured claim wording staged behind a default-OFF flag (CLM-1); copy-only, verdict unchanged, distinct from TemplateCorrections
+- [0044](0044-audit-client-input-clamped-at-the-boundary.md) — Client-controlled audit input is clamped at one boundary; an unusable `X-Trace-Id` is replaced (not truncated) and the charset is narrow so no PII reaches the un-redacted Sentry tag

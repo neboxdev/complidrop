@@ -389,8 +389,14 @@ export function scrubEvent<T extends Event>(event: T): T {
  * Cross-reference a frontend Sentry event with the backend request that caused
  * it: when the captured error is the api.ts `ApiError` (duck-typed — no import,
  * so this stays runtime-agnostic for the server/edge configs), copy its
- * server-minted `correlationId` onto an event tag. The correlation id is a
- * server-generated identifier, not PII, so it is safe to send.
+ * `correlationId` onto an event tag.
+ *
+ * The id is server-RESOLVED rather than always server-minted: the API honors an
+ * inbound `X-Trace-Id` when it is a well-formed trace id, and mints a fresh one
+ * otherwise. What makes the tag safe to send un-redacted is not its origin but
+ * its shape — `CorrelationIdMiddleware.IsUsableTraceId` accepts only ASCII
+ * alphanumerics, `-` and `_`, up to 64 chars (#372 / ADR 0044), so an email
+ * address or any other free text cannot be smuggled into this tag.
  *
  * Called AFTER {@link scrubEvent} in `beforeSend` so the tag is never itself
  * passed through the redactor (a long correlation id could otherwise trip the

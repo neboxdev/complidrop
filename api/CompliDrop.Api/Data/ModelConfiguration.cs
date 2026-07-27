@@ -203,8 +203,12 @@ internal static class ModelConfiguration
 
         builder.Entity<ComplianceCheck>(e =>
         {
-            e.Property(c => c.ActualValue).HasMaxLength(500);
-            e.Property(c => c.Notes).HasMaxLength(500);
+            // Same binding as AuditLog below (#372): ComplianceCheckService clamps every value it
+            // writes here, and the verdict + its inputs must commit as ONE unit of work (ADR 0030)
+            // — so a width that drifted from the clamp would take the whole SaveChanges down with a
+            // 22001 rather than just truncating a note.
+            e.Property(c => c.ActualValue).HasMaxLength(Services.ComplianceCheckService.CheckColumnMaxLength);
+            e.Property(c => c.Notes).HasMaxLength(Services.ComplianceCheckService.CheckColumnMaxLength);
             e.HasOne(c => c.Document).WithMany(d => d.ComplianceChecks)
                 .HasForeignKey(c => c.DocumentId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne(c => c.ComplianceRule).WithMany()
@@ -273,9 +277,15 @@ internal static class ModelConfiguration
         {
             e.Property(a => a.Action).HasMaxLength(100);
             e.Property(a => a.EntityType).HasMaxLength(100);
-            e.Property(a => a.IpAddress).HasMaxLength(64);
-            e.Property(a => a.UserAgent).HasMaxLength(500);
-            e.Property(a => a.CorrelationId).HasMaxLength(64);
+            // Bound to the boundary clamp's constants rather than a second copy of the numbers
+            // (#372, the ContactEmail.MaxLength pattern above): these three columns are the ones fed
+            // by UNTRUSTED client input (User-Agent / X-Trace-Id / remote address), the audit row
+            // commits in the SAME SaveChanges as the business mutation, and Npgsql does not truncate
+            // — so a column widened or narrowed out from under CurrentUserService either re-opens
+            // that 22001 or silently throws away forensic evidence. Bind, don't mirror.
+            e.Property(a => a.IpAddress).HasMaxLength(Services.AuditColumnLengths.IpAddress);
+            e.Property(a => a.UserAgent).HasMaxLength(Services.AuditColumnLengths.UserAgent);
+            e.Property(a => a.CorrelationId).HasMaxLength(Services.AuditColumnLengths.CorrelationId);
             e.Property(a => a.BeforeJson).HasColumnType("jsonb");
             e.Property(a => a.AfterJson).HasColumnType("jsonb");
             e.HasIndex(a => new { a.OrganizationId, a.CreatedAt });
