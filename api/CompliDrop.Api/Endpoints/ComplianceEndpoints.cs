@@ -211,6 +211,18 @@ public static class ComplianceEndpoints
             return Error(400, "validation.document_type", "That document type isn't recognized.");
         var documentType = CanonicalDocumentTypes.Normalize(req.DocumentType);
 
+        // Operator is a non-nullable POSITIONAL record parameter over a NOT NULL column, but
+        // System.Text.Json binds a missing or JSON-null "operator" to null regardless — and the length
+        // guard below deliberately treats null as "fits" (an absent value is not an over-length one), so
+        // the null flowed all the way into SaveChanges and 23502'd as a 500. Same 500-where-a-400-belongs
+        // class the length guards close, on the same block, and the same blank guard CreateTemplate /
+        // UpdateTemplate / CreateVendor already carry. A blank operator is meaningless in its own right:
+        // EvaluateRule's switch has no arm for it, so the rule would grade nothing while still printing
+        // on the checklist and on the auditor-facing export. Placed BEFORE the length check so the
+        // narrower diagnosis wins. (#389 re-review)
+        if (string.IsNullOrWhiteSpace(req.Operator))
+            return Error(400, "validation.operator", "Choose what this requirement checks.");
+
         // #389: the four free-text rule columns. Each is written verbatim below into a bounded varchar
         // and Npgsql does not truncate, so an over-length value 22001'd the save — and because a rule
         // upsert fans out a re-grade over every document on the checklist, the 500 landed on a page
@@ -232,7 +244,7 @@ public static class ComplianceEndpoints
         // persisted; ComplianceCheckService.EvaluateRule also fails such a rule closed as a
         // defense-in-depth net for rows written before this guard. `required` legitimately carries no
         // expected value, so it stays exempt. Op set + normalization mirror EvaluateRule's switch.
-        var op = req.Operator?.ToLowerInvariant();
+        var op = req.Operator.ToLowerInvariant();
         if (op is "equals" or "contains" or "min_value" && string.IsNullOrWhiteSpace(req.ExpectedValue))
             return Error(400, "validation.expected_value_required",
                 "This requirement needs a value to check against.");

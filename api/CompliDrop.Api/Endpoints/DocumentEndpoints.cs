@@ -583,8 +583,21 @@ public static class DocumentEndpoints
         // (ADR 0045 §4): the worker is salvaging a model response nobody typed, while this is the user's
         // own correction — storing a silent half of it on a compliance record is the worse failure.
         // Checked BEFORE the document lookup: nothing about the request depends on the document.
+        //
+        // Fields and FieldName are non-nullable POSITIONAL record parameters, and System.Text.Json
+        // leaves a missing or JSON-null property as null regardless — so `{}`, `{"fields": null}`,
+        // `{"fields":[null]}` and `{"fields":[{"fieldValue":"x"}]}` each NRE'd on the walk below, and a
+        // blank name would have written a nameless DocumentField row into a NOT NULL column. Every one
+        // is a 500 where a 400 belongs — the class this ticket closes, and the same JSON-null hole
+        // already fixed in ComplianceEndpoints.UpdateTemplate. An EMPTY array stays legal: the detail
+        // page enables Save with no edits precisely while the manual-review card shows, and that no-op
+        // save is what resolves the review (ADR 0040).
+        if (req.Fields is null)
+            return Error(400, "validation.fields", "Send the fields you want to update.");
         foreach (var update in req.Fields)
         {
+            if (update is null || string.IsNullOrWhiteSpace(update.FieldName))
+                return Error(400, "validation.field_name", "Every field you send needs a name.");
             if (InputLength.FirstViolation(
                     (update.FieldName, InputLengths.DocumentFieldName, "Field name"),
                     (update.FieldValue, InputLengths.DocumentFieldValue, "Field value")) is { } tooLong)

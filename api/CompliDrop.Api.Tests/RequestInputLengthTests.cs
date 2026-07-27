@@ -637,6 +637,29 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
         await ShouldBeFriendly400(resp, label, limit);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Upserting_a_rule_with_a_blank_operator_is_a_400_not_a_500(string? blank)
+    {
+        // The JSON-null twin of UpdateTemplate's null name, on the very block #389 hardened:
+        // ComplianceRule.Operator is a non-nullable POSITIONAL record parameter over a NOT NULL column,
+        // and InputLength.FirstViolation deliberately treats null as "fits" — so `"operator": null`
+        // sailed through every guard and 23502'd inside SaveChanges as a generic 500.
+        var auth = await RegisterAndLoginAsync();
+        var templateId = await CreateTemplateAsync(auth.Client);
+
+        var body = RuleBody("fieldName", "expiration_date");
+        body["operator"] = blank;
+        var resp = await auth.Client.PostAsJsonAsync($"/api/compliance/templates/{templateId}/rules", body);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorOf(resp)).Code.Should().Be("validation.operator");
+        await using var db = CreateSystemDb();
+        (await db.ComplianceRules.CountAsync(r => r.ComplianceTemplateId == templateId)).Should().Be(0);
+    }
+
     [Fact]
     public async Task Upserting_a_rule_accepts_fields_exactly_at_their_column_widths()
     {
@@ -735,6 +758,53 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
         await using var db = CreateSystemDb();
         (await db.DocumentFields.CountAsync(f => f.DocumentId == docId)).Should().Be(0,
             "a refused edit must not half-apply");
+    }
+
+    public static TheoryData<string, object?> MalformedFieldEdits => new()
+    {
+        // body sent, the code it must answer with
+        { "validation.fields", new { } },                                     // "fields" absent entirely
+        { "validation.fields", new { fields = (object?)null } },              // explicit JSON null
+        { "validation.field_name", new { fields = new object?[] { null } } }, // a null ELEMENT
+        { "validation.field_name", new { fields = new[] { new { fieldValue = "x" } } } },      // no name
+        { "validation.field_name", new { fields = new[] { new { fieldName = (string?)null, fieldValue = "x" } } } },
+        { "validation.field_name", new { fields = new[] { new { fieldName = "  ", fieldValue = "x" } } } },
+    };
+
+    [Theory]
+    [MemberData(nameof(MalformedFieldEdits))]
+    public async Task Editing_fields_answers_a_400_where_a_missing_name_used_to_NRE(string expectedCode, object? body)
+    {
+        // Discovered on the line the length guard lands on (the same shape as UpdateTemplate's null
+        // name): Fields and FieldName are non-nullable POSITIONAL record parameters, but
+        // System.Text.Json binds a missing/JSON-null property to null anyway — so the guard's own walk
+        // dereferenced null and 500'd, and a blank name would have written a nameless DocumentField into
+        // a NOT NULL column. Exactly the 500-where-a-400-belongs class #389 exists to remove.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await UploadDocumentAsync(auth.Client);
+
+        var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", body);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorOf(resp)).Code.Should().Be(expectedCode);
+        await using var db = CreateSystemDb();
+        (await db.DocumentFields.CountAsync(f => f.DocumentId == docId)).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Editing_fields_with_an_empty_list_stays_legal()
+    {
+        // The complement, and the reason the guard rejects null rather than "nothing to do": the detail
+        // page enables Save with no edits precisely while the manual-review card is showing, and that
+        // empty save is what resolves the review (#383 / ADR 0040). Rejecting it would break the one
+        // interaction the review card exists for.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await UploadDocumentAsync(auth.Client);
+
+        var resp = await auth.Client.PutAsJsonAsync(
+            $"/api/documents/{docId}/fields", new { fields = Array.Empty<object>() });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
     }
 
     [Fact]
