@@ -3,11 +3,19 @@
  * for the upload picker, the orphaned-row / detail-page type editors, and any
  * value→label rendering.
  *
- * The `value`s mirror the backend exactly: the LLM extraction prompt
- * (`api/.../Services/Extraction/ExtractionPrompts.cs`) and the PATCH endpoint's
- * `AllowedDocumentTypes` set both speak this same lower-case vocabulary. A
- * mismatch would let the UI submit a type the server rejects, so keep the two
- * lists in lockstep (#186).
+ * The `value`s mirror the backend exactly. The backend's single source of truth
+ * is `CanonicalDocumentTypes.All` in `api/.../Services/CanonicalDocumentTypes.cs`
+ * (#373, ADR 0045); every server-side copy — both provider schemas, the extraction
+ * prompt's DOCUMENT TYPES block, `DisplayLabels.DocumentTypes` — is pinned equal
+ * to it by `CanonicalDocumentTypeTests`. (#389 deleted the PATCH endpoint's own
+ * `AllowedDocumentTypes` set, which this comment used to name; those endpoints now
+ * call `CanonicalDocumentTypes` directly.)
+ *
+ * THIS FILE IS THE ONE MIRROR NO .NET TEST CAN REACH — there is no shared fixture
+ * here, unlike ADR 0038's contact-email corpus — so this comment is its only guard.
+ * A mismatch lets the UI submit a type the server rejects, and worse, a value the
+ * server would store outside the vocabulary grades against zero compliance rules.
+ * Keep the two lists in lockstep (#186, ADR 0045 "Known limitation").
  *
  * The `label`s are the human-facing names an SMB venue manager recognizes.
  * #188 humanizes status/jargon copy app-wide and reuses `documentTypeLabel`

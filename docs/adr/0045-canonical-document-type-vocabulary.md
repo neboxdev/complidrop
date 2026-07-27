@@ -251,6 +251,8 @@ runtime failure whose message invites deleting the guard.
 > `RequestInputLengthTests`. #389 also closed this ADR's "does not touch the ingress upload paths" gap: an
 > uploaded `documentType` is now coerced on both paths, so a non-canonical value can no longer enter through
 > the front door either. It still does **not** launder legacy rows — see "Known limitation" above.
+> Consequently "Known limitation" above now reads FOUR pinned in-repo mirrors, not five: both provider
+> schemas, the extraction prompt's DOCUMENT TYPES block, and `DisplayLabels.DocumentTypes`.
 
 ## References
 

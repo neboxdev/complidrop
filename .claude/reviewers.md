@@ -223,11 +223,13 @@ Both are defined in this repo's `.claude/agents/`.
     `contains` fallback) narrows the canonical value. Surfacing the clip in the UI is
     [#444](https://github.com/neboxdev/complidrop/issues/444).
   - **One unpinned mirror:** `frontend/src/lib/document-types.ts`. A .NET test cannot reach it
-    (no shared fixture, unlike ADR 0038's contact-email corpus). The five in-repo mirrors that CAN
-    be reached are pinned: both provider schemas, the extraction prompt's DOCUMENT TYPES block,
-    `DocumentEndpoints.AllowedDocumentTypes`, and `DisplayLabels.DocumentTypes`.
-    `RuleEngine/RuleSetLoader.DocumentTypes` is a SIXTH set and deliberately NOT a mirror — an RD-c
-    SUBSET (`coi | license | certification | other`) that must NOT be pinned equal to `All`.
+    (no shared fixture, unlike ADR 0038's contact-email corpus). The four in-repo mirrors that CAN
+    be reached are pinned: both provider schemas, the extraction prompt's DOCUMENT TYPES block, and
+    `DisplayLabels.DocumentTypes`. (It was five until #389 deleted
+    `DocumentEndpoints.AllowedDocumentTypes` — see the bullet above; what those endpoints owe the
+    vocabulary is now pinned over HTTP in `RequestInputLengthTests`, not by set equality.)
+    `RuleEngine/RuleSetLoader.DocumentTypes` is a SEPARATE set and deliberately NOT a mirror — an
+    RD-c SUBSET (`coi | license | certification | other`) that must NOT be pinned equal to `All`.
 - Client-controlled input in a BOUNDED audit column is ADR 0044 (#372); the review-time facts
   that follow are pointers into it.
   - The clamp lives at ONE boundary — `CurrentUserService` reading `ColumnClamp.To` — not at
