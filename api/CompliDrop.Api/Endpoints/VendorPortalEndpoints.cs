@@ -103,9 +103,16 @@ public static class VendorPortalEndpoints
         // dashboard upload's key in the same org. Honored only at a sane length (untrusted route, Key is
         // varchar(200)); otherwise the upload proceeds without dedupe. The co-commit below makes it
         // concurrency-safe.
+        //
+        // This route IGNORES an oversize key where the three AUTHENTICATED ones CLAMP it to the same
+        // bound (#389). Deliberate asymmetry: clamping manufactures collisions between two distinct keys
+        // sharing a prefix, and here the key is chosen by an untrusted third party who could force that
+        // collision on purpose — a second, unrelated upload silently replaying the first. An authenticated
+        // caller can only do that to their OWN org, so there the clamp's upside (a long key still dedupes
+        // a double-submit) wins. Same reasoning as ADR 0044 §2's replace-don't-truncate trace id.
         var portalOrgId = link.Vendor.OrganizationId;
         var clientKey = http.Request.Headers["Idempotency-Key"].FirstOrDefault();
-        var idempotencyKey = !string.IsNullOrWhiteSpace(clientKey) && clientKey.Length <= MaxClientIdempotencyKeyLength
+        var idempotencyKey = !string.IsNullOrWhiteSpace(clientKey) && clientKey.Length <= InputLengths.ClientIdempotencyKey
             ? $"portal:{token}:{clientKey}"
             : null;
         if (idempotencyKey is not null)
@@ -202,12 +209,26 @@ public static class VendorPortalEndpoints
             Id = Guid.NewGuid(),
             OrganizationId = orgId,
             VendorId = link.VendorId,
-            OriginalFileName = file.FileName,
+            // CLAMPED, not rejected (#389 / ADR 0046). ASP.NET admits a filename up to the 16 KB
+            // multipart header limit and OriginalFileName is varchar(500); SanitizeFileName's 120-char
+            // clamp only ever applied to the BLOB name, so the stored value went in raw and a long
+            // filename 22001'd this insert — inside the permit transaction, after the blob was already
+            // uploaded. A vendor must never be refused their certificate over what their phone named
+            // the file, and a truncated name is still recognizable, so this clamps where the typed
+            // fields reject. ColumnClamp.To is the one surrogate-safe truncation (ADR 0044) — needed
+            // here precisely because filenames carry emoji.
+            OriginalFileName = ColumnClamp.To(file.FileName, InputLengths.DocumentOriginalFileName) ?? string.Empty,
             BlobStorageUrl = upload.Url,
             BlobStoragePath = blobName,
             FileSizeBytes = storedStream.Length,
             ContentType = storedContentType,
-            DocumentType = form["documentType"].ToString() is var dt && !string.IsNullOrWhiteSpace(dt) ? dt : "other",
+            // Coerced through the shared vocabulary (#389, closing the #373 ingress half): the form field
+            // is public free text that used to be stored VERBATIM, so it both 22001'd this insert at
+            // >100 chars and — far worse, silently — wrote a type no compliance rule can ordinally match,
+            // leaving the document graded against nothing (ADR 0045). Normalize, don't reject: a stray
+            // form value must not cost the vendor their upload, and "other" is exactly what a blank
+            // already meant here. The rule side (UpsertRule) still rejects — see ADR 0045 §5.
+            DocumentType = CanonicalDocumentTypes.Normalize(form["documentType"].ToString()),
             ExtractionStatus = ExtractionStatus.Pending,
             ComplianceStatus = ComplianceStatus.Pending,
             UploadedBy = "vendor_portal",
@@ -314,13 +335,6 @@ public static class VendorPortalEndpoints
 
         return Results.Ok(response);
     }
-
-    // The client Idempotency-Key is honored only up to this length: the route is untrusted (#333) and the
-    // namespaced "portal:{token}:{key}" must fit the IdempotencyRecord.Key varchar(200). A token is 32
-    // chars (24 bytes base64url) + the "portal::" wrapper (8), so the worst case is 8 + 32 + 128 = 168,
-    // ample headroom under 200; a normal UUID/nonce is well under. An oversize key is simply ignored (the
-    // upload proceeds without dedupe), never a 500.
-    private const int MaxClientIdempotencyKeyLength = 128;
 
     private static Task<int> DeactivateAsync(SystemDbContext db, Guid linkId, CancellationToken ct) =>
         db.VendorPortalLinks
