@@ -105,6 +105,16 @@ sure the choice is never accidental.
   [ADR 0026](adr/0026-environment-aware-required-config-validation.md) config validators; pinned by
   `StartupEnvironmentBannerTests`.
 
+## Configuration reference
+
+### Backend secrets (user-secrets in Development, env vars in prod)
+
+`ConnectionStrings:Database`, `Jwt:Secret`, `Frontend:BaseUrl` (public site origin, `https://www.complidrop.com` — REQUIRED in prod: portal links, email-borne URLs (verify/reset), and Stripe checkout + billing-portal return URLs are minted from it and silently fall back to `http://localhost:3000` when unset, see [#250](https://github.com/neboxdev/complidrop/issues/250)), `AzureStorage:ConnectionString`, `AzureStorage:ContainerName`, `Sentry:Dsn`, `DocumentAi:ProjectId`, `DocumentAi:Location`, `DocumentAi:ProcessorId`, `DocumentAi:CredentialsPath` (or `CredentialsJson`), `Gemini:ApiKey` (when Endpoint=aistudio), `Anthropic:ApiKey` (optional), `Stripe:SecretKey`, `Stripe:PublishableKey`, `Stripe:WebhookSecret`, `Stripe:MonthlyPriceId`, `Stripe:AnnualPriceId`, `Stripe:FoundingPriceId`, `Resend:ApiKey`, `Resend:FromEmail`, `Resend:WebhookSecret` (Svix `whsec_…` signing secret for the inbound delivery-status webhook; if unset the webhook is rejected in production and allowed-with-warning only in Development).
+
+### Frontend env vars (set in the build/host environment; `NEXT_PUBLIC_*` are baked into the client bundle at build time)
+
+`NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_POSTHOG_KEY` / `NEXT_PUBLIC_POSTHOG_HOST`, and — frontend Sentry ([ADR 0037](adr/0037-frontend-sentry-pii-scrubbing-and-gating.md)) — `NEXT_PUBLIC_SENTRY_DSN` (public DSN, **distinct from the backend `Sentry:Dsn`**; absence ⇒ Sentry is a no-op, and it stays unset in dev per the posture above), the optional `NEXT_PUBLIC_SENTRY_ENVIRONMENT` (event tag; defaults to `NODE_ENV`) and `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` (default `0`), plus the build-time source-map upload trio `SENTRY_AUTH_TOKEN` / `SENTRY_ORG` / `SENTRY_PROJECT` (server-only, never shipped; absent ⇒ upload skipped and the build still succeeds).
+
 ## Related
 
 - [#271](https://github.com/neboxdev/complidrop/issues/271) — the dev-isolation bug.
