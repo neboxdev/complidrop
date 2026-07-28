@@ -76,7 +76,13 @@ public static class BillingEndpoints
             && sub.Status is not ("canceled" or "incomplete_expired" or "incomplete"))
             return Error(409, "billing.already_subscribed", "You already have an active plan — use Manage billing to change it.");
 
-        var idempotencyKey = http.Request.Headers["Idempotency-Key"].FirstOrDefault();
+        // Clamped at the single point the header is READ (#389), matching the upload + sample endpoints:
+        // IdempotencyRecord.Key is varchar(200) and Npgsql does not truncate, so a long header used to
+        // 22001 the record insert — 500ing a checkout whose Stripe session had ALREADY been created.
+        // Lookup and storage must see the same string or a repeat of a long key would miss its own
+        // record and mint a second session.
+        var idempotencyKey = ColumnClamp.To(
+            http.Request.Headers["Idempotency-Key"].FirstOrDefault(), InputLengths.ClientIdempotencyKey);
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
         {
             var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);

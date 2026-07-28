@@ -1,8 +1,11 @@
+using Microsoft.EntityFrameworkCore;
+using Npgsql;
+
 namespace CompliDrop.Api.Services;
 
 /// <summary>
 /// Constants describing the one-click sample-demo fixtures (#238 / ADR 0028), shared by the code
-/// that SEEDS them and the code that must avoid acting on them.
+/// that SEEDS them, the code that must avoid acting on them, and the schema that constrains them.
 /// <para/>
 /// The vendor address is the important one. It is an RFC 2606 reserved domain that accepts no mail,
 /// so any send to it is a guaranteed hard bounce — which writes an <c>EmailSuppression</c>, a
@@ -25,4 +28,29 @@ public static class SampleData
     /// </summary>
     public static bool IsUndeliverableSampleAddress(string? email) =>
         string.Equals(email?.Trim(), VendorEmail, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Database name of the partial unique index that allows at most one LIVE sample document per org
+    /// (<c>IsSample AND DeletedAt IS NULL</c>, #238) — the concurrent-double-click backstop. Npgsql
+    /// reports it as <see cref="PostgresException.ConstraintName"/> on the 23505 the losing seed gets.
+    /// <para/>
+    /// It lives HERE, in <c>Services/</c>, for the reason <see cref="WaitlistSignup.EmailUniqueIndexName"/>
+    /// does (#389 review): an index name that a <c>catch</c> filter matches on must be ONE constant owned
+    /// by a layer BOTH sides may depend on — <c>ModelConfiguration</c> names the index with it
+    /// (<c>HasDatabaseName</c>) and <c>SampleEndpoints</c> matches the violation with it, so the schema
+    /// and the matcher agree by construction. Hand-copying it into the endpoint is exactly the drift
+    /// that turns a concurrent double-click back into a 500. The value is unchanged, so pinning it
+    /// needed no migration.
+    /// </summary>
+    public const string DocumentUniqueIndexName = "IX_Documents_OrganizationId_SampleUnique";
+
+    /// <summary>
+    /// True when <paramref name="ex"/> is the one-live-sample-per-org violation — and nothing else, so
+    /// an unrelated 23505 is surfaced rather than silently answered as "someone else seeded first".
+    /// Same shape as <see cref="WaitlistSignup.IsDuplicateEmail"/> and
+    /// <see cref="IdempotencyService.IsKeyConflict"/>.
+    /// </summary>
+    public static bool IsDocumentUniqueViolation(DbUpdateException ex) =>
+        ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } pg
+        && string.Equals(pg.ConstraintName, DocumentUniqueIndexName, StringComparison.Ordinal);
 }

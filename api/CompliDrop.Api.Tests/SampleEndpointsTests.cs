@@ -15,6 +15,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 
 namespace CompliDrop.Api.Tests;
 
@@ -650,6 +651,54 @@ public sealed class SampleEndpointsTests(IntegrationTestFixture fixture) : Integ
             .Contain("demo vendor", "the copy must tell the user WHY, in product language")
             .And.NotContainAny("RFC", "bounce", "SMTP");
         email.Sends.Should().BeEmpty("no mail may be sent to the fictional address");
+    }
+
+    // ---- the one-sample-per-org index name ----
+
+    [Fact]
+    public async Task The_sample_unique_index_is_actually_named_what_the_seed_matcher_expects()
+    {
+        // SampleEndpoints answers a losing concurrent double-click with the winner's sample by matching
+        // the 23505 on this INDEX NAME, so a wrong constant re-throws instead — a 500 on the first thing
+        // a cold org clicks. #389's review moved the name into Services/SampleData so ModelConfiguration
+        // and the matcher are ONE constant (the WaitlistSignup shape), which makes the EF-model form of
+        // this check VACUOUS: HasDatabaseName now takes the name FROM the constant, so it would compare
+        // the constant to itself. Postgres is the only independent witness left.
+        await using var conn = new NpgsqlConnection(Fixture.ConnectionString);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            select indexname from pg_indexes
+            where schemaname = 'public' and tablename = 'Documents' and indexname = @name;
+            """;
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@name";
+        p.Value = SampleData.DocumentUniqueIndexName;
+        cmd.Parameters.Add(p);
+
+        (await cmd.ExecuteScalarAsync() as string).Should().Be(
+            SampleData.DocumentUniqueIndexName,
+            "Npgsql reports THIS name as PostgresException.ConstraintName on the losing seed's 23505");
+    }
+
+    [Fact]
+    public void IsDocumentUniqueViolation_matches_only_the_sample_index_not_other_unique_violations()
+    {
+        // The predicate half. A broadening to bare SqlState would answer an UNRELATED 23505 with
+        // "here's your sample", quietly handing the caller a document that is not the one they seeded.
+        var sampleConflict = new DbUpdateException("dup", new PostgresException(
+            "duplicate key", "ERROR", "ERROR", PostgresErrorCodes.UniqueViolation,
+            constraintName: SampleData.DocumentUniqueIndexName));
+        SampleData.IsDocumentUniqueViolation(sampleConflict).Should().BeTrue();
+
+        var otherIndex = new DbUpdateException("dup", new PostgresException(
+            "duplicate key", "ERROR", "ERROR", PostgresErrorCodes.UniqueViolation,
+            constraintName: IdempotencyService.KeyIndexName));
+        SampleData.IsDocumentUniqueViolation(otherIndex).Should().BeFalse();
+
+        SampleData.IsDocumentUniqueViolation(
+            new DbUpdateException("x", new InvalidOperationException("not postgres")))
+            .Should().BeFalse();
     }
 
     private static decimal ParseMoney(string money) =>

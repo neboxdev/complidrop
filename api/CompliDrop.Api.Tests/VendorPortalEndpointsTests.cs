@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using CompliDrop.Api.Endpoints;
 using CompliDrop.Api.Entities;
+using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -873,13 +875,66 @@ public sealed class VendorPortalEndpointsTests(IntegrationTestFixture fixture) :
     }
 
     [Fact]
-    public async Task An_oversize_client_key_degrades_to_no_dedupe_never_a_500()
+    public async Task A_client_key_exactly_at_the_shared_bound_is_honored_and_still_dedupes()
     {
-        // The untrusted-route guard: a client key longer than the honored bound is ignored (the upload
-        // proceeds without dedupe), never overflowing IdempotencyRecord.Key (varchar 200) into a 500.
+        // #389 replaced this route's PRIVATE MaxClientIdempotencyKeyLength with the shared
+        // InputLengths.ClientIdempotencyKey that three AUTHENTICATED routes also read — so the PUBLIC
+        // route's safety now depends on a constant it does not own. The largest key it accepts is the
+        // one that stresses the namespaced form ("portal:{token}:{key}") hardest against
+        // IdempotencyRecord.Key, and that write is the one that would 22001 — INSIDE the permit
+        // transaction, after the vendor's blob is already stored. Nothing exercised it: the suite had
+        // 32-char UUID keys and a 200-char oversize case, nothing at the boundary itself.
         var seeded = await SeedLinkAsync(maxUploads: 5);
         var client = CreateClient();
-        var oversize = new string('a', 200);
+        var atBound = new string('k', InputLengths.ClientIdempotencyKey);
+
+        var first = await UploadWithKeyAsync(client, seeded.Token, atBound);
+        var second = await UploadWithKeyAsync(client, seeded.Token, atBound);
+
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+        second.StatusCode.Should().Be(HttpStatusCode.OK, "at the bound the key is HONORED, so this replays");
+        (await UploadIdOf(second)).Should().Be(await UploadIdOf(first));
+
+        await using var db = CreateSystemDb();
+        (await db.Documents.IgnoreQueryFilters().CountAsync(d => d.VendorId == seeded.VendorId)).Should().Be(1);
+        (await db.VendorPortalLinks.IgnoreQueryFilters().Where(l => l.Id == seeded.LinkId)
+            .Select(l => l.UploadCount).FirstAsync())
+            .Should().Be(1, "a replay must not burn a second permit");
+        // The write that would have overflowed: the stored key is the NAMESPACED form, not the header.
+        (await db.IdempotencyRecords.IgnoreQueryFilters()
+            .SingleAsync(r => r.OrganizationId == seeded.OrgId)).Key
+            .Should().Be(VendorPortalEndpoints.NamespacedIdempotencyKey(seeded.Token, atBound));
+    }
+
+    [Fact]
+    public void The_namespaced_portal_key_always_fits_the_idempotency_column()
+    {
+        // The constraint that keeps the PUBLIC route safe, expressed mechanically instead of as
+        // arithmetic in a doc comment: raising InputLengths.ClientIdempotencyKey (shared with three
+        // authenticated routes that have no such namespacing) or lengthening the portal token must go
+        // RED here, not silently start 22001-ing a vendor's upload.
+        //
+        // The token is the REAL minted one — PortalLink.GenerateToken is the only writer of
+        // VendorPortalLink.Token, and UploadViaPortal resolves the link (404 on no match) BEFORE it
+        // builds this key, so an arbitrarily long token in the URL can never reach it.
+        var worstCase = VendorPortalEndpoints.NamespacedIdempotencyKey(
+            PortalLink.GenerateToken(), new string('k', InputLengths.ClientIdempotencyKey));
+
+        worstCase.Length.Should().BeLessThanOrEqualTo(InputLengths.IdempotencyKey,
+            "the namespaced key is what gets STORED — if it doesn't fit, the co-committed insert 22001s "
+                + "inside the permit transaction, after the vendor's blob is already in storage");
+    }
+
+    [Fact]
+    public async Task An_oversize_client_key_degrades_to_no_dedupe_never_a_500()
+    {
+        // The untrusted-route guard: a key ONE character past the honored bound is ignored (the upload
+        // proceeds without dedupe), never overflowing IdempotencyRecord.Key (varchar 200) into a 500.
+        // Expressed as bound+1 rather than a magic 200 so it stays the boundary's complement — the
+        // at-the-bound case above is the other half.
+        var seeded = await SeedLinkAsync(maxUploads: 5);
+        var client = CreateClient();
+        var oversize = new string('a', InputLengths.ClientIdempotencyKey + 1);
 
         var first = await UploadWithKeyAsync(client, seeded.Token, oversize);
         var second = await UploadWithKeyAsync(client, seeded.Token, oversize);

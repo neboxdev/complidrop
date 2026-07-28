@@ -30,20 +30,11 @@ public static class DocumentEndpoints
         group.MapDelete("/{id:guid}", DeleteDocument);
     }
 
-    /// <summary>
-    /// Canonical document-type vocabulary, mirroring the LLM extraction prompt
-    /// (<see cref="Services.Extraction.ExtractionPrompts"/>). A manual type edit
-    /// must resolve to one of these so a typo can't create an unmatchable type
-    /// that silently excludes every compliance rule. Case-insensitive; stored
-    /// lower-case.
-    /// </summary>
-    // internal (not private) so CanonicalDocumentTypeTests compares this set to the shared vocabulary
-    // DIRECTLY instead of reflecting on the field NAME — a rename must be a build error here, not a
-    // runtime test failure whose message reads like an invitation to delete the drift guard (#373).
-    internal static readonly HashSet<string> AllowedDocumentTypes = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "coi", "license", "permit", "certification", "contract", "other"
-    };
+    // The private AllowedDocumentTypes literal that used to live here is GONE (#389, the collapse ADR
+    // 0045 §"Option E" deferred to this ticket). It was a second copy of the vocabulary kept only
+    // because these endpoint files were in flight; all three sites in this file — the PATCH type edit,
+    // the upload path, and the portal twin — now ask Services/CanonicalDocumentTypes directly, so the
+    // pinned-equal test that guarded the duplication has nothing left to guard and is retired with it.
 
     private static async Task<IResult> ListDocuments(
         AppDbContext db,
@@ -354,9 +345,14 @@ public static class DocumentEndpoints
 
         if (!string.IsNullOrWhiteSpace(req.DocumentType))
         {
-            var type = req.DocumentType.Trim().ToLowerInvariant();
-            if (!AllowedDocumentTypes.Contains(type))
+            // REJECTS an unrecognized type where the two UPLOAD paths coerce it to "other" — the same
+            // deliberate asymmetry ADR 0045 §5 draws for UpsertRule. This is a human deliberately
+            // RE-TYPING a document, and the type decides which rules grade it; silently answering
+            // "other" would change what the document is checked against without telling them. An upload
+            // must not lose a file over a stray form value, so it coerces instead.
+            if (!CanonicalDocumentTypes.IsAllowed(req.DocumentType))
                 return Error(400, "document.invalid_type", "That document type isn't recognized.");
+            var type = CanonicalDocumentTypes.Normalize(req.DocumentType);
             if (!string.Equals(doc.DocumentType, type, StringComparison.Ordinal))
             {
                 doc.DocumentType = type;
@@ -396,13 +392,22 @@ public static class DocumentEndpoints
         IImageTranscoder transcoder,
         IIdempotencyService idem,
         ICurrentUser currentUser,
+        IServiceScopeFactory scopes,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
         var orgId = currentUser.OrganizationId.Value;
 
-        var idempotencyKey = http.Request.Headers["Idempotency-Key"].FirstOrDefault();
+        // Clamped ONCE, here, before the key is used for anything (#389). IdempotencyRecord.Key is
+        // varchar(200) and the raw header used to go straight to both TryGetAsync and BuildRecord, so a
+        // long key 22001'd the co-committed insert — taking the Document down with it (ADR 0029) and
+        // orphaning the blob. Clamping at the single point where the key is READ (the
+        // CurrentUserService shape of ADR 0044 §1) is what keeps lookup and storage seeing the SAME
+        // string: clamping at only one of the two would make a repeat of a long key miss its own record
+        // and duplicate the upload — idempotency silently broken rather than loudly failed.
+        var idempotencyKey = ColumnClamp.To(
+            http.Request.Headers["Idempotency-Key"].FirstOrDefault(), InputLengths.ClientIdempotencyKey);
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
         {
             var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
@@ -444,8 +449,11 @@ public static class DocumentEndpoints
                 return Error(400, "vendor.not_found", "That vendor no longer exists.");
             vendorId = parsedVendorId;
         }
-        var declaredType = form["documentType"].ToString();
-        if (string.IsNullOrWhiteSpace(declaredType)) declaredType = "other";
+        // Coerced through the shared vocabulary, exactly like the portal twin (#389 / ADR 0045): the raw
+        // form value used to be stored VERBATIM, so ">100 chars" 22001'd the insert and — silently — a
+        // mis-cased "COI" wrote a type that ordinally matches no compliance rule, leaving the document
+        // graded against nothing. Normalize also subsumes the old blank -> "other" special case.
+        var declaredType = CanonicalDocumentTypes.Normalize(form["documentType"].ToString());
 
         await using var buffer = new MemoryStream();
         await file.CopyToAsync(buffer, ct);
@@ -479,7 +487,11 @@ public static class DocumentEndpoints
             Id = Guid.NewGuid(),
             OrganizationId = orgId,
             VendorId = vendorId,
-            OriginalFileName = file.FileName,
+            // Clamped like the portal twin (#389 / ADR 0046): OriginalFileName is varchar(500) and ASP.NET
+            // admits a filename far longer, so this went in raw and 22001'd the insert AFTER the blob was
+            // stored. Clamp, don't reject — a truncated name is still recognizable and refusing the
+            // upload helps nobody.
+            OriginalFileName = ColumnClamp.To(file.FileName, InputLengths.DocumentOriginalFileName) ?? string.Empty,
             BlobStorageUrl = upload.Url,
             BlobStoragePath = blobName,
             FileSizeBytes = storedStream.Length,
@@ -515,19 +527,44 @@ public static class DocumentEndpoints
             db.IdempotencyRecords.Add(
                 idem.BuildRecord(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status201Created, response));
 
+        // Blob cleanup is attempted on EVERY failure path (#389), mirroring the portal twin's
+        // documentPersisted + finally (VendorPortalEndpoints.UploadViaPortal). The blob is uploaded
+        // BEFORE the insert, and only the IsKeyConflict catch below used to delete it — so ANY other
+        // SaveChanges failure (the 22001 this ticket removes at the source, a connection drop, a
+        // constraint we haven't thought of) left a paid-for blob in storage with no row pointing at it
+        // and nothing that would ever find it. The flag flips only after the commit returns.
+        //
+        // "documentPersisted == false" is the TRIGGER, not the verdict: it only means SaveChangesAsync
+        // did not return normally, which includes the commit landing in Postgres and the ACK never
+        // getting back. OrphanBlobCleanup therefore re-reads the row on a fresh connection and deletes
+        // only what is genuinely absent — see its docs for why deleting on the bare signal is worse
+        // than the orphan (#389 re-review, ADR 0046 §5 Amendment 2).
+        //
+        // Safe against the concurrent same-key race by construction: blobName and doc.Id are this
+        // request's own Guids, so the loser confirms and deletes ONLY its own blob and can never touch
+        // the winner's. And a sequential replay returns at the fast path above, long before any blob
+        // exists — so ADR 0029/0032's "a committed record replays the winner's exact response" is
+        // untouched: the replay still returns the winner's uploadId, pointing at the winner's
+        // still-present blob.
+        var documentPersisted = false;
         try
         {
             await db.SaveChangesAsync(ct);
+            documentPersisted = true;
         }
         catch (DbUpdateException ex) when (!string.IsNullOrWhiteSpace(idempotencyKey) && idem.IsKeyConflict(ex))
         {
             // Lost the concurrent same-key race: another request committed this key first. Our Document
-            // never committed (same transaction → rolled back with the conflicting record), so only the
-            // orphaned blob needs cleanup; then replay the winner so the caller still gets exactly one doc.
-            await TryDeleteBlobAsync(blobs, blobName, loggerFactory, ct);
+            // never committed (same transaction → rolled back with the conflicting record); the finally
+            // deletes our orphaned blob. Replay the winner so the caller still gets exactly one doc.
             db.ChangeTracker.Clear();
             var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
             return hit is not null ? IdempotencyResults.Replay(hit) : IdempotencyResults.InProgressConflict();
+        }
+        finally
+        {
+            if (!documentPersisted)
+                await OrphanBlobCleanup.RunAsync(scopes, blobs, doc.Id, blobName, loggerFactory, "dashboard upload");
         }
 
         // No explicit "document.uploaded": the interceptor already records this owner upload as the
@@ -547,6 +584,42 @@ public static class DocumentEndpoints
         ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
+        // Both DocumentField columns are bounded and both are written verbatim from the request below, so
+        // an over-length submission 22001'd the whole SaveChanges — which under ADR 0030 carries the
+        // recomputed VERDICT too, so the user's correction and its verdict both vanished behind a 500
+        // (#389). REJECTED rather than clamped, unlike the extraction worker writing the same two columns
+        // (ADR 0045 §4): the worker is salvaging a model response nobody typed, while this is the user's
+        // own correction — storing a silent half of it on a compliance record is the worse failure.
+        // Checked BEFORE the document lookup: nothing about the request depends on the document.
+        //
+        // Fields and FieldName are non-nullable POSITIONAL record parameters, and System.Text.Json
+        // leaves a missing or JSON-null property as null regardless — so `{}`, `{"fields": null}`,
+        // `{"fields":[null]}` and `{"fields":[{"fieldValue":"x"}]}` each NRE'd on the walk below, and a
+        // blank name would have written a nameless DocumentField row into a NOT NULL column. Every one
+        // is a 500 where a 400 belongs — the class this ticket closes, and the same JSON-null hole
+        // already fixed in ComplianceEndpoints.UpdateTemplate. An EMPTY array stays legal: the detail
+        // page enables Save with no edits precisely while the manual-review card shows, and that no-op
+        // save is what resolves the review (ADR 0040).
+        if (req.Fields is null)
+            return Error(400, "validation.fields", "Send the fields you want to update.");
+        // The array's COUNT is bounded too, not just each element's length (#389 re-review). Kestrel
+        // admits a 10 MB body and FieldsUpdateRequest caps nothing, so ~45-byte entries buy one
+        // authenticated PUT a six-figure element count — walked twice by this guard, grouped, then
+        // written row by row against the tracked document. Checked BEFORE the walk, which is the whole
+        // point: a bound applied after the loop is a bound the loop already paid for.
+        if (req.Fields.Length > InputLengths.DocumentFieldUpdatesPerRequest)
+            return Error(400, "validation.too_many_fields",
+                $"You can update up to {InputLengths.DocumentFieldUpdatesPerRequest} fields at a time.");
+        foreach (var update in req.Fields)
+        {
+            if (update is null || string.IsNullOrWhiteSpace(update.FieldName))
+                return Error(400, "validation.field_name", "Every field you send needs a name.");
+            if (InputLength.FirstViolation(
+                    (update.FieldName, InputLengths.DocumentFieldName, "Field name"),
+                    (update.FieldValue, InputLengths.DocumentFieldValue, "Field value")) is { } tooLong)
+                return tooLong;
+        }
+
         var doc = await db.Documents
             .Include(d => d.Fields)
             .FirstOrDefaultAsync(d => d.Id == id, ct);
@@ -739,22 +812,6 @@ public static class DocumentEndpoints
             doc.ExtractionStatus = ExtractionStatus.ManualRequired;
     }
 
-    // Best-effort rollback of a blob whose owning Document never committed (lost the concurrent
-    // idempotency-key race). Mirrors SampleEndpoints.TryDeleteBlobAsync: a failure here only leaves an
-    // orphan blob, never a failed request, so it's logged and swallowed.
-    private static async Task TryDeleteBlobAsync(
-        IBlobStorageService blobs, string blobName, ILoggerFactory loggerFactory, CancellationToken ct)
-    {
-        try
-        {
-            await blobs.DeleteAsync(blobName, ct);
-        }
-        catch (Exception ex)
-        {
-            loggerFactory.CreateLogger("DocumentEndpoints")
-                .LogWarning(ex, "Failed to roll back orphaned upload blob {BlobName} after an idempotency-key race", blobName);
-        }
-    }
 
     private static string SanitizeFileName(string? name)
     {

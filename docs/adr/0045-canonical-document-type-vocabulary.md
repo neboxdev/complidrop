@@ -245,6 +245,15 @@ them here is a near-certain conflict. The duplication is made safe in the meanti
 is now a COMPILE-checked reference (the field is `internal`), so a rename is a build error rather than a
 runtime failure whose message invites deleting the guard.
 
+> **Landed in #389** ([ADR 0046](0046-request-input-length-guards.md) §7). The literal is deleted, the PATCH
+> type edit and BOTH upload paths call the vocabulary directly, and the set-equality pin was retired with it
+> (a pin comparing the vocabulary to itself is vacuous) in favour of HTTP-level tests in
+> `RequestInputLengthTests`. #389 also closed this ADR's "does not touch the ingress upload paths" gap: an
+> uploaded `documentType` is now coerced on both paths, so a non-canonical value can no longer enter through
+> the front door either. It still does **not** launder legacy rows — see "Known limitation" above.
+> Consequently "Known limitation" above now reads FOUR pinned in-repo mirrors, not five: both provider
+> schemas, the extraction prompt's DOCUMENT TYPES block, and `DisplayLabels.DocumentTypes`.
+
 ## References
 
 - Tickets: [#373](https://github.com/neboxdev/complidrop/issues/373), [#389](https://github.com/neboxdev/complidrop/issues/389) (the ingress half), [#385](https://github.com/neboxdev/complidrop/issues/385) (partially addressed by the column clamps), [#443](https://github.com/neboxdev/complidrop/issues/443) (a never-graded document must not read as in-force coverage), [#444](https://github.com/neboxdev/complidrop/issues/444) (surface a clipped field so a manual save can't narrow it), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
