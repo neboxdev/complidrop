@@ -77,6 +77,8 @@ public static class VendorPortalEndpoints
         IImageTranscoder transcoder,
         IAuditLogger audit,
         IIdempotencyService idem,
+        IServiceScopeFactory scopes,
+        ILoggerFactory loggerFactory,
         ILogger<VendorPortalLink> logger,
         CancellationToken ct)
     {
@@ -103,10 +105,17 @@ public static class VendorPortalEndpoints
         // dashboard upload's key in the same org. Honored only at a sane length (untrusted route, Key is
         // varchar(200)); otherwise the upload proceeds without dedupe. The co-commit below makes it
         // concurrency-safe.
+        //
+        // This route IGNORES an oversize key where the three AUTHENTICATED ones CLAMP it to the same
+        // bound (#389). Deliberate asymmetry: clamping manufactures collisions between two distinct keys
+        // sharing a prefix, and here the key is chosen by an untrusted third party who could force that
+        // collision on purpose — a second, unrelated upload silently replaying the first. An authenticated
+        // caller can only do that to their OWN org, so there the clamp's upside (a long key still dedupes
+        // a double-submit) wins. Same reasoning as ADR 0044 §2's replace-don't-truncate trace id.
         var portalOrgId = link.Vendor.OrganizationId;
         var clientKey = http.Request.Headers["Idempotency-Key"].FirstOrDefault();
-        var idempotencyKey = !string.IsNullOrWhiteSpace(clientKey) && clientKey.Length <= MaxClientIdempotencyKeyLength
-            ? $"portal:{token}:{clientKey}"
+        var idempotencyKey = !string.IsNullOrWhiteSpace(clientKey) && clientKey.Length <= InputLengths.ClientIdempotencyKey
+            ? NamespacedIdempotencyKey(token, clientKey)
             : null;
         if (idempotencyKey is not null)
         {
@@ -202,12 +211,26 @@ public static class VendorPortalEndpoints
             Id = Guid.NewGuid(),
             OrganizationId = orgId,
             VendorId = link.VendorId,
-            OriginalFileName = file.FileName,
+            // CLAMPED, not rejected (#389 / ADR 0046). ASP.NET admits a filename up to the 16 KB
+            // multipart header limit and OriginalFileName is varchar(500); SanitizeFileName's 120-char
+            // clamp only ever applied to the BLOB name, so the stored value went in raw and a long
+            // filename 22001'd this insert — inside the permit transaction, after the blob was already
+            // uploaded. A vendor must never be refused their certificate over what their phone named
+            // the file, and a truncated name is still recognizable, so this clamps where the typed
+            // fields reject. ColumnClamp.To is the one surrogate-safe truncation (ADR 0044) — needed
+            // here precisely because filenames carry emoji.
+            OriginalFileName = ColumnClamp.To(file.FileName, InputLengths.DocumentOriginalFileName) ?? string.Empty,
             BlobStorageUrl = upload.Url,
             BlobStoragePath = blobName,
             FileSizeBytes = storedStream.Length,
             ContentType = storedContentType,
-            DocumentType = form["documentType"].ToString() is var dt && !string.IsNullOrWhiteSpace(dt) ? dt : "other",
+            // Coerced through the shared vocabulary (#389, closing the #373 ingress half): the form field
+            // is public free text that used to be stored VERBATIM, so it both 22001'd this insert at
+            // >100 chars and — far worse, silently — wrote a type no compliance rule can ordinally match,
+            // leaving the document graded against nothing (ADR 0045). Normalize, don't reject: a stray
+            // form value must not cost the vendor their upload, and "other" is exactly what a blank
+            // already meant here. The rule side (UpsertRule) still rejects — see ADR 0045 §5.
+            DocumentType = CanonicalDocumentTypes.Normalize(form["documentType"].ToString()),
             ExtractionStatus = ExtractionStatus.Pending,
             ComplianceStatus = ComplianceStatus.Pending,
             UploadedBy = "vendor_portal",
@@ -300,27 +323,46 @@ public static class VendorPortalEndpoints
         }
         finally
         {
+            // Shared with both authenticated upload paths (#389 re-review). Two properties this route
+            // needs more than either of them, since a vendor uploading from a phone is the likeliest
+            // client in the app to drop mid-request:
+            //
+            //  - it never uses the REQUEST's ct. A client abort between the blob upload and the commit
+            //    cancels ct, unwinds the transaction and lands HERE, but DeleteIfExistsAsync throws
+            //    before issuing the DELETE on an already-cancelled token — so the failure path most
+            //    likely to strand a blob was the one whose cleanup could not run. Its own short-lived
+            //    token also stops a best-effort delete burning the full Azure retry budget on a PUBLIC
+            //    route while the vendor waits.
+            //  - it CONFIRMS the row is absent before deleting. "documentPersisted == false" only means
+            //    the try did not complete, which includes tx.CommitAsync landing in Postgres and the
+            //    acknowledgement never getting back — deleting on that alone destroys a real vendor's
+            //    certificate file (ADR 0046 §5 Amendment 2).
+            //
+            // It swallows unfiltered, which is what lets it sit in a `finally` without replacing the
+            // real exception on the way out — the old `when (ex is not OperationCanceledException)`
+            // filter let precisely the abort case escape and mask it.
             if (!documentPersisted)
-            {
-                try { await blobs.DeleteAsync(blobName, ct); }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    logger.LogWarning(ex,
-                        "Portal upload: best-effort blob cleanup failed for {BlobName} on link {LinkId}",
-                        blobName, link.Id);
-                }
-            }
+                await OrphanBlobCleanup.RunAsync(scopes, blobs, doc.Id, blobName, loggerFactory, "portal upload");
         }
 
         return Results.Ok(response);
     }
 
-    // The client Idempotency-Key is honored only up to this length: the route is untrusted (#333) and the
-    // namespaced "portal:{token}:{key}" must fit the IdempotencyRecord.Key varchar(200). A token is 32
-    // chars (24 bytes base64url) + the "portal::" wrapper (8), so the worst case is 8 + 32 + 128 = 168,
-    // ample headroom under 200; a normal UUID/nonce is well under. An oversize key is simply ignored (the
-    // upload proceeds without dedupe), never a 500.
-    private const int MaxClientIdempotencyKeyLength = 128;
+    /// <summary>
+    /// The stored form of a PUBLIC portal upload's idempotency key (#333 / ADR 0032): the client's raw
+    /// header namespaced per link, so the same key on two links in one org cannot dedupe against each
+    /// other under the <c>(OrganizationId, Key)</c> index.
+    /// <para/>
+    /// A named method rather than an inline interpolation because the safety property that keeps this
+    /// public route from 22001-ing — <c>"portal:".Length + token + ":" + </c>
+    /// <see cref="InputLengths.ClientIdempotencyKey"/> must fit <see cref="InputLengths.IdempotencyKey"/>
+    /// — used to live only as arithmetic in a doc comment, which nothing checked. It is now pinned by
+    /// <c>VendorPortalEndpointsTests</c> against THIS method and the real
+    /// <c>PortalLink.GenerateToken()</c>, so raising the shared client-key bound (or lengthening the
+    /// token) goes red here instead of failing an untrusted vendor's upload in production. (#389 review)
+    /// </summary>
+    internal static string NamespacedIdempotencyKey(string token, string clientKey) =>
+        $"portal:{token}:{clientKey}";
 
     private static Task<int> DeactivateAsync(SystemDbContext db, Guid linkId, CancellationToken ct) =>
         db.VendorPortalLinks

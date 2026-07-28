@@ -234,13 +234,19 @@ public static class VendorEndpoints
         if (currentUser.OrganizationId is null) return Unauthorized();
         if (string.IsNullOrWhiteSpace(req.Name)) return Error(400, "validation.name", "Vendor name is required.");
         if (!ContactEmail.TryNormalize(req.ContactEmail, out var contactEmail)) return ContactEmailInvalid(req.ContactEmail);
+        // #389: the three columns ContactEmail.TryNormalize does NOT already bound. All are written
+        // verbatim below into bounded varchars, and Npgsql does not truncate — so an over-length value
+        // was a 500 rather than the 400 it is. Rejected, not clamped: these are the customer's own words
+        // for their vendor (ADR 0046). Length checked on the TRIMMED name, which is what gets written.
+        var name = req.Name.Trim();
+        if (LengthViolation(name, req.ContactPhone, req.Category) is { } tooLong) return tooLong;
         if (!await TemplateIsAssignable(req.ComplianceTemplateId, db, ct)) return TemplateNotFound();
 
         var vendor = new Vendor
         {
             Id = Guid.NewGuid(),
             OrganizationId = currentUser.OrganizationId.Value,
-            Name = req.Name.Trim(),
+            Name = name,
             ContactEmail = contactEmail,
             ContactPhone = req.ContactPhone,
             Category = req.Category,
@@ -275,12 +281,16 @@ public static class VendorEndpoints
         // edit form is where a contact email actually gets corrected (and mistyped), and a bad value
         // saved here breaks every subsequent reminder send silently.
         if (!ContactEmail.TryNormalize(req.ContactEmail, out var contactEmail)) return ContactEmailInvalid(req.ContactEmail);
+        // Same three length guards as CreateVendor (#389) — the edit form is the path that actually
+        // reaches these columns in practice, and /api/vendors is reachable without either form.
+        var name = req.Name.Trim();
+        if (LengthViolation(name, req.ContactPhone, req.Category) is { } tooLong) return tooLong;
 
         var v = await db.Vendors.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (v is null) return NotFound();
         if (!await TemplateIsAssignable(req.ComplianceTemplateId, db, ct)) return TemplateNotFound();
         var templateChanged = v.ComplianceTemplateId != req.ComplianceTemplateId;
-        v.Name = req.Name.Trim();
+        v.Name = name;
         v.ContactEmail = contactEmail;
         v.ContactPhone = req.ContactPhone;
         v.Category = req.Category;
@@ -600,6 +610,17 @@ public static class VendorEndpoints
     private static IResult ContactEmailInvalid(string? submitted) =>
         Error(400, "validation.contact_email",
             ContactEmail.DescribeProblem(submitted) ?? ContactEmail.InvalidMessage);
+
+    /// <summary>
+    /// The three bounded vendor columns not already guarded by <see cref="ContactEmail"/>, in ONE place
+    /// so Create and Update cannot drift on them (#389) — the same both-paths rule #369 established for
+    /// the contact email. Labels are the field captions the vendor form shows.
+    /// </summary>
+    private static IResult? LengthViolation(string name, string? contactPhone, string? category) =>
+        InputLength.FirstViolation(
+            (name, InputLengths.VendorName, "Vendor name"),
+            (contactPhone, InputLengths.VendorContactPhone, "Phone"),
+            (category, InputLengths.VendorCategory, "Category"));
 
     // #340: maps the per-(org, email) suppression reason to the wire label the vendor badge renders
     // (null = deliverable). Shared by the list (dict lookup) and the detail (single lookup).

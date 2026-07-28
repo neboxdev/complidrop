@@ -9,9 +9,14 @@ internal static class ModelConfiguration
     {
         builder.Entity<Organization>(e =>
         {
-            e.Property(o => o.Name).HasMaxLength(200);
-            e.Property(o => o.Industry).HasMaxLength(100);
-            e.Property(o => o.CompanySize).HasMaxLength(20);
+            // Bound to the register/settings edge guards rather than a second copy of the numbers
+            // (#389, the ContactEmail.MaxLength / AuditColumnLengths pattern): POST /api/auth/register is
+            // ANONYMOUS and writes all three straight from the request body, and Npgsql does not
+            // truncate — a column widened or narrowed out from under InputLengths either re-opens that
+            // 22001-as-500 or starts rejecting values the column would have taken. Bind, don't mirror.
+            e.Property(o => o.Name).HasMaxLength(Services.InputLengths.OrganizationName);
+            e.Property(o => o.Industry).HasMaxLength(Services.InputLengths.OrganizationIndustry);
+            e.Property(o => o.CompanySize).HasMaxLength(Services.InputLengths.OrganizationCompanySize);
             e.Property(o => o.TimeZone).HasMaxLength(64).HasDefaultValue("America/New_York");
             e.Property(o => o.State).HasMaxLength(10);
             e.Property(o => o.RegulatoryFactsJson).HasColumnType("jsonb");
@@ -19,9 +24,14 @@ internal static class ModelConfiguration
 
         builder.Entity<User>(e =>
         {
-            e.Property(u => u.Email).HasMaxLength(256);
+            // Bound to the same edge guard as every other request-fed column (#389 review). This one
+            // is written from the ANONYMOUS register body and from the change-email request, and its
+            // 256 used to be a hand-copied literal on BOTH sides — the exact drift shape ADR 0046 §1
+            // exists to remove, left behind while the identical anonymous-signup email column
+            // (WaitlistEntry.Email, also 256) was bound in the same commit.
+            e.Property(u => u.Email).HasMaxLength(Services.InputLengths.UserEmail);
             e.Property(u => u.PasswordHash).HasMaxLength(500);
-            e.Property(u => u.FullName).HasMaxLength(200);
+            e.Property(u => u.FullName).HasMaxLength(Services.InputLengths.UserFullName);
             e.Property(u => u.Role).HasMaxLength(50).HasDefaultValue("admin");
             e.HasIndex(u => u.Email).IsUnique();
             // Store-generated default so EVERY existing row gets a non-empty stamp
@@ -38,7 +48,9 @@ internal static class ModelConfiguration
             // single index seek and a (statistically impossible) hash collision
             // surfaces as a write conflict rather than silent ambiguity.
             e.Property(t => t.TokenHash).HasMaxLength(64);
-            e.Property(t => t.NewEmail).HasMaxLength(256);
+            // The pending change-email address, which lands in User.Email on confirm — same guard,
+            // same width, same constant (#389 review).
+            e.Property(t => t.NewEmail).HasMaxLength(Services.InputLengths.UserEmail);
             e.HasIndex(t => t.TokenHash).IsUnique();
             e.HasIndex(t => t.UserId);
             // Cascade so a genuine HARD delete of a user takes its tokens with it
@@ -60,15 +72,15 @@ internal static class ModelConfiguration
 
         builder.Entity<Vendor>(e =>
         {
-            e.Property(v => v.Name).HasMaxLength(200);
+            e.Property(v => v.Name).HasMaxLength(Services.InputLengths.VendorName);
             // Bound to the validator's constant rather than a third copy of 256 (#369): the column
             // width is what the ContactEmail cap exists to respect (Npgsql does not truncate, so an
             // over-length value is a 500 without it), and a widened column that left the validator
             // behind would silently re-open that gap. The corpus pins the two mirrors' constants to
             // each other; this pins the schema to the server's.
             e.Property(v => v.ContactEmail).HasMaxLength(Services.ContactEmail.MaxLength);
-            e.Property(v => v.ContactPhone).HasMaxLength(50);
-            e.Property(v => v.Category).HasMaxLength(100);
+            e.Property(v => v.ContactPhone).HasMaxLength(Services.InputLengths.VendorContactPhone);
+            e.Property(v => v.Category).HasMaxLength(Services.InputLengths.VendorCategory);
             e.Property(v => v.EntityType).HasMaxLength(50);
             e.Property(v => v.RegulatoryFactsJson).HasColumnType("jsonb");
             e.HasIndex(v => new { v.OrganizationId, v.Name });
@@ -90,7 +102,10 @@ internal static class ModelConfiguration
 
         builder.Entity<Document>(e =>
         {
-            e.Property(d => d.OriginalFileName).HasMaxLength(500);
+            // Bound to the ingress CLAMP (#389): both upload paths — including the PUBLIC portal one,
+            // where a third party names the file — pass the uploaded name through
+            // ColumnClamp.To(..., InputLengths.DocumentOriginalFileName) before it lands here.
+            e.Property(d => d.OriginalFileName).HasMaxLength(Services.InputLengths.DocumentOriginalFileName);
             e.Property(d => d.BlobStorageUrl).HasMaxLength(500);
             e.Property(d => d.BlobStoragePath).HasMaxLength(500);
             e.Property(d => d.ContentType).HasMaxLength(100);
@@ -117,10 +132,15 @@ internal static class ModelConfiguration
             // returns the existing sample instead of double-seeding. Scoped to live sample rows so a
             // normal upload (IsSample=false) is never constrained and a cleared/soft-deleted sample
             // doesn't block re-seeding. Mirrors the IX_ComplianceTemplates_Name_SystemUnique guard.
+            //
+            // The NAME is read from Services/, not spelled here: SampleEndpoints matches the 23505 on it
+            // to answer the losing double-click with the winner's sample, so schema and matcher must be
+            // ONE constant — the WaitlistSignup.EmailUniqueIndexName rule, applied to the pair that
+            // predates it (#389 review). Value unchanged, so no migration.
             e.HasIndex(d => d.OrganizationId)
                 .IsUnique()
                 .HasFilter("\"IsSample\" AND \"DeletedAt\" IS NULL")
-                .HasDatabaseName("IX_Documents_OrganizationId_SampleUnique");
+                .HasDatabaseName(Services.SampleData.DocumentUniqueIndexName);
 
             // ExtractionWorker's claim/zombie-reclaim query (ExtractionWorker.ClaimSql) scans for the
             // next processable document SYSTEM-WIDE — it has NO OrganizationId predicate (a single
@@ -159,18 +179,23 @@ internal static class ModelConfiguration
 
         builder.Entity<DocumentField>(e =>
         {
-            e.Property(f => f.FieldName).HasMaxLength(200);
-            e.Property(f => f.FieldValue).HasMaxLength(2000);
+            // Two writers, two policies, ONE width each. The extraction worker TRUNCATES what the model
+            // returned (ADR 0045 §4 — a clipped description_of_operations beats a lost document); the
+            // manual-correction endpoint REJECTS an over-length submission (ADR 0046 — the user typed
+            // it, so silently dropping half of it is data loss). Both read the width from here.
+            e.Property(f => f.FieldName).HasMaxLength(Services.InputLengths.DocumentFieldName);
+            e.Property(f => f.FieldValue).HasMaxLength(Services.InputLengths.DocumentFieldValue);
             e.Property(f => f.FieldType).HasMaxLength(50);
-            e.Property(f => f.OriginalValue).HasMaxLength(2000);
+            // OriginalValue is only ever copied from FieldValue, so it inherits that width.
+            e.Property(f => f.OriginalValue).HasMaxLength(Services.InputLengths.DocumentFieldValue);
             e.HasOne(f => f.Document).WithMany(d => d.Fields)
                 .HasForeignKey(f => f.DocumentId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<ComplianceTemplate>(e =>
         {
-            e.Property(ct => ct.Name).HasMaxLength(200);
-            e.Property(ct => ct.Description).HasMaxLength(500);
+            e.Property(ct => ct.Name).HasMaxLength(Services.InputLengths.TemplateName);
+            e.Property(ct => ct.Description).HasMaxLength(Services.InputLengths.TemplateDescription);
             // Seed re-grade durability watermark (#416, ADR 0036 Amendment 2). Store-side default 0 so the
             // additive migration back-fills every existing row (and the system seed) at 0/0 — an already-
             // caught-up state that triggers no re-grade on the first boot after deploy.
@@ -192,11 +217,14 @@ internal static class ModelConfiguration
 
         builder.Entity<ComplianceRule>(e =>
         {
+            // DocumentType is NOT bound to an edge guard: UpsertRule stores only what
+            // CanonicalDocumentTypes.Normalize returns, which is always a vocabulary member and so
+            // length-safe by construction (ADR 0045 §1). The other four are free text the owner typed.
             e.Property(r => r.DocumentType).HasMaxLength(100);
-            e.Property(r => r.FieldName).HasMaxLength(200);
-            e.Property(r => r.Operator).HasMaxLength(50);
-            e.Property(r => r.ExpectedValue).HasMaxLength(500);
-            e.Property(r => r.ErrorMessage).HasMaxLength(500);
+            e.Property(r => r.FieldName).HasMaxLength(Services.InputLengths.RuleFieldName);
+            e.Property(r => r.Operator).HasMaxLength(Services.InputLengths.RuleOperator);
+            e.Property(r => r.ExpectedValue).HasMaxLength(Services.InputLengths.RuleExpectedValue);
+            e.Property(r => r.ErrorMessage).HasMaxLength(Services.InputLengths.RuleErrorMessage);
             e.HasOne(r => r.ComplianceTemplate).WithMany(ct => ct.Rules)
                 .HasForeignKey(r => r.ComplianceTemplateId).OnDelete(DeleteBehavior.Cascade);
         });
@@ -217,7 +245,7 @@ internal static class ModelConfiguration
 
         builder.Entity<Reminder>(e =>
         {
-            e.Property(r => r.EmailSubjectTemplate).HasMaxLength(500);
+            e.Property(r => r.EmailSubjectTemplate).HasMaxLength(Services.InputLengths.ReminderEmailSubjectTemplate);
             e.Property(r => r.EmailBodyTemplate).HasMaxLength(4000);
             e.HasOne(r => r.Organization).WithMany(o => o.Reminders)
                 .HasForeignKey(r => r.OrganizationId).OnDelete(DeleteBehavior.Cascade);
@@ -266,11 +294,20 @@ internal static class ModelConfiguration
 
         builder.Entity<WaitlistEntry>(e =>
         {
-            e.Property(w => w.Email).HasMaxLength(256);
-            e.Property(w => w.CompanyName).HasMaxLength(200);
-            e.Property(w => w.Industry).HasMaxLength(100);
-            e.Property(w => w.Source).HasMaxLength(100);
-            e.HasIndex(w => w.Email).IsUnique();
+            // Every column here is written straight from an ANONYMOUS request body, so all four are
+            // bound to their edge guards (#389).
+            e.Property(w => w.Email).HasMaxLength(Services.InputLengths.WaitlistEmail);
+            e.Property(w => w.CompanyName).HasMaxLength(Services.InputLengths.WaitlistCompanyName);
+            e.Property(w => w.Industry).HasMaxLength(Services.InputLengths.WaitlistIndustry);
+            e.Property(w => w.Source).HasMaxLength(Services.InputLengths.WaitlistSource);
+            // Named explicitly rather than left to EF's convention because the waitlist endpoint matches
+            // on this name to turn the concurrent duplicate-signup 23505 into the friendly "You're on
+            // the list!" 200 instead of a 500 (#389 — the IdempotencyService.KeyIndexName pattern). The
+            // name is the EF default, so no migration: this pins it against a future rename. It is read
+            // from Services/, not from the endpoint that catches the violation — this is the DATA layer,
+            // and it must not compile against Endpoints (#389 review).
+            e.HasIndex(w => w.Email).IsUnique()
+                .HasDatabaseName(Services.WaitlistSignup.EmailUniqueIndexName);
         });
 
         builder.Entity<AuditLog>(e =>
@@ -294,7 +331,7 @@ internal static class ModelConfiguration
 
         builder.Entity<IdempotencyRecord>(e =>
         {
-            e.Property(i => i.Key).HasMaxLength(200);
+            e.Property(i => i.Key).HasMaxLength(Services.InputLengths.IdempotencyKey);
             e.Property(i => i.RequestPath).HasMaxLength(500);
             e.Property(i => i.ResponseJson).HasColumnType("jsonb");
             e.HasIndex(i => new { i.OrganizationId, i.Key }).IsUnique();

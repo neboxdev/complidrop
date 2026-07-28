@@ -41,14 +41,20 @@ public static class SampleEndpoints
         IIdempotencyService idem,
         ICurrentUser currentUser,
         IAuditLogger audit,
+        IServiceScopeFactory scopes,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         if (currentUser.OrganizationId is null) return Unauthorized();
         var orgId = currentUser.OrganizationId.Value;
 
-        // Idempotency-Key replay, consistent with the document-upload endpoint.
-        var idempotencyKey = http.Request.Headers["Idempotency-Key"].FirstOrDefault();
+        // Idempotency-Key replay, consistent with the document-upload endpoint — including its clamp
+        // (#389): IdempotencyRecord.Key is varchar(200) and Npgsql does not truncate, so a long header
+        // used to 22001 the co-committed record and take the sample seed down with it. Clamped at the
+        // single point the header is READ, so the lookup and the stored key are the same string and a
+        // repeat of a long key still replays instead of re-seeding.
+        var idempotencyKey = ColumnClamp.To(
+            http.Request.Headers["Idempotency-Key"].FirstOrDefault(), InputLengths.ClientIdempotencyKey);
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
         {
             var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
@@ -129,7 +135,7 @@ public static class SampleEndpoints
         var response = SampleEnvelope(doc.Id, vendor.Id);
         // Idempotency (#336): co-commit the dedupe record (if a key was sent) in the SAME transaction as
         // the sample document, the same way the upload endpoint does. Sample seeding was already
-        // concurrent-safe via IX_Documents_OrganizationId_SampleUnique; this just folds the old
+        // concurrent-safe via the sample partial unique index; this just folds the old
         // check-then-store StoreAsync into the atomic commit so the key path matches the shared contract.
         if (!string.IsNullOrWhiteSpace(idempotencyKey))
             db.IdempotencyRecords.Add(
@@ -142,18 +148,18 @@ public static class SampleEndpoints
         catch (DbUpdateException ex) when (IsUniqueViolation(ex))
         {
             // Lost a concurrent-seed race — on EITHER the sample partial index
-            // (IX_Documents_OrganizationId_SampleUnique) OR the idempotency-key index. Both mean another
+            // (SampleData.DocumentUniqueIndexName) OR the idempotency-key index. Both mean another
             // request seeded first: roll our just-uploaded blob back and replay the winner so the caller
             // still lands on a verdict (idempotent). Disambiguate by the violated INDEX (not just the
             // SqlState) so an UNRELATED future 23505 is surfaced, never silently masked as a sample replay.
-            await TryDeleteBlobAsync(blobs, blobName, loggerFactory, ct);
+            await TryDeleteBlobAsync(scopes, blobs, doc.Id, blobName, loggerFactory);
             db.ChangeTracker.Clear();
             if (!string.IsNullOrWhiteSpace(idempotencyKey) && idem.IsKeyConflict(ex))
             {
                 var hit = await idem.TryGetAsync(orgId, idempotencyKey, ct);
                 if (hit is not null) return IdempotencyResults.Replay(hit);
             }
-            if (IsSampleUniqueViolation(ex))
+            if (SampleData.IsDocumentUniqueViolation(ex))
             {
                 var winner = await CurrentSampleAsync(db, ct);
                 if (winner is not null)
@@ -167,8 +173,11 @@ public static class SampleEndpoints
         }
         catch
         {
-            // Any other persistence failure after the blob upload — don't orphan the blob.
-            await TryDeleteBlobAsync(blobs, blobName, loggerFactory, ct);
+            // Any other persistence failure after the blob upload — don't orphan the blob. Unlike the
+            // 23505 arm above, reaching HERE does not prove the insert rolled back (a client abort or a
+            // dropped connection while the COMMIT acknowledgement was in flight lands here too), which
+            // is exactly why the helper confirms the row is absent before deleting.
+            await TryDeleteBlobAsync(scopes, blobs, doc.Id, blobName, loggerFactory);
             throw;
         }
 
@@ -277,30 +286,22 @@ public static class SampleEndpoints
 
     // Gate for the catch: any unique-constraint violation (23505). The seed's SaveChanges can conflict on
     // either the sample partial index or the idempotency-key index; the handler then disambiguates by the
-    // specific index (IsKeyConflict / IsSampleUniqueViolation) so an unrelated 23505 is re-thrown.
+    // specific index (IsKeyConflict / SampleData.IsDocumentUniqueViolation) so an unrelated 23505 is
+    // re-thrown.
     private static bool IsUniqueViolation(DbUpdateException ex) =>
         ex.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation };
 
-    // Specifically the one-sample-per-org partial unique index (IX_Documents_OrganizationId_SampleUnique),
-    // matched on the index name so it never swallows an unrelated unique violation.
-    private const string SampleUniqueIndexName = "IX_Documents_OrganizationId_SampleUnique";
-    private static bool IsSampleUniqueViolation(DbUpdateException ex) =>
-        ex.InnerException is Npgsql.PostgresException { SqlState: Npgsql.PostgresErrorCodes.UniqueViolation } pg
-        && string.Equals(pg.ConstraintName, SampleUniqueIndexName, StringComparison.Ordinal);
-
-    private static async Task TryDeleteBlobAsync(
-        IBlobStorageService blobs, string blobName, ILoggerFactory loggerFactory, CancellationToken ct)
-    {
-        try
-        {
-            await blobs.DeleteAsync(blobName, ct);
-        }
-        catch (Exception ex)
-        {
-            loggerFactory.CreateLogger("SampleEndpoints")
-                .LogWarning(ex, "Failed to roll back orphaned sample blob {BlobName}", blobName);
-        }
-    }
+    // Delegates to the shared cleanup both upload paths use (#389 re-review). It takes NO
+    // CancellationToken from here, deliberately: the `catch` arms that reach it also catch the
+    // OperationCanceledException of a client abort, and BlobStorageService.DeleteAsync forwards the
+    // token to DeleteIfExistsAsync, which throws before issuing the DELETE on an already-cancelled one —
+    // so the aborted request, the very case that strands a blob, would be the one whose rollback
+    // silently no-ops. And it confirms the row is genuinely absent before deleting, so an ambiguous
+    // failure can never strip a committed sample of its PDF.
+    private static Task TryDeleteBlobAsync(
+        IServiceScopeFactory scopes, IBlobStorageService blobs, Guid documentId, string blobName,
+        ILoggerFactory loggerFactory) =>
+        OrphanBlobCleanup.RunAsync(scopes, blobs, documentId, blobName, loggerFactory, "sample seed");
 
     private static IResult Unauthorized() =>
         Results.Json(new { data = (object?)null, error = new { code = "auth.unauthorized", message = "Not authenticated." } }, statusCode: 401);

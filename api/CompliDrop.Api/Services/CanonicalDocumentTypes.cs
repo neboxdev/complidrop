@@ -35,18 +35,20 @@ namespace CompliDrop.Api.Services;
 /// this class stops NEW documents from joining that population.
 /// <para/>
 /// Callers: <c>ExtractionWorker.PersistSuccess</c> (coerces the model's answer before it overwrites the
-/// stored type), <c>ComplianceEndpoints.UpsertRule</c> (the OTHER operand of that ordinal comparison — it
-/// REJECTS an unknown type with a 400 rather than coercing, because retyping a compliance RULE would
-/// change what it governs), and both extraction clients' structured-output schemas, which pin
-/// <c>documentType</c> to this exact list via <see cref="SchemaEnum"/> so the Gemini and Anthropic
-/// contracts cannot drift apart.
+/// stored type), the two INGRESS upload paths — <c>DocumentEndpoints.UploadDocument</c> and the PUBLIC
+/// <c>VendorPortalEndpoints.UploadViaPortal</c>, which also coerce (#389) — <c>UpdateDocument</c> and
+/// <c>ComplianceEndpoints.UpsertRule</c> (the OTHER operand of that ordinal comparison — both REJECT an
+/// unknown type with a 400 rather than coercing, because a human deliberately re-typing a document or
+/// writing a RULE is choosing what gets graded), and both extraction clients' structured-output schemas,
+/// which pin <c>documentType</c> to this exact list via <see cref="SchemaEnum"/> so the Gemini and
+/// Anthropic contracts cannot drift apart.
 /// <para/>
 /// Mirrors pinned equal to <see cref="All"/> by <c>CanonicalDocumentTypeTests</c>: both provider schemas,
-/// the extraction prompt's DOCUMENT TYPES block, <c>DocumentEndpoints.AllowedDocumentTypes</c> (still a
-/// second literal — those endpoint files are owned by
-/// <see href="https://github.com/neboxdev/complidrop/issues/389">#389</see>, which should collapse it) and
-/// <see cref="DisplayLabels"/>' label map (which renders the type on the audit export). One mirror a .NET
-/// test cannot reach stays unpinned and is named in <c>.claude/reviewers.md</c> + ADR 0045:
+/// the extraction prompt's DOCUMENT TYPES block, and <see cref="DisplayLabels"/>' label map (which
+/// renders the type on the audit export). <c>DocumentEndpoints</c>' second literal is GONE — #389
+/// collapsed it (ADR 0046 §7, the collapse ADR 0045 § "Option E" deferred), so those endpoints call this
+/// class directly and their contract is asserted over HTTP in <c>RequestInputLengthTests</c> instead. One
+/// mirror a .NET test cannot reach stays unpinned and is named in <c>.claude/reviewers.md</c> + ADR 0045:
 /// <c>frontend/src/lib/document-types.ts</c>.
 /// <para/>
 /// NOT a mirror: <c>RuleEngine/RuleSetLoader</c>'s private <c>DocumentTypes</c> set

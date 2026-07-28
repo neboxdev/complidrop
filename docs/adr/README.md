@@ -53,3 +53,4 @@ Use `/adr <title>` to scaffold a new one.
 - [0043](0043-additional-insured-claim-wording-staged-behind-flag.md) — Corrected additional-insured claim wording staged behind a default-OFF flag (CLM-1); copy-only, verdict unchanged, distinct from TemplateCorrections
 - [0044](0044-audit-client-input-clamped-at-the-boundary.md) — Client-controlled audit input is clamped at one boundary; an unusable `X-Trace-Id` is replaced (not truncated) and the charset is narrow so no PII reaches the un-redacted Sentry tag
 - [0045](0045-canonical-document-type-vocabulary.md) — One canonical document-type vocabulary, coerced at the extraction choke point and validated at the rule write boundary
+- [0046](0046-request-input-length-guards.md) — Every request string is bounded before it reaches a bounded column: reject what the user typed, clamp what a machine chose; plus the unconditional upload-blob cleanup and the waitlist duplicate-race replay

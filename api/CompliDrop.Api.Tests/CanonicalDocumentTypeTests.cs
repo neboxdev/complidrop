@@ -1,7 +1,6 @@
 using System.Net;
 using System.Reflection;
 using System.Text.Json.Nodes;
-using CompliDrop.Api.Endpoints;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Tests.ExtractionFixtures;
@@ -14,9 +13,12 @@ namespace CompliDrop.Api.Tests;
 /// Pins the canonical document-type vocabulary (#373, ADR 0045) and every in-repo mirror that must speak
 /// it: <see cref="CanonicalDocumentTypes"/> itself, the two providers' structured-output schemas
 /// (asserted on the WIRE payload, not the C# source), the extraction system prompt's DOCUMENT TYPES block
-/// (the thing that actually teaches the model the vocabulary), the PATCH endpoint's allow-list, and
-/// <see cref="DisplayLabels"/> (which renders the type on the auditor-facing PDF/CSV export). No web
-/// host, no network — the extraction clients run against a stub HTTP handler.
+/// (the thing that actually teaches the model the vocabulary), and <see cref="DisplayLabels"/> (which
+/// renders the type on the auditor-facing PDF/CSV export). No web host, no network — the extraction
+/// clients run against a stub HTTP handler.
+/// <para/>
+/// The document endpoints no longer appear here: #389 deleted their duplicate literal, so the guarantee
+/// moved from a set-equality pin to the end-to-end behaviour tests in <c>RequestInputLengthTests</c>.
 /// <para/>
 /// One mirror is deliberately NOT pinned here because a .NET test cannot reach it:
 /// <c>frontend/src/lib/document-types.ts</c>. It is named in <c>.claude/reviewers.md</c> and ADR 0045 so
@@ -221,23 +223,15 @@ public sealed class CanonicalDocumentTypeTests
             .Select(line => line[2..].Split(' ', StringSplitOptions.RemoveEmptyEntries)[0])];
     }
 
-    // ---- The PATCH endpoint's allow-list -----------------------------------------------------------
-
-    [Fact]
-    public void The_document_PATCH_allow_list_speaks_the_same_vocabulary()
-    {
-        // DocumentEndpoints validates a manual type edit against its own literal set. That file is owned
-        // by #389 (the upload-path allow-list + the oversize 22001) and is otherwise NOT edited here, so
-        // the drift guarantee is mechanical instead: the two sets are pinned EQUAL. The field is
-        // `internal` rather than `private` for exactly this — compared directly, so a rename is a BUILD
-        // error rather than a runtime failure whose message reads like a suggestion to delete the guard.
-        //
-        // If #389 collapses that literal into CanonicalDocumentTypes — the desired end state — this stops
-        // compiling, which is the correct prompt to delete it rather than a silent gap.
-        DocumentEndpoints.AllowedDocumentTypes.Should().BeEquivalentTo(CanonicalDocumentTypes.All,
-            "a type the PATCH endpoint accepts but extraction normalizes away (or vice versa) is exactly " +
-            "the drift #373 closes");
-    }
+    // ---- The document endpoints' allow-list --------------------------------------------------------
+    //
+    // DocumentEndpoints' private AllowedDocumentTypes literal — and the set-equality test that pinned it
+    // to this vocabulary — are GONE (#389, the collapse ADR 0045 § "Option E" deferred to that ticket).
+    // The PATCH type edit and BOTH upload paths now call CanonicalDocumentTypes directly, so there is no
+    // second set left to drift and a set-equality assertion here would compare the vocabulary to itself.
+    // The behaviour those endpoints owe the vocabulary is pinned end-to-end over HTTP instead, in
+    // RequestInputLengthTests (every member accepted on PATCH, an unknown one rejected, and both upload
+    // paths coercing an unknown/mis-cased/over-length value to the fallback).
 
     // ---- The export's display labels ---------------------------------------------------------------
 
