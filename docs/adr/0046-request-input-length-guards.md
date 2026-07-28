@@ -59,6 +59,8 @@ Only columns fed by request input are listed. Columns written from compile-time 
 (`UploadedBy`), from a server-derived value (`BlobStoragePath`, `Token`), or from a vocabulary that is
 length-safe by construction (`DocumentType` via `CanonicalDocumentTypes`, `TimeZone` via `TimeZones`)
 are deliberately **absent** — listing them would imply a guard that does not and need not exist.
+(One later entry — `DocumentFieldUpdatesPerRequest`, §4 Amendment 1 — bounds a collection COUNT rather
+than a column width, and is therefore outside the `ModelConfiguration` binding by design.)
 
 `ExtractionWorker`'s two `DocumentField` widths become one-line **aliases** of `InputLengths` rather
 than a second pair of literals. Two writers hold opposite policies on those same two columns (see §2),
@@ -137,6 +139,13 @@ for the #389 family, with the actionable detail in `error.message`, which the fr
 > - `AuthEndpoints.IsValidEmail`'s `validation.email`, likewise one "enter a valid email" answer
 >   covering shape *and* length. Its 256 now reads `InputLengths.UserEmail` (§1 Amendment 1) — the
 >   number is shared, the error code is not.
+>
+> That cap is the ONLY thing between the **anonymous** register route (and the authenticated
+> change-email route) and a 22001-as-500 on `User.Email` / `EmailVerificationToken.NewEmail` — the
+> register guard block explicitly declines to list email on exactly that basis. So it is now asserted
+> rather than assumed, on both routes and at both boundaries, **including the code**: exactly
+> `InputLengths.UserEmail` succeeds and stores whole; one over answers `validation.email`. A future
+> "consistency" pass that folds this into `validation.too_long` goes red (#389 re-review).
 `InputLength.TooLongMessage` produces `"{Label} must be {n} characters or fewer."`, which is
 byte-identical to the tone `UpdateOrganization` already set. Never HTTP jargon, never a column-width
 dump. "N or fewer", not "under N": exactly N is a legal value, pinned by a boundary test on every
@@ -166,10 +175,30 @@ third party who could force such a collision on purpose — making a second, unr
 replay the first. An authenticated caller can only do that to their **own** org, so there the clamp's
 upside (a long key still dedupes a double-submit) outweighs it.
 
-### 5. The dashboard blob cleanup becomes unconditional
+> **Amendment 1 (#389 re-review) — a bounded ELEMENT is not a bounded REQUEST.**
+>
+> `UpdateFields` bounded each correction's `FieldName`/`FieldValue` but left
+> `FieldsUpdateRequest.Fields` uncapped. Kestrel admits a 10 MB body, so ~45-byte entries buy a single
+> authenticated PUT a six-figure element count — walked twice by the guard, grouped, then written row by
+> row against the tracked document. Cheap to send, expensive to serve.
+>
+> `InputLengths.DocumentFieldUpdatesPerRequest` (200) bounds it, checked **before** the walk, and it is
+> the one entry in that file measuring a COUNT rather than a column width — kept there so it is pinned
+> and reviewed beside its siblings, and deliberately absent from the `ModelConfiguration` binding tests
+> because there is no column for it to agree with. 200 is an order of magnitude above reality (the
+> extraction schema defines ~20 canonical fields, and the detail page renders one input per extracted
+> field).
+>
+> Its own code, `validation.too_many_fields`, **not** `validation.too_long`: "you sent too many things"
+> and "one thing was too long" are different problems with different fixes, and the frontend renders the
+> message verbatim. Pinned at both boundaries like every length guard here.
+
+### 5. The dashboard blob cleanup is attempted on every failure path
 
 `UploadDocument` gains the portal's `documentPersisted` + `finally` shape, so **every** failure path
-deletes the blob, not just the idempotency-conflict one.
+runs the cleanup, not just the idempotency-conflict one. (As first shipped this section said every
+failure path *deletes* the blob; Amendment 2 below is why that is no longer the claim — the cleanup is
+now attempted everywhere and deletes only what it can prove is an orphan.)
 
 ADR 0029/0032 semantics are preserved exactly, and the reasoning is the load-bearing part:
 
@@ -200,11 +229,54 @@ orphan). That is what lets it sit in a `finally` without masking the real except
 > unfiltered like its sibling. Deleting an orphan is milliseconds of best-effort work that has to
 > outlive the request that triggered it.
 >
-> Pinned by two tests that abort the request the instant the blob is stored, with no timing race: a
+> Pinned by tests that abort the request the instant the blob is stored, with no timing race: a
 > test-only `IStartupFilter` swaps `HttpContext.RequestAborted` for a token the fake blob store cancels
 > from inside `UploadAsync`, and `FakeBlobStorageService.DeleteAsync` now honours `ct` the way the real
 > client does (a fake that ignored it would report a green cleanup Azure would have refused). The
-> pre-existing 22001-driven orphan test cannot catch this — its token is never cancelled.
+> pre-existing 22001-driven orphan test cannot catch this — its token is never cancelled. All **three**
+> sites are pinned, the sample seed included (a later review pass found only the two uploads were).
+
+> **Amendment 2 (#389 re-review) — the cleanup must CONFIRM ABSENCE before it deletes, and its own
+> token is short-lived rather than `None`.**
+>
+> Amendment 1 moved the trigger from a signal that PROVES the row rolled back (`IsKeyConflict`) to one
+> that only means "`SaveChangesAsync` did not return normally". **Those are not the same set.** A
+> failure arriving AFTER Postgres committed — a connection reset while reading the COMMIT
+> acknowledgement, or a cancellation racing that round trip (the very client-abort path Amendment 1
+> made the delete *work* on) — leaves the `Document` row **persisted** while the `finally` deletes its
+> blob. The result is a document the customer can never view or download, whose extraction can never
+> succeed (`DownloadAsync` returns null), and which still appears on the audit export. That is strictly
+> worse than the orphan this section set out to fix.
+>
+> So the trigger stays broad and a **confirming read** decides: `Endpoints/OrphanBlobCleanup` re-queries
+> `Documents.AnyAsync(d => d.Id == documentId)` on a **fresh scope's `SystemDbContext`** — a different
+> connection from the one that just faulted, which may be mid-unwind, holding a rolled-back
+> transaction, or bound to a cancelled token — and **skips the delete when the row is there**. The read
+> uses `IgnoreQueryFilters` (a system context, which is where CLAUDE.md permits it) because a
+> soft-deleted row owns its blob too: ADR 0013 deliberately RETAINS the blob of a deleted document, so
+> answering through the soft-delete filter would report "absent" for a row that is merely hidden.
+>
+> **If the read itself fails we do NOT delete.** Absence was not proved, and the asymmetry is the whole
+> point: an orphan costs storage and is named in an operator log; a wrongly-deleted blob costs the
+> customer their document.
+>
+> Narrowing the trigger back to `IsKeyConflict` is **not** the fix — that re-opens the original orphan
+> on every failure class nobody enumerated, and reviewers.md rules it out. The confirming read is what
+> lets the trigger stay broad AND stay safe.
+>
+> Second change, same helper: the delete runs on a **short-lived `CancellationTokenSource` (10s)** the
+> cleanup owns, not `CancellationToken.None`. `None` fixed the aborted-delete but left a best-effort
+> delete free to burn the full Azure retry budget (`MaxRetries` x a 30s network timeout plus back-off,
+> ~90s) inside the `finally` while the caller waits — including on the PUBLIC portal route. The
+> short-lived token is never pre-cancelled, so Amendment 1's property holds.
+>
+> All three sites (dashboard upload, portal upload, sample seed) now delegate to that one helper, so
+> the policy cannot drift between them. Pinned by: a post-commit fault on the dashboard upload and on
+> the sample seed (a test-only interceptor throws from EF's `SavedChangesAsync`, which fires only after
+> `StateManager.SaveChangesAsync` — the implicit transaction's commit — has returned), asserting the row
+> exists AND the blob survives; a direct both-branches test of the helper; and a token assertion
+> (`CanBeCanceled` is true for a real source and false for `None`, so the two are told apart without
+> waiting on the deadline).
 
 ### 6. The waitlist duplicate race is caught, not indexed away
 
@@ -235,6 +307,27 @@ implementation one.
 > Postgres actually carries is the one `WaitlistSignup.IsDuplicateEmail` matches on. That is the only
 > independent witness, and it is deterministic. (The constant itself moved to `Services/` — §1
 > Amendment 1.)
+
+> **Amendment 2 (#389 re-review) — the rule applies to the sample-demo index too, and the predicates
+> have their own tests.**
+>
+> This section establishes that an index name matched by a 23505 `catch` must be **one** constant owned
+> by a layer both sides may depend on. `SampleEndpoints` held the other instance of exactly that shape —
+> a hand-copied `IX_Documents_OrganizationId_SampleUnique` in the endpoint and a second literal in
+> `ModelConfiguration` — so it moves to `Services/SampleData` as
+> `DocumentUniqueIndexName` / `IsDocumentUniqueViolation`, and `ModelConfiguration` names it in
+> `HasDatabaseName`. The value is unchanged, so no migration (`has-pending-model-changes` reports none).
+> `SampleData` rather than a new file: it already owns the sample-demo constants shared across layers.
+>
+> Naming the constant makes the EF-model form of the check vacuous for this index too, so
+> `SampleEndpointsTests` gains the same `pg_indexes` witness the waitlist has.
+>
+> Both **predicates** also gain the deterministic unit test they lacked (the
+> `IdempotencyService.IsKeyConflict` shape: true for a 23505 naming the right index, false for one
+> naming a different index, false for a non-Postgres inner exception). Until now the only thing
+> exercising `IsDuplicateEmail` was the probabilistic five-racer test, which passes whether or not its
+> losing arm ever runs — so a predicate broadened to bare SqlState (swallowing an unrelated 23505 as a
+> duplicate signup) or narrowed to never match (a public 500) could ship green.
 
 ### 7. The duplicate document-type literal is collapsed
 
@@ -281,10 +374,12 @@ normalizers; `Reminder.EmailSubjectTemplate` is a nullable column.
   can act on, or clamp and succeed.
 - A vendor's upload can no longer be lost to a long filename or a stray `documentType`, and a
   `documentType` from either ingress path can no longer create a never-graded document.
-- The dashboard upload leaks no blob on any failure, closing the ticket's one data-loss-adjacent item.
+- The dashboard upload leaks no blob on any failure it can confirm rolled back, closing the ticket's
+  one data-loss-adjacent item — and, per §5 Amendment 2, it never deletes the file of a document that
+  DID commit, which would have been a worse one.
 - A public marketing form no longer 500s on a concurrent duplicate signup.
 - All four idempotent routes agree on one client-key bound, and a long key still dedupes.
-- One vocabulary literal instead of two.
+- One vocabulary literal instead of two, and one index-name literal per index instead of two.
 
 ### Negative
 
@@ -300,8 +395,10 @@ normalizers; `Reminder.EmailSubjectTemplate` is a nullable column.
 
 ### Neutral
 
-- **No migration and no data migration.** Every width is numerically unchanged and the waitlist index
-  name is EF's own default; `dotnet ef migrations has-pending-model-changes` reports no model changes.
+- **No migration and no data migration.** Every width is numerically unchanged; the waitlist index name
+  is EF's own default and the sample index name is the one it already carried (§6 Amendment 2), so
+  naming both from a constant changes no model. `dotnet ef migrations has-pending-model-changes`
+  reports no model changes.
   Existing rows are untouched — including the pre-#373 non-canonical `DocumentType` residue, which
   ADR 0045's "Known limitation — legacy rows are NOT laundered" already records as needing a measured,
   human-signed-off cleanup rather than a blind `UPDATE`.
@@ -353,9 +450,19 @@ endpoint is a product decision.
   [0032](0032-portal-upload-idempotency.md) (the replay semantics the blob cleanup preserves),
   [0030](0030-compliance-verdict-combined-unit-of-work.md) (why a `UpdateFields` 22001 took the verdict
   with it), [0016](0016-apply-ef-migrations-on-startup.md) (why no index is added)
-- Code: `Services/InputLengths.cs` (`InputLengths` + `InputLength`), `Data/ModelConfiguration.cs`,
+- Code: `Services/InputLengths.cs` (the widths, plus the one collection-count bound — §4 Amendment 1),
+  `Endpoints/InputLength.cs` (the `validation.too_long` envelope; it lives in `Endpoints/` per §1
+  Amendment 1), `Services/WaitlistSignup.cs` (the `(Email)` index name + the duplicate predicate — §6),
+  `Services/SampleData.cs` (the sample partial-unique index name + its predicate, moved there for the
+  same reason — §6 Amendment 2), `Endpoints/OrphanBlobCleanup.cs` (the shared confirm-then-delete blob
+  rollback — §5 Amendment 2), `Data/ModelConfiguration.cs`,
   `Endpoints/{VendorPortal,Auth,Waitlist,Document,Sample,Billing,Vendor,Compliance,Reminder}Endpoints.cs`,
   `BackgroundServices/ExtractionWorker.cs` (the aliased widths)
-- Tests: `RequestInputLengthTests` (every guarded field at both boundaries, the portal + dashboard
-  clamps and coercions, the waitlist duplicate race, the blob-orphan assertion on the blob store, the
-  long-key replay, and the PATCH vocabulary behaviour that replaced the retired set-equality pin)
+- Tests: `RequestInputLengthTests` (every guarded field at both boundaries — including the account
+  email, which answers `validation.email` and not `validation.too_long`; the portal + dashboard clamps
+  and coercions; the waitlist duplicate race; the blob-orphan assertion on the blob store; the
+  client-abort cleanup on all three upload paths and the post-commit-fault cases that must NOT delete;
+  the long-key replay on all three clamped routes; the field-update count cap; and the PATCH vocabulary
+  behaviour that replaced the retired set-equality pin), `WaitlistEndpointsTests` +
+  `SampleEndpointsTests` (each index name against `pg_indexes`, plus its predicate),
+  `AuditClientInputClampTests` (the width binding, §1 Amendment 1)

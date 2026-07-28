@@ -291,24 +291,46 @@ Both are defined in this repo's `.claude/agents/`.
     portal still IGNORES an oversize key rather than clamping (truncation manufactures collisions an
     untrusted third party could force on purpose, ADR 0044 §2's reasoning); the three authenticated
     routes clamp at the same 128. That asymmetry is deliberate.
-  - The dashboard upload's blob cleanup is UNCONDITIONAL (`documentPersisted` + `finally`, the
-    portal's shape). It does not violate ADR 0029/0032: `blobName` embeds the request's own Guid so
-    a concurrent same-key loser deletes only ITS OWN blob, and a sequential replay returns at the
-    fast path before any blob exists. A version that narrows it back to the `IsKeyConflict` catch
-    re-opens the orphan.
-  - That cleanup deletes with `CancellationToken.None`, NEVER the request's `ct` — on both upload
-    paths and the sample seed. `BlobStorageService.DeleteAsync` forwards the token to
-    `DeleteIfExistsAsync`, which throws BEFORE issuing the DELETE on an already-cancelled token, so a
-    client abort (the likeliest orphan-maker: tab closed, phone drops mid-upload) was the one failure
-    whose cleanup could not run. Both `TryDeleteBlobAsync` helpers take no token at all so it can't
-    be reintroduced, and the portal's catch is unfiltered — the old
-    `when (ex is not OperationCanceledException)` let the aborted delete's exception escape the
-    `finally` and replace the real one. Passing `ct` back in IS a real finding.
+  - The dashboard upload's blob cleanup is ATTEMPTED on every failure path (`documentPersisted` +
+    `finally`, the portal's shape). It does not violate ADR 0029/0032: `blobName` and `doc.Id` are the
+    request's own Guids so a concurrent same-key loser only ever touches ITS OWN blob, and a
+    sequential replay returns at the fast path before any blob exists. A version that narrows the
+    TRIGGER back to the `IsKeyConflict` catch re-opens the orphan.
+  - But the trigger is not the verdict: all three sites (both uploads + the sample seed) delegate to
+    ONE `Endpoints/OrphanBlobCleanup`, which CONFIRMS ABSENCE before deleting — it re-queries
+    `Documents.AnyAsync(d => d.Id == documentId)` on a FRESH scope's `SystemDbContext`
+    (`IgnoreQueryFilters`: a soft-deleted row owns its blob too, ADR 0013) and SKIPS the delete when
+    the row is there, or when that read itself fails (absence unproven -> keep the blob, log it).
+    `documentPersisted == false` only means `SaveChangesAsync` did not return normally, which includes
+    the commit landing and the ACK never getting back — deleting then destroys a REAL document's file
+    (unviewable, un-extractable, still on the audit export), which is strictly worse than the orphan.
+    Removing the confirm-absence read, or inlining a fourth copy of this cleanup, IS a real finding.
+  - That cleanup deletes on its OWN short-lived (`OrphanBlobCleanup.Budget`, 10s) token — NEVER the
+    request's `ct`, and no longer `CancellationToken.None`. `BlobStorageService.DeleteAsync` forwards
+    the token to `DeleteIfExistsAsync`, which throws BEFORE issuing the DELETE on an already-cancelled
+    token, so a client abort (the likeliest orphan-maker: tab closed, phone drops mid-upload) was the
+    one failure whose cleanup could not run; `None` fixed that but let a best-effort delete burn the
+    full ~90s Azure retry budget inside the caller's `finally`, including on the PUBLIC portal route.
+    The helper takes no token from its callers at all so neither can be reintroduced, and its catches
+    are unfiltered — the portal's old `when (ex is not OperationCanceledException)` let the aborted
+    delete's exception escape the `finally` and replace the real one. Passing `ct` back in IS a real
+    finding.
   - The waitlist duplicate race is fixed by CATCHING the existing `(Email)` unique violation (matched
     on the index NAME, the `IsKeyConflict` shape, verified against `pg_indexes` on the migrated test
     DB because the EF-model form would compare the constant to itself) and replaying the friendly
     200 — NOT by adding an index. Adding one over possibly-duplicated prod rows would fail the startup auto-migration and
     take prod down (ADR 0016). "Just add a unique index" is a refuted suggestion, not a finding.
+  - An index name a 23505 `catch` matches on is ONE `Services/` constant consumed by BOTH
+    `ModelConfiguration` (`HasDatabaseName`) and the endpoint — `WaitlistSignup.EmailUniqueIndexName`
+    and `SampleData.DocumentUniqueIndexName` / `IsDocumentUniqueViolation`. Naming it there makes the
+    EF-model check vacuous, so each is witnessed against `pg_indexes` on the migrated test DB and each
+    PREDICATE has the three-case `IsKeyConflict`-shaped unit test (right index true, other index
+    false, non-Postgres false). A hand-copied literal in an endpoint IS a real finding; so is a
+    predicate broadened to bare SqlState.
+  - Element length is not request size: `UpdateFields` caps the ARRAY COUNT too
+    (`InputLengths.DocumentFieldUpdatesPerRequest`, its own `validation.too_many_fields` code),
+    checked BEFORE the walk. It is the one `InputLengths` entry that is not a column width, so it is
+    deliberately absent from the two `ModelConfiguration` binding tests — not an omission.
   - The waitlist endpoint has no frontend caller and is KEPT anyway — removing a public endpoint is a
     product decision. Do not flag it as dead code.
 - Bare `now()` / `DateTime.UtcNow` in raw SQL on `timestamptz` is correct; the bug is
