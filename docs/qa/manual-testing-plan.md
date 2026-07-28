@@ -1128,7 +1128,7 @@ You're done when this entire table is filled in.
 - [ ] Delete the test Stripe customers from the Stripe Dashboard test-mode list.
 - [ ] Delete the test orgs from staging DB (or note them as "qa" orgs for future regression).
 - [ ] Archive the fixtures folder OR keep it for the next regression pass.
-- [ ] Update [`WORKLOG.md`](../../WORKLOG.md) with a short summary of what QA caught.
+- [ ] Post a short summary of what QA caught as a comment on the tracking issue [#175](https://github.com/neboxdev/complidrop/issues/175).
 
 ---
 

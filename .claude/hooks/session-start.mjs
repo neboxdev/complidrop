@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// SessionStart hook: inject git/issue/worklog context into the session.
+// SessionStart hook: inject git/issue/session context into the session.
 // Fails silently — never crash the session start.
 
 import { execSync } from "node:child_process";
@@ -79,16 +79,6 @@ if (ghAvailable) {
       }
     } catch {}
   }
-}
-
-// --- WORKLOG.md tail (committed human narrative, if the file exists) ----
-if (existsSync("WORKLOG.md")) {
-  try {
-    const content = readFileSync("WORKLOG.md", "utf8");
-    const lines = content.trim().split("\n");
-    const tail = lines.slice(-30).join("\n").trim();
-    if (tail) sections.push(`## WORKLOG.md (tail)\n\n\`\`\`\n${tail}\n\`\`\``);
-  } catch {}
 }
 
 // --- Recent session markers (local, gitignored) -----------------------

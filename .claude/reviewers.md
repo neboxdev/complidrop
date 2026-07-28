@@ -3,8 +3,9 @@
 Read at review time by every generic reviewer persona in the machine-level claude-kit
 (`~/.claude/agents/`) and by the /start, /review, /plan and /epic-review skills. This
 file owns the project's review-time facts: rosters, deliberate patterns, sensitive
-areas, commit scopes, scale. The invariants themselves live in CLAUDE.md § Core
-patterns and `docs/adr/` — this file points at them, it does not restate them.
+areas, commit scopes, scale. The invariants themselves live in `docs/adr/` (indexed
+one-per-line in CLAUDE.md § Domain invariants) — this file points at them, it does
+not restate them.
 
 **Sync rule:** a code change that alters one of these facts updates this file in the
 same PR. That is the whole point of this file existing — the previous kit hardcoded
