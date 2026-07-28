@@ -27,6 +27,10 @@ namespace CompliDrop.Api.Services;
 /// This file holds the NUMBERS only. The guard that turns one into a 400 — <c>InputLength</c> — lives
 /// in <c>Endpoints/</c>, because it returns an <c>IResult</c> and nothing else in <c>Services/</c>
 /// knows what an HTTP envelope looks like (#389 review).
+/// <para/>
+/// One entry — <see cref="DocumentFieldUpdatesPerRequest"/> — bounds a COLLECTION COUNT rather than a
+/// column width. It is here because it is the same decision (bound the request at the edge, in one
+/// reviewed place) even though it has no column to be bound to; its own doc says so.
 /// </summary>
 public static class InputLengths
 {
@@ -43,7 +47,7 @@ public static class InputLengths
     /// one number rather than the two hand-copied 256s they were.
     /// <para/>
     /// That guard keeps its OWN error code (<c>validation.email</c>) and is NOT folded into
-    /// <see cref="InputLength.TooLongCode"/>: an unparseable-or-too-long account email is one
+    /// <c>InputLength.TooLongCode</c>: an unparseable-or-too-long account email is one
     /// "enter a valid email" answer on a field the user is looking at, and splitting it into two codes
     /// mid-form would be a worse experience than the single rule it has today. Nor is
     /// <c>IsValidEmail</c>'s laxness otherwise touched — the lax-account-email vs strict-vendor-contact
@@ -64,6 +68,26 @@ public static class InputLengths
     // Manual field correction — PUT /api/documents/{id}/fields
     public const int DocumentFieldName = 200;
     public const int DocumentFieldValue = 2000;
+
+    /// <summary>
+    /// Most field corrections one <c>PUT /api/documents/{id}/fields</c> may carry. The ONE entry here
+    /// that bounds a COUNT rather than a column width, and it is here so it is pinned and reviewed
+    /// beside its siblings rather than buried as a magic number in the endpoint — same family of
+    /// decision (bound the request at the edge), different unit. Deliberately absent from the
+    /// <c>ModelConfiguration</c> binding tests for that reason: there is no column to agree with.
+    /// <para/>
+    /// Bounding each element's LENGTH is not enough on its own. Kestrel admits a 10 MB body and the
+    /// array is uncapped, so ~45 bytes per entry buys a single authenticated PUT a six-figure element
+    /// count — walked twice by the guard, grouped, then written row by row against the tracked
+    /// document. Cheap for the caller, expensive for the CPU and the DB.
+    /// <para/>
+    /// Sized an order of magnitude above reality: the extraction schema defines ~20 canonical fields
+    /// and the detail page renders one input per extracted field, so a genuine save is a handful.
+    /// Exactly this many is accepted; one more is a <c>validation.too_many_fields</c> 400 — a distinct
+    /// code from <c>InputLength.TooLongCode</c> on purpose, because "you sent too many things" and
+    /// "one thing was too long" are different problems with different fixes.
+    /// </summary>
+    public const int DocumentFieldUpdatesPerRequest = 200;
 
     // Vendors — POST/PUT /api/vendors. ContactEmail is bounded by ContactEmail.MaxLength (#369).
     public const int VendorName = 200;

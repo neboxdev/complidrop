@@ -44,6 +44,14 @@ public sealed class FakeBlobStorageService : IBlobStorageService
     /// </summary>
     public CancellationTokenSource? CancelRequestAfterUpload { get; set; }
 
+    /// <summary>
+    /// The token the most recent <see cref="DeleteAsync"/> was handed. Lets a test assert what the
+    /// orphan cleanup passes down (#389 re-review): <see cref="CancellationToken.None"/> reports
+    /// <c>CanBeCanceled == false</c>, a token from a <see cref="CancellationTokenSource"/> with a
+    /// deadline reports true — so the two are distinguishable without waiting for that deadline.
+    /// </summary>
+    public CancellationToken LastDeleteToken { get; private set; }
+
     public async Task<BlobUploadResult> UploadAsync(string blobName, Stream content, string contentType, CancellationToken ct)
     {
         if (ThrowUnavailableOnUpload)
@@ -67,6 +75,7 @@ public sealed class FakeBlobStorageService : IBlobStorageService
         ThrowOnDelete = false;
         UrlOverride = null;
         CancelRequestAfterUpload = null;
+        LastDeleteToken = default;
     }
 
     // Honest not-found: null for an unknown name, mirroring the interface contract the real
@@ -77,6 +86,7 @@ public sealed class FakeBlobStorageService : IBlobStorageService
 
     public Task DeleteAsync(string blobName, CancellationToken ct)
     {
+        LastDeleteToken = ct;
         // FAITHFUL to the real service, and load-bearing for the #389 re-review test: BlobStorageService
         // forwards ct to BlobClient.DeleteIfExistsAsync, which throws the moment it sees an already-
         // cancelled token — it never issues the DELETE. A fake that ignored ct would report a green

@@ -1,10 +1,12 @@
 using CompliDrop.Api.BackgroundServices;
+using CompliDrop.Api.Data;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Services.Ocr;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -138,6 +140,14 @@ public sealed class CustomWebApplicationFactory(
             // Lets a test abort a request mid-handler (#389 re-review). Inert unless the request
             // carries ClientAbortStartupFilter.HeaderName, so it changes nothing for every other test.
             services.AddSingleton<IStartupFilter, ClientAbortStartupFilter>();
+
+            // Lets a test fault a request AFTER its SaveChanges committed (#389 re-review) — the
+            // ambiguous outcome an upload's blob cleanup must not treat as a rollback. Attached to
+            // AppDbContext through EF's own options-configuration hook rather than by re-registering
+            // the context (see PostCommitFaultOptionsConfiguration). Inert unless the request carries
+            // PostCommitFaultInterceptor.HeaderName.
+            services.AddSingleton<PostCommitFaultInterceptor>();
+            services.AddSingleton<IDbContextOptionsConfiguration<AppDbContext>, PostCommitFaultOptionsConfiguration>();
         });
     }
 }

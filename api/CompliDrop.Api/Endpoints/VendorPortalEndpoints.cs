@@ -77,6 +77,8 @@ public static class VendorPortalEndpoints
         IImageTranscoder transcoder,
         IAuditLogger audit,
         IIdempotencyService idem,
+        IServiceScopeFactory scopes,
+        ILoggerFactory loggerFactory,
         ILogger<VendorPortalLink> logger,
         CancellationToken ct)
     {
@@ -321,29 +323,26 @@ public static class VendorPortalEndpoints
         }
         finally
         {
+            // Shared with both authenticated upload paths (#389 re-review). Two properties this route
+            // needs more than either of them, since a vendor uploading from a phone is the likeliest
+            // client in the app to drop mid-request:
+            //
+            //  - it never uses the REQUEST's ct. A client abort between the blob upload and the commit
+            //    cancels ct, unwinds the transaction and lands HERE, but DeleteIfExistsAsync throws
+            //    before issuing the DELETE on an already-cancelled token — so the failure path most
+            //    likely to strand a blob was the one whose cleanup could not run. Its own short-lived
+            //    token also stops a best-effort delete burning the full Azure retry budget on a PUBLIC
+            //    route while the vendor waits.
+            //  - it CONFIRMS the row is absent before deleting. "documentPersisted == false" only means
+            //    the try did not complete, which includes tx.CommitAsync landing in Postgres and the
+            //    acknowledgement never getting back — deleting on that alone destroys a real vendor's
+            //    certificate file (ADR 0046 §5 Amendment 2).
+            //
+            // It swallows unfiltered, which is what lets it sit in a `finally` without replacing the
+            // real exception on the way out — the old `when (ex is not OperationCanceledException)`
+            // filter let precisely the abort case escape and mask it.
             if (!documentPersisted)
-            {
-                // CancellationToken.None, NOT the request's ct (#389 re-review — same fix as
-                // DocumentEndpoints.TryDeleteBlobAsync). A client abort between the blob upload and the
-                // commit — the vendor closing the tab, a phone losing signal mid-upload — cancels ct,
-                // unwinds the transaction and lands HERE; but BlobStorageService.DeleteAsync forwards
-                // the token to DeleteIfExistsAsync, which throws before issuing the DELETE on an
-                // already-cancelled token. So the failure path most likely to strand a blob was the one
-                // whose cleanup could not run. The cleanup is milliseconds of best-effort work that has
-                // to outlive the request that triggered it.
-                //
-                // The catch is unfiltered for the same reason it is in DocumentEndpoints: swallowing is
-                // what lets this sit in a `finally` without replacing the real exception on the way out.
-                // The old `when (ex is not OperationCanceledException)` filter let precisely the abort
-                // case escape and mask it.
-                try { await blobs.DeleteAsync(blobName, CancellationToken.None); }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex,
-                        "Portal upload: best-effort blob cleanup failed for {BlobName} on link {LinkId}",
-                        blobName, link.Id);
-                }
-            }
+                await OrphanBlobCleanup.RunAsync(scopes, blobs, doc.Id, blobName, loggerFactory, "portal upload");
         }
 
         return Results.Ok(response);

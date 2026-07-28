@@ -392,6 +392,7 @@ public static class DocumentEndpoints
         IImageTranscoder transcoder,
         IIdempotencyService idem,
         ICurrentUser currentUser,
+        IServiceScopeFactory scopes,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
@@ -526,18 +527,25 @@ public static class DocumentEndpoints
             db.IdempotencyRecords.Add(
                 idem.BuildRecord(orgId, idempotencyKey, http.Request.Path, StatusCodes.Status201Created, response));
 
-        // Blob cleanup is UNCONDITIONAL on every failure path (#389), mirroring the portal twin's
+        // Blob cleanup is attempted on EVERY failure path (#389), mirroring the portal twin's
         // documentPersisted + finally (VendorPortalEndpoints.UploadViaPortal). The blob is uploaded
         // BEFORE the insert, and only the IsKeyConflict catch below used to delete it — so ANY other
         // SaveChanges failure (the 22001 this ticket removes at the source, a connection drop, a
         // constraint we haven't thought of) left a paid-for blob in storage with no row pointing at it
         // and nothing that would ever find it. The flag flips only after the commit returns.
         //
-        // Safe against the concurrent same-key race by construction: blobName embeds this request's own
-        // Guid, so the loser deletes ONLY its own blob and can never touch the winner's. And a sequential
-        // replay returns at the fast path above, long before any blob exists — so ADR 0029/0032's
-        // "a committed record replays the winner's exact response" is untouched: the replay still
-        // returns the winner's uploadId, pointing at the winner's still-present blob.
+        // "documentPersisted == false" is the TRIGGER, not the verdict: it only means SaveChangesAsync
+        // did not return normally, which includes the commit landing in Postgres and the ACK never
+        // getting back. OrphanBlobCleanup therefore re-reads the row on a fresh connection and deletes
+        // only what is genuinely absent — see its docs for why deleting on the bare signal is worse
+        // than the orphan (#389 re-review, ADR 0046 §5 Amendment 2).
+        //
+        // Safe against the concurrent same-key race by construction: blobName and doc.Id are this
+        // request's own Guids, so the loser confirms and deletes ONLY its own blob and can never touch
+        // the winner's. And a sequential replay returns at the fast path above, long before any blob
+        // exists — so ADR 0029/0032's "a committed record replays the winner's exact response" is
+        // untouched: the replay still returns the winner's uploadId, pointing at the winner's
+        // still-present blob.
         var documentPersisted = false;
         try
         {
@@ -556,7 +564,7 @@ public static class DocumentEndpoints
         finally
         {
             if (!documentPersisted)
-                await TryDeleteBlobAsync(blobs, blobName, loggerFactory);
+                await OrphanBlobCleanup.RunAsync(scopes, blobs, doc.Id, blobName, loggerFactory, "dashboard upload");
         }
 
         // No explicit "document.uploaded": the interceptor already records this owner upload as the
@@ -594,6 +602,14 @@ public static class DocumentEndpoints
         // save is what resolves the review (ADR 0040).
         if (req.Fields is null)
             return Error(400, "validation.fields", "Send the fields you want to update.");
+        // The array's COUNT is bounded too, not just each element's length (#389 re-review). Kestrel
+        // admits a 10 MB body and FieldsUpdateRequest caps nothing, so ~45-byte entries buy one
+        // authenticated PUT a six-figure element count — walked twice by this guard, grouped, then
+        // written row by row against the tracked document. Checked BEFORE the walk, which is the whole
+        // point: a bound applied after the loop is a bound the loop already paid for.
+        if (req.Fields.Length > InputLengths.DocumentFieldUpdatesPerRequest)
+            return Error(400, "validation.too_many_fields",
+                $"You can update up to {InputLengths.DocumentFieldUpdatesPerRequest} fields at a time.");
         foreach (var update in req.Fields)
         {
             if (update is null || string.IsNullOrWhiteSpace(update.FieldName))
@@ -796,33 +812,6 @@ public static class DocumentEndpoints
             doc.ExtractionStatus = ExtractionStatus.ManualRequired;
     }
 
-    // Best-effort rollback of a blob whose owning Document never committed — for ANY reason, not just
-    // the lost idempotency-key race it was originally written for (#389). Mirrors
-    // SampleEndpoints.TryDeleteBlobAsync and the portal's finally: a failure here only leaves an orphan
-    // blob, never a failed request, so it's logged (loud enough for an operator to find the orphan) and
-    // swallowed. Swallowing is what lets it sit in a `finally` without masking the real exception on the
-    // way out.
-    //
-    // Takes NO CancellationToken, deliberately, and passes CancellationToken.None to the delete. The
-    // REQUEST token is exactly the wrong one here: a client abort between the blob upload and the commit
-    // (tab closed, mobile connection dropped) is itself a failure path that reaches this cleanup, and
-    // BlobStorageService.DeleteAsync forwards the token to DeleteIfExistsAsync, which throws before
-    // issuing the DELETE when it is already cancelled. The catch below would then swallow that and log —
-    // so the ONE failure mode most likely to strand a blob would be the one whose cleanup cannot run.
-    // Deleting an orphan is a few milliseconds of best-effort work that must outlive the request.
-    private static async Task TryDeleteBlobAsync(
-        IBlobStorageService blobs, string blobName, ILoggerFactory loggerFactory)
-    {
-        try
-        {
-            await blobs.DeleteAsync(blobName, CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            loggerFactory.CreateLogger("DocumentEndpoints")
-                .LogWarning(ex, "Failed to roll back orphaned upload blob {BlobName} after a failed document insert", blobName);
-        }
-    }
 
     private static string SanitizeFileName(string? name)
     {
