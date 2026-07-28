@@ -7,6 +7,7 @@ using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using static CompliDrop.Api.Tests.TestHelpers.UploadFixtures;
 
 namespace CompliDrop.Api.Tests;
@@ -171,6 +172,82 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
         await using var db = CreateSystemDb();
         (await db.Organizations.SingleAsync(o => o.Name.Length == InputLengths.OrganizationName))
             .Name.Should().NotStartWith(" ");
+    }
+
+    [Fact]
+    public async Task Register_accepts_an_email_exactly_at_the_column_width()
+    {
+        // Email is the ONE register field the #389 guard block deliberately does not list, on the
+        // grounds that AuthEndpoints.IsValidEmail already caps it — which makes that cap the only thing
+        // between an ANONYMOUS route and a 22001-as-500 on User.Email, with nothing asserting it (#389
+        // re-review). Both boundaries, here and below.
+        var email = EmailOfLength(InputLengths.UserEmail);
+
+        var resp = await CreateClient().PostAsJsonAsync("/api/auth/register", RegisterBody("email", email));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.Users.SingleAsync()).Email.Should().Be(email,
+            "the column takes exactly its width — stored whole, not clipped");
+    }
+
+    [Fact]
+    public async Task Register_refuses_an_over_length_email_with_the_email_code_not_the_too_long_one()
+    {
+        // The code is ASSERTED, not assumed. ADR 0046 §3 Amendment 1 keeps `validation.email` separate
+        // from `validation.too_long` on purpose — an unparseable-or-too-long ACCOUNT email is one "enter
+        // a valid email" answer on a field the user is looking at, and splitting it in two mid-form is a
+        // worse experience than the single rule it has. Only the NUMBER is shared
+        // (InputLengths.UserEmail). A future "consistency" pass that folds this into the shared guard
+        // goes red here.
+        var resp = await CreateClient().PostAsJsonAsync(
+            "/api/auth/register", RegisterBody("email", EmailOfLength(InputLengths.UserEmail + 1)));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest,
+            "a 500 from a 22001 on User.Email is the failure class #389 removes");
+        var (code, message) = await ErrorOf(resp);
+        code.Should().Be("validation.email");
+        message.Should().Be("Enter a valid email.");
+        await using var db = CreateSystemDb();
+        (await db.Users.CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Changing_the_email_refuses_an_over_length_address_with_the_email_code()
+    {
+        // The second column InputLengths.UserEmail backs: EmailVerificationToken.NewEmail, written from
+        // this request and later copied onto User.Email. Same guard, same code, authenticated route.
+        var auth = await RegisterAndLoginAsync();
+
+        var resp = await auth.Client.PostAsJsonAsync("/api/auth/change-email", new
+        {
+            newEmail = EmailOfLength(InputLengths.UserEmail + 1),
+            password = "Password1234",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await ErrorOf(resp)).Code.Should().Be("validation.email");
+        await using var db = CreateSystemDb();
+        (await db.EmailVerificationTokens.CountAsync(t => t.NewEmail != null)).Should().Be(0,
+            "a refused change must not mint a pending-email token");
+    }
+
+    [Fact]
+    public async Task Changing_the_email_accepts_an_address_exactly_at_the_column_width()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var email = EmailOfLength(InputLengths.UserEmail);
+
+        var resp = await auth.Client.PostAsJsonAsync("/api/auth/change-email", new
+        {
+            newEmail = email,
+            password = "Password1234",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.EmailVerificationTokens.SingleAsync(t => t.NewEmail != null)).NewEmail
+            .Should().Be(email, "the column takes exactly its width — stored whole, not clipped");
     }
 
     // ───────────────────────── Authenticated: the settings org-name edit ─────────────────────────
@@ -427,6 +504,138 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
             "cleanup must outlive the request that triggered it — a cancelled token cannot delete");
     }
 
+    [Fact]
+    public async Task A_client_abort_during_the_sample_seed_still_deletes_the_blob()
+    {
+        // The third site the CancellationToken.None rule covers (#389 re-review). Its cleanup sits in a
+        // bare `catch`, which also catches the OperationCanceledException of a client abort — so it is
+        // reachable exactly the same way, and reviewers.md states the rule for "both upload paths plus
+        // the sample seed" while only the two uploads were pinned.
+        var auth = await RegisterAndLoginAsync();
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/sample");
+        req.Headers.Add(ClientAbortStartupFilter.HeaderName, "1");
+        var resp = await auth.Client.SendAsync(req);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.InternalServerError);
+        await using var db = CreateSystemDb();
+        (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId)).Should().Be(0);
+        Blobs.BlobCount.Should().Be(0,
+            "the generated sample PDF is uploaded before the insert; an aborted seed must not leave it");
+    }
+
+    // ───────── The other half: an AMBIGUOUS failure must NOT delete a committed document's blob ─────────
+
+    [Fact]
+    public async Task A_fault_after_the_commit_keeps_the_committed_documents_blob()
+    {
+        // The regression the unconditional cleanup introduced, and the reason it now confirms absence
+        // (#389 re-review, ADR 0046 §5 Amendment 2). "The insert failed" and "SaveChangesAsync did not
+        // return normally" are NOT the same set: a connection reset while reading the COMMIT
+        // acknowledgement, or a cancellation racing that round trip, throws at the endpoint while
+        // Postgres has already committed the row. On the bare `documentPersisted == false` signal the
+        // finally then deleted a REAL document's file — unviewable, undownloadable, un-extractable
+        // (DownloadAsync returns null) and still listed on the audit export. Strictly worse than the
+        // orphan the cleanup exists to prevent.
+        //
+        // PostCommitFaultInterceptor throws from EF's SavedChangesAsync hook, which fires only after
+        // StateManager.SaveChangesAsync — the implicit transaction's commit — has returned. So this is
+        // that exact state, not an approximation of it. Neither abort test above can catch it: in both,
+        // the row genuinely never commits, so deleting is the right answer there.
+        var auth = await RegisterAndLoginAsync();
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/documents/upload")
+        {
+            Content = UploadForm(PdfBytes(), "coi.pdf", "application/pdf"),
+        };
+        req.Headers.Add(PostCommitFaultInterceptor.HeaderName, "1");
+        var resp = await auth.Client.SendAsync(req);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.InternalServerError);
+        await using var db = CreateSystemDb();
+        (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId)).Should().Be(
+            1, "the fault fires AFTER the commit — if the row is absent this test is not exercising the "
+                + "ambiguous outcome at all and its blob assertion below would be vacuous");
+        Blobs.BlobCount.Should().Be(1,
+            "a document that EXISTS must keep its file — deleting it is worse than the orphan the "
+                + "cleanup was added to prevent");
+    }
+
+    [Fact]
+    public async Task A_fault_after_the_sample_seed_commits_keeps_the_committed_samples_blob()
+    {
+        // The same ambiguity at the sample-seed site, whose cleanup hangs off a bare `catch` rather than
+        // a finally. A sample whose PDF was deleted is a demo that renders a broken document on the very
+        // screen it exists to sell — and one live sample per org means re-seeding cannot heal it.
+        var auth = await RegisterAndLoginAsync();
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/sample");
+        req.Headers.Add(PostCommitFaultInterceptor.HeaderName, "1");
+        var resp = await auth.Client.SendAsync(req);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.InternalServerError);
+        await using var db = CreateSystemDb();
+        (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId && d.IsSample)).Should().Be(1);
+        Blobs.BlobCount.Should().Be(1, "the sample committed, so its generated PDF must survive");
+    }
+
+    [Fact]
+    public async Task The_cleanup_deletes_a_blob_whose_document_is_absent_and_keeps_one_whose_document_exists()
+    {
+        // The shared helper all three upload paths delegate to, exercised on both sides of its decision
+        // so neither branch can be silently lost. The end-to-end tests above pin the WIRING (that each
+        // endpoint hands it the right document id); this pins the RULE.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await UploadDocumentAsync(auth.Client);
+        await using var db = CreateSystemDb();
+        var committed = await db.Documents.SingleAsync(d => d.Id == docId);
+
+        var scopes = Fixture.Factory.Services.GetRequiredService<IServiceScopeFactory>();
+        var loggers = Fixture.Factory.Services.GetRequiredService<ILoggerFactory>();
+
+        // A blob nothing points at — what a genuinely failed insert leaves behind.
+        var orphanName = $"{auth.OrgId}/orphan-{Guid.NewGuid()}.pdf";
+        await Blobs.UploadAsync(orphanName, new MemoryStream(PdfBytes()), "application/pdf", default);
+        Blobs.BlobCount.Should().Be(2);
+
+        await OrphanBlobCleanup.RunAsync(
+            scopes, Blobs, committed.Id, committed.BlobStoragePath!, loggers, "test");
+        Blobs.BlobCount.Should().Be(2, "a row owns that blob, so absence was never confirmed");
+
+        await OrphanBlobCleanup.RunAsync(scopes, Blobs, Guid.NewGuid(), orphanName, loggers, "test");
+        Blobs.BlobCount.Should().Be(1,
+            "no row owns that id, so the blob is a genuine orphan and the cleanup must still reclaim it "
+                + "— confirming absence must not turn the cleanup into a no-op");
+    }
+
+    [Fact]
+    public async Task The_cleanup_deletes_on_a_token_that_is_bounded_rather_than_never_cancellable()
+    {
+        // The cleanup must NOT hold the failed request open for the full Azure retry budget (MaxRetries
+        // x a 30s network timeout plus back-off, ~90s) while the caller waits inside its `finally` — on
+        // request threads that include the PUBLIC portal route. So it owns a SHORT-LIVED token rather
+        // than the CancellationToken.None it used to pass (#389 re-review).
+        //
+        // CancellationToken.None reports CanBeCanceled == false and a CancellationTokenSource token
+        // reports true, so the two are told apart instantly — no waiting on the deadline. That it is not
+        // the REQUEST's token, which is already cancelled on the abort path, is what the three abort
+        // tests above pin.
+        var auth = await RegisterAndLoginAsync();
+        var scopes = Fixture.Factory.Services.GetRequiredService<IServiceScopeFactory>();
+        var loggers = Fixture.Factory.Services.GetRequiredService<ILoggerFactory>();
+        var orphanName = $"{auth.OrgId}/orphan-{Guid.NewGuid()}.pdf";
+        await Blobs.UploadAsync(orphanName, new MemoryStream(PdfBytes()), "application/pdf", default);
+
+        await OrphanBlobCleanup.RunAsync(scopes, Blobs, Guid.NewGuid(), orphanName, loggers, "test");
+
+        Blobs.LastDeleteToken.CanBeCanceled.Should().BeTrue(
+            "an uncancellable CancellationToken.None lets a best-effort delete burn the whole retry "
+                + "budget inside the caller's finally");
+        Blobs.LastDeleteToken.IsCancellationRequested.Should().BeFalse(
+            "and it must not be PRE-cancelled either — DeleteIfExistsAsync throws before issuing the "
+                + "DELETE on an already-cancelled token");
+    }
+
     // ───────────────────────── The dashboard upload's own input ─────────────────────────
 
     [Fact]
@@ -542,14 +751,44 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
     }
 
     [Fact]
-    public async Task A_long_idempotency_key_does_not_500_the_sample_seed()
+    public async Task A_long_idempotency_key_is_clamped_and_still_replays_the_sample_seed()
     {
+        // Both halves, like the upload and checkout twins — asserting only the status code cannot see a
+        // HALF-applied clamp, which is the exact failure ADR 0046 §4 names: clamp the storage but not
+        // the lookup (or vice versa) and a repeat of a long key misses its own record, so idempotency is
+        // silently broken rather than loudly failed. Here the second seed would then fall through to the
+        // partial unique index instead of replaying (#389 re-review).
         var auth = await RegisterAndLoginAsync();
-        var req = new HttpRequestMessage(HttpMethod.Post, "/api/sample");
-        req.Headers.Add("Idempotency-Key", Chars(300));
+        var key = Chars(300);
 
-        (await auth.Client.SendAsync(req)).StatusCode.Should().Be(HttpStatusCode.Created);
+        var first = await PostSampleWithIdempotency(auth.Client, key);
+        var second = await PostSampleWithIdempotency(auth.Client, key);
+
+        first.StatusCode.Should().Be(HttpStatusCode.Created);
+        second.StatusCode.Should().Be(HttpStatusCode.Created,
+            "a replay returns the winner's CACHED response verbatim, status included — a 200 here would "
+                + "mean the one-sample-per-org fallback answered instead of the key");
+        (await SampleDocumentId(first)).Should().Be(await SampleDocumentId(second),
+            "the second call replays the first — proof the LOOKUP saw the clamped key");
+
+        Blobs.BlobCount.Should().Be(1, "a replay must not generate and store a second sample PDF");
+        await using var db = CreateSystemDb();
+        (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId)).Should().Be(1);
+        (await db.IdempotencyRecords.SingleAsync(r => r.OrganizationId == auth.OrgId)).Key
+            .Should().HaveLength(InputLengths.ClientIdempotencyKey,
+                "proof the STORAGE saw the clamped key — the other half of the same clamp");
     }
+
+    private static Task<HttpResponseMessage> PostSampleWithIdempotency(HttpClient client, string key)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/sample");
+        req.Headers.Add("Idempotency-Key", key);
+        return client.SendAsync(req);
+    }
+
+    private static async Task<Guid> SampleDocumentId(HttpResponseMessage resp) =>
+        (await resp.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("documentId").GetGuid();
 
     [Fact]
     public async Task A_long_idempotency_key_is_clamped_and_still_replays_a_checkout_session()
@@ -990,6 +1229,54 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
             "the column takes exactly its width — stored whole, not clipped");
         stored.FieldValue.Should().HaveLength(InputLengths.DocumentFieldValue);
     }
+
+    [Fact]
+    public async Task Editing_fields_accepts_exactly_the_capped_number_of_updates()
+    {
+        // The count bound is inclusive at the cap, like every length bound in this suite — a guard
+        // written with the wrong comparison passes a one-sided test.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await UploadDocumentAsync(auth.Client);
+
+        var resp = await auth.Client.PutAsJsonAsync(
+            $"/api/documents/{docId}/fields",
+            new { fields = FieldUpdates(InputLengths.DocumentFieldUpdatesPerRequest) });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var db = CreateSystemDb();
+        (await db.DocumentFields.CountAsync(f => f.DocumentId == docId))
+            .Should().Be(InputLengths.DocumentFieldUpdatesPerRequest);
+    }
+
+    [Fact]
+    public async Task Editing_more_fields_than_the_cap_is_refused_before_anything_is_written()
+    {
+        // Bounding each element's LENGTH left the ARRAY unbounded: Kestrel admits a 10 MB body and
+        // FieldsUpdateRequest caps nothing, so ~45-byte entries buy one authenticated PUT a six-figure
+        // element count — walked twice by the guard, grouped, then written row by row. Cheap to send,
+        // expensive to serve (#389 re-review).
+        //
+        // Its own code, NOT validation.too_long: "you sent too many things" and "one thing was too long"
+        // are different problems with different fixes, and the frontend renders the message verbatim.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await UploadDocumentAsync(auth.Client);
+
+        var resp = await auth.Client.PutAsJsonAsync(
+            $"/api/documents/{docId}/fields",
+            new { fields = FieldUpdates(InputLengths.DocumentFieldUpdatesPerRequest + 1) });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        var (code, message) = await ErrorOf(resp);
+        code.Should().Be("validation.too_many_fields");
+        message.Should().Contain(InputLengths.DocumentFieldUpdatesPerRequest.ToString());
+        message.Should().NotContainAny("22001", "varchar", "DbUpdate", "Npgsql");
+        await using var db = CreateSystemDb();
+        (await db.DocumentFields.CountAsync(f => f.DocumentId == docId)).Should().Be(0,
+            "the cap is checked BEFORE the walk — a bound applied after the loop is one the loop paid for");
+    }
+
+    private static object[] FieldUpdates(int count) =>
+        [.. Enumerable.Range(0, count).Select(i => new { fieldName = $"field_{i}", fieldValue = "v" })];
 
     // ───────────────────────── shared upload helpers ─────────────────────────
 

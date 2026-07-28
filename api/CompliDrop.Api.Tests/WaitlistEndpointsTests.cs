@@ -4,6 +4,7 @@ using System.Text.Json;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
 namespace CompliDrop.Api.Tests;
@@ -138,5 +139,31 @@ public sealed class WaitlistEndpointsTests(IntegrationTestFixture fixture) : Int
             "Npgsql reports THIS name as PostgresException.ConstraintName on the duplicate-signup "
                 + "23505; if the database doesn't carry it, IsDuplicateEmail never matches and the "
                 + "concurrent duplicate is a 500");
+    }
+
+    [Fact]
+    public void IsDuplicateEmail_matches_only_the_email_index_not_other_unique_violations()
+    {
+        // The other half of the contract, and it had no deterministic test at all (#389 re-review): the
+        // pg_indexes test above pins the NAME, while the only thing exercising the PREDICATE was the
+        // five-racer integration test — which passes whether or not the losing arm ever runs, so a
+        // predicate broadened to bare SqlState (swallowing an unrelated 23505 as "you're on the list!")
+        // or narrowed to never match (turning the race back into a public 500) could ship green.
+        //
+        // Same shape as DocumentEndpointsTests' IsKeyConflict twin, deliberately: three cases, one per
+        // way the match can go wrong.
+        var duplicate = new DbUpdateException("dup", new PostgresException(
+            "duplicate key", "ERROR", "ERROR", PostgresErrorCodes.UniqueViolation,
+            constraintName: WaitlistSignup.EmailUniqueIndexName));
+        WaitlistSignup.IsDuplicateEmail(duplicate).Should().BeTrue();
+
+        var otherIndex = new DbUpdateException("dup", new PostgresException(
+            "duplicate key", "ERROR", "ERROR", PostgresErrorCodes.UniqueViolation,
+            constraintName: IdempotencyService.KeyIndexName));
+        WaitlistSignup.IsDuplicateEmail(otherIndex).Should().BeFalse(
+            "an unrelated unique violation must SURFACE, never be answered with the friendly 200");
+
+        WaitlistSignup.IsDuplicateEmail(new DbUpdateException("x", new InvalidOperationException("not postgres")))
+            .Should().BeFalse();
     }
 }
