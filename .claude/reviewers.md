@@ -365,7 +365,7 @@ Both are defined in this repo's `.claude/agents/`.
   hosts leave it at the prod default OFF; the ON value is pinned by
   ComplianceClaimsFlagTests (isolated host). The staged corrected copy is not dead code.
 
-## Sensitive areas (`careful-review` label ⇒ autonomous sessions stop before merge)
+## Sensitive areas (`careful-review` label ⇒ merge needs a two-reviewer clearance)
 
 - **Auth**: `Endpoints/Auth*`, JWT/cookie issuance (`cd_session`/`cd_refresh`), BCrypt,
   lockout logic
@@ -387,7 +387,10 @@ possible: **multi-instance races are REAL findings**, never hypothetical.
 
 ## Sensitive globs (machine-readable — merge-gate `--careful` matching)
 
-Any touched path matching one of these ⇒ pass `--careful` to the merge gate:
+Any touched path matching one of these ⇒ pass `--careful` to the merge gate, which now
+means "this merge needs a careful clearance" (two Fable-5 max-effort reviewers, both
+answering safe) rather than "stop for a human" — same treatment as the `careful-review`
+label above, and the gate blocks identically without the clearance record:
 
 ```
 api/**/Endpoints/Auth*
