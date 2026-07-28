@@ -132,10 +132,15 @@ internal static class ModelConfiguration
             // returns the existing sample instead of double-seeding. Scoped to live sample rows so a
             // normal upload (IsSample=false) is never constrained and a cleared/soft-deleted sample
             // doesn't block re-seeding. Mirrors the IX_ComplianceTemplates_Name_SystemUnique guard.
+            //
+            // The NAME is read from Services/, not spelled here: SampleEndpoints matches the 23505 on it
+            // to answer the losing double-click with the winner's sample, so schema and matcher must be
+            // ONE constant — the WaitlistSignup.EmailUniqueIndexName rule, applied to the pair that
+            // predates it (#389 review). Value unchanged, so no migration.
             e.HasIndex(d => d.OrganizationId)
                 .IsUnique()
                 .HasFilter("\"IsSample\" AND \"DeletedAt\" IS NULL")
-                .HasDatabaseName("IX_Documents_OrganizationId_SampleUnique");
+                .HasDatabaseName(Services.SampleData.DocumentUniqueIndexName);
 
             // ExtractionWorker's claim/zombie-reclaim query (ExtractionWorker.ClaimSql) scans for the
             // next processable document SYSTEM-WIDE — it has NO OrganizationId predicate (a single

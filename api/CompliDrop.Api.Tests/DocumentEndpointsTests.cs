@@ -448,7 +448,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
 
         var otherIndexConflict = new DbUpdateException("dup", new Npgsql.PostgresException(
             "duplicate key", "ERROR", "ERROR", Npgsql.PostgresErrorCodes.UniqueViolation,
-            constraintName: "IX_Documents_OrganizationId_SampleUnique"));
+            constraintName: SampleData.DocumentUniqueIndexName));
         service.IsKeyConflict(otherIndexConflict).Should().BeFalse("a different unique index must surface, not be swallowed");
 
         service.IsKeyConflict(new DbUpdateException("x", new InvalidOperationException("not postgres")))
