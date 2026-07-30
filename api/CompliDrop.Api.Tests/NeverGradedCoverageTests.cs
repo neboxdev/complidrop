@@ -87,6 +87,18 @@ public sealed class NeverGradedCoverageTests(IntegrationTestFixture fixture) : I
             .GetProperty("data").GetProperty("items").EnumerateArray()
             .Select(i => i.GetProperty("id").GetGuid()).ToArray();
 
+    /// <summary>
+    /// The BADGE an UNFILTERED documents-list row renders for one document — a different code path from
+    /// the <c>?status=</c> SQL arms above (a C# projection over a per-row check COUNT), and the one the
+    /// #294 count-vs-badge split lives in. Read from the unfiltered list on purpose: a badge asserted only
+    /// inside <c>?status=Pending</c> would agree with the filter by construction.
+    /// </summary>
+    private static async Task<string> ListBadgeAsync(HttpClient client, Guid id) =>
+        (await client.GetFromJsonAsync<JsonElement>("/api/documents/"))
+            .GetProperty("data").GetProperty("items").EnumerateArray()
+            .First(i => i.GetProperty("id").GetGuid() == id)
+            .GetProperty("complianceStatus").GetString()!;
+
     private static async Task<JsonElement> StatsAsync(HttpClient client) =>
         (await client.GetFromJsonAsync<JsonElement>("/api/dashboard/stats")).GetProperty("data");
 
@@ -162,16 +174,28 @@ public sealed class NeverGradedCoverageTests(IntegrationTestFixture fixture) : I
         // here: the list carries a separate ManualRequired *extraction* badge beside the compliance badge,
         // but there is no badge anywhere for "nothing graded this" — the detail page's "What we checked"
         // panel is simply EMPTY under the verdict.
+        //
+        // The org holds one GRADED and one ungraded doc on purpose. The list badge is a C# projection over
+        // a per-row check count — independent code from the SQL ?status= arms — so a projection that read
+        // an org-wide "does anything here have checks" scalar, or one that lost the grading input
+        // entirely, would still pass against a single-document org.
         var auth = await RegisterAndLoginAsync();
-        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.ExpiringSoon, InTenDays);
+        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.ExpiringSoon, InTenDays, fileName: "ungraded.pdf");
+        var graded = await SeedDocAsync(
+            auth.OrgId, ComplianceStatus.ExpiringSoon, InTenDays, graded: true, fileName: "graded.pdf");
 
         (await DetailStatusAsync(auth.Client, id)).Should().Be("Pending");
-        (await ListIdsAsync(auth.Client, "Pending")).Should().Contain(id);
-        (await ListIdsAsync(auth.Client, "ExpiringSoon")).Should().NotContain(id);
+        (await ListBadgeAsync(auth.Client, id)).Should().Be("Pending",
+            "the list ROW must render the same verdict the filter selects on — a badge saying 'Expiring "
+            + "soon' inside the Pending list is the #294 split this ticket names as the failure mode");
+        (await ListBadgeAsync(auth.Client, graded)).Should().Be("ExpiringSoon",
+            "the graded row is untouched — the demotion is per-document, not per-org");
+        (await ListIdsAsync(auth.Client, "Pending")).Should().Contain(id).And.NotContain(graded);
+        (await ListIdsAsync(auth.Client, "ExpiringSoon")).Should().NotContain(id).And.Contain(graded);
         (await ListIdsAsync(auth.Client, "Compliant")).Should().NotContain(id);
 
         var stats = await StatsAsync(auth.Client);
-        stats.GetProperty("expiringSoon").GetInt32().Should().Be(0, "nothing was measured against it");
+        stats.GetProperty("expiringSoon").GetInt32().Should().Be(1, "only the graded doc was measured");
         stats.GetProperty("compliant").GetInt32().Should().Be(0);
     }
 
@@ -229,15 +253,63 @@ public sealed class NeverGradedCoverageTests(IntegrationTestFixture fixture) : I
         // Expired is top precedence and is never softened: a lapsed date is a real fact and a present
         // liability, whether or not anything graded the document. Demoting it to Pending would HIDE a gap —
         // the exact failure this ticket exists to prevent, inverted.
+        //
+        // A second, GRADED + Compliant document is seeded so the compliance rate can discriminate. With
+        // only the expired doc, `compliant` is 0 and the endpoint returns 0 whether the denominator is 1
+        // or 0 — the "expired never-graded docs stay in the denominator" claim would be unfalsifiable.
+        // Two docs make it arithmetic: expired one COUNTED => 1/2 => 50; excluded => 1/1 => 100.
         var auth = await RegisterAndLoginAsync();
-        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.ExpiringSoon, Today.AddDays(-1));
+        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.ExpiringSoon, Today.AddDays(-1), fileName: "lapsed.pdf");
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, FarFuture, graded: true, fileName: "graded.pdf");
 
         (await DetailStatusAsync(auth.Client, id)).Should().Be("Expired");
         (await ListIdsAsync(auth.Client, "Expired")).Should().Contain(id);
         (await ListIdsAsync(auth.Client, "Pending")).Should().NotContain(id);
-        (await StatsAsync(auth.Client)).GetProperty("expired").GetInt32().Should().Be(1);
-        // …and it stays IN the compliance-rate denominator: an expiry is a verdict.
-        (await StatsAsync(auth.Client)).GetProperty("complianceRate").GetDouble().Should().Be(0);
+        var stats = await StatsAsync(auth.Client);
+        stats.GetProperty("expired").GetInt32().Should().Be(1);
+        // …and it stays IN the compliance-rate denominator: an expiry is a verdict. This is why BOTH
+        // demotion clauses in that denominator carry the not-yet-expired guard (parity with ADR 0041).
+        stats.GetProperty("complianceRate").GetDouble().Should().Be(50,
+            "1 compliant of 2 documents that have a verdict — the never-graded one is EXPIRED, and a "
+            + "lapsed date is a real verdict, so dropping it from the denominator would flatter the rate");
+    }
+
+    [Fact]
+    public async Task A_never_graded_doc_with_NO_expiry_date_reads_Pending_on_the_badge_and_the_list()
+    {
+        // The null-expiry path. The demotion sits AFTER the deriver's expiry if/else precisely so it also
+        // catches a document with no expiration date (the #362 review's S2 lesson), and the ?status=Pending
+        // SQL arm carries its own `d.ExpirationDate == null` branch to match. Only the pure deriver test
+        // covered this axis; #362 set the precedent of pinning it over HTTP as well.
+        var auth = await RegisterAndLoginAsync();
+        var graded = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, null, graded: true, fileName: "graded.pdf");
+        var ungraded = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, null, fileName: "ungraded.pdf");
+
+        (await DetailStatusAsync(auth.Client, ungraded)).Should().Be("Pending");
+        (await ListBadgeAsync(auth.Client, ungraded)).Should().Be("Pending");
+        (await ListIdsAsync(auth.Client, "Pending")).Should().Contain(ungraded,
+            "a never-graded doc with no expiry date has nothing to be Expired by, so the Pending arm's "
+            + "null-expiry branch is the ONLY thing that puts it in the list its badge says it belongs to");
+        (await ListIdsAsync(auth.Client, "Compliant")).Should().NotContain(ungraded).And.Contain(graded);
+        (await StatsAsync(auth.Client)).GetProperty("compliant").GetInt32().Should().Be(1);
+    }
+
+    [Fact]
+    public async Task The_dashboard_awaitingReview_count_equals_its_deep_linked_Pending_list()
+    {
+        // #443 review B5: a demoted document must be REACHABLE from the dashboard, not merely absent from
+        // the affirmative tiles. The awaitingReview stat is what makes it so, and — like every other
+        // count/list pair on this screen — it must equal the list it deep-links to (#294).
+        var auth = await RegisterAndLoginAsync();
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.ExpiringSoon, InTenDays, fileName: "ungraded.pdf");
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, FarFuture, graded: true, fileName: "graded.pdf");
+        await SeedDocAsync(auth.OrgId, ComplianceStatus.Pending, FarFuture, graded: true, fileName: "genuinely-pending.pdf");
+
+        var listed = await ListIdsAsync(auth.Client, "Pending");
+        (await StatsAsync(auth.Client)).GetProperty("awaitingReview").GetInt32()
+            .Should().Be(listed.Length, "the tile and the list it links to are the same population");
+        listed.Length.Should().Be(2, "the never-graded doc joins the genuinely-Pending one; the graded "
+            + "Compliant doc does not");
     }
 
     [Fact]
@@ -325,32 +397,78 @@ public sealed class NeverGradedCoverageTests(IntegrationTestFixture fixture) : I
     }
 
     [Fact]
-    public async Task The_EF_graded_predicate_agrees_with_the_in_memory_one()
+    public async Task MarkGradedAsync_picks_the_backing_rule_deterministically()
     {
-        // DocumentGrading has two shapes — IsGraded(count) in memory and the Graded expression in SQL — and
-        // the SQL read arms spell the same fact inline as d.ComplianceChecks.Any(). Pin all three against
-        // one seeded population so a divergence (a soft-delete filter appearing on ComplianceCheck, say)
-        // fails here rather than as a silent coverage overclaim.
+        // The fixture seam itself. MarkGradedAsync reuses a rule already in the org, and Postgres
+        // guarantees NO row order without an ORDER BY — so an unordered FirstOrDefaultAsync leaves WHICH
+        // rule backs the seeded check row up to the planner. Invisible while a test only counts check
+        // rows, but not once one asserts on the requirement behind one (the detail page's "What we
+        // checked" panel renders the rule's field, operator and message). Lowest SortOrder, then Id.
+        var auth = await RegisterAndLoginAsync();
+        var templateId = Guid.NewGuid();
+        var firstRuleId = Guid.NewGuid();
+        await using (var seed = CreateSystemDb())
+        {
+            seed.ComplianceTemplates.Add(new ComplianceTemplate
+            {
+                Id = templateId, OrganizationId = auth.OrgId, Name = "T", CreatedAt = DateTime.UtcNow
+            });
+            // Inserted OUT of SortOrder on purpose: insertion order must not be what decides.
+            seed.ComplianceRules.Add(new ComplianceRule
+            {
+                Id = Guid.NewGuid(), ComplianceTemplateId = templateId, DocumentType = "coi",
+                FieldName = "expiration_date", Operator = "required", SortOrder = 2
+            });
+            seed.ComplianceRules.Add(new ComplianceRule
+            {
+                Id = firstRuleId, ComplianceTemplateId = templateId, DocumentType = "coi",
+                FieldName = "general_liability_limit", Operator = "min_value", ExpectedValue = "1000000",
+                SortOrder = 0
+            });
+            await seed.SaveChangesAsync();
+        }
+        var docId = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, FarFuture, graded: true);
+
+        await using var db = CreateSystemDb();
+        (await db.ComplianceChecks.Where(c => c.DocumentId == docId).Select(c => c.ComplianceRuleId).SingleAsync())
+            .Should().Be(firstRuleId, "the lowest SortOrder wins, not whichever row the planner returned");
+    }
+
+    [Fact]
+    public async Task The_SQL_grading_predicate_agrees_with_the_in_memory_one_and_with_the_check_rows()
+    {
+        // Exactly TWO forms of "was this graded" ship: the SQL read arms spell it inline as
+        // `d.ComplianceChecks.Any()`, and the in-memory read sites ask DocumentGrading.IsGraded of a
+        // projected count. Both traverse the SAME ComplianceChecks navigation, so comparing them only to
+        // each other pins `Any() == Count > 0` and nothing else — a filter appearing on the navigation
+        // would move them identically and this test would stay green. So the third leg is GROUND TRUTH
+        // read straight from the ComplianceChecks table by DocumentId, which the navigation's filters
+        // cannot reach: if a query filter or a soft-delete column ever lands on ComplianceCheck, the
+        // shipping forms diverge from the rows themselves and it fails HERE rather than as a silent
+        // coverage overclaim.
         var auth = await RegisterAndLoginAsync();
         var graded = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, FarFuture, graded: true, fileName: "graded.pdf");
         var ungraded = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, FarFuture, fileName: "ungraded.pdf");
 
         await using var db = CreateSystemDb();
-        var viaExpression = await db.Documents
-            .Where(d => d.OrganizationId == auth.OrgId)
-            .Where(DocumentGrading.Graded)
-            .Select(d => d.Id)
-            .ToListAsync();
-        var viaCount = (await db.Documents
-                .Where(d => d.OrganizationId == auth.OrgId)
-                .Select(d => new { d.Id, Count = d.ComplianceChecks.Count })
-                .ToListAsync())
+        var orgDocs = db.Documents.Where(d => d.OrganizationId == auth.OrgId);
+
+        // (1) the SQL spelling every read arm uses, inline in a composite predicate.
+        var viaSql = await orgDocs.Where(d => d.ComplianceChecks.Any()).Select(d => d.Id).ToListAsync();
+        // (2) the in-memory spelling every projection/deriver call site uses.
+        var viaCount = (await orgDocs.Select(d => new { d.Id, Count = d.ComplianceChecks.Count }).ToListAsync())
             .Where(x => DocumentGrading.IsGraded(x.Count))
             .Select(x => x.Id)
             .ToList();
+        // (3) ground truth: the check ROWS, keyed by DocumentId, never through the navigation.
+        var viaRows = new List<Guid>();
+        foreach (var id in await orgDocs.Select(d => d.Id).ToListAsync())
+            if (await db.ComplianceChecks.CountAsync(c => c.DocumentId == id) > 0)
+                viaRows.Add(id);
 
-        viaExpression.Should().BeEquivalentTo([graded]);
-        viaCount.Should().BeEquivalentTo(viaExpression);
-        viaExpression.Should().NotContain(ungraded);
+        viaRows.Should().BeEquivalentTo([graded], "one seeded doc carries a check row and one carries none");
+        viaSql.Should().BeEquivalentTo(viaRows);
+        viaCount.Should().BeEquivalentTo(viaRows);
+        viaSql.Should().NotContain(ungraded);
     }
 }

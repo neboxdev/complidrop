@@ -113,8 +113,19 @@ public abstract class IntegrationTestBase(IntegrationTestFixture fixture) : IAsy
     /// any seeded doc whose AFFIRMATIVE verdict is the thing under test.
     /// <para/>
     /// Reuses any rule already in the org (so a test's own checklist backs its checks) and otherwise
-    /// mints a throwaway template + rule. Assigning it to no vendor keeps it inert for coverage
-    /// rollups, which key on the VENDOR's <c>ComplianceTemplateId</c>.
+    /// mints a throwaway template + rule. Two fixture side effects worth knowing before you call it:
+    /// <list type="bullet">
+    ///   <item><description>The rule pick is ORDERED (<c>SortOrder</c> then <c>Id</c>). Postgres
+    ///     guarantees no row order without an <c>ORDER BY</c>, so an unordered
+    ///     <c>FirstOrDefaultAsync</c> would make WHICH rule backs the check row non-deterministic —
+    ///     invisible while a test only counts check rows, but not once one asserts on the rule behind
+    ///     one (the detail page's "What we checked" panel renders it).</description></item>
+    ///   <item><description>The no-rule fallback mints a REAL, org-visible <c>ComplianceTemplate</c>
+    ///     named <c>Graded-{guid}</c> plus one rule. It is assigned to no vendor, so it stays inert for
+    ///     coverage rollups (which key on the VENDOR's <c>ComplianceTemplateId</c>) — but it DOES appear
+    ///     on any surface that lists templates or counts an org's requirements. A test asserting on
+    ///     those should seed its own checklist first, which this helper then reuses instead.</description></item>
+    /// </list>
     /// </summary>
     protected async Task MarkGradedAsync(Guid organizationId, params Guid[] documentIds)
     {
@@ -122,6 +133,8 @@ public abstract class IntegrationTestBase(IntegrationTestFixture fixture) : IAsy
         await using var db = CreateSystemDb();
         var ruleId = await db.ComplianceRules
             .Where(r => r.ComplianceTemplate.OrganizationId == organizationId)
+            .OrderBy(r => r.SortOrder)
+            .ThenBy(r => r.Id)
             .Select(r => (Guid?)r.Id)
             .FirstOrDefaultAsync();
         var now = DateTime.UtcNow;
