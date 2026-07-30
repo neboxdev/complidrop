@@ -217,4 +217,100 @@ public sealed class ComplianceStatusDeriverTests
         ComplianceStatusDeriver.Effective(ComplianceStatus.NonCompliant, expirationDate: null, effectiveDate: Today.AddDays(30), isGraded: true, Today)
             .Should().Be(ComplianceStatus.NonCompliant);
     }
+
+    // ---- #443 / ADR 0047: never-graded (zero applicable rules) demotion ----
+
+    [Fact]
+    public void Never_graded_inside_the_expiry_window_reads_Pending_not_ExpiringSoon()
+    {
+        // THE bug. ComputeOutcome's zero-applicable-rules branch stores `expiringSoon ? ExpiringSoon :
+        // Pending`, so a never-graded doc 10 days from expiry was stored ExpiringSoon — and every surface
+        // that groups ExpiringSoon with Compliant then asserted coverage nothing had established.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.ExpiringSoon, Today.AddDays(10), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Pending);
+        // …and the other half of the chain: the overlay used to PROMOTE a stored Pending into the same
+        // affirmative ExpiringSoon. Both stored values must land on Pending, or the two halves disagree.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Pending, Today.AddDays(10), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Pending);
+    }
+
+    [Fact]
+    public void The_grading_axis_no_longer_turns_on_the_expiry_date()
+    {
+        // The tell that the pre-#443 behaviour was arbitrary: the SAME absence of grading read Pending at
+        // 31 days to expiry and ExpiringSoon at 29. The date decided whether the product claimed coverage.
+        // Both sides of the window boundary must now read Pending.
+        foreach (var days in new[] { 0, 1, 29, 30, 31, 200 })
+            ComplianceStatusDeriver.Effective(ComplianceStatus.ExpiringSoon, Today.AddDays(days), null, isGraded: false, Today)
+                .Should().Be(ComplianceStatus.Pending, $"a never-graded doc expiring in {days} days certifies nothing");
+    }
+
+    [Fact]
+    public void Never_graded_demotes_a_stored_Compliant_too()
+    {
+        // Not reachable from ComputeOutcome (an affirmative verdict always comes with its check rows), but
+        // reachable transiently: deleting a rule hard-deletes its check rows and re-grades AFTER the
+        // commit, and the seed's orphan cleanup does the same. If that re-grade never lands, the stored
+        // Compliant is backed by nothing — fail CLOSED rather than certify off missing evidence.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(200), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Pending);
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, expirationDate: null, effectiveDate: null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Pending, "the demotion sits after the expiry if/else, so it catches the null-expiry path too");
+    }
+
+    [Fact]
+    public void Never_graded_does_not_soften_Expired_or_NonCompliant()
+    {
+        // Expired is top precedence and is never demoted: a lapsed date is a real, un-graded fact and a
+        // present liability. The demotion only ever moves a doc OUT of the affirmative tally.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.ExpiringSoon, Today.AddDays(-1), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Expired);
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Pending, Today.AddDays(-1), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Expired);
+        // NonCompliant is unreachable without a failed check row, but is excluded anyway so the clause can
+        // never mask a hard fail (the ADR 0041 rule, on the grading axis).
+        ComplianceStatusDeriver.Effective(ComplianceStatus.NonCompliant, Today.AddDays(10), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.NonCompliant);
+    }
+
+    [Fact]
+    public void A_graded_document_is_completely_unaffected_by_the_new_clause()
+    {
+        // The blast radius: with isGraded true, every stored verdict × date combination must derive exactly
+        // what it did before #443. This is the regression fence around the whole change.
+        foreach (var stored in Enum.GetValues<ComplianceStatus>())
+            foreach (var days in new int?[] { null, -1, 0, 10, 30, 31, 200 })
+            {
+                var exp = days is int d ? Today.AddDays(d) : (DateTime?)null;
+                var expected = exp is null ? stored
+                    : days < 0 ? ComplianceStatus.Expired
+                    : days <= 30 && stored is ComplianceStatus.Compliant or ComplianceStatus.ExpiringSoon or ComplianceStatus.Pending
+                        ? ComplianceStatus.ExpiringSoon
+                        : stored;
+                ComplianceStatusDeriver.Effective(stored, exp, null, isGraded: true, Today)
+                    .Should().Be(expected, $"stored {stored} expiring in {days?.ToString() ?? "never"} days is unchanged when graded");
+            }
+    }
+
+    [Fact]
+    public void The_verdict_self_heals_the_moment_the_document_is_graded()
+    {
+        // The read-only-overlay guarantee, the grading twin of the future-effective self-heal above: the
+        // SAME stored verdict reads Pending while nothing has graded the doc and its real value the instant
+        // a check row exists. Nothing is persisted, so adding a governing rule (or correcting the doc's
+        // type) recovers the verdict with no re-write of ComplianceStatus.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.ExpiringSoon, Today.AddDays(10), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Pending, "nothing has been measured against it yet");
+        ComplianceStatusDeriver.Effective(ComplianceStatus.ExpiringSoon, Today.AddDays(10), null, isGraded: true, Today)
+            .Should().Be(ComplianceStatus.ExpiringSoon, "the stored verdict surfaces the moment a requirement is checked");
+    }
+
+    [Fact]
+    public void Never_graded_and_future_effective_are_independent_clauses()
+    {
+        // A doc can be both. Either alone demotes, and both together still land on Pending — so no read
+        // site can satisfy one clause and skip the other and still look correct.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(300), Today.AddDays(30), isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Pending);
+    }
 }

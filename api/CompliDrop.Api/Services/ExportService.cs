@@ -369,8 +369,11 @@ public class ExportService(SystemDbContext db) : IExportService
     /// The compliance cell for one exported document: the date-/effective-/grading-overlaid verdict,
     /// plus the "(superseded)" and "(no requirements checked)" qualifiers. One helper so the audit PDF,
     /// the CSV and the vendor package cannot tell an auditor three different stories about one document.
+    /// <para/>
+    /// internal for a direct unit test (InternalsVisibleTo): the two PDFs are FlateDecode-compressed and
+    /// not text-assertable, so this is the only place their exported wording can be pinned.
     /// </summary>
-    private static string ComplianceCell(
+    internal static string ComplianceCell(
         Entities.Document d, DateTime today, IReadOnlyDictionary<Guid, int> checkCounts,
         bool superseded, bool annotateNeverGraded = true)
     {
