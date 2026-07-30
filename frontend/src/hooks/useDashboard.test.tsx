@@ -38,6 +38,7 @@ const STATS: DashboardStats = {
   nonCompliant: 1,
   expiringSoon: 2,
   expired: 1,
+  awaitingReview: 2,
   pendingExtraction: 3,
   totalVendors: 4,
   anyVendorWithRequirements: true,
