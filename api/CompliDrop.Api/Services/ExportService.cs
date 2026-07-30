@@ -400,13 +400,7 @@ public class ExportService(SystemDbContext db) : IExportService
             ?? throw new InvalidOperationException("Vendor not found.");
 
         var today = DateTime.UtcNow.Date; // date-overlay the verdict at generation time (#257)
-        // Reuse the one shared supersession helper (all these docs share one vendor) so the annotation
-        // matches the CSV / audit-report exactly. (#327)
-        var supersededIds = SupersededIds([.. vendor.Documents]);
-        // #443 / ADR 0047: this package is THE artifact the ticket names — it printed "Expiring soon" for a
-        // document with an EMPTY "What we checked" panel behind it. Same requirement counts, same cell
-        // helper as the audit report, so the two PDFs can't diverge.
-        var checkCounts = await CheckCountsAsync(db.Documents.Where(d => d.VendorId == vendorId), ct);
+        var lines = await VendorPackageLinesAsync(vendor, today, ct);
         return QuestPDF.Fluent.Document.Create(container =>
         {
             container.Page(page =>
@@ -420,14 +414,40 @@ public class ExportService(SystemDbContext db) : IExportService
                 page.Content().PaddingVertical(12).Column(col =>
                 {
                     col.Item().Text($"Documents: {vendor.Documents.Count}");
-                    // #327: mark a superseded (renewed) old cert so the package shows the old doc AND that
-                    // a newer one for the same type replaced it.
-                    foreach (var d in vendor.Documents.OrderBy(d => d.ExpirationDate))
-                    {
-                        col.Item().PaddingTop(6).Text($"• {d.OriginalFileName} — {DisplayLabels.DocumentType(d.DocumentType)} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {ComplianceCell(d, today, checkCounts, supersededIds.Contains(d.Id))}");
-                    }
+                    foreach (var line in lines) col.Item().PaddingTop(6).Text(line);
                 });
             });
         }).GeneratePdf();
+    }
+
+    /// <summary>
+    /// The exact per-document bullet lines the vendor package prints, INCLUDING the requirement-count
+    /// read they are built from. This is an internal seam, not a formatting helper: the generated PDF is
+    /// FlateDecode-compressed and not text-assertable, and the vendor package is the one export whose
+    /// check-count query is its OWN (the CSV and the audit report share theirs), so wiring the counts up
+    /// wrong here — in either direction — would otherwise be invisible to every test. Pinned directly
+    /// against a seeded vendor holding one graded and one never-graded document (#443 / ADR 0047).
+    /// <para/>
+    /// The count query names the ORG as well as the vendor, matching every other
+    /// <see cref="SystemDbContext"/> read in this file: <see cref="SystemDbContext"/> carries no tenant
+    /// query filter, and "scoped by the vendor whose ownership we just checked" is a two-step argument
+    /// where the sibling call sites make a one-step one.
+    /// </summary>
+    internal async Task<List<string>> VendorPackageLinesAsync(
+        Entities.Vendor vendor, DateTime today, CancellationToken ct)
+    {
+        // Reuse the one shared supersession helper (all these docs share one vendor) so the annotation
+        // matches the CSV / audit-report exactly. (#327)
+        var supersededIds = SupersededIds([.. vendor.Documents]);
+        // #443 / ADR 0047: this package is THE artifact the ticket names — it printed "Expiring soon" for a
+        // document with an EMPTY "What we checked" panel behind it. Same requirement counts, same cell
+        // helper as the audit report, so the two PDFs can't diverge.
+        var checkCounts = await CheckCountsAsync(
+            db.Documents.Where(d => d.VendorId == vendor.Id && d.OrganizationId == vendor.OrganizationId), ct);
+        // #327: mark a superseded (renewed) old cert so the package shows the old doc AND that a newer one
+        // for the same type replaced it.
+        return [.. vendor.Documents
+            .OrderBy(d => d.ExpirationDate)
+            .Select(d => $"• {d.OriginalFileName} — {DisplayLabels.DocumentType(d.DocumentType)} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {ComplianceCell(d, today, checkCounts, supersededIds.Contains(d.Id))}")];
     }
 }

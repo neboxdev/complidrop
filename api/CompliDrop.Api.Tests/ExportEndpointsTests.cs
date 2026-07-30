@@ -6,6 +6,7 @@ using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 
 namespace CompliDrop.Api.Tests;
 
@@ -583,31 +584,77 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
             .Should().Be("Awaiting review (no requirements checked)");
     }
 
-    [Fact]
-    public async Task Vendor_package_pdf_still_renders_for_a_never_graded_document()
+    /// <summary>Seeds a vendor holding one GRADED and one never-graded COI, both expiring in 10 days.</summary>
+    private async Task<(Guid VendorId, Guid GradedId, Guid UngradedId)> SeedVendorWithOneGradedAndOneUngradedAsync(
+        Guid orgId)
     {
-        // The artifact the ticket names. The wording is pinned by the unit test above (the bytes are
-        // compressed); this is the end-to-end guard that the extra check-count query and the annotation
-        // don't break generation for the very document that motivated the fix.
-        var auth = await RegisterAndLoginAsync();
         var vendorId = Guid.NewGuid();
+        var gradedId = Guid.NewGuid();
+        var ungradedId = Guid.NewGuid();
+        var expires = DateTime.UtcNow.Date.AddDays(10);
         await using (var db = CreateSystemDb())
         {
             var now = DateTime.UtcNow;
-            db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = auth.OrgId, Name = "V", CreatedAt = now, UpdatedAt = now });
-            db.Documents.Add(new Document
-            {
-                Id = Guid.NewGuid(), OrganizationId = auth.OrgId, VendorId = vendorId,
-                OriginalFileName = "never-graded.pdf", BlobStorageUrl = "memory://v", FileSizeBytes = 1,
-                ContentType = "application/pdf", DocumentType = "coi",
-                ExtractionStatus = ExtractionStatus.Completed, ComplianceStatus = ComplianceStatus.ExpiringSoon,
-                ExpirationDate = DateTime.UtcNow.Date.AddDays(10), CreatedAt = now, UpdatedAt = now,
-            });
+            db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = orgId, Name = "V", CreatedAt = now, UpdatedAt = now });
+            foreach (var (id, name) in new[] { (gradedId, "measured.pdf"), (ungradedId, "never-graded.pdf") })
+                db.Documents.Add(new Document
+                {
+                    Id = id, OrganizationId = orgId, VendorId = vendorId,
+                    OriginalFileName = name, BlobStorageUrl = "memory://v", FileSizeBytes = 1,
+                    ContentType = "application/pdf", DocumentType = "coi",
+                    ExtractionStatus = ExtractionStatus.Completed,
+                    // The exact state ComputeOutcome's zero-applicable-rules branch stores in the window.
+                    ComplianceStatus = ComplianceStatus.ExpiringSoon,
+                    ExpirationDate = expires, CreatedAt = now, UpdatedAt = now,
+                });
             await db.SaveChangesAsync();
         }
+        await MarkGradedAsync(orgId, gradedId);
+        return (vendorId, gradedId, ungradedId);
+    }
+
+    [Fact]
+    public async Task Vendor_package_prints_the_never_graded_annotation_only_for_the_ungraded_document()
+    {
+        // The vendor package is THE artifact the ticket names, and it is the one export whose check-count
+        // input is its OWN query — the CSV and the audit report share theirs. Asserting only that the
+        // response bytes are non-empty left that wiring invisible in BOTH directions: an EMPTY count map
+        // would print "(no requirements checked)" beside every line of an auditor package, and a bug that
+        // dropped the annotation would print an affirmative verdict for a document nothing graded. Neither
+        // is visible in the compressed bytes, so the lines are asserted at the seam that builds them —
+        // which does the count read itself, so the query is pinned along with the formatting.
+        var auth = await RegisterAndLoginAsync();
+        var (vendorId, _, _) = await SeedVendorWithOneGradedAndOneUngradedAsync(auth.OrgId);
+
+        await using var db = CreateSystemDb();
+        var vendor = await db.Vendors.Include(v => v.Documents)
+            .FirstAsync(v => v.Id == vendorId);
+        var lines = await new ExportService(db).VendorPackageLinesAsync(vendor, DateTime.UtcNow.Date, default);
+
+        lines.Should().HaveCount(2);
+        lines.Should().ContainSingle(l => l.Contains("never-graded.pdf"))
+            .Which.Should().EndWith("Awaiting review (no requirements checked)",
+                "the auditor package must not certify a document no requirement was measured against, and "
+                + "is entitled to the count that explains why");
+        lines.Should().ContainSingle(l => l.Contains("measured.pdf"))
+            .Which.Should().EndWith("Expiring soon",
+                "the graded cert keeps its real verdict, un-annotated — an empty count map would annotate "
+                + "every line of the package");
+    }
+
+    [Fact]
+    public async Task Vendor_package_pdf_still_renders_for_a_never_graded_document()
+    {
+        // The end-to-end guard that the extra check-count query and the annotation don't break generation
+        // for the very document that motivated the fix. The %PDF magic bytes are the same assertion every
+        // sibling PDF test in this file makes — a 200 carrying HTML or an empty body would otherwise pass.
+        var auth = await RegisterAndLoginAsync();
+        var (vendorId, _, _) = await SeedVendorWithOneGradedAndOneUngradedAsync(auth.OrgId);
 
         var resp = await auth.Client.GetAsync($"/api/export/vendor/{vendorId}");
         resp.EnsureSuccessStatusCode();
-        (await resp.Content.ReadAsByteArrayAsync()).Length.Should().BeGreaterThan(0);
+        var bytes = await resp.Content.ReadAsByteArrayAsync();
+        bytes.Length.Should().BeGreaterThan(0);
+        System.Text.Encoding.ASCII.GetString(bytes, 0, 4).Should().Be("%PDF");
     }
 }
