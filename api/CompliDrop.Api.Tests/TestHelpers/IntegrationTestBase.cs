@@ -99,6 +99,55 @@ public abstract class IntegrationTestBase(IntegrationTestFixture fixture) : IAsy
                 .SetProperty(x => x.DocumentLimit, documentLimit));
     }
 
+    /// <summary>
+    /// Marks the given documents as GRADED (#443 / ADR 0047) by seeding one passing
+    /// <see cref="ComplianceCheck"/> row against each — the artifact the engine emits when it
+    /// actually measured a requirement, and the fact <c>DocumentGrading.IsGraded</c> reads.
+    /// <para/>
+    /// A fixture that writes a stored <c>Compliant</c> / <c>ExpiringSoon</c> straight into the
+    /// Documents table without this is seeding a state no production path can reach: every
+    /// <c>ComputeOutcome</c> branch that certifies nothing returns Pending-or-ExpiringSoon AND clears
+    /// the check rows, so an affirmative stored verdict always comes with at least one check. Since
+    /// #443 the read overlay demotes an ungraded affirmative verdict to Pending, so such a fixture no
+    /// longer exercises what it means to — it exercises the never-graded path instead. Call this for
+    /// any seeded doc whose AFFIRMATIVE verdict is the thing under test.
+    /// <para/>
+    /// Reuses any rule already in the org (so a test's own checklist backs its checks) and otherwise
+    /// mints a throwaway template + rule. Assigning it to no vendor keeps it inert for coverage
+    /// rollups, which key on the VENDOR's <c>ComplianceTemplateId</c>.
+    /// </summary>
+    protected async Task MarkGradedAsync(Guid organizationId, params Guid[] documentIds)
+    {
+        if (documentIds.Length == 0) return;
+        await using var db = CreateSystemDb();
+        var ruleId = await db.ComplianceRules
+            .Where(r => r.ComplianceTemplate.OrganizationId == organizationId)
+            .Select(r => (Guid?)r.Id)
+            .FirstOrDefaultAsync();
+        var now = DateTime.UtcNow;
+        if (ruleId is null)
+        {
+            var templateId = Guid.NewGuid();
+            ruleId = Guid.NewGuid();
+            db.ComplianceTemplates.Add(new ComplianceTemplate
+            {
+                Id = templateId, OrganizationId = organizationId, Name = $"Graded-{templateId:N}", CreatedAt = now
+            });
+            db.ComplianceRules.Add(new ComplianceRule
+            {
+                Id = ruleId.Value, ComplianceTemplateId = templateId, DocumentType = "coi",
+                FieldName = "expiration_date", Operator = "required", SortOrder = 0
+            });
+        }
+        foreach (var documentId in documentIds)
+            db.ComplianceChecks.Add(new ComplianceCheck
+            {
+                Id = Guid.NewGuid(), DocumentId = documentId, ComplianceRuleId = ruleId.Value,
+                IsPassed = true, CheckedAt = now
+            });
+        await db.SaveChangesAsync();
+    }
+
     protected sealed record SeededLink(Guid OrgId, Guid VendorId, Guid LinkId, string Token, string OrgName, string VendorName);
 
     /// <summary>

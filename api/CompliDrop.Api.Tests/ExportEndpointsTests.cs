@@ -126,17 +126,20 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
             });
             await db.SaveChangesAsync();
         }
+        // #443: back the stored Compliant with a check row so it exports as Compliant — an ungraded one
+        // now exports as the demoted Pending label with RequirementsChecked 0.
+        await MarkGradedAsync(auth.OrgId, docId);
 
         var csv = await (await auth.Client.GetAsync("/api/export/csv")).Content.ReadAsStringAsync();
         var lines = csv.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToArray();
 
         lines[0].Should().Be(
-            "FileName,Vendor,Type,ProcessingStatus,Compliance,Superseded,EffectiveDate,ExpirationDate,GeneralLiabilityLimit,UploadedBy,CreatedAt,Id");
+            "FileName,Vendor,Type,ProcessingStatus,Compliance,Superseded,RequirementsChecked,EffectiveDate,ExpirationDate,GeneralLiabilityLimit,UploadedBy,CreatedAt,Id");
 
         var fields = lines[1].Split(',');
         fields[0].Should().Be("acme-coi.pdf", "the filename leads, not the GUID");
         fields[^1].Should().Be(docId.ToString(), "the raw GUID is last");
-        fields[10].Should().MatchRegex(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", "CreatedAt is Excel-parseable, no trailing Z");
+        fields[11].Should().MatchRegex(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", "CreatedAt is Excel-parseable, no trailing Z");
     }
 
     [Fact]

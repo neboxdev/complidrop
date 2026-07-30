@@ -18,7 +18,11 @@ public sealed class FutureEffectiveCoverageGapTests(IntegrationTestFixture fixtu
 {
     private async Task<Guid> SeedDocAsync(
         Guid orgId, ComplianceStatus stored, DateTime? expiration, DateTime? effective,
-        Guid? vendorId = null, string docType = "coi", DateTime? createdAt = null)
+        Guid? vendorId = null, string docType = "coi", DateTime? createdAt = null,
+        // #443 / ADR 0047: the stored verdict under test here is a REAL rule verdict, so the seed writes
+        // the ComplianceCheck row that backs it. Without one the never-graded overlay would demote these
+        // docs to Pending for the wrong reason and the future-effective assertions would pass vacuously.
+        bool graded = true)
     {
         var now = DateTime.UtcNow;
         var docId = Guid.NewGuid();
@@ -41,6 +45,7 @@ public sealed class FutureEffectiveCoverageGapTests(IntegrationTestFixture fixtu
             UpdatedAt = now
         });
         await db.SaveChangesAsync();
+        if (graded) await MarkGradedAsync(orgId, docId);
         return docId;
     }
 

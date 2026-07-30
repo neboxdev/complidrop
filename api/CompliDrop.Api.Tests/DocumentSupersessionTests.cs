@@ -47,6 +47,10 @@ public sealed class DocumentSupersessionTests(IntegrationTestFixture fixture) : 
             CreatedAt = createdAt, UpdatedAt = createdAt, DeletedAt = deletedAt,
         });
         await db.SaveChangesAsync();
+        // #443 / ADR 0047: the stored Compliant above only reads as an affirmative verdict when something
+        // graded the document. Supersession is about which cert is CURRENT, not about the grading axis, so
+        // the seeds stay graded and the two overlays are exercised independently.
+        await MarkGradedAsync(orgId, docId);
         return docId;
     }
 

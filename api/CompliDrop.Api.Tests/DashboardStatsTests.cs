@@ -64,10 +64,17 @@ public sealed class DashboardStatsTests(IntegrationTestFixture fixture) : Integr
         await using var db = CreateSystemDb();
         var now = DateTime.UtcNow;
         var i = 0;
+        // #443 / ADR 0047: a stored verdict counts as one only when something graded the document, so
+        // every seeded row gets a check. Without it the affirmative statuses here would read Pending and
+        // these counts would be testing the never-graded path instead of the one they name.
+        var seeded = new List<Guid>();
         foreach (var status in statuses)
+        {
+            var docId = Guid.NewGuid();
+            seeded.Add(docId);
             db.Documents.Add(new Document
             {
-                Id = Guid.NewGuid(),
+                Id = docId,
                 OrganizationId = orgId,
                 OriginalFileName = $"doc{i++}.pdf",
                 BlobStorageUrl = "memory://x",
@@ -79,7 +86,9 @@ public sealed class DashboardStatsTests(IntegrationTestFixture fixture) : Integr
                 CreatedAt = now,
                 UpdatedAt = now,
             });
+        }
         await db.SaveChangesAsync();
+        await MarkGradedAsync(orgId, [.. seeded]);
     }
 
     private async Task AddActiveLinkAsync(Guid orgId, bool isActive = true)
