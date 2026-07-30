@@ -583,8 +583,11 @@ the company's control (rule-content care + claim discipline).
    filing (they are versioned pages).
 7. Advise on E&O placement (application wording; fines-as-damages; the
    regulatory-action exclusion) — §IV.F.
-8. Consider whether the exported PDF disclaimer (open ticket #402, existing
-   product) should adopt §V.1 verbatim now, ahead of this feature.
+8. Consider whether the exported PDF disclaimer should adopt §V.1 verbatim now,
+   ahead of this feature. **Status:** #402 shipped a narrower, export-sized
+   sentence on all three artifacts (ADR 0047, one constant, on by default) —
+   §V.1 was deliberately NOT adopted unreviewed. This item stays open: it is a
+   one-line change to `ExportService.Disclaimer` if the answer is yes.
 
 ## Appendix — authorities and verification tiers
 

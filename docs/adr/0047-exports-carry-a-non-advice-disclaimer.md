@@ -175,6 +175,16 @@ three artifacts bare and re-open the drift the shared constant exists to prevent
 reader to treat the PDF as the contract, and every additional sentence is another unreviewed legal
 claim shipped ahead of CLM-3.
 
+### Option D′ — Adopt `G1-LEGAL-RESEARCH.md` §V.1 verbatim now
+§V.1 drafts the conspicuous **"NOT LEGAL ADVICE — NOT A SUBSTITUTE FOR AN ATTORNEY"** notice
+(the Tex. Gov't Code §81.101(c) formula) for the *rule engine's* obligation reports, and that
+document's §VII item 8 explicitly asks counsel whether the export should adopt it *ahead of* the rule
+engine. **Rejected for now, and deliberately left to counsel**: §V.1 speaks about regulatory
+obligations and cited sources — a surface today's export does not have — and shipping an unreviewed
+attorney-formula notice is exactly the over-reach Option D rejects. The shipped sentence is #402's
+own proposal, sized to what the export actually asserts. If counsel answers item 8 "yes", it is a
+one-line change to the same constant.
+
 ### Option E — Also soften the verdict LABELS on the export ("Compliant" → "Appears compliant")
 **Rejected / out of scope**: that is a verdict-semantics change of exactly the kind ADR 0043 stages
 behind a flag, it would split the export's vocabulary from every in-app surface
@@ -185,7 +195,7 @@ re-word verdicts.
 ## References
 
 - Tickets: [#402](https://github.com/neboxdev/complidrop/issues/402) (bug), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic); related [#443](https://github.com/neboxdev/complidrop/issues/443) (never-graded read-surface overclaim)
-- Gate: `docs/rule-engine/G1-COUNSEL-BRIEF.md` §0 (CLM-3) + §C
+- Gate: `docs/rule-engine/G1-COUNSEL-BRIEF.md` §0 (CLM-3) + §C; `docs/rule-engine/G1-LEGAL-RESEARCH.md` §V.1 (the rule-engine notice) + §VII item 8 (the open "should the export adopt §V.1 now?" question this leaves to counsel)
 - ADRs: [0043](0043-additional-insured-claim-wording-staged-behind-flag.md) (the flag-staging precedent this deliberately does **not** follow, and why), [0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) + [0045](0045-canonical-document-type-vocabulary.md) (export verdicts that are softer than they read), [0041](0041-future-effective-not-yet-in-force-reads-pending.md) (the export's future-effective overlay)
 - Code: `api/CompliDrop.Api/Services/ExportService.cs` (`Disclaimer`, `PdfFooterLines`, `ApplyPageDefaults`, `BuildCsvAsync`), `api/CompliDrop.Api.Tests/ExportDisclaimerTests.cs`
 - Consistent with: `frontend/src/app/terms/page.tsx` ("Automatic reading is a head start, not advice")
