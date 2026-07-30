@@ -45,6 +45,9 @@ const STATS = {
   nonCompliant: 1,
   expiringSoon: 2,
   expired: 1,
+  // #443 / ADR 0047: the effective-Pending population — including every document the
+  // never-graded demotion moved out of compliant/expiringSoon.
+  awaitingReview: 5,
   pendingExtraction: 3,
   totalVendors: 4,
   anyVendorWithRequirements: true,
@@ -87,10 +90,49 @@ describe("DashboardPage — clickable stat cards (#317 FP-041)", () => {
     expect(await screen.findByRole("link", { name: /compliant: 8\. view these documents/i })).toHaveAttribute("href", "/documents?status=Compliant");
     expect(screen.getByRole("link", { name: /total documents: 12\. view these documents/i })).toHaveAttribute("href", "/documents");
     expect(screen.getByRole("link", { name: /non-compliant: 1\. view these documents/i })).toHaveAttribute("href", "/documents?status=NonCompliant");
-    expect(screen.getByRole("link", { name: /expiring within 30 days: 2\. view these documents/i })).toHaveAttribute("href", "/documents?status=ExpiringSoon");
+    expect(screen.getByRole("link", { name: /expiring soon: 2\. view these documents/i })).toHaveAttribute("href", "/documents?status=ExpiringSoon");
+    expect(screen.getByRole("link", { name: /awaiting review: 5\. view these documents/i })).toHaveAttribute("href", "/documents?status=Pending");
     // Pipeline buckets (distinct aria-label format + the expiresWithin param path).
     expect(screen.getByRole("link", { name: /expired: 1 documents\. view them/i })).toHaveAttribute("href", "/documents?status=Expired");
     expect(screen.getByRole("link", { name: /next 30 days: 2 documents\. view them/i })).toHaveAttribute("href", "/documents?expiresWithin=30");
+  });
+});
+
+describe("DashboardPage — the never-graded population is honest and reachable (#443 / ADR 0047)", () => {
+  beforeEach(() => {
+    server.use(
+      http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
+      http.get(url("/api/dashboard/expiry-pipeline"), () => jsonOk(PIPELINE)),
+      http.get(url("/api/dashboard/recent-activity"), () => jsonOk(ACTIVITY)),
+    );
+  });
+
+  it("labels the expiringSoon tile with the STATUS it links to, not a bare date range", async () => {
+    // `expiringSoon` is a VERDICT count: it excludes a not-yet-in-force cert (#362) and, since
+    // #443, one nothing ever graded. Labelling it "Expiring within 30 days" made it a pure date
+    // claim that disagreed with the date-only "Next 30 days" bucket on this very screen about
+    // the same document — the #294-class split this ticket names as the failure mode. The tile
+    // now carries the same wording as the badge on the list it deep-links to; the date question
+    // stays owned by the "When documents expire" card.
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    expect(await screen.findByText("Expiring soon")).toBeInTheDocument();
+    expect(screen.queryByText(/expiring within 30 days/i)).toBeNull();
+    // …and the date card still answers the date question, unchanged.
+    expect(screen.getByText("Next 30 days")).toBeInTheDocument();
+  });
+
+  it("surfaces the effective-Pending population so a demoted document stays reachable", async () => {
+    // The counterpart to the demotion: a never-graded cert is dropped from Compliant AND from
+    // Expiring soon, so without this tile it appeared in no number on the dashboard at all —
+    // demoting it would have made it INVISIBLE, the opposite of ADR 0047's purpose. The tile
+    // deep-links to the very list those documents were demoted into.
+    renderWithProviders(<DashboardPage />, { auth: authedMe });
+
+    expect(await screen.findByText("Awaiting review")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /awaiting review: 5\. view these documents/i }),
+    ).toHaveAttribute("href", "/documents?status=Pending");
   });
 });
 
@@ -143,6 +185,7 @@ describe("DashboardPage — state matrix (#36)", () => {
           nonCompliant: 0,
           expiringSoon: 0,
           expired: 0,
+          awaitingReview: 0,
           pendingExtraction: 0,
           totalVendors: 0,
           anyVendorWithRequirements: false,

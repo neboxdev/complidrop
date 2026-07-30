@@ -76,6 +76,7 @@ describe("DocumentDetailPage — not-checked explainer (#316 FP-063)", () => {
             complianceStatus: "Pending",
             vendorId: "v9",
             vendorName: "Bob's Flowers",
+            vendorHasChecklist: false,
             complianceChecks: [],
           }),
         ),
@@ -92,6 +93,49 @@ describe("DocumentDetailPage — not-checked explainer (#316 FP-063)", () => {
       "href",
       "/vendors/v9",
     );
+  });
+
+  it("names the REAL cause when the checklist exists but nothing on it governs this type (#443)", async () => {
+    // ADR 0047 widened what complianceStatus === "Pending" means on this page: a document
+    // NOTHING ever graded now reads Pending instead of the affirmative verdict its expiry
+    // date used to buy it. Zero check rows has three causes, and only the backend can tell
+    // "no checklist" from "a checklist whose rules govern other document types" — the
+    // ticket's own headline population (a "COI" document against a "coi" rule). Claiming
+    // "doesn't have a requirements checklist yet" here is a FALSE statement about the
+    // vendor plus a CTA that resolves nothing, while the vendor rollup simultaneously
+    // reads ActionNeeded against the checklist this card says doesn't exist.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_notype",
+            documentType: "coi",
+            extractionStatus: "Completed",
+            complianceStatus: "Pending",
+            vendorId: "v7",
+            vendorName: "Bob's Flowers",
+            vendorHasChecklist: true,
+            complianceChecks: [],
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_notype" } });
+
+    expect(await screen.findByText(/not checked yet/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Bob's Flowers has a requirements checklist, but nothing on it applies to this document's type \(Certificate of Insurance\)/i,
+      ),
+    ).toBeInTheDocument();
+    // Never the false "no checklist" claim, nor its dead-end CTA.
+    expect(screen.queryByText(/doesn't have a requirements checklist/i)).toBeNull();
+    expect(screen.queryByRole("link", { name: /set up bob's flowers requirements/i })).toBeNull();
+    // A CTA that resolves the actual cause: add a requirement covering this type.
+    expect(
+      screen.getByRole("link", { name: /add a requirement for certificate of insurance/i }),
+    ).toHaveAttribute("href", "/vendors/v7");
   });
 
   it("treats a deleted vendor's surviving doc as no-vendor, not 'needs a checklist' (#422)", async () => {
