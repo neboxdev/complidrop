@@ -365,6 +365,33 @@ Both are defined in this repo's `.claude/agents/`.
   `TemplateCorrections` on purpose (a different sign-off — do not "unify" them). Test
   hosts leave it at the prod default OFF; the ON value is pinned by
   ComplianceClaimsFlagTests (isolated host). The staged corrected copy is not dead code.
+- The export disclaimer (#402 / CLM-3, ADR 0047) is ON BY DEFAULT and behind NO flag —
+  deliberately unlike ADR 0043's staged wording, and the asymmetry is recorded in ADR 0047
+  §4: a flag stages a string whose flip changes what a VERDICT ASSERTS (dangerous in either
+  direction, so default OFF), while adding a disclaimer where none existed is
+  one-directional risk reduction and a default-OFF flag would leave the reported bug live in
+  prod. "Stage it like CLM-1" is a refuted suggestion, not a finding. Other facts here that
+  look like bugs and are not:
+  - ONE constant, `ExportService.Disclaimer`, feeds all three artifacts (audit PDF, vendor
+    package PDF, CSV). A hand-copied second literal IS a real finding (pinned: the sentence
+    occurs exactly once in `ExportService.cs`).
+  - Both PDFs render it from `ApplyPageDefaults`' `page.Footer()`, which QuestPDF repeats per
+    page. Moving it into `page.Content()` (prints once, last page only) or applying it at one
+    builder instead of the shared chrome IS a real finding — `ExportDisclaimerTests` pins that
+    every `container.Page` composition calls `ApplyPageDefaults(page, …)`.
+  - The vendor package passes `attribution: null` on purpose (it never loads the Organization
+    row); only the audit report carries the `CompliDrop · {org}` line. Not a missing footer.
+  - The CSV note is a TRAILING single-field row, never a preamble above the header (FP-102's
+    row-1-is-the-header shape) and never padded rectangular (that would read as a document
+    named after the disclaimer). "Make it a real 12-column row" is the bug, not the fix.
+  - The wording is PROVISIONAL pending the CLM-3 attorney pass and is pinned verbatim by test
+    so a reword is deliberate. Do not expand it with liability-cap / warranty / subprocessor
+    prose — ADR 0047 Option D records that rejection (an over-reaching disclaimer is its own
+    liability; the Terms own the full treatment).
+  - Deliberately NOT in scope: softening the export's verdict LABELS (Option E — that is
+    verdict semantics, and the known overclaims are #443), the in-app read surfaces, the
+    reminder emails, and `SampleCertificateGenerator` (a simulated vendor document, not a
+    CompliDrop assertion).
 
 ## Sensitive areas (`careful-review` label ⇒ merge needs a two-reviewer clearance)
 

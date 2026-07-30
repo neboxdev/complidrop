@@ -58,7 +58,7 @@ confirmation · ✅ confirmed. **Gate:** launch-blocking unless marked *(refine 
 | **TPL-B8** | How often does bar-service **liquor liability** appear on the main ACORD 25 vs a separate certificate? (calibrates the liquor rule's fail-closed rate) | B | Liquor rule tuning | ⬜ *(refine later)* | TRR §8 B-8 |
 | **CLM-1** | Additional-insured copy: reword "Names you as additional insured" → "Certificate indicates…"; the certificate cannot prove AI status (endorsement needed). **UI/API copy now STAGED** behind `ComplianceClaims:CorrectedAdditionalInsuredWording` (default OFF, copy-only, ADR 0043); marketing-site copy still to do at flip. | A | Marketing + UI (#396) | ⬜ | §C, TRR §3/§7 |
 | **CLM-2** | "Coverage dates that include the event" is currently unbacked (no event-date check exists); soften until the feature is built. | A | Marketing (#399 tier b) | ⬜ | §C, TRR §2.6/§7 |
-| **CLM-3** | Exported audit PDF / vendor package carry no disclaimer while printing bare "Compliant". | A | Export (#402) | ⬜ | §C |
+| **CLM-3** | Exported audit PDF / vendor package carry no disclaimer while printing bare "Compliant". **A disclaimer now SHIPS on all three artifacts** (audit PDF, vendor package, CSV), on by default and behind no flag — ADR 0047. Confirm/refine the exact sentence alongside CLM-1. | A | Export (#402) | ⬜ | §C |
 | **CLM-4** | FAQ "We don't sell or share your data" vs the 7 disclosed subprocessors (document contents to Google). | A | Marketing/privacy (#403) | ⬜ | §C |
 | **CLM-5** | Public vendor portal has no privacy notice (CCPA notice-at-collection). | A | Portal (#404) | ⬜ | §C |
 | **CLM-6** | "Documents not used to train AI models" holds only on the Vertex path; AI Studio + Anthropic are config-reachable and Anthropic isn't a disclosed subprocessor. | A | Privacy (#405) | ⬜ | §C |
@@ -75,6 +75,11 @@ dollar minimums), CLM-1..CLM-6 (copy/privacy). *Refine-later:* TPL-B4..B8.
   `ComplianceClaims__CorrectedAdditionalInsuredWording=true` after CLM-1 clears. Copy-only
   (UI sentence + failure message + the ACORD-checkbox check note); no verdict change. The
   marketing-site copy has no flag and is edited at the same time (§C, ADR 0043).
+
+**No switch (already live):** the export disclaimer (CLM-3) is ON by default — a disclaimer
+where none existed is one-directional risk reduction, so staging it OFF would have left the
+defect live in prod (ADR 0047 §4). Sign-off here means *confirming or refining the sentence*,
+a one-line edit to `ExportService.Disclaimer` (plus its verbatim test pin), not a flag flip.
 
 ---
 
@@ -272,7 +277,7 @@ gate is complete and the attorney can bundle them into one engagement.
 |---|---|---|---|
 | CLM-1 | "Names your venue as additional insured" / "flagging anyone who listed you as certificate holder instead of additional insured" — a certificate cannot *prove* AI status (needs the endorsement). | #396 | Reword to "certificate **indicates** '{name}' as additional insured" + tell the venue to collect the CG 20 26-class endorsement. (TRR §3) |
 | CLM-2 | "Coverage dates that include the event" — no event-date concept exists in the product; grades *today* only, and no COI can promise day-of validity (cancellation). | #399 (tier b) | Soften to "coverage dates you can see at a glance, expirations tracked"; build the event-date feature before re-claiming. (TRR §2.6/§7) |
-| CLM-3 | Exported audit PDF & vendor package print bare "Compliant" with no disclaimer — the artifact most likely handed to an insurer or court. | #402 | Add the same non-advice disclaimer the UI carries. |
+| CLM-3 | Exported audit PDF & vendor package print bare "Compliant" with no disclaimer — the artifact most likely handed to an insurer or court. | #402 | **Done (ADR 0047)**: one shared `ExportService.Disclaimer` on the audit PDF, vendor package and CSV — *"Statuses reflect automated reading of documents as uploaded; certificates do not modify policies. Verify current coverage with the issuing carrier."* On by default (a disclaimer is one-directional risk reduction, so unlike CLM-1 it is not flag-staged). **Attorney to confirm or refine this exact sentence** — one edit, one constant, no flag flip. |
 | CLM-4 | FAQ "We don't sell or share your data" contradicts 7 disclosed subprocessors (document contents to Google), emitted as JSON-LD. | #403 | Reconcile copy with the actual subprocessor list. |
 | CLM-5 | Public vendor portal shows no privacy notice (CCPA notice-at-collection) to non-customer vendors whose uploads are stored + sent to Google AI + PostHog-tracked. | #404 | Add notice-at-collection to the portal. |
 | CLM-6 | "Documents not used to train AI models" holds only on the Vertex path; AI Studio + Anthropic are config-reachable and Anthropic isn't a disclosed subprocessor. | #405 | Pin the prod path or disclose; correct the claim. |
