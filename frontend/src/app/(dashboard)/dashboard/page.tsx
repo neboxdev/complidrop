@@ -14,7 +14,7 @@ import { WelcomeModal } from "@/components/onboarding/WelcomeModal";
 import { GetStartedChecklist, useOnboardingChecklist } from "@/components/onboarding/GetStartedChecklist";
 import { SampleDataBanner, TrySampleButton } from "@/components/onboarding/SampleData";
 import Link from "next/link";
-import { FileText, Clock, AlertTriangle, ShieldCheck, Users, Zap, RotateCw } from "lucide-react";
+import { FileText, Clock, AlertTriangle, FileQuestion, ShieldCheck, Users, Zap, RotateCw } from "lucide-react";
 
 export default function DashboardPage() {
   const me = useMe();
@@ -97,11 +97,31 @@ export default function DashboardPage() {
           <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <StatCard icon={FileText} label="Total documents" value={stats.data?.totalDocuments ?? 0} hue="sky" href="/documents" />
             <StatCard icon={ShieldCheck} label="Compliant" value={stats.data?.compliant ?? 0} hue="emerald" href="/documents?status=Compliant" />
-            <StatCard icon={Clock} label="Expiring within 30 days" value={stats.data?.expiringSoon ?? 0} hue="amber" href="/documents?status=ExpiringSoon" />
+            {/* Labelled with the STATUS it deep-links to, not a date range (#443 review B5).
+                `expiringSoon` is a verdict count — it excludes a cert that is not yet in force
+                (#362) and one nothing ever graded (#443) — so a pure date claim ("Expiring
+                within 30 days") disagreed with the date-only "Next 30 days" bucket on this same
+                screen about the same document. The date question stays owned by "When documents
+                expire" below; this tile answers the verdict question and says so. */}
+            <StatCard icon={Clock} label="Expiring soon" value={stats.data?.expiringSoon ?? 0} hue="amber" href="/documents?status=ExpiringSoon" />
             <StatCard icon={AlertTriangle} label="Non-compliant" value={stats.data?.nonCompliant ?? 0} hue="rose" href="/documents?status=NonCompliant" />
           </section>
 
-          <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            {/* #443 review B5: the documents this product declines to vouch for have to be
+                REACHABLE. A never-graded cert is demoted out of Compliant and Expiring soon
+                by ADR 0047, and before this tile it then appeared in no number on this screen
+                at all — demoting it made it INVISIBLE, the opposite of telling the user
+                nothing graded it. Labelled with the status it deep-links to (the same wording
+                its badge carries) and counted from the very same predicate that builds that
+                list, so the tile and the list can never disagree (#294). */}
+            <StatCard
+              icon={FileQuestion}
+              label="Awaiting review"
+              value={stats.data?.awaitingReview ?? 0}
+              hue="sky"
+              href="/documents?status=Pending"
+            />
             <Card>
               <CardContent className="p-5 flex items-center gap-4">
                 <div className="w-10 h-10 rounded-lg bg-sky-50 text-sky-700 flex items-center justify-center">

@@ -22,6 +22,7 @@ import {
   fieldLabel,
   processingErrorMessage,
 } from "@/lib/display-labels";
+import { documentTypeLabel } from "@/lib/document-types";
 import { requirementSentence } from "@/lib/requirements";
 import { SUPPORT_EMAIL } from "@/lib/site";
 import { formatCalendarDate } from "@/lib/dates";
@@ -62,6 +63,12 @@ type DocDetail = {
   vendorName: string | null;
   vendorContactEmail: string | null;
   vendorId: string | null;
+  // Whether the assigned vendor has a requirements checklist AT ALL (#443 / ADR
+  // 0047 §4). Sourced from the backend because the page cannot derive it:
+  // `complianceChecks.length === 0` has three causes and only the server can tell
+  // "no checklist" from "a checklist whose rules govern other document types".
+  // See NotCheckedExplainer.
+  vendorHasChecklist: boolean;
   extractionStatus: string;
   extractionConfidence: number | null;
   complianceStatus: string;
@@ -363,8 +370,23 @@ const MANUAL_ENTRY_FIELDS: ReadonlyArray<{
 // Explains WHY a document is "not checked yet" instead of leaving the user at a
 // dead end, and fixes it inline: an orphan doc gets a vendor picker (the only
 // place to assign a vendor to an already-uploaded doc — also FP-065's orphan
-// picker), and a vendor with no checklist links to set one up. Assigning re-runs
-// the check automatically (#257). (#316 FP-063)
+// picker), a vendor with no checklist links to set one up, and a checklist that
+// simply doesn't cover this document's TYPE says so. Assigning a vendor or adding
+// a governing requirement re-runs the check automatically (#257). (#316 FP-063)
+//
+// This card is the ONE place in the product that NAMES the reason a document was
+// never checked, so its taxonomy has to match the backend's. Zero
+// ComplianceCheck rows has THREE causes, not two — ComputeOutcome reaches that
+// state from no-checklist, an EMPTY checklist, and `applicableRules.Count == 0`
+// (a checklist that exists but whose rules all govern other document types,
+// reachable today because the applicable-rules filter compares DocumentType
+// case-SENSITIVELY). Before #443 the third cause read ExpiringSoon inside the
+// 30-day window, so this card never rendered for it; ADR 0047 makes it read
+// Pending, and guessing "no checklist" from `complianceChecks.length === 0`
+// would then print a FALSE claim plus a dead-end CTA over a vendor that plainly
+// has a checklist — while the vendor rollup called that same vendor
+// ActionNeeded against it. `vendorHasChecklist` comes from the backend for that
+// reason: it is the one party that knows. (#443 review B4)
 function NotCheckedExplainer({ doc }: { doc: DocDetail }) {
   const updateDoc = useUpdateDocument();
   const [picked, setPicked] = useState<VendorOption | null>(null);
@@ -381,9 +403,14 @@ function NotCheckedExplainer({ doc }: { doc: DocDetail }) {
   // linking to a dead vendor page. Same vendorName keying as the list page's
   // Assign-vendor cell.
   const noVendor = !doc.vendorName;
-  const noChecklist = !noVendor && (doc.complianceChecks?.length ?? 0) === 0;
-  // Pending for some reason we can't name (shouldn't happen) — don't guess.
-  if (!noVendor && !noChecklist) return null;
+  const nothingChecked = !noVendor && (doc.complianceChecks?.length ?? 0) === 0;
+  const noChecklist = nothingChecked && !doc.vendorHasChecklist;
+  const noApplicableRule = nothingChecked && doc.vendorHasChecklist;
+  // The three causes are exhaustive over "nothing was ever checked". Pending for
+  // any OTHER reason — a future-effective cert (#362), whose own banner explains
+  // it — falls through here rather than being guessed at.
+  if (!noVendor && !noChecklist && !noApplicableRule) return null;
+  const typeLabel = documentTypeLabel(doc.documentType);
 
   return (
     <Card className="border-sky-200 bg-sky-50/60">
@@ -419,7 +446,7 @@ function NotCheckedExplainer({ doc }: { doc: DocDetail }) {
               }}
             />
           </>
-        ) : (
+        ) : noChecklist ? (
           <>
             <p className="text-sm text-sky-900">
               {doc.vendorName ?? "This vendor"}{" "}
@@ -432,6 +459,28 @@ function NotCheckedExplainer({ doc }: { doc: DocDetail }) {
               className={cn(buttonVariants({ variant: "outline", size: "sm" }), "w-fit")}
             >
               Set up {doc.vendorName ?? "vendor"} requirements
+            </Link>
+          </>
+        ) : (
+          <>
+            {/* The third cause (#443): the checklist EXISTS — so we must not claim it
+                doesn't — but nothing on it governs this document's type. The type is
+                named in parentheses rather than inside an article ("a {label}") so the
+                sentence reads correctly for every entry in the vocabulary, "Other"
+                included. Both real remedies are offered, because either could be the
+                mistake: the checklist is missing a requirement, or the type is wrong. */}
+            <p className="text-sm text-sky-900">
+              {doc.vendorName ?? "This vendor"} has a requirements checklist, but nothing
+              on it applies to this document&apos;s type ({typeLabel}), so there was
+              nothing to check it against. Add a requirement that covers it — or, if the
+              type is wrong, change it at the top of this page. Either way we&apos;ll
+              check it automatically.
+            </p>
+            <Link
+              href={`/vendors/${doc.vendorId}`}
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }), "w-fit")}
+            >
+              Add a requirement for {typeLabel}
             </Link>
           </>
         )}

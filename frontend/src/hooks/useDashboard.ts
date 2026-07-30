@@ -9,6 +9,11 @@ export type DashboardStats = {
   nonCompliant: number;
   expiringSoon: number;
   expired: number;
+  /** Documents whose EFFECTIVE verdict reads Pending — a genuinely-pending one plus every
+   *  affirmative verdict the future-effective (#362) or never-graded (#443 / ADR 0047)
+   *  demotion moved there. Deep-links to `/documents?status=Pending`, and the backend counts
+   *  it from the same predicate that builds that list so the two cannot disagree (#294). */
+  awaitingReview: number;
   pendingExtraction: number;
   totalVendors: number;
   /** True when at least one vendor has a requirement checklist assigned (#191
