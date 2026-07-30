@@ -31,6 +31,23 @@ public class ExportService(SystemDbContext db) : IExportService
     internal const int AuditCap = 500;
 
     /// <summary>
+    /// The non-advice disclaimer every generated export carries (#402, counsel-gate item CLM-3 —
+    /// <c>docs/rule-engine/G1-COUNSEL-BRIEF.md</c> §0; <c>docs/adr/0047-exports-carry-a-non-advice-disclaimer.md</c>).
+    /// <para/>
+    /// ONE constant consumed by ALL THREE artifacts — the audit PDF, the vendor package PDF and the
+    /// CSV — because an export is the artifact most likely forwarded to an insurer, broker, auditor or
+    /// opposing counsel, and it is the surface where reliance forms. Three hand-copied literals is how
+    /// two of them silently drift apart, so there is exactly one (pinned by
+    /// <c>ExportDisclaimerTests</c>).
+    /// <para/>
+    /// Consistent with the Terms ("Automatic reading is a head start, not advice") but deliberately
+    /// narrower: it states what the statuses ARE and what a certificate cannot do, and it does not
+    /// invent legal claims the Terms do not make. The exact wording is PROVISIONAL pending the CLM-3
+    /// attorney sign-off — refine it there, in one place, not at three call sites.
+    /// </summary>
+    internal const string Disclaimer = "Statuses reflect automated reading of documents as uploaded; certificates do not modify policies. Verify current coverage with the issuing carrier.";
+
+    /// <summary>
     /// The audit-slice query as an internal seam (#262 review): the To-day boundary bug
     /// lived in exactly this predicate, and the PDF is FlateDecode-compressed (not
     /// text-assertable), so the half-open comparison is pinned by a Testcontainers test
@@ -94,7 +111,8 @@ public class ExportService(SystemDbContext db) : IExportService
         {
             container.Page(page =>
             {
-                ApplyPageDefaults(page);
+                // The org name rides in the footer's attribution line, beneath the #402 disclaimer.
+                ApplyPageDefaults(page, org.Name);
 
                 page.Header().Column(col =>
                 {
@@ -158,12 +176,6 @@ public class ExportService(SystemDbContext db) : IExportService
                                 });
                             }
                         }));
-                });
-
-                page.Footer().AlignCenter().Text(x =>
-                {
-                    x.Span("CompliDrop · ").FontSize(8).FontColor("#64748b");
-                    x.Span(org.Name).FontSize(8).FontColor("#64748b");
                 });
             });
         }).GeneratePdf();
@@ -294,6 +306,16 @@ public class ExportService(SystemDbContext db) : IExportService
             csv.WriteField(d.Id);
             await csv.NextRecordAsync();
         }
+
+        // #402: the CSV carries the same one disclaimer the two PDFs do — it is forwarded to the same
+        // readers. Written as a single-field record AFTER the data (never a preamble above the header:
+        // FP-102 shaped row 1 as the header line Excel and pandas both key on, and a note there would
+        // break that). A short trailing row is unambiguously not a document row, and both parsers take
+        // it — a rectangular one padded to 12 columns would instead read as a document named after the
+        // disclaimer.
+        csv.WriteField(Disclaimer);
+        await csv.NextRecordAsync();
+
         await writer.FlushAsync(ct);
         return ms.ToArray();
     }
@@ -329,13 +351,51 @@ public class ExportService(SystemDbContext db) : IExportService
         return superseded;
     }
 
-    /// <summary>Shared QuestPDF page chrome for the PDF reports (Letter size, 40pt margin, default text style).</summary>
-    private static void ApplyPageDefaults(PageDescriptor page)
+    /// <summary>
+    /// Shared QuestPDF page chrome for the PDF reports: Letter size, 40pt margin, default text style —
+    /// and the mandatory export FOOTER. The footer lives here rather than at each builder so a fourth
+    /// PDF export cannot ship without the #402 disclaimer (pinned by <c>ExportDisclaimerTests</c>: every
+    /// <c>container.Page</c> in this file must call through here).
+    /// <para/>
+    /// <paramref name="attribution"/> is the "CompliDrop · {name}" line beneath the disclaimer — the org
+    /// name on the audit report; omitted (null) on the vendor package, which never loaded the org.
+    /// </summary>
+    private static void ApplyPageDefaults(PageDescriptor page, string? attribution)
     {
         page.Size(PageSizes.Letter);
         page.Margin(40);
         page.DefaultTextStyle(t => t.FontFamily("Helvetica").FontSize(10).FontColor("#0c4a6e"));
+
+        // QuestPDF renders page.Footer() on EVERY page, so the disclaimer travels with any page of a
+        // forwarded export rather than only the last — which is what putting it in the content flow
+        // would have given. Each line is its own Column item, so the disclaimer never collides with or
+        // displaces the attribution and a max-length (200-char) org name simply wraps within its own
+        // line instead of pushing the disclaimer off the page.
+        page.Footer().Column(col =>
+        {
+            foreach (var line in PdfFooterLines(attribution))
+            {
+                col.Item().Text(t =>
+                {
+                    t.AlignCenter();
+                    t.Span(line).FontSize(8).FontColor("#64748b");
+                });
+            }
+        });
     }
+
+    /// <summary>
+    /// The footer lines of a generated PDF export, in render order — an internal seam (#402). QuestPDF
+    /// writes the content stream FlateDecode-compressed AND draws text as subset-font glyph ids, so the
+    /// rendered words are not assertable from the bytes at any setting (the same reason the #262 audit
+    /// window is pinned through <see cref="QueryAuditSliceAsync"/> rather than by grepping the PDF).
+    /// <see cref="ApplyPageDefaults"/> renders exactly this sequence, one <c>Text</c> item per element,
+    /// so pinning this pins what the footer says.
+    /// </summary>
+    internal static IReadOnlyList<string> PdfFooterLines(string? attribution) =>
+        string.IsNullOrWhiteSpace(attribution)
+            ? [Disclaimer]
+            : [Disclaimer, $"CompliDrop · {attribution}"];
 
     public async Task<byte[]> BuildVendorReportAsync(Guid organizationId, Guid vendorId, CancellationToken ct)
     {
@@ -352,7 +412,9 @@ public class ExportService(SystemDbContext db) : IExportService
         {
             container.Page(page =>
             {
-                ApplyPageDefaults(page);
+                // No attribution line: the vendor package never loads the Organization row, and adding a
+                // query for a branding line is not what #402 asks for — the disclaimer is.
+                ApplyPageDefaults(page, attribution: null);
                 page.Header().Column(col =>
                 {
                     col.Item().Text("Vendor Compliance Package").FontSize(18).SemiBold().FontColor("#0284c7");
