@@ -1,4 +1,3 @@
-using System.Linq.Expressions;
 using CompliDrop.Api.Entities;
 
 namespace CompliDrop.Api.Services;
@@ -24,19 +23,23 @@ namespace CompliDrop.Api.Services;
 /// Callers — the decision itself lives in ONE place,
 /// <see cref="ComplianceStatusDeriver.Effective"/>, which takes the answer as its <c>isGraded</c>
 /// argument and demotes an affirmative verdict to Pending without it. This class only answers the
-/// raw question, in the two shapes the codebase needs:
-/// <list type="bullet">
-///   <item><description><see cref="IsGraded(int)"/> — in memory, from a loaded or projected check
-///     count. Used by <c>DocumentEndpoints</c> (list projection + detail), <c>VendorEndpoints</c>
-///     (both <c>DocCoverageInfo</c> projections) and <c>ExportService</c> (all three artifacts).</description></item>
-///   <item><description><see cref="Graded"/> — the EF-translatable whole-entity mirror, for the
-///     SQL read sites. Pinned equal to <see cref="IsGraded(int)"/> by <c>DocumentGradingTests</c>.</description></item>
-/// </list>
-/// The SQL sites that need the fact INSIDE a composite predicate (the documents-list status arms, the
-/// dashboard counts) spell it inline as <c>d.ComplianceChecks.Any()</c> — the same hand-mirroring
-/// ADR 0041's future-effective bound already requires, and covered the same way: by cross-surface
-/// tests pinning each SQL arm against the in-memory deriver. Same shared-predicate shape as
-/// <see cref="DocumentSupersession"/>, <see cref="PlanDocumentScope"/> and
+/// raw question, and it deliberately ships ONE shape: <see cref="IsGraded(int)"/>, in memory, from a
+/// loaded or projected check count. Used by <c>DocumentEndpoints</c> (list projection + detail),
+/// <c>VendorEndpoints</c> (both <c>DocCoverageInfo</c> projections) and <c>ExportService</c> (all
+/// three artifacts).
+/// <para/>
+/// There is deliberately NO EF <c>Expression</c> mirror here. Every SQL read site needs the fact
+/// INSIDE a composite predicate or a projection (the documents-list status arms, the dashboard
+/// counts), where an EF expression cannot be invoked, so each spells it inline as
+/// <c>d.ComplianceChecks.Any()</c> — the same hand-mirroring ADR 0041's future-effective bound
+/// already requires, and covered the same way: by cross-surface tests pinning each SQL arm against
+/// the in-memory deriver, plus <c>NeverGradedCoverageTests</c>'
+/// <c>The_SQL_grading_predicate_agrees_with_the_in_memory_one_and_with_the_check_rows</c>, which
+/// compares both shipping forms against the <c>ComplianceChecks</c> table itself. An
+/// <c>Expression</c> property with no production caller would be a third form nothing exercises.
+/// <see cref="ComplianceCheck"/> carries no <c>DeletedAt</c> and has no query filter, so
+/// <c>Any()</c> counts exactly the rows <see cref="IsGraded(int)"/> counts. Same shared-predicate
+/// shape as <see cref="DocumentSupersession"/>, <see cref="PlanDocumentScope"/> and
 /// <see cref="DocumentFieldReadability"/>.
 /// </summary>
 public static class DocumentGrading
@@ -47,12 +50,4 @@ public static class DocumentGrading
     /// pass or fail.
     /// </summary>
     public static bool IsGraded(int complianceCheckCount) => complianceCheckCount > 0;
-
-    /// <summary>
-    /// The EF-translatable mirror of <see cref="IsGraded(int)"/> over the entity, for SQL read sites
-    /// that can take a whole-entity predicate (<c>.Where(DocumentGrading.Graded)</c>).
-    /// <see cref="ComplianceCheck"/> carries no <c>DeletedAt</c> and has no query filter, so
-    /// <c>Any()</c> counts exactly the rows <see cref="IsGraded(int)"/> would count.
-    /// </summary>
-    public static Expression<Func<Document, bool>> Graded => d => d.ComplianceChecks.Any();
 }
