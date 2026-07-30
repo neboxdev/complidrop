@@ -162,6 +162,54 @@ Both are defined in this repo's `.claude/agents/`.
     compliance badge, and demoting the counts too would create a #294-class count-vs-badge
     split. The vendor rollup is the one surface with no room for the separate badge. Do NOT
     flag the untouched document-level counts as a missed demotion — that inversion is the bug.
+    Note the CONTRAST with ADR 0047 below, which mirrors its demotion onto the document-level
+    surfaces: that is not an inconsistency, it turns on whether a second badge already discloses
+    the state. Here one does; for never-graded none does.
+- A NEVER-GRADED document is ADR 0047 (#443) — zero `ComplianceCheck` rows, i.e. nothing was ever
+  measured against it. The facts that follow are pointers into it, not a second copy.
+  - There is ONE recognizer, `Services/DocumentGrading.cs`: `IsGraded(int checkCount)` (the in-memory
+    threshold — ONE check row is enough) plus `Graded`, its EF `Expression` mirror, pinned equal by
+    test. The DECISION is in `ComplianceStatusDeriver.Effective`, whose `isGraded` parameter is
+    REQUIRED, not defaulted: a default would be fail-open for the next read surface added. A read
+    site that re-derives the threshold instead of asking `DocumentGrading` IS a real finding.
+  - The demotion is READ-ONLY, exactly like ADR 0041's. `ComputeOutcome`'s zero-applicable-rules
+    branch and the nightly sweep DELIBERATELY keep storing the real date verdict (`ExpiringSoon`
+    inside the window) — do NOT flag that as a missed demotion; persisting `Pending` would be the
+    bug twice over (it strands the doc, and `Pending` is what `ExtractionWorker` claims on).
+  - Mirrored on EVERY read surface, document-level INCLUDED — badge, `?status=` arms, dashboard
+    `compliant`/`expiringSoon` AND the rate denominator, vendor rollup, CSV/PDF export. This
+    deliberately DIVERGES from ADR 0042's document-level carve-out, whose stated reason (a separate
+    `ManualRequired` extraction badge already sits beside the compliance badge) is FALSE here: no
+    badge anywhere says "nothing graded this", and the detail page's "What we checked" panel is
+    simply EMPTY. Demoting the rollup while leaving the badge affirmative would BE the #294 split.
+  - The vendor rollup has NO grading clause of its own — `ComputeCoverage` gets the exclusion for
+    free because `Effective` already reads such a doc `Pending`. Adding a second explicit clause
+    there (the shape ADR 0042's `ManualRequired` exclusion needs) would be a duplicate, not a fix.
+  - `Expired` and `NonCompliant` are NEVER demoted: a lapsed date is a real un-graded fact and a
+    present liability, and the clause must only ever move a doc OUT of the affirmative tally. A
+    stored `Compliant` with zero checks DOES demote — transiently reachable when a rule delete
+    hard-deletes its checks and the post-commit re-grade never lands; fail-closed is intended.
+  - SQL sites spell the fact inline as `d.ComplianceChecks.Any()` rather than composing the shared
+    `Expression` — an EF expression cannot be invoked inside a composite predicate or a projection,
+    the same hand-mirroring ADR 0041's date bounds already require. Covered by the count-vs-
+    deep-linked-list pins; a NEW SQL read arm missing the clause IS a real finding.
+  - The export discloses the COUNT as well as the demoted label, through the one shared
+    `ExportService.ComplianceCell`: the two PDFs append `" (no requirements checked)"` inline (the
+    `"(superseded)"` shape, and the two compose), the CSV instead carries a `RequirementsChecked`
+    column so its `Compliance` cell stays machine-filterable. That asymmetry is deliberate.
+  - The ordinal-case-SENSITIVE applicable-rules filter vs `ComputeCoverage`'s case-INsensitive
+    required-type match is a KNOWN live disagreement (it is how the never-graded state is reachable
+    without any legacy data). ADR 0047 Option E records why it was NOT unified here — widening what
+    a rule governs is a live-data grading change needing its own ticket. Do not re-report it as new.
+  - Expiry-pipeline buckets, `expiresWithin` and REMINDERS are untouched (date questions, not verdict
+    ones — reminders never read `ComplianceStatus` at all). Three raw stored-status readers stay
+    un-overlaid and out of scope, because they ignore the ADR 0027/0041 overlays too and always did:
+    the portal upload-status poll, the `AuthEndpoints` account data export, and
+    `ComplianceEndpoints.OrgStatus`.
+  - Test fixtures: `IntegrationTestBase.MarkGradedAsync` is the ONE seam for "this seeded doc was
+    actually graded". A fixture writing a stored `Compliant`/`ExpiringSoon` with no check row is
+    seeding a state no production path reaches, and since #443 it silently tests the never-graded
+    path instead of the one it names — that IS a real finding in a new test.
 - The canonical document-type vocabulary is ONE list — `Services/CanonicalDocumentTypes.cs`
   (#373, [ADR 0045](../docs/adr/0045-canonical-document-type-vocabulary.md)) — and
   `ExtractionWorker.PersistSuccess` coerces the model's `documentType` through it before that
@@ -202,21 +250,20 @@ Both are defined in this repo's `.claude/agents/`.
   shared `Services/ColumnClamp.cs` (#372 / ADR 0044), the same shape as
   `ComplianceCheckService.ClampToColumn` — do not re-inline either body.
   **NEVER-GRADED IS NOT FAIL-SAFE** — do not repeat the old "nothing is certified, so it's safe"
-  framing. `ComputeOutcome`'s zero-applicable-rules branch stores
-  `expiringSoon ? ExpiringSoon : Pending`; `ComplianceStatusDeriver.Effective` promotes even a
-  stored `Pending` to `ExpiringSoon` inside the 30-day window; `VendorEndpoints.ComputeCoverage`
-  counts `Compliant or ExpiringSoon` as in-force and rolls the vendor up to `Covered`; and
-  `ExportService` prints "Expiring soon" in the auditor package — with an EMPTY "What we checked"
-  panel behind it. That is an affirmative-coverage overclaim. Fixing the read surfaces is
-  [#443](https://github.com/neboxdev/complidrop/issues/443) (out of #373's scope, already ticketed —
-  do not re-report).
+  framing. CLOSED by [#443](https://github.com/neboxdev/complidrop/issues/443) /
+  [ADR 0047](../docs/adr/0047-never-graded-document-asserts-no-affirmative-verdict.md); see the
+  ADR 0047 block below for the review-time facts. The stored write side is UNCHANGED — do not flag
+  `ComputeOutcome`'s zero-applicable-rules branch still storing `expiringSoon ? ExpiringSoon :
+  Pending`, nor the sweep's `Pending -> ExpiringSoon` transition; the demotion is read-only.
   Three KNOWN GAPS, recorded in ADR 0045 — do not re-report them as new findings:
   - **Legacy rows are not laundered.** Coercion runs only on the next EXTRACTION and nothing
     re-extracts a processed row, so a pre-deploy non-canonical type persists (never graded, own
     supersession group, invisible to `?type=coi`) until a human re-types it. #389 does not touch
     stored rows either. Deliberately NOT fixed by a data migration — because laundering production
     rows is a destructive operation needing human sign-off (measure the population first), NOT
-    because the residue is harmless. It is not; see #443 above.
+    because the residue is harmless. Since #443 / ADR 0047 such a row at least reads `Pending`
+    everywhere instead of rolling up to `Covered`, so the residue is now VISIBLE rather than
+    silent — the population still needs re-typing.
   - **A clamped field can be narrowed by a manual edit.** `ExtractionFields` (jsonb) keeps the FULL
     value AS EXTRACTED, but the detail page binds its input to the clamped `DocumentField.FieldValue`
     and `UpdateFields` writes the submitted text back into `ExtractionFields` — so saving an

@@ -148,8 +148,29 @@ little gain: the date requirement for those document types is already covered by
 every identity field would push much of the license/permit corpus into manual review. Revisitable if the
 review population shows those mis-reads matter.
 
+## Amendment 1 (2026-07-30) — the document-level carve-out is conditional, and does not generalize
+
+[ADR 0047](0047-never-graded-document-asserts-no-affirmative-verdict.md) (#443) applies this ADR's
+coverage-exclusion reasoning to a sibling state — a document with **zero `ComplianceCheck` rows**, which the
+machine never graded at all — but **mirrors its demotion onto the document-level surfaces too**, the opposite
+of "What this deliberately does NOT do" above and of Option B.
+
+That is not a reversal of this decision, and nothing here changes: a `ManualRequired` document's counts,
+badges and export are still untouched. The two differ because this ADR's carve-out rests on a **verifiable
+premise**, not on a general principle — *"the documents list already renders a distinct `ManualRequired`
+extraction badge next to the compliance badge, so the document surface is not misleading."* For a
+never-graded document no such second badge exists (the extraction badge reads a healthy "Read" and the "What
+we checked" panel is simply empty), so leaving the document surfaces affirmative there would **create** the
+#294-class split rather than avoid it. The substantive difference: a `ManualRequired` document **was** graded
+and its verdict is real — only its extraction *inputs* are distrusted, two separate axes — whereas a
+never-graded document has no verdict on either axis.
+
+**The test when extending either decision:** ask whether some other surface already discloses the state
+beside the compliance badge. If yes, confine the demotion to the vendor rollup (this ADR). If no, mirror it
+everywhere (ADR 0047).
+
 ## References
 
-- Tickets: [#401](https://github.com/neboxdev/complidrop/issues/401), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
+- Tickets: [#401](https://github.com/neboxdev/complidrop/issues/401), [#443](https://github.com/neboxdev/complidrop/issues/443) (Amendment 1), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
 - ADRs: [0040](0040-unreadable-canonical-value-fails-closed.md) (the unreadable-value trigger this dovetails with — both raise `ManualRequired`), [0041](0041-future-effective-not-yet-in-force-reads-pending.md) (the read-only-overlay pattern and the vendor-rollup in-force test this extends), [0030](0030-compliance-verdict-combined-unit-of-work.md) (the single unit of work the gate stays inside)
 - Code: `Services/VerdictBearingFields.cs` (the verdict-bearing set), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `ManualReviewConfidenceThreshold`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo` + both projections)
