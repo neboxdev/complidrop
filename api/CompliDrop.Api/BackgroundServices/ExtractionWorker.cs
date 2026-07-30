@@ -482,17 +482,16 @@ public class ExtractionWorker(
         // WHICH documents share a supersession group (DocumentSupersession keys on
         // (VendorId, DocumentType) — a "COI" renewal never supersedes the "coi" cert it replaces).
         //
-        // Never-graded is NOT a harmless no-op. ComputeOutcome's zero-applicable-rules branch stores
-        // `expiringSoon ? ExpiringSoon : Pending`, and ComplianceStatusDeriver.Effective promotes even a
-        // stored Pending to ExpiringSoon inside the 30-day window — so an ungraded document with an
-        // expiry in the next 30 days reads "Expiring soon" on the list, counts as IN-FORCE coverage in
-        // VendorEndpoints.ComputeCoverage (which accepts Compliant or ExpiringSoon), rolls the vendor up
-        // to "Covered", and prints as "Expiring soon" in the auditor-facing vendor package — while the
-        // document's own "What we checked" panel is empty because no rule ever ran. That is an
-        // affirmative-coverage OVERCLAIM, not a fail-safe silence. Fixing the READ surfaces so a
-        // never-graded document can't read as coverage is
-        // https://github.com/neboxdev/complidrop/issues/443; this line stops NEW documents from joining
-        // that population.
+        // Never-graded is not a fail-safe silence, and it USED to be an affirmative-coverage overclaim:
+        // an ungraded document expiring within 30 days read "Expiring soon" on the list, counted as
+        // IN-FORCE coverage in VendorEndpoints.ComputeCoverage, rolled its vendor up to "Covered", and
+        // printed "Expiring soon" into the auditor-facing vendor package — over an empty "What we
+        // checked" panel. #443 / ADR 0047 CLOSED that: a document with zero ComplianceCheck rows now
+        // reads Pending on every read surface, so the residue is visible rather than silent. What
+        // survives that fix, and is why this coercion still matters, is the SUPERSESSION half:
+        // DocumentSupersession groups on (VendorId, DocumentType), so a "COI" renewal still never
+        // supersedes the "coi" cert it replaces. Coercing here also spares the document the demoted
+        // Pending in the first place — this line stops NEW documents from joining that population.
         //
         // Every value this can yield is one of six short vocabulary literals, so THIS column
         // is length-safe by construction: a runaway documentType no longer throws 22001. It is not the
