@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using CompliDrop.Api.Entities;
 
 namespace CompliDrop.Api.Services;
@@ -89,6 +90,50 @@ public static class ComplianceStatusDeriver
     /// </summary>
     public static bool IsFutureEffective(DateTime? effectiveDate, DateTime today) =>
         effectiveDate is DateTime eff && eff.Date > today.Date;
+
+    /// <summary>
+    /// The SQL mirror of "this document READS <see cref="ComplianceStatus.Pending"/> today" — the whole
+    /// effective-Pending population: a genuinely-stored Pending outside the expiry window, plus every
+    /// affirmative verdict the future-effective (#362 / ADR 0041) or never-graded (#443 / ADR 0047)
+    /// demotion moves here. Expired wins outright, so every arm carries the not-yet-expired guard.
+    /// <para/>
+    /// A whole-entity <c>Expression</c> — the one shape an EF read site CAN compose (the
+    /// <see cref="DocumentSupersession"/> pattern) — precisely because it has two consumers that must
+    /// never disagree: the documents-list <c>?status=Pending</c> arm and the dashboard's
+    /// <c>awaitingReview</c> count that deep-links to it. Spelling that predicate twice is the #294
+    /// count-vs-list split this ADR exists to prevent, so it is spelled once. The Compliant /
+    /// ExpiringSoon arms stay inline in their own read sites: each is one clause of a larger composite
+    /// (type / vendor / search filters), where an <c>Expression</c> cannot be invoked.
+    /// <para/>
+    /// The demotion arms are deliberately INDEPENDENT of one another: a document can be both
+    /// future-effective and never-graded, and either alone must land it here so the list matches the
+    /// badge <see cref="Effective"/> renders.
+    /// </summary>
+    public static Expression<Func<Document, bool>> ReadsPending(DateTime today)
+    {
+        var expiringSoonUpperExclusive = WindowUpperBoundExclusive(today, ExpiringSoonWindowDays);
+        var notYetEffectiveBound = NotYetEffectiveLowerBoundInclusive(today);
+        var todayDate = today.Date;
+        return d =>
+            // Genuine Pending — stored Pending, not date-overlaid to ExpiringSoon/Expired.
+            (d.ComplianceStatus == ComplianceStatus.Pending
+                && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive))
+            // OR the future-effective demotion (#362): a not-yet-in-force cert whose stored verdict is
+            // affirmative (Compliant / ExpiringSoon / Pending) and which isn't already Expired.
+            || (d.EffectiveDate != null && d.EffectiveDate >= notYetEffectiveBound
+                && (d.ExpirationDate == null || d.ExpirationDate >= todayDate)
+                && (d.ComplianceStatus == ComplianceStatus.Compliant
+                    || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
+                    || d.ComplianceStatus == ComplianceStatus.Pending))
+            // OR the never-graded demotion (#443 / ADR 0047): the same clause on the grading axis — an
+            // affirmative stored verdict (or one the expiry window would promote) that no ComplianceCheck
+            // row backs. `d.ComplianceChecks.Any()` is the SQL spelling of DocumentGrading.IsGraded.
+            || (!d.ComplianceChecks.Any()
+                && (d.ExpirationDate == null || d.ExpirationDate >= todayDate)
+                && (d.ComplianceStatus == ComplianceStatus.Compliant
+                    || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
+                    || d.ComplianceStatus == ComplianceStatus.Pending));
+    }
 
     /// <summary>
     /// Derives the effective status shown to the user as of <paramref name="today"/> (a date; the

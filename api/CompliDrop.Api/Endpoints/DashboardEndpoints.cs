@@ -89,6 +89,14 @@ public static class DashboardEndpoints
                 && (d.ExpirationDate == null || d.ExpirationDate >= today)
                 && (d.ComplianceStatus == Entities.ComplianceStatus.Compliant
                     || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon)), ct);
+        // #443 / ADR 0047: the documents this product declines to vouch for. Without it a never-graded
+        // cert demoted out of `expiringSoon` appeared in NO tile at all — invisible on the dashboard,
+        // the opposite of telling the user nothing graded it. Deliberately the WHOLE effective-Pending
+        // population (genuine Pending + the #362 and #443 demotions) rather than a never-graded-only
+        // number: it is the population the "Awaiting review" label names, and it is computed from the
+        // SAME shared predicate the ?status=Pending list it deep-links to uses, so the count and the
+        // list are one population by construction rather than by two hand-mirrored SQL arms (#294).
+        var awaitingReview = await docs.CountAsync(ComplianceStatusDeriver.ReadsPending(today), ct);
         var pendingExtraction = await docs.CountAsync(d =>
             d.ExtractionStatus == Entities.ExtractionStatus.Pending
             || d.ExtractionStatus == Entities.ExtractionStatus.Processing, ct);
@@ -123,6 +131,7 @@ public static class DashboardEndpoints
                 nonCompliant,
                 expiringSoon,
                 expired,
+                awaitingReview,
                 pendingExtraction,
                 totalVendors = vendors,
                 anyVendorWithRequirements,
