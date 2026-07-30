@@ -42,7 +42,8 @@ public static class VendorEndpoints
                     : new List<string>(),
                 Docs = v.Documents
                     .Select(d => new DocCoverageInfo(
-                        d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, d.ExtractionStatus))
+                        d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, d.ExtractionStatus,
+                        d.ComplianceChecks.Count))
                     .ToList(),
                 DocumentCount = v.Documents.Count,
                 ActivePortalLinks = v.PortalLinks.Count(l => l.IsActive),
@@ -69,11 +70,13 @@ public static class VendorEndpoints
     /// <summary>Lightweight per-document view the coverage rollup needs (FP-074). EffectiveDate feeds the
     /// future-effective demotion (#362 / ADR 0041) via ComplianceStatusDeriver.Effective. ExtractionStatus
     /// lets the rollup drop a doc the SYSTEM ITSELF distrusts (ManualRequired) from in-force coverage
-    /// (#401 / ADR 0042). No CreatedAt: coverage is decided by the best CURRENTLY-IN-FORCE cert, not the
-    /// newest upload (#362 review).</summary>
+    /// (#401 / ADR 0042). ComplianceCheckCount feeds the never-graded demotion (#443 / ADR 0047) through
+    /// the SAME deriver — it is a COUNT rather than a bool so the projection stays a plain scalar EF can
+    /// translate, and DocumentGrading.IsGraded owns the threshold. No CreatedAt: coverage is decided by
+    /// the best CURRENTLY-IN-FORCE cert, not the newest upload (#362 review).</summary>
     private sealed record DocCoverageInfo(
         string DocumentType, Entities.ComplianceStatus ComplianceStatus, DateTime? ExpirationDate,
-        DateTime? EffectiveDate, Entities.ExtractionStatus ExtractionStatus);
+        DateTime? EffectiveDate, Entities.ExtractionStatus ExtractionStatus, int ComplianceCheckCount);
 
     /// <summary>
     /// Rolls a vendor's documents up against the distinct document types its checklist requires
@@ -84,10 +87,12 @@ public static class VendorEndpoints
     /// an in-force earlier cert who PRE-UPLOADS a future-effective renewal (which reads Pending, ADR 0041)
     /// stays Covered instead of flipping to ActionNeeded. A doc the extraction system distrusts
     /// (ExtractionStatus.ManualRequired) is NOT counted as in-force coverage either, so a distrusted
-    /// extraction can't silently roll up to Covered (#401 / ADR 0042). A required type with no document is
-    /// "missing"; a type whose only documents are Expired / NonCompliant / not-yet-in-force (Pending) /
-    /// awaiting-review (ManualRequired) is "action-needed" — a genuine gap still surfaces. The engine
-    /// re-grades on rule/assignment change since #257, so this isn't built on stale verdicts.
+    /// extraction can't silently roll up to Covered (#401 / ADR 0042), and neither is one NOTHING EVER
+    /// GRADED (#443 / ADR 0047 — that exclusion arrives through the deriver itself, which reads such a doc
+    /// Pending). A required type with no document is "missing"; a type whose only documents are Expired /
+    /// NonCompliant / not-yet-in-force (Pending) / never-graded (Pending) / awaiting-review
+    /// (ManualRequired) is "action-needed" — a genuine gap still surfaces. The engine re-grades on
+    /// rule/assignment change since #257, so this isn't built on stale verdicts.
     /// </summary>
     private static VendorCoverage ComputeCoverage(
         bool hasTemplate, List<string> requiredTypes, List<DocCoverageInfo> docs, DateTime today)
@@ -128,10 +133,19 @@ public static class VendorEndpoints
             // genuine gap surfaces, exactly like an expired-only type -- until a human confirms the
             // extraction on the document detail page. Read-time judgement only; the stored ComplianceStatus
             // is untouched (extraction-trust and rule-verdict are separate axes -- ADR 0042).
+            //
+            // #443 / ADR 0047: a doc NOTHING EVER GRADED (zero ComplianceCheck rows -- no checklist, an
+            // empty checklist, or a checklist whose rules all govern other document types, which is
+            // reachable today because the applicable-rules filter is case-SENSITIVE while the required-type
+            // match below is case-INsensitive) likewise contributes no coverage. That exclusion is NOT a
+            // separate clause here: DocumentGrading.IsGraded feeds ComplianceStatusDeriver.Effective, which
+            // reads such a doc Pending, so it falls out of the affirmative test the same way an
+            // expired or not-yet-in-force cert does -- one demotion, applied identically on every surface.
             var inForce = typeDocs
                 .Where(d => d.ExtractionStatus != Entities.ExtractionStatus.ManualRequired
                     && ComplianceStatusDeriver.Effective(
-                        d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today)
+                        d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate,
+                        DocumentGrading.IsGraded(d.ComplianceCheckCount), today)
                     is Entities.ComplianceStatus.Compliant or Entities.ComplianceStatus.ExpiringSoon)
                 .ToList();
             if (inForce.Count == 0) { actionNeeded = true; continue; }
@@ -188,12 +202,14 @@ public static class VendorEndpoints
         // Coverage docs are PROJECTED in a separate lightweight query rather than Include(Documents):
         // a third sibling collection Include would cartesian-multiply the result AND re-ship each
         // Document's fat ExtractionRawJson / ExtractionFields jsonb (the split-query convention in
-        // GetDocument / ComplianceCheckService). The projection ships only the five scalar fields the
-        // rollup needs. Tenant-scoped via the global Documents filter; VendorId scopes to this vendor.
+        // GetDocument / ComplianceCheckService). The projection ships only the scalars the rollup needs —
+        // the check COUNT (#443), never the check rows themselves. Tenant-scoped via the global Documents
+        // filter; VendorId scopes to this vendor.
         var coverageDocs = await db.Documents
             .Where(d => d.VendorId == id)
             .Select(d => new DocCoverageInfo(
-                d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, d.ExtractionStatus))
+                d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, d.ExtractionStatus,
+                d.ComplianceChecks.Count))
             .ToListAsync(ct);
 
         var coverage = ComputeCoverage(

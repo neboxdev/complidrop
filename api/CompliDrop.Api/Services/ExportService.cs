@@ -61,14 +61,17 @@ public class ExportService(SystemDbContext db) : IExportService
         var (fromUtc, toUtcExclusive, fromDate, toDate) =
             ResolveAuditWindow(from, to, org.TimeZone, DateTime.UtcNow);
 
-        var docs = await db.Documents
-            .Where(d => d.OrganizationId == organizationId && d.DeletedAt == null)
+        var orgDocs = db.Documents.Where(d => d.OrganizationId == organizationId && d.DeletedAt == null);
+        var docs = await orgDocs
             .Include(d => d.Vendor)
             .OrderBy(d => d.ExpirationDate)
             .ToListAsync(ct);
         // #327: annotate superseded (renewed) old certs in the audit report so a reader sees the old cert
         // AND knows it was replaced — same coverage-extending-renewal rule as the CSV (DocumentSupersession).
         var supersededIds = SupersededIds(docs);
+        // #443: how many requirements were actually measured against each document — the audit report must
+        // not print an affirmative verdict for one nothing graded.
+        var checkCounts = await CheckCountsAsync(orgDocs, ct);
         var (audit, auditTruncated) = await QueryAuditSliceAsync(organizationId, fromUtc, toUtcExclusive, ct);
 
         // Resolve UserIds to human names so the report shows WHO acted, not a raw
@@ -125,9 +128,8 @@ public class ExportService(SystemDbContext db) : IExportService
                                     r.RelativeItem(2).Text(d.Vendor?.Name ?? "—").FontSize(9);
                                     r.RelativeItem(2).Text(DisplayLabels.DocumentType(d.DocumentType)).FontSize(9);
                                     r.RelativeItem(2).Text(d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "—").FontSize(9);
-                                    r.RelativeItem(2).Text(DisplayLabels.Compliance(
-                                        ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today))
-                                        + (supersededIds.Contains(d.Id) ? " (superseded)" : "")).FontSize(9);
+                                    r.RelativeItem(2).Text(ComplianceCell(
+                                        d, today, checkCounts, supersededIds.Contains(d.Id))).FontSize(9);
                                 });
                             }
                         }));
@@ -228,11 +230,13 @@ public class ExportService(SystemDbContext db) : IExportService
 
     public async Task<byte[]> BuildCsvAsync(Guid organizationId, CancellationToken ct)
     {
-        var docs = await db.Documents
-            .Where(d => d.OrganizationId == organizationId && d.DeletedAt == null)
+        var orgDocs = db.Documents.Where(d => d.OrganizationId == organizationId && d.DeletedAt == null);
+        var docs = await orgDocs
             .Include(d => d.Vendor)
             .OrderBy(d => d.ExpirationDate)
             .ToListAsync(ct);
+        // #443: the requirement count behind each verdict — see the RequirementsChecked column below.
+        var checkCounts = await CheckCountsAsync(orgDocs, ct);
 
         // #327: the audit export keeps EVERY document (it must not hide history — an auditor wants to see
         // the expired old cert AND its renewal), but ANNOTATES the superseded ones so a reader knows the
@@ -266,6 +270,12 @@ public class ExportService(SystemDbContext db) : IExportService
         csv.WriteField("ProcessingStatus");
         csv.WriteField("Compliance");
         csv.WriteField("Superseded"); // #327: "Yes" when a newer cert for the same vendor+type exists
+        // #443 / ADR 0047: how many requirements were actually measured against this document. 0 means the
+        // engine certified NOTHING about it (no checklist, an empty one, or one whose rules all govern
+        // other document types) — the fact behind its demoted "Awaiting review" verdict. The CSV carries
+        // it as its own column rather than as an inline parenthetical on Compliance (the shape the two
+        // PDFs use) because Compliance is a machine-filterable cell here, exactly like Superseded beside it.
+        csv.WriteField("RequirementsChecked");
         csv.WriteField("EffectiveDate");
         csv.WriteField("ExpirationDate");
         csv.WriteField("GeneralLiabilityLimit");
@@ -281,9 +291,12 @@ public class ExportService(SystemDbContext db) : IExportService
             csv.WriteField(d.Vendor?.Name ?? "");
             csv.WriteField(DisplayLabels.DocumentType(d.DocumentType));
             csv.WriteField(DisplayLabels.Extraction(d.ExtractionStatus));
-            csv.WriteField(DisplayLabels.Compliance(
-                ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today)));
+            // annotateNeverGraded: false — the RequirementsChecked column below carries that fact here,
+            // so the Compliance cell stays a single filterable label (#443).
+            csv.WriteField(ComplianceCell(
+                d, today, checkCounts, superseded: false, annotateNeverGraded: false));
             csv.WriteField(supersededIds.Contains(d.Id) ? "Yes" : "No");
+            csv.WriteField(checkCounts.GetValueOrDefault(d.Id));
             csv.WriteField(d.EffectiveDate?.ToString("yyyy-MM-dd"));
             csv.WriteField(d.ExpirationDate?.ToString("yyyy-MM-dd"));
             csv.WriteField(d.GeneralLiabilityLimit?.ToString(CultureInfo.InvariantCulture));
@@ -329,6 +342,45 @@ public class ExportService(SystemDbContext db) : IExportService
         return superseded;
     }
 
+    /// <summary>
+    /// Appended to the compliance verdict in the two PDF artifacts for a document NOTHING EVER GRADED
+    /// (#443 / ADR 0047). The verdict itself already reads "Awaiting review" (the deriver demotes an
+    /// affirmative one — see <see cref="ComplianceStatusDeriver.Effective"/>), but "awaiting review" and
+    /// "we measured zero requirements against this" are different facts, and the auditor is entitled to
+    /// the second. Same inline-annotation shape as "(superseded)" beside it, for the same reason: the
+    /// export must not hide a document, only qualify what it can honestly assert about it.
+    /// </summary>
+    internal const string NeverGradedAnnotation = " (no requirements checked)";
+
+    /// <summary>
+    /// How many requirements were actually measured against each of an org's documents (#443 / ADR 0047),
+    /// keyed by document id — the export's input to <see cref="DocumentGrading.IsGraded(int)"/>. A single
+    /// scalar projection rather than <c>Include(d =&gt; d.ComplianceChecks)</c>: an org's check ROWS carry
+    /// two varchar(500) columns each and would multiply the export's payload for a number.
+    /// </summary>
+    private static async Task<Dictionary<Guid, int>> CheckCountsAsync(
+        IQueryable<Entities.Document> documents, CancellationToken ct) =>
+        (await documents
+            .Select(d => new { d.Id, Count = d.ComplianceChecks.Count })
+            .ToListAsync(ct))
+        .ToDictionary(x => x.Id, x => x.Count);
+
+    /// <summary>
+    /// The compliance cell for one exported document: the date-/effective-/grading-overlaid verdict,
+    /// plus the "(superseded)" and "(no requirements checked)" qualifiers. One helper so the audit PDF,
+    /// the CSV and the vendor package cannot tell an auditor three different stories about one document.
+    /// </summary>
+    private static string ComplianceCell(
+        Entities.Document d, DateTime today, IReadOnlyDictionary<Guid, int> checkCounts,
+        bool superseded, bool annotateNeverGraded = true)
+    {
+        var graded = DocumentGrading.IsGraded(checkCounts.GetValueOrDefault(d.Id));
+        var label = DisplayLabels.Compliance(ComplianceStatusDeriver.Effective(
+            d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, graded, today));
+        if (annotateNeverGraded && !graded) label += NeverGradedAnnotation;
+        return superseded ? label + " (superseded)" : label;
+    }
+
     /// <summary>Shared QuestPDF page chrome for the PDF reports (Letter size, 40pt margin, default text style).</summary>
     private static void ApplyPageDefaults(PageDescriptor page)
     {
@@ -348,6 +400,10 @@ public class ExportService(SystemDbContext db) : IExportService
         // Reuse the one shared supersession helper (all these docs share one vendor) so the annotation
         // matches the CSV / audit-report exactly. (#327)
         var supersededIds = SupersededIds([.. vendor.Documents]);
+        // #443 / ADR 0047: this package is THE artifact the ticket names — it printed "Expiring soon" for a
+        // document with an EMPTY "What we checked" panel behind it. Same requirement counts, same cell
+        // helper as the audit report, so the two PDFs can't diverge.
+        var checkCounts = await CheckCountsAsync(db.Documents.Where(d => d.VendorId == vendorId), ct);
         return QuestPDF.Fluent.Document.Create(container =>
         {
             container.Page(page =>
@@ -365,8 +421,7 @@ public class ExportService(SystemDbContext db) : IExportService
                     // a newer one for the same type replaced it.
                     foreach (var d in vendor.Documents.OrderBy(d => d.ExpirationDate))
                     {
-                        var superseded = supersededIds.Contains(d.Id);
-                        col.Item().PaddingTop(6).Text($"• {d.OriginalFileName} — {DisplayLabels.DocumentType(d.DocumentType)} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {DisplayLabels.Compliance(ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today))}{(superseded ? " (superseded)" : "")}");
+                        col.Item().PaddingTop(6).Text($"• {d.OriginalFileName} — {DisplayLabels.DocumentType(d.DocumentType)} — expires {d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "unknown"} — {ComplianceCell(d, today, checkCounts, supersededIds.Contains(d.Id))}");
                     }
                 });
             });

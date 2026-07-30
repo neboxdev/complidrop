@@ -16,6 +16,8 @@ namespace CompliDrop.Api.Services;
 ///   * within 30 days of expiring AND the rule verdict isn't a hard fail -> ExpiringSoon;
 ///   * NOT YET in force (EffectiveDate is a date strictly after today) AND the verdict would otherwise
 ///     read Compliant or ExpiringSoon -> Pending ("not yet in force"), #362 / ADR 0041;
+///   * NEVER GRADED (no ComplianceCheck row — nothing was ever measured against it) AND the verdict
+///     would otherwise read Compliant or ExpiringSoon -> Pending, #443 / ADR 0047;
 ///   * otherwise                           -> the stored rule verdict unchanged.
 /// A NonCompliant verdict (rules failed) is preserved when merely expiring-soon OR future-effective — a
 /// failing doc is still failing, and a not-yet-active deficient cert is accurately not-compliant — but an
@@ -29,6 +31,14 @@ namespace CompliDrop.Api.Services;
 /// stale Pending after it became effective (nothing re-runs rule evaluation on an EffectiveDate crossing),
 /// so <see cref="ComplianceCheckService.ComputeOutcome"/> and the nightly sweep deliberately do NOT persist
 /// this demotion; every read surface applies it instead. See ADR 0041.
+/// <para/>
+/// The never-graded demotion (#443 / ADR 0047) is read-only for the SAME reason, and the shape is
+/// deliberately identical: an affirmative verdict the engine never actually measured anything to reach
+/// reads Pending. It self-heals the moment the document IS graded (a governing rule is added, its type is
+/// corrected, a checklist is assigned — each of which re-evaluates and writes check rows), and persisting
+/// Pending would instead strand it, because writing Pending is also how the extraction worker claims a
+/// document. <see cref="DocumentGrading"/> answers "was it graded"; this deriver owns what that ANSWER
+/// means for the status a reader sees.
 /// </summary>
 public static class ComplianceStatusDeriver
 {
@@ -85,10 +95,17 @@ public static class ComplianceStatusDeriver
     /// time component is ignored). <paramref name="today"/> is passed in — not read from the clock —
     /// so callers stay deterministically testable and consistent with the rest of the codebase's
     /// UTC-date convention. <paramref name="effectiveDate"/> demotes an affirmative verdict to Pending
-    /// while the policy is not yet in force (#362 / ADR 0041).
+    /// while the policy is not yet in force (#362 / ADR 0041); <paramref name="isGraded"/> demotes one
+    /// no requirement was ever measured to produce (#443 / ADR 0047).
+    /// <para/>
+    /// <paramref name="isGraded"/> is REQUIRED rather than defaulted on purpose: a default would be
+    /// fail-open (a new read surface that forgot it would silently re-assert the coverage #443 removed),
+    /// and it is the same forcing function ADR 0041 used when it added <paramref name="effectiveDate"/>.
+    /// Ask <see cref="DocumentGrading.IsGraded(int)"/> for the value — never re-derive the threshold.
     /// </summary>
     public static ComplianceStatus Effective(
-        ComplianceStatus stored, DateTime? expirationDate, DateTime? effectiveDate, DateTime today)
+        ComplianceStatus stored, DateTime? expirationDate, DateTime? effectiveDate, bool isGraded,
+        DateTime today)
     {
         var todayDate = today.Date;
 
@@ -114,6 +131,17 @@ public static class ComplianceStatusDeriver
         // above) are never demoted — the demotion only ever moves a doc OUT of the compliant tally.
         if (overlaid is ComplianceStatus.Compliant or ComplianceStatus.ExpiringSoon
             && IsFutureEffective(effectiveDate, today))
+            return ComplianceStatus.Pending;
+
+        // Never-graded demotion (#443 / ADR 0047), the same clause on a third axis: the product may not
+        // assert an affirmative verdict it never measured anything to reach. Placed AFTER the expiry
+        // if/else (like the future-effective clause, and for the same reason — #362 review S2) so it also
+        // catches the null-expiry path, and gated on the OVERLAID status so it demotes both a stored
+        // ExpiringSoon and the stored Pending this deriver just promoted into one. Expired is returned
+        // above and is never demoted (a lapsed date is a real, un-graded fact and a present liability);
+        // NonCompliant is unreachable without a failed check row, and is excluded anyway so the demotion
+        // can only ever move a doc OUT of the affirmative tally, never mask a hard fail.
+        if (overlaid is ComplianceStatus.Compliant or ComplianceStatus.ExpiringSoon && !isGraded)
             return ComplianceStatus.Pending;
 
         return overlaid;

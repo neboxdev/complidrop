@@ -82,16 +82,20 @@ public static class DocumentEndpoints
                         .Where(DocumentSupersession.IsCurrent(db.Documents)),
                     // #362: a future-effective (not-yet-in-force) doc is demoted out of ExpiringSoon/Compliant
                     // into the effective-Pending arm below — same date↔instant rule the dashboard counts use.
+                    // #443: so is a NEVER-GRADED one (no ComplianceCheck row — nothing was measured against
+                    // it). `d.ComplianceChecks.Any()` is the SQL mirror of DocumentGrading.IsGraded.
                     ComplianceStatus.ExpiringSoon => query.Where(d =>
                         d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate < expiringSoonUpperExclusive
                         && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)
+                        && d.ComplianceChecks.Any()
                         && (d.ComplianceStatus == ComplianceStatus.Compliant
                             || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
                             || d.ComplianceStatus == ComplianceStatus.Pending)),
                     ComplianceStatus.Compliant => query.Where(d =>
                         d.ComplianceStatus == ComplianceStatus.Compliant
                         && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive)
-                        && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)),
+                        && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)
+                        && d.ComplianceChecks.Any()),
                     ComplianceStatus.NonCompliant => query.Where(d =>
                         d.ComplianceStatus == ComplianceStatus.NonCompliant
                         && (d.ExpirationDate == null || d.ExpirationDate >= today)),
@@ -104,6 +108,16 @@ public static class DocumentEndpoints
                         // (Expired wins outright). Mirrors ComplianceStatusDeriver.Effective's demotion set, so
                         // the ?status=Pending list matches every future-effective row's Pending badge.
                         || (d.EffectiveDate != null && d.EffectiveDate >= notYetEffectiveBound
+                            && (d.ExpirationDate == null || d.ExpirationDate >= today)
+                            && (d.ComplianceStatus == ComplianceStatus.Compliant
+                                || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
+                                || d.ComplianceStatus == ComplianceStatus.Pending))
+                        // OR never-graded demotion (#443 / ADR 0047): the same clause on the grading axis —
+                        // an affirmative stored verdict (or one the expiry window would promote) that no
+                        // ComplianceCheck row backs. Not-yet-expired only, so Expired still wins outright.
+                        // Deliberately independent of the future-effective clause above: a doc can be BOTH,
+                        // and either alone must land it here so the ?status=Pending list matches its badge.
+                        || (!d.ComplianceChecks.Any()
                             && (d.ExpirationDate == null || d.ExpirationDate >= today)
                             && (d.ComplianceStatus == ComplianceStatus.Compliant
                                 || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
@@ -179,7 +193,10 @@ public static class DocumentEndpoints
                 d.EffectiveDate,
                 d.ExpirationDate,
                 d.IsSample,
-                d.CreatedAt
+                d.CreatedAt,
+                // #443 / ADR 0047: the never-graded input to the deriver below. A scalar COUNT, so the
+                // projection stays narrow — the check ROWS are never shipped to build a list badge.
+                ComplianceCheckCount = d.ComplianceChecks.Count
             })
             .ToListAsync(ct);
         var items = rows.Select(d => new DocumentListItem(
@@ -190,7 +207,9 @@ public static class DocumentEndpoints
             d.VendorId,
             d.ExtractionStatus.ToString(),
             d.ExtractionConfidence,
-            ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today).ToString(),
+            ComplianceStatusDeriver.Effective(
+                d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate,
+                DocumentGrading.IsGraded(d.ComplianceCheckCount), today).ToString(),
             d.EffectiveDate,
             d.ExpirationDate,
             DaysUntilExpiry(d.ExpirationDate, today),
@@ -241,7 +260,12 @@ public static class DocumentEndpoints
             doc.VendorId,
             doc.ExtractionStatus.ToString(),
             doc.ExtractionConfidence,
-            ComplianceStatusDeriver.Effective(doc.ComplianceStatus, doc.ExpirationDate, doc.EffectiveDate, today).ToString(),
+            // #443 / ADR 0047: the ComplianceChecks collection is already Include-loaded (it IS the "What
+            // we checked" panel below), so the never-graded input costs nothing extra here — and an EMPTY
+            // panel can no longer sit under an affirmative badge, the contradiction the ticket names.
+            ComplianceStatusDeriver.Effective(
+                doc.ComplianceStatus, doc.ExpirationDate, doc.EffectiveDate,
+                DocumentGrading.IsGraded(doc.ComplianceChecks.Count), today).ToString(),
             doc.EffectiveDate,
             doc.ExpirationDate,
             DaysUntilExpiry(doc.ExpirationDate, today),
