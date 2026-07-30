@@ -167,11 +167,14 @@ Both are defined in this repo's `.claude/agents/`.
     the state. Here one does; for never-graded none does.
 - A NEVER-GRADED document is ADR 0047 (#443) — zero `ComplianceCheck` rows, i.e. nothing was ever
   measured against it. The facts that follow are pointers into it, not a second copy.
-  - There is ONE recognizer, `Services/DocumentGrading.cs`: `IsGraded(int checkCount)` (the in-memory
-    threshold — ONE check row is enough) plus `Graded`, its EF `Expression` mirror, pinned equal by
-    test. The DECISION is in `ComplianceStatusDeriver.Effective`, whose `isGraded` parameter is
-    REQUIRED, not defaulted: a default would be fail-open for the next read surface added. A read
-    site that re-derives the threshold instead of asking `DocumentGrading` IS a real finding.
+  - There is ONE recognizer, `Services/DocumentGrading.cs`, shipping exactly ONE shape:
+    `IsGraded(int checkCount)` (the in-memory threshold — ONE check row is enough). It deliberately has
+    NO EF `Expression` mirror — every SQL site needs the fact inside a composite predicate where an
+    expression can't be invoked, so a mirror would be a public form with zero production callers. Adding
+    one back IS a finding, not an improvement. The DECISION is in `ComplianceStatusDeriver.Effective`,
+    whose `isGraded` parameter is REQUIRED, not defaulted: a default would be fail-open for the next read
+    surface added. A read site that re-derives the threshold instead of asking `DocumentGrading` IS a
+    real finding.
   - The demotion is READ-ONLY, exactly like ADR 0041's. `ComputeOutcome`'s zero-applicable-rules
     branch and the nightly sweep DELIBERATELY keep storing the real date verdict (`ExpiringSoon`
     inside the window) — do NOT flag that as a missed demotion; persisting `Pending` would be the
@@ -182,6 +185,22 @@ Both are defined in this repo's `.claude/agents/`.
     `ManualRequired` extraction badge already sits beside the compliance badge) is FALSE here: no
     badge anywhere says "nothing graded this", and the detail page's "What we checked" panel is
     simply EMPTY. Demoting the rollup while leaving the badge affirmative would BE the #294 split.
+  - The demotion must not make a document DISAPPEAR. The dashboard carries an `awaitingReview` tile
+    deep-linked to `?status=Pending` — the WHOLE effective-Pending population (genuine Pending + the
+    #362 and #443 demotions), counted from the SAME `ComplianceStatusDeriver.ReadsPending(today)`
+    expression that builds that list, so the two can't drift. That shared predicate is the ONE
+    exception to the spell-it-inline rule below, and it is allowed precisely because it is a
+    whole-entity predicate on both consumers (the `DocumentSupersession.IsCurrent` shape). The
+    `expiringSoon` tile is labelled "Expiring soon" (the `DisplayLabels.Compliance` wording of the
+    status it links to), NOT a date range: it is a verdict count, and a date label put it in
+    disagreement with the date-only "Next 30 days" pipeline bucket about the same document. Softening
+    a COUNT to fix such a disagreement would re-open the overclaim — change the label, not the number.
+  - `DocumentDetail.vendorHasChecklist` exists because the detail page's "Not checked yet" card NAMES
+    the cause, and zero check rows has THREE causes, not two: no vendor, no checklist, or a checklist
+    whose rules all govern OTHER document types. Only the backend can tell the last two apart; deriving
+    the cause from `complianceChecks.length` prints a FALSE claim about a vendor that plainly has a
+    checklist, plus a dead-end CTA — the same reasoning as `DocumentDetail.UnreadableFields` (ADR 0040).
+    A frontend re-derivation IS a real finding.
   - The vendor rollup has NO grading clause of its own — `ComputeCoverage` gets the exclusion for
     free because `Effective` already reads such a doc `Pending`. Adding a second explicit clause
     there (the shape ADR 0042's `ManualRequired` exclusion needs) would be a duplicate, not a fix.
@@ -189,10 +208,11 @@ Both are defined in this repo's `.claude/agents/`.
     present liability, and the clause must only ever move a doc OUT of the affirmative tally. A
     stored `Compliant` with zero checks DOES demote — transiently reachable when a rule delete
     hard-deletes its checks and the post-commit re-grade never lands; fail-closed is intended.
-  - SQL sites spell the fact inline as `d.ComplianceChecks.Any()` rather than composing the shared
-    `Expression` — an EF expression cannot be invoked inside a composite predicate or a projection,
-    the same hand-mirroring ADR 0041's date bounds already require. Covered by the count-vs-
-    deep-linked-list pins; a NEW SQL read arm missing the clause IS a real finding.
+  - SQL sites spell the fact inline as `d.ComplianceChecks.Any()` — an EF expression cannot be invoked
+    inside a composite predicate or a projection, the same hand-mirroring ADR 0041's date bounds already
+    require. Covered by the count-vs-deep-linked-list pins; a NEW SQL read arm missing the clause IS a
+    real finding. The lone shared predicate is `ReadsPending` (see the dashboard bullet above) — it has
+    two consumers that must agree and both take a whole-entity predicate.
   - The export discloses the COUNT as well as the demoted label, through the one shared
     `ExportService.ComplianceCell`: the two PDFs append `" (no requirements checked)"` inline (the
     `"(superseded)"` shape, and the two compose), the CSV instead carries a `RequirementsChecked`
@@ -202,14 +222,20 @@ Both are defined in this repo's `.claude/agents/`.
     without any legacy data). ADR 0047 Option E records why it was NOT unified here — widening what
     a rule governs is a live-data grading change needing its own ticket. Do not re-report it as new.
   - Expiry-pipeline buckets, `expiresWithin` and REMINDERS are untouched (date questions, not verdict
-    ones — reminders never read `ComplianceStatus` at all). Three raw stored-status readers stay
+    ones — reminders never read `ComplianceStatus` at all). FOUR raw stored-status readers stay
     un-overlaid and out of scope, because they ignore the ADR 0027/0041 overlays too and always did:
-    the portal upload-status poll, the `AuthEndpoints` account data export, and
-    `ComplianceEndpoints.OrgStatus`.
+    the portal upload-status poll, the `AuthEndpoints` account data export,
+    `ComplianceEndpoints.OrgStatus`, and `ComplianceEndpoints.RunCheck` (its `status` field has no
+    reader — the only caller is `api.post<void>`). Recorded, not swept; if `RunCheck`'s `status` ever
+    gains a reader it must be overlaid first.
   - Test fixtures: `IntegrationTestBase.MarkGradedAsync` is the ONE seam for "this seeded doc was
     actually graded". A fixture writing a stored `Compliant`/`ExpiringSoon` with no check row is
     seeding a state no production path reaches, and since #443 it silently tests the never-graded
-    path instead of the one it names — that IS a real finding in a new test.
+    path instead of the one it names — that IS a real finding in a new test. Two documented side
+    effects, not bugs: it picks the backing rule by `SortOrder` then `Id` (Postgres gives no row
+    order without an ORDER BY, and the rule shows up in the "What we checked" panel), and with NO
+    rule in the org it mints a real, org-visible `Graded-{guid}` template — a test asserting on
+    template lists or requirement counts should seed its own checklist, which the helper then reuses.
 - The canonical document-type vocabulary is ONE list — `Services/CanonicalDocumentTypes.cs`
   (#373, [ADR 0045](../docs/adr/0045-canonical-document-type-vocabulary.md)) — and
   `ExtractionWorker.PersistSuccess` coerces the model's `documentType` through it before that

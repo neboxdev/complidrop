@@ -55,9 +55,14 @@ affirmative `Compliant` or `ExpiringSoon`, it reads `Pending` instead — on eve
 
 - `IsGraded(int complianceCheckCount) => complianceCheckCount > 0` — the in-memory predicate and the ONE
   threshold. A single check row is enough: a document graded against one rule HAS been graded, pass or fail.
-- `Graded` — the EF-translatable `Expression<Func<Document, bool>>` mirror for SQL sites that can take a
-  whole-entity predicate. `ComplianceCheck` carries no `DeletedAt` and has no query filter, so `Any()`
-  counts exactly what `IsGraded` counts. Pinned equal to the in-memory form by a test.
+
+It ships **exactly that one shape**, deliberately. Every SQL read site needs the fact *inside* a composite
+predicate or a projection, where an EF `Expression` cannot be invoked, so each spells it inline as
+`d.ComplianceChecks.Any()` (§4). An `Expression` mirror would therefore be a second public form with **no
+production caller** — a shape nothing exercises, pinned only against itself. `ComplianceCheck` carries no
+`DeletedAt` and has no query filter, so `Any()` counts exactly what `IsGraded` counts; the two forms that
+actually ship are pinned against **the `ComplianceChecks` table itself**, not against each other, because
+both traverse the same navigation and a filter landing on it would move them identically.
 
 **A check row is the right recognizer** because it is the artifact the engine emits when it actually
 measured something, and every `ComputeOutcome` branch that certifies nothing returns zero checks **and**
@@ -114,13 +119,29 @@ list already renders a distinct `ManualRequired` extraction badge next to the co
 distrusted document is already visible there as 'Needs your review' beside its verdict."* The rollup was
 "the one surface with no room for the separate badge."
 
-**That premise is false for a never-graded document.** There is no second badge anywhere that says "nothing
-graded this" — the extraction badge reads a healthy "Read", and the detail page's "What we checked" panel is
-simply **empty** beneath the verdict. The distinction is also substantive, not cosmetic: for
-`ManualRequired` the document *was* graded and the verdict is real (only its extraction *inputs* are
-distrusted) — two axes. Here there is no verdict on either axis. Applying ADR 0042's carve-out would leave
-the vendor rollup saying `ActionNeeded` while the list badge said "Expiring soon" for the same document: a
-#294-class split, and precisely the outcome the ticket names as the failure mode to avoid.
+**That premise is false for a never-graded document.** No *badge* anywhere says "nothing graded this" — the
+extraction badge reads a healthy "Read", and the detail page's "What we checked" panel is simply **empty**
+beneath the verdict. The distinction is also substantive, not cosmetic: for `ManualRequired` the document
+*was* graded and the verdict is real (only its extraction *inputs* are distrusted) — two axes. Here there is
+no verdict on either axis. Applying ADR 0042's carve-out would leave the vendor rollup saying `ActionNeeded`
+while the list badge said "Expiring soon" for the same document: a #294-class split, and precisely the
+outcome the ticket names as the failure mode to avoid.
+
+There is, however, **one existing surface that explains** the state rather than badging it, and this
+decision widens what it has to explain: the document detail page's "Not checked yet" card
+(`NotCheckedExplainer`), which renders when `complianceStatus === "Pending"` and *names the cause*. Before
+this ADR it had a two-cause taxonomy — no vendor, or a vendor with no checklist — derived from
+`complianceChecks.length === 0`. `ComputeOutcome` reaches zero checks from **three** branches, and the third
+(`applicableRules.Count == 0`: a checklist that exists but whose rules govern other document types) is
+exactly the population §"Context" describes. It used to read `ExpiringSoon` inside the window, so the card
+never rendered for it; now it does, and re-deriving the cause from the check count would print the **false**
+claim "this vendor doesn't have a requirements checklist yet" plus a CTA that resolves nothing — while the
+vendor rollup simultaneously read `ActionNeeded` against the checklist the card denied existed. So
+`DocumentDetail` carries **`vendorHasChecklist`**: the backend already knows which of the two it is, and the
+page cannot know. The card's third arm states the checklist exists, names the document's type, and offers
+both real remedies (add a requirement covering that type, or correct the type). Same reasoning as
+`DocumentDetail.UnreadableFields` under ADR 0040: sourcing the fact from the server is the point, not
+incidental.
 
 So the demotion is mirrored everywhere:
 
@@ -133,11 +154,18 @@ So the demotion is mirrored everywhere:
 | Dashboard compliance-rate denominator | SQL: a clause exactly parallel to the future-effective exclusion |
 | Vendor rollup (list + detail projections) | through `Effective`, via `DocCoverageInfo.ComplianceCheckCount` |
 | CSV / audit PDF / vendor package | through `Effective`, plus §5 below |
+| Dashboard `awaitingReview` tile | SQL: the shared `ComplianceStatusDeriver.ReadsPending` predicate — §6 |
+| Document detail "Not checked yet" card | `DocumentDetail.vendorHasChecklist` — see the three-cause taxonomy above |
 
-The SQL sites spell the fact inline as `d.ComplianceChecks.Any()` rather than composing the shared
+The SQL sites spell the fact inline as `d.ComplianceChecks.Any()` rather than composing a shared
 expression — the same hand-mirroring ADR 0041's date bounds already require (an EF `Expression` cannot be
 invoked inside a composite predicate or a projection), covered the same way: by cross-surface tests pinning
 each count against its own deep-linked list.
+
+The **one exception** is `?status=Pending`, which is a whole-entity predicate on both of its consumers and
+therefore *can* be shared — and must be, because its second consumer is the dashboard count that deep-links
+to it (§6). It lives in `ComplianceStatusDeriver.ReadsPending(today)`, the `DocumentSupersession.IsCurrent`
+shape.
 
 ### 5. The export discloses the count, not just the demoted label
 
@@ -151,7 +179,28 @@ artifacts so they cannot diverge, and each surface discloses in its own establis
   because `Compliance` there is a machine-filterable cell, exactly like `Superseded` next to it.
 
 `ComplianceCell` is `internal` so its wording can be pinned by a unit test: both PDFs are
-FlateDecode-compressed and not text-assertable.
+FlateDecode-compressed and not text-assertable. The vendor package's per-document bullet lines —
+`ExportService.VendorPackageLinesAsync`, which performs its own check-count read — are `internal` for the
+same reason and for one more: that read is the **only** check-count query not shared with the other two
+artifacts, so nothing else would catch it being wired up wrong in either direction.
+
+### 6. Demoting a document must not make it disappear
+
+A demotion that removes a document from `compliant` and `expiringSoon` and puts it nowhere else leaves it in
+**no number on the dashboard at all** — the opposite of this ADR's purpose, which is to *tell* the user
+nothing graded it. So the dashboard gains an **`awaitingReview`** tile, deep-linked to `?status=Pending`.
+
+- It counts the **whole effective-Pending population** (genuine Pending + the ADR 0041 and ADR 0047
+  demotions), not a never-graded-only number, because that is the population its label names and the
+  population the list it links to contains. A narrower count over a wider list would be the same
+  count-vs-list split, one level down.
+- It is computed from the **same predicate** that builds that list (`ReadsPending`), so the two cannot drift.
+- The `expiringSoon` tile is **relabelled** from "Expiring within 30 days" to **"Expiring soon"** — the
+  `DisplayLabels.Compliance` wording of the status it deep-links to. That count is a *verdict* count (it
+  already excluded a not-yet-in-force cert under ADR 0041, and now a never-graded one), so a pure DATE label
+  put it in disagreement with the date-only "Next 30 days" bucket on the same screen about the same
+  document. The date question stays owned by the "When documents expire" card, which is untouched.
+- The **counts themselves are not softened** — that would re-open the overclaim. Only the label changes.
 
 ## Consequences
 
@@ -191,10 +240,15 @@ FlateDecode-compressed and not text-assertable.
   never consulted `ComplianceStatus` at all. Same informational-vs-liability scoping ADR 0041 applies.
 - `ComputeOutcome`'s zero-applicable-rules branch, its `ClearExistingChecks: true`, and the nightly sweep's
   `Pending → ExpiringSoon` transition are all unchanged.
-- Three raw stored-`ComplianceStatus` readers remain un-overlaid and are **out of scope**, because each
+- **Four** raw stored-`ComplianceStatus` readers remain un-overlaid and are **out of scope**, because each
   predates this decision and already ignores the ADR 0027/0041 overlays too: the portal upload-status poll
   (`VendorPortalEndpoints`), the account data export (`AuthEndpoints` — exporting the stored record is
-  arguably correct), and `ComplianceEndpoints.OrgStatus`.
+  arguably correct), `ComplianceEndpoints.OrgStatus`, and `ComplianceEndpoints.RunCheck`
+  (`POST /api/compliance/check/{documentId}`), which returns the freshly-stored verdict in its response
+  envelope — so it answers `ExpiringSoon` for exactly the document class this ADR makes read `Pending`
+  everywhere else. No user sees it today: its only caller discards the body (`api.post<void>`) and refetches
+  the overlaid surfaces. Recorded here rather than overlaid silently, so the next contributor reading "every
+  read surface" is not misled; if that `status` field ever acquires a reader, it must be overlaid first.
 
 ## Alternatives considered
 
