@@ -1965,6 +1965,12 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     /// the stored verdict is the Compliant that full value genuinely earned. Built by hand rather than
     /// by running the worker because this suite owns the REQUEST paths; the worker's own half of the
     /// invariant is pinned in <c>ExtractionWorkerTests</c>.
+    /// <para/>
+    /// #443 / ADR 0048: that affirmative verdict is only REAL when something graded the document, so the
+    /// seed ends in <c>MarkGradedAsync</c> — which reuses the <c>description_of_operations</c> rule
+    /// above (the org's only one). Without it the doc has zero <c>ComplianceCheck</c> rows,
+    /// <c>ComplianceStatusDeriver.Effective</c> demotes it, every read surface answers <c>Pending</c>,
+    /// and the pass→fail narrative below would be told over a pre-state no production path reaches.
     /// </summary>
     private async Task<Guid> SeedDocWithClippedDescriptionAsync(Guid orgId)
     {
@@ -2027,6 +2033,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             FieldValue = "Acme Catering LLC", FieldType = "text", Confidence = 0.95
         });
         await db.SaveChangesAsync();
+        await MarkGradedAsync(orgId, doc.Id);
         return doc.Id;
     }
 
@@ -2098,9 +2105,14 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         var auth = await RegisterAndLoginAsync();
         var docId = await SeedDocWithClippedDescriptionAsync(auth.OrgId);
 
-        var shown = FieldNamed(
-            (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}")).GetProperty("data"),
-            "description_of_operations").GetProperty("fieldValue").GetString();
+        var before = (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}")).GetProperty("data");
+        // The PRE-STATE this whole narrative rests on, asserted rather than assumed: the pass being
+        // flipped has to be a pass the user can actually see. #443 / ADR 0048 demotes an ungraded
+        // affirmative verdict to Pending on every read surface, so a seed that skipped MarkGradedAsync
+        // would leave "a genuine pass" that reads Pending here and this test would compare a fail
+        // against a fail.
+        before.GetProperty("complianceStatus").GetString().Should().Be("Compliant");
+        var shown = FieldNamed(before, "description_of_operations").GetProperty("fieldValue").GetString();
 
         var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
         {
