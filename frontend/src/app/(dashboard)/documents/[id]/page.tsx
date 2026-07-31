@@ -1169,6 +1169,12 @@ export default function DocumentDetailPage() {
                       fieldBorderClass(f.confidence),
                       unreadableSet.has(f.fieldName) && UNREADABLE_FIELD_BORDER,
                     )}
+                    // The clip warning is about what happens if you EDIT this input, so it has to
+                    // reach a screen reader as part of the input — a sibling paragraph is silent
+                    // until the user goes looking for it, and by then they've typed. (#444)
+                    aria-describedby={
+                      f.fieldValueTruncated ? `field-truncated-${f.id}` : undefined
+                    }
                     onChange={(e) => setEdits((prev) => ({ ...prev, [f.fieldName]: e.target.value }))}
                   />
                   {/* #444 / ADR 0049: the box above holds only the START of this value —
@@ -1184,6 +1190,7 @@ export default function DocumentDetailPage() {
                       clipped value IS read correctly, just not shown whole. */}
                   {f.fieldValueTruncated && (
                     <p
+                      id={`field-truncated-${f.id}`}
                       data-testid={`field-truncated-${f.id}`}
                       className="text-xs leading-snug text-amber-800"
                     >

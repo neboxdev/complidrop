@@ -2471,6 +2471,13 @@ describe("DocumentDetailPage — a clipped field value is disclosed (#444 / ADR 
     expect(hint).toHaveTextContent(/view file/i);
     // Error-copy policy: no HTTP jargon, no column widths, no field-name jargon leaking through.
     expect(hint).not.toHaveTextContent(/varchar|2000|truncat/i);
+
+    // And it reaches a screen reader as part of the input it warns about — a sibling paragraph is
+    // silent until the user goes looking, and by then they have already typed over the value.
+    expect(screen.getByLabelText("Description of operations")).toHaveAttribute(
+      "aria-describedby",
+      "field-truncated-f-desc",
+    );
   });
 
   it("shows no clip hint on a normal field", async () => {
@@ -2481,6 +2488,10 @@ describe("DocumentDetailPage — a clipped field value is disclosed (#444 / ADR 
     await waitFor(() => expect(screen.getByText("coi.pdf")).toBeInTheDocument());
     expect(screen.queryByTestId("field-truncated-f-desc")).toBeNull();
     expect(screen.queryByText(/shown shortened/i)).toBeNull();
+    // No dangling pointer at a description that isn't rendered.
+    expect(screen.getByLabelText("Description of operations")).not.toHaveAttribute(
+      "aria-describedby",
+    );
   });
 
   it("marks only the clipped field when the document carries several", async () => {
