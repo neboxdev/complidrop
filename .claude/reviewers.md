@@ -363,6 +363,9 @@ Both are defined in this repo's `.claude/agents/`.
     absence on both sides — it goes through the ONE `DocumentFieldReadability.RawFieldValue` reader,
     ADR 0040), and an earlier duplicate-name row (the worker writes a row per extracted field but
     only the last value per name into the jsonb mirror). Loosening it to an inequality IS a finding.
+    So does an over-length field NAME, whose row name is clamped so the full-name jsonb lookup misses
+    (ADR 0049 §3's "safe direction" — no hint beats a hint pointing at a value we cannot line up).
+    Keying the lookup off a clamped/normalised name to "fix" it IS a finding; pinned by test.
   - The narrowing save is still ALLOWED. Blocking it strands a user who genuinely needs to fix a
     clipped field — ADR 0046 rejects an over-length correction too, so they could not resubmit the
     full text either — and the narrowing is fail-CLOSED (removing text only turns a `contains` pass
@@ -371,6 +374,10 @@ Both are defined in this repo's `.claude/agents/`.
     record) and points at **View file**, never at retyping — retyping is unreachable through ADR
     0046's `validation.too_long`, pinned by a test. Dropping either fact, or offering "type the full
     value back", IS a real finding.
+  - It SURVIVES a pending edit — deliberately NOT gated on the page's `edits` overlay (ADR 0049 §4).
+    The flag describes the RECORD, which holds the fuller value until a Save lands, and a pending edit
+    is when "saving replaces it" is one click from being true. Hiding it once the user types (or
+    scoping away the "Shown shortened." lead) IS a finding; pinned by test, copy AND `aria-describedby`.
   - NO amber input border: that marker means "we couldn't read this" / low confidence (ADR 0040), and
     a clipped value is read correctly and high-confidence. Adding one conflates two states.
   - The worker-side pin (`ExtractionWorkerTests.A_row_the_worker_clipped_is_reported_clipped_by_the_

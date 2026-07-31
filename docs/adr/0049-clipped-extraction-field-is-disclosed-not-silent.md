@@ -105,6 +105,28 @@ REJECTS an over-length correction (`validation.too_long`) — user-TYPED content
 there is no path by which a person restores the full text through this input, and copy implying
 otherwise would send them into a 400 loop. Pinned by a test, so the two decisions cannot drift apart.
 
+**The hint SURVIVES a pending edit**, and that is a decision rather than an accident of where the flag
+comes from. The moment the user types, the input switches to the page's `edits` overlay while
+`fieldValueTruncated` keeps describing the server payload — so the hint could plausibly have been gated
+on "no edit pending". It is not, and must not be:
+
+- The flag is a fact about the **record**, not about the pixels. `ExtractionFields` still holds the
+  fuller value right up until a Save lands, so "this value is longer than we can show here" stays true
+  for the whole of the pending edit — it is describing the same record it described before the user
+  touched anything.
+- A pending edit is precisely **when the second sentence matters most**. "Saving replaces it with just
+  what's in the box" is a statement about an action the user is now one click from taking. Withdrawing
+  the warning at that instant would remove it at the only moment it is actionable, and the failure it
+  guards — an untouched clip PUT back as the canonical value — reaches its commit point right there.
+- Dropping the whole hint would break this section's own rule that **both** facts stay on screen; and
+  dropping only the "Shown shortened." lead (the one clause a typed-over box arguably outdates) would
+  buy a small gain in literal precision for a second copy variant, pinned separately, that says less at
+  the moment the user needs it most. The lead is a label for the disclosure, not a claim about the
+  current contents of the input.
+
+Pinned by a test that types into the clipped input and asserts both the copy and the `aria-describedby`
+wiring survive, so a later "tidy up: hide it once they've edited" goes red.
+
 **5. No amber border.** The amber input outline means *"we couldn't read this"* (ADR 0040) or *"low
 confidence"*. A clipped value is read correctly and is high-confidence; it is simply not shown whole.
 Reusing the marker would make two different states indistinguishable and would tell the user to

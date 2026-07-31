@@ -2514,6 +2514,33 @@ describe("DocumentDetailPage — a clipped field value is disclosed (#444 / ADR 
     expect(await screen.findByTestId("field-truncated-f-desc")).toBeInTheDocument();
     expect(screen.queryByTestId("field-truncated-f-insured")).toBeNull();
   });
+
+  it("keeps the hint while an edit is pending on the clipped field", async () => {
+    // The state the hint EXISTS for, and the only one it was not pinned in. The flag comes from the
+    // server payload while the input switches to the `edits` overlay the moment the user types, so
+    // "does the hint survive its own warning coming true?" is a real branch, not a detail.
+    //
+    // It must survive (ADR 0049 §4): this is the instant the second sentence matters most — the
+    // record still holds the fuller value, the box no longer does, and a Save now is exactly the
+    // narrowing the hint was raised about. Dropping it here would take the warning away at the one
+    // moment it is actionable, and §4 forbids showing either fact without the other.
+    mountWithFields([{ ...clippedField, fieldValueTruncated: true }]);
+
+    const input = await screen.findByLabelText("Description of operations");
+    expect(input).toHaveValue(CLIPPED);
+    fireEvent.change(input, { target: { value: "Catering services for the gala." } });
+    // The overlay really is in force — otherwise this test would pass without ever leaving the
+    // server-rendered state it means to leave.
+    expect(input).toHaveValue("Catering services for the gala.");
+
+    const hint = screen.getByTestId("field-truncated-f-desc");
+    expect(hint).toHaveTextContent(/shown shortened/i);
+    expect(hint).toHaveTextContent(/saving replaces it with just what's in the box/i);
+    expect(hint).toHaveTextContent(/view file/i);
+    // And still announced with the input, so the warning reaches someone who is mid-edit rather
+    // than only someone who read the page before touching it.
+    expect(input).toHaveAttribute("aria-describedby", "field-truncated-f-desc");
+  });
 });
 
 describe("DocumentDetailPage — View file streams through the authenticated proxy (#254)", () => {

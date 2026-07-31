@@ -1187,7 +1187,11 @@ export default function DocumentDetailPage() {
                       an over-length value is rejected (ADR 0046) — so the honest remedy
                       we can offer is "read the original", not "retype it". No amber
                       border: that marker means "we couldn't read this" (ADR 0040), and a
-                      clipped value IS read correctly, just not shown whole. */}
+                      clipped value IS read correctly, just not shown whole.
+                      Deliberately NOT gated on `edits[f.fieldName] === undefined`
+                      (ADR 0049 §4): the flag describes the RECORD, which still holds the
+                      fuller value until a Save lands, so a pending edit is the moment the
+                      warning is most actionable — not the moment to withdraw it. */}
                   {f.fieldValueTruncated && (
                     <p
                       id={`field-truncated-${f.id}`}
