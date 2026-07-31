@@ -195,12 +195,34 @@ Both are defined in this repo's `.claude/agents/`.
     status it links to), NOT a date range: it is a verdict count, and a date label put it in
     disagreement with the date-only "Next 30 days" pipeline bucket about the same document. Softening
     a COUNT to fix such a disagreement would re-open the overclaim — change the label, not the number.
-  - `DocumentDetail.vendorHasChecklist` exists because the detail page's "Not checked yet" card NAMES
-    the cause, and zero check rows has THREE causes, not two: no vendor, no checklist, or a checklist
-    whose rules all govern OTHER document types. Only the backend can tell the last two apart; deriving
+  - The detail page's "Not checked yet" card NAMES the cause, so it may only ever name a cause it can
+    KNOW. Zero check rows has FOUR causes: no vendor, no checklist, an EMPTY checklist, or a checklist
+    whose rules all govern OTHER document types. Only the backend can tell the last three apart, so
+    `DocumentDetail` carries BOTH `vendorHasChecklist` AND `vendorChecklistRuleCount` — neither alone
+    separates them (a bare `count > 0` can't tell an empty checklist from no checklist), and the coarse
+    boolean alone put an empty checklist in the arm asserting it holds rules for other types. Deriving
     the cause from `complianceChecks.length` prints a FALSE claim about a vendor that plainly has a
-    checklist, plus a dead-end CTA — the same reasoning as `DocumentDetail.UnreadableFields` (ADR 0040).
-    A frontend re-derivation IS a real finding.
+    checklist, plus a dead-end CTA — same reasoning as `DocumentDetail.UnreadableFields` (ADR 0040). A
+    frontend re-derivation of the CAUSE IS a real finding. Three more properties of that card, each
+    load-bearing rather than cosmetic:
+    - It gates on an ALLOW-LIST of settled extraction statuses (`Completed`/`ManualRequired`, the
+      `ResolveManualReview` pair), NOT on excluding `Pending`/`Processing`. A terminally `Failed`
+      extraction never reaches `ApplyEvaluationAsync` (the worker calls it only inside `PersistSuccess`),
+      so it sits at default-`Pending` with zero checks and used to get a confident, false cause named
+      over it; `ProcessingErrorCard` states the real reason. Re-widening that gate to an exclusion list
+      IS a real finding — the allow-list is what fails closed for a future extraction state.
+    - When the stored `documentType` is NOT exactly canonical (the `"COI"` vs `"coi"` headline
+      population), the arm prints the RAW stored value and leads with a one-click "Set type to {label}"
+      PATCH. Load-bearing: `documentTypeLabel` normalizes case, so the old copy denied a requirement the
+      vendor page visibly lists, and its "add a requirement" CTA added a DUPLICATE that still wouldn't
+      grade the doc — while `DocumentTypeSelect` is case-insensitive and already displays the right
+      label, so re-picking it fires no change event and the "just fix the type" advice was unfollowable.
+      `frontend/src/lib/document-types.ts`'s `canonicalDocumentType` is PRESENTATIONAL — it picks which
+      remedy leads, never which cause is named.
+    - KNOWN residue, recorded in ADR 0048 §4 — do not re-report: a rule delete hard-deletes its checks
+      and re-grades AFTER the commit, so a never-landed re-grade reaches zero checks with a governing
+      rule present, and the last arm's copy overstates. Closing it needs the applicable-rules filter
+      re-implemented at read time (a second grading predicate), for a transient that self-heals.
   - The vendor rollup has NO grading clause of its own — `ComputeCoverage` gets the exclusion for
     free because `Effective` already reads such a doc `Pending`. Adding a second explicit clause
     there (the shape ADR 0042's `ManualRequired` exclusion needs) would be a duplicate, not a fix.
@@ -209,14 +231,25 @@ Both are defined in this repo's `.claude/agents/`.
     stored `Compliant` with zero checks DOES demote — transiently reachable when a rule delete
     hard-deletes its checks and the post-commit re-grade never lands; fail-closed is intended.
   - SQL sites spell the fact inline as `d.ComplianceChecks.Any()` — an EF expression cannot be invoked
-    inside a composite predicate or a projection, the same hand-mirroring ADR 0041's date bounds already
-    require. Covered by the count-vs-deep-linked-list pins; a NEW SQL read arm missing the clause IS a
-    real finding. The lone shared predicate is `ReadsPending` (see the dashboard bullet above) — it has
-    two consumers that must agree and both take a whole-entity predicate.
+    as one clause of a multi-clause lambda (the dashboard counts, most sharply the rate denominator's
+    NEGATED composite) nor as a projected scalar (the list / rollup / export projections), the same
+    hand-mirroring ADR 0041's date bounds already require. Covered by the count-vs-deep-linked-list pins;
+    a NEW SQL read arm missing the clause IS a real finding. The lone shared predicate is `ReadsPending`
+    (see the dashboard bullet above) — it has two consumers that must agree and both take a whole-entity
+    predicate, and it is pinned against `Effective` over the full status × expiry × effective-date ×
+    grading grid so one of its three OR arms can't drift out of the deriver. The documents-list
+    Compliant/ExpiringSoon arms are the SAME shape and COULD take an `Expression`; they stay inline
+    because each has ONE consumer, so there is no drift to prevent — not because they structurally
+    can't. Do not "fix" that as an inconsistency in either direction.
   - The export discloses the COUNT as well as the demoted label, through the one shared
     `ExportService.ComplianceCell`: the two PDFs append `" (no requirements checked)"` inline (the
     `"(superseded)"` shape, and the two compose), the CSV instead carries a `RequirementsChecked`
-    column so its `Compliance` cell stays machine-filterable. That asymmetry is deliberate.
+    column so its `Compliance` cell stays machine-filterable. That asymmetry is deliberate. Each PDF's
+    rows go through its OWN `internal` seam carrying its OWN check-count read —
+    `AuditReportRowsAsync` and `VendorPackageLinesAsync` — because a `%PDF` smoke test can't tell a
+    wired-up count map from an empty one (empty annotates EVERY row; a dropped annotation certifies a
+    doc nothing graded), and neither is visible in the FlateDecode bytes. Inlining either back into its
+    builder un-pins that wiring.
   - The ordinal-case-SENSITIVE applicable-rules filter vs `ComputeCoverage`'s case-INsensitive
     required-type match is a KNOWN live disagreement (it is how the never-graded state is reachable
     without any legacy data). ADR 0048 Option E records why it was NOT unified here — widening what
@@ -236,6 +269,11 @@ Both are defined in this repo's `.claude/agents/`.
     order without an ORDER BY, and the rule shows up in the "What we checked" panel), and with NO
     rule in the org it mints a real, org-visible `Graded-{guid}` template — a test asserting on
     template lists or requirement counts should seed its own checklist, which the helper then reuses.
+    The per-suite `SeedDocAsync`/`SeedVendorDocAsync` helpers in `ComplianceVerdictFreshnessTests`,
+    `FutureEffectiveCoverageGapTests` and `VendorEndpointsTests` therefore call it UNCONDITIONALLY and
+    carry no `graded` knob: those suites test the date / effective-date / rollup axes, and an opt-out
+    nothing passes is a dead parameter whose comment misleads. `NeverGradedCoverageTests.SeedDocAsync`
+    is the one that keeps the knob — ungraded is its DEFAULT, because that is its subject.
 - The canonical document-type vocabulary is ONE list — `Services/CanonicalDocumentTypes.cs`
   (#373, [ADR 0045](../docs/adr/0045-canonical-document-type-vocabulary.md)) — and
   `ExtractionWorker.PersistSuccess` coerces the model's `documentType` through it before that

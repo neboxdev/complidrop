@@ -131,17 +131,55 @@ There is, however, **one existing surface that explains** the state rather than 
 decision widens what it has to explain: the document detail page's "Not checked yet" card
 (`NotCheckedExplainer`), which renders when `complianceStatus === "Pending"` and *names the cause*. Before
 this ADR it had a two-cause taxonomy — no vendor, or a vendor with no checklist — derived from
-`complianceChecks.length === 0`. `ComputeOutcome` reaches zero checks from **three** branches, and the third
-(`applicableRules.Count == 0`: a checklist that exists but whose rules govern other document types) is
+`complianceChecks.length === 0`. `ComputeOutcome` reaches zero checks from more branches than that, and the
+`applicableRules.Count == 0` one (a checklist that exists but whose rules govern other document types) is
 exactly the population §"Context" describes. It used to read `ExpiringSoon` inside the window, so the card
 never rendered for it; now it does, and re-deriving the cause from the check count would print the **false**
 claim "this vendor doesn't have a requirements checklist yet" plus a CTA that resolves nothing — while the
-vendor rollup simultaneously read `ActionNeeded` against the checklist the card denied existed. So
-`DocumentDetail` carries **`vendorHasChecklist`**: the backend already knows which of the two it is, and the
-page cannot know. The card's third arm states the checklist exists, names the document's type, and offers
-both real remedies (add a requirement covering that type, or correct the type). Same reasoning as
-`DocumentDetail.UnreadableFields` under ADR 0040: sourcing the fact from the server is the point, not
-incidental.
+vendor rollup simultaneously read `ActionNeeded` against the checklist the card denied existed.
+
+**The governing rule for this card is that it may only name a cause it can actually know**, which the
+review pass turned into four requirements:
+
+- **`DocumentDetail` carries `vendorHasChecklist`** — the backend knows whether a template is assigned and
+  the page cannot. Same reasoning as `DocumentDetail.UnreadableFields` under ADR 0040: sourcing the fact
+  from the server is the point, not incidental.
+- **…and `vendorChecklistRuleCount` beside it**, because "a template is assigned" is too coarse for the
+  taxonomy the card names. A vendor assigned an **empty** checklist has one, so it landed in the arm whose
+  copy asserts the checklist *holds requirements that govern other types* — false about the customer's own
+  data, with the wrong remedy. The two fields together separate all four causes; neither alone does (a bare
+  `count > 0` cannot tell an empty checklist from no checklist). A soft-deleted template reports `0` and
+  lands on the empty-checklist arm, where the remedy is equally right.
+- **Only a SETTLED extraction gets a cause named.** A terminally failed extraction never reaches
+  `ApplyEvaluationAsync` — `ExtractionWorker`'s only call site is inside `PersistSuccess` — so it sits at
+  the default `Pending` compliance with zero checks, indistinguishable from a non-governing checklist by
+  the check count alone. The card gates on an **allow-list** (`Completed` / `ManualRequired`, the pair
+  `DocumentEndpoints.ResolveManualReview` treats as settled) rather than on excluding
+  `Pending`/`Processing`, so it also fails closed for any extraction state added later. `ProcessingErrorCard`
+  states the real reason, and every `Failed` write sets the `ProcessingError` that renders it.
+- **A non-canonically-stored type leads with the type correction, and shows the raw value.**
+  `documentTypeLabel` normalizes case, so the headline population — a document stored `"COI"` against a
+  `"coi"` rule — renders "Certificate of Insurance" on both sides: the old copy told the user nothing on
+  the checklist applied to Certificate of Insurance while the vendor page visibly listed a Certificate of
+  Insurance requirement, and offered to add a **duplicate that still would not grade the document**. That
+  arm now prints the RAW stored string and offers a one-click "Set type to {label}" (a `PATCH`, which
+  re-grades) — necessary because the type picker at the top of the page is case-insensitive and already
+  *displays* the right label, so re-picking it fires no change event. A value the vocabulary does not
+  recognise at all has no one-click target, so the copy points at that picker, which does show such a value
+  as un-selectable. `frontend/src/lib/document-types.ts`'s `canonicalDocumentType` answers "is the stored
+  string exactly canonical?"; it is **presentational only** — it chooses which remedy leads, never which
+  cause is named.
+
+The resulting four arms: no vendor (assign picker) · no checklist (set one up) · empty checklist (add the
+first requirement) · a checklist with rules that do not govern this document (add a covering requirement,
+or — when the stored type is non-canonical — correct the type).
+
+**Known residue, deliberately not closed here:** a rule delete hard-deletes its check rows and re-grades
+*after* the commit (§2). If that re-grade never lands, a document whose checklist *does* have a governing
+rule reaches zero checks, and the last arm's copy overstates. Closing it would need the applicable-rules
+filter re-implemented at read time — a second copy of a grading predicate, the exact drift this ADR's
+one-recognizer rule exists to prevent — to describe a transient state that self-heals on the next
+evaluation. Recorded rather than mirrored.
 
 So the demotion is mirrored everywhere:
 
@@ -155,7 +193,7 @@ So the demotion is mirrored everywhere:
 | Vendor rollup (list + detail projections) | through `Effective`, via `DocCoverageInfo.ComplianceCheckCount` |
 | CSV / audit PDF / vendor package | through `Effective`, plus §5 below |
 | Dashboard `awaitingReview` tile | SQL: the shared `ComplianceStatusDeriver.ReadsPending` predicate — §6 |
-| Document detail "Not checked yet" card | `DocumentDetail.vendorHasChecklist` — see the three-cause taxonomy above |
+| Document detail "Not checked yet" card | `DocumentDetail.vendorHasChecklist` + `vendorChecklistRuleCount` — see the four-cause taxonomy above |
 
 The SQL sites spell the fact inline as `d.ComplianceChecks.Any()` rather than composing a shared
 expression — the same hand-mirroring ADR 0041's date bounds already require (an EF `Expression` cannot be
@@ -179,10 +217,13 @@ artifacts so they cannot diverge, and each surface discloses in its own establis
   because `Compliance` there is a machine-filterable cell, exactly like `Superseded` next to it.
 
 `ComplianceCell` is `internal` so its wording can be pinned by a unit test: both PDFs are
-FlateDecode-compressed and not text-assertable. The vendor package's per-document bullet lines —
-`ExportService.VendorPackageLinesAsync`, which performs its own check-count read — are `internal` for the
-same reason and for one more: that read is the **only** check-count query not shared with the other two
-artifacts, so nothing else would catch it being wired up wrong in either direction.
+FlateDecode-compressed and not text-assertable. Each PDF's rows are `internal` seams for the same reason —
+`ExportService.VendorPackageLinesAsync` and `ExportService.AuditReportRowsAsync`, **each performing its own
+check-count read**, each pinned against a seeded org holding one graded and one never-graded document. A
+`%PDF` smoke test cannot distinguish a correctly-wired count map from an empty one: an empty map would
+annotate *every* row of an auditor's report "(no requirements checked)", and a dropped annotation would
+print an affirmative verdict for a document nothing graded. Both directions are invisible in the compressed
+bytes, so both are asserted at the seam that builds the rows rather than at the artifact.
 
 ### 6. Demoting a document must not make it disappear
 
@@ -295,4 +336,4 @@ exact bug with an extra step.
 
 - Tickets: [#443](https://github.com/neboxdev/complidrop/issues/443), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
 - ADRs: [0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) (the coverage-exclusion precedent this follows, and whose document-level carve-out it deliberately does not), [0041](0041-future-effective-not-yet-in-force-reads-pending.md) (the read-only-overlay mechanism this reuses verbatim on a third axis), [0040](0040-unreadable-canonical-value-fails-closed.md) (the same fail-closed posture), [0045](0045-canonical-document-type-vocabulary.md) (why the never-graded population is reachable and is not laundered), [0030](0030-compliance-verdict-combined-unit-of-work.md) (why an affirmative stored verdict normally commits with its check rows), [0027](0027-compliance-date-window-boundaries.md) (the date-window convention the demotion sits beside)
-- Code: `Services/DocumentGrading.cs` (the recognizer), `Services/ComplianceStatusDeriver.cs` (`Effective`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo` + both projections), `Endpoints/DocumentEndpoints.cs` (list status arms + projection, detail), `Endpoints/DashboardEndpoints.cs` (`Stats`), `Services/ExportService.cs` (`ComplianceCell`, `CheckCountsAsync`, `NeverGradedAnnotation`, the CSV `RequirementsChecked` column)
+- Code: `Services/DocumentGrading.cs` (the recognizer), `Services/ComplianceStatusDeriver.cs` (`Effective`, `ReadsPending`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo` + both projections), `Endpoints/DocumentEndpoints.cs` (list status arms + projection, detail), `Endpoints/DashboardEndpoints.cs` (`Stats`), `Services/ExportService.cs` (`ComplianceCell`, `CheckCountsAsync`, `NeverGradedAnnotation`, `AuditReportRowsAsync`, `VendorPackageLinesAsync`, the CSV `RequirementsChecked` column), `frontend/src/app/(dashboard)/documents/[id]/page.tsx` (`NotCheckedExplainer`), `frontend/src/lib/document-types.ts` (`canonicalDocumentType`)
