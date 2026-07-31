@@ -58,7 +58,7 @@ confirmation · ✅ confirmed. **Gate:** launch-blocking unless marked *(refine 
 | **TPL-B8** | How often does bar-service **liquor liability** appear on the main ACORD 25 vs a separate certificate? (calibrates the liquor rule's fail-closed rate) | B | Liquor rule tuning | ⬜ *(refine later)* | TRR §8 B-8 |
 | **CLM-1** | Additional-insured copy: reword "Names you as additional insured" → "Certificate indicates…"; the certificate cannot prove AI status (endorsement needed). **UI/API copy now STAGED** behind `ComplianceClaims:CorrectedAdditionalInsuredWording` (default OFF, copy-only, ADR 0043); marketing-site copy still to do at flip. | A | Marketing + UI (#396) | ⬜ | §C, TRR §3/§7 |
 | **CLM-2** | "Coverage dates that include the event" is currently unbacked (no event-date check exists); soften until the feature is built. | A | Marketing (#399 tier b) | ⬜ | §C, TRR §2.6/§7 |
-| **CLM-3** | Exported audit PDF / vendor package carry no disclaimer while printing bare "Compliant". **A disclaimer now SHIPS on all three artifacts** (audit PDF, vendor package, CSV), on by default and behind no flag — ADR 0047. Confirm/refine the exact sentence alongside CLM-1. | A | Export (#402) | ⬜ | §C |
+| **CLM-3** | Exported audit PDF / vendor package carry no disclaimer while printing bare "Compliant". **A disclaimer now SHIPS on all three artifacts** (audit PDF, vendor package, CSV), on by default and behind no flag — ADR 0047. **Two answers needed:** (a) confirm/refine the exact sentence alongside CLM-1, and (b) rule on **prominence** — it currently renders in the same 8pt light-slate fine print as the branding line beneath it; is that conspicuous enough for an artifact handed to an insurer/broker/adjuster, or does it want weight, size, a rule, or the §V.1 all-caps formula? | A | Export (#402) | ⬜ | §C |
 | **CLM-4** | FAQ "We don't sell or share your data" vs the 7 disclosed subprocessors (document contents to Google). | A | Marketing/privacy (#403) | ⬜ | §C |
 | **CLM-5** | Public vendor portal has no privacy notice (CCPA notice-at-collection). | A | Portal (#404) | ⬜ | §C |
 | **CLM-6** | "Documents not used to train AI models" holds only on the Vertex path; AI Studio + Anthropic are config-reachable and Anthropic isn't a disclosed subprocessor. | A | Privacy (#405) | ⬜ | §C |
@@ -79,7 +79,10 @@ dollar minimums), CLM-1..CLM-6 (copy/privacy). *Refine-later:* TPL-B4..B8.
 **No switch (already live):** the export disclaimer (CLM-3) is ON by default — a disclaimer
 where none existed is one-directional risk reduction, so staging it OFF would have left the
 defect live in prod (ADR 0047 §4). Sign-off here means *confirming or refining the sentence*,
-a one-line edit to `ExportService.Disclaimer` (plus its verbatim test pin), not a flag flip.
+a one-line edit to `ExportService.Disclaimer` (plus its verbatim test pin), not a flag flip —
+**and**, if counsel wants the qualifier more conspicuous than today's fine print (ADR 0047 §5),
+a second one-place edit to the footer styling in `ExportService.ApplyPageDefaults`. Neither
+touches a verdict, so neither needs a runbook or a re-grade.
 
 ---
 

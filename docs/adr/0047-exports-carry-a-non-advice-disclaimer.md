@@ -41,7 +41,12 @@ pending a licensed **Texas attorney's** sign-off), filed as
 
 ## Decision
 
-**Every generated export carries one shared non-advice disclaimer, ON BY DEFAULT.**
+**Every export a customer hands to a third party carries one shared non-advice disclaimer, ON BY
+DEFAULT.**
+
+That is the three reliance artifacts in the table above, and it is the scope on purpose: the
+disclaimer belongs on what leaves the app bearing a CompliDrop verdict, not on everything the API can
+serialize (see § Consequences → Neutral for what that excludes, and why).
 
 ### 1. One constant, three artifacts
 
@@ -64,8 +69,30 @@ over-reaching disclaimer is its own liability, and the Terms already own the ful
 
 `ApplyPageDefaults(PageDescriptor page, string? attribution)` now applies the footer alongside the
 page size, margin and default text style. Both PDF builders call it; a new PDF export cannot pick up
-the chrome without the disclaimer, and `ExportDisclaimerTests` pins that every `container.Page`
-composition in the file calls through it.
+the chrome without the disclaimer, and `ExportDisclaimerTests` pins that **every** QuestPDF page
+composition anywhere under `api/CompliDrop.Api/` calls through it.
+
+That pin is deliberately shaped like `Adr0009EnforcementTests`, and for the same reason — a
+guarantee stated in a document is not re-run on every PR, so it has to be mechanical:
+
+- it walks the whole production tree, because the likeliest fourth export lives in a **new file**;
+- it matches the composition on **shape**, not on the identifiers `container` / `page`, so renaming
+  the lambda parameter or nesting the composition (`Document.Create(doc => doc.Page(page => …))`)
+  does not slip past it;
+- a `.Page(` call in a shape it cannot read fails **closed** — "I could not check this" is reported
+  as a violation, never skipped;
+- it carries anti-no-op floors (files scanned, compositions inspected) so a mis-resolved root fails
+  loudly instead of passing by checking nothing;
+- and the one exclusion, `SampleCertificateGenerator`, is a named entry citing this ADR rather than a
+  file the scan silently never reached.
+
+A type-level guarantee — the `RuleEngine/ObligationReport` technique, where the mandatory notice is
+structurally impossible to omit because you cannot construct the report without it — was considered
+and is **not available here**. That works because `ObligationReport` is our type and its constructor
+is the only door. A PDF's door is `QuestPDF.Fluent.Document.Create` + `GeneratePdf()`, a third-party
+static returning `byte[]`: any code can produce export bytes without touching our wrapper, exactly as
+`SampleCertificateGenerator` already does. A wrapper would make the chrome *convenient*, not
+mandatory, so the mechanical scan is the strongest guarantee actually purchasable.
 
 - **`page.Footer()`, not `page.Content()`.** QuestPDF repeats the footer on **every** page, so the
   disclaimer travels with any page of a forwarded export. In the content flow it would print once, at
@@ -92,8 +119,13 @@ so pinning the seam pins what the footer says — the same technique #262 used w
 A single-field record **after** the data. Never a preamble above the header: FP-102 deliberately
 shaped row 1 as the header line Excel and pandas both key on, and a note there breaks that. A short
 trailing row is unambiguously not a document row, and both parsers accept it — whereas a rectangular
-row padded to twelve columns would read as a document *named after the disclaimer*. The sentence
-contains no comma, so it is written unquoted and cannot split into extra columns.
+row padded to twelve columns would read as a document *named after the disclaimer*.
+
+Today's sentence contains no comma, so CsvHelper writes it unquoted and the last line is the
+sentence verbatim. That is a property of **this wording**, not a constraint on it: a reworded
+disclaimer containing a comma would simply be quoted, which is correct CSV and still one field. The
+tests assert the *parsed* trailing field for exactly that reason, and pin "needs no quoting"
+separately, so a counsel reword (§5) reads as a reword rather than as a CSV defect.
 
 ### 4. On by default — deliberately NOT behind a feature flag
 
@@ -111,13 +143,30 @@ one is not**, and the distinction is the point:
 - It changes **no verdict and no value**: same statuses, same columns, same rows. It is additive
   copy on the artifact, not a claim about any document.
 
-### 5. The wording is provisional, and refined at the CLM-1 pass
+### 5. The wording — and its prominence — are provisional, and counsel rules on both
 
 `G1-COUNSEL-BRIEF.md` §0 CLM-3 stays ⬜ (pending attorney confirmation) and now records that the
 disclaimer is **shipped and live**, with the exact string to be confirmed or refined in the same pass
 as CLM-1's additional-insured sentence — the two highest-leverage strings in the product, reviewed
 together. Refinement is a one-line edit to `ExportService.Disclaimer` plus its verbatim test pin: no
 flag flip, no runbook, no re-grade. That is the whole reason the constant is single-sourced.
+
+**CLM-3 is two questions, not one.** As shipped, the disclaimer renders in *exactly the treatment of
+the branding line beneath it* — 8pt, `#64748b` light slate, centred, bottom of the page. §2 records
+*where* it goes (footer, not content) and §4 records *whether* it ships (on, not staged), but nothing
+recorded how **conspicuous** it should be — and conspicuousness is the axis disclaimer enforceability
+actually turns on for a third party who never agreed to anything. Bottom-of-page fine print, styled
+identically to a logo line, is the weakest treatment available on the one artifact whose entire
+problem is third-party reliance.
+
+Restyling it unilaterally would be Option D's over-reach pointed the other way: picking a
+conspicuousness level is a legal judgement, and the sentence it would be applied to is itself
+provisional. So CLM-3 now asks counsel **both** halves in one pass — *confirm or refine the sentence,
+**and** say whether this treatment is conspicuous enough for an artifact handed to an insurer, broker
+or adjuster* (weight, size, a rule above it, or the `G1-LEGAL-RESEARCH.md` §V.1 all-caps
+Tex. Gov't Code §81.101(c) formula are all on the table — see Option D′). Both answers land in the
+same two places: `ExportService.Disclaimer` and `ApplyPageDefaults`' footer styling. The CSV has no
+typography, so a prominence answer reaches only the two PDFs.
 
 ## Consequences
 
@@ -126,8 +175,9 @@ flag flip, no runbook, no re-grade. That is the whole reason the constant is sin
 - The reliance artifact now qualifies itself. A third party reading a forwarded PDF sees, on every
   page, that the status is an automated reading and that the certificate does not modify the policy.
 - Counsel refines one string in one place; the change reaches all three artifacts by construction.
-- Structurally durable: a fourth export path either goes through `ApplyPageDefaults` (and carries the
-  disclaimer) or fails the pin.
+- Structurally durable: a fourth export path — in this file or any new one under
+  `api/CompliDrop.Api/` — either goes through `ApplyPageDefaults` (and carries the disclaimer), or
+  earns a cited exemption, or fails the pin.
 - Partially covers the read-surface overclaims already recorded against the export —
   [#443](https://github.com/neboxdev/complidrop/issues/443)'s never-graded "Expiring soon" and ADR
   0042's undemoted distrusted extraction now at least print under a non-advice qualifier. It does not
@@ -143,6 +193,10 @@ flag flip, no runbook, no re-grade. That is the whole reason the constant is sin
   short width are what make that recoverable; the alternative (no disclaimer on the CSV) is worse.
 - The wording ships before sign-off. Mitigated by being one-directional (§4) and single-sourced (§5),
   but it *is* an unreviewed legal string in production until CLM-3 clears.
+- So does its **prominence**, which is weaker: the qualifier is set in the same fine print as the
+  branding line, so a reader's eye may file it as a footer logo rather than as a notice (§5). Accepted
+  for now — under-styling is recoverable and over-styling ahead of counsel is not — but it is an open
+  question routed to CLM-3, not a settled decision.
 
 ### Neutral
 
@@ -150,7 +204,18 @@ flag flip, no runbook, no re-grade. That is the whole reason the constant is sin
   the customer reads while looking at the product's own framing; #402 is about what leaves the app.
 - `SampleCertificateGenerator` (the generated sample COI) is deliberately **not** in scope. It is a
   simulated *vendor document*, not a CompliDrop assertion about anything, and it does not use the
-  shared export chrome.
+  shared export chrome — it carries a louder qualifier of its own (a "SAMPLE — NOT A REAL CERTIFICATE"
+  banner, a page watermark, and its own footer). It is recorded as the one named exemption in
+  `ExportDisclaimerTests.ChromeExemptions`, so the exclusion is enforced as a decision rather than
+  surviving as an oversight.
+- The **account data export** (`GET /api/auth/account/export`, `AuthEndpoints.ExportAccount` — the
+  Settings → "Export your data" button) is deliberately out of scope, and it is the reason the
+  Decision above says *"every export a customer hands to a third party"* rather than *"every export"*.
+  It is a GDPR/CCPA **portability dump of the account's own data back to its own owner**: raw JSON,
+  no masthead, no branding, no rendered verdict — its `complianceStatus` is the bare numeric enum
+  code, not a `DisplayLabels.Compliance` label — so there is no "Compliant" for a third party to read
+  off it and nothing for reliance to attach to. Same treatment, and the same reasoning, as the email
+  templates below.
 - The email templates are out of scope — a reminder makes no compliance assertion about a document.
 
 ## Alternatives considered

@@ -670,7 +670,8 @@ Use a real phone, not just DevTools emulation.
   - **Documents** table: every active doc — columns **File / Vendor / Type / Expires / Compliance** (humanized labels).
   - **Audit Log** table: columns **When / Action / Entity / User**. The **User** column shows a human **actor name** (full name, or email, or **"System"** for system events) — not a raw id (#197).
   - A scope line: **"{N} events from {from} to {to}"**, or, if the log was capped, **"Showing the 500 most recent events from {from} to {to}"** (#197 cap disclosure — 500 max).
-  - Footer: **"CompliDrop · QA Admin A"**.
+  - Footer, **two lines, in this order** (#402 / CLM-3, ADR 0047): the disclaimer **"Statuses reflect automated reading of documents as uploaded; certificates do not modify policies. Verify current coverage with the issuing carrier."**, and **below it** the attribution **"CompliDrop · QA Admin A"**. The disclaimer is **added above** the attribution — a footer showing only one of the two is a bug either way.
+  - The same footer on **EVERY page** — scroll to **page 2** of a multi-page report (seed enough documents to paginate if §1 didn't) and to the last page. This is the whole point of it living in the page footer: a forwarded page must carry the qualifier, not just page 1.
 - [ ] **9.1.6** **Don't expect:** any other org's documents, any soft-deleted documents, or PII you didn't enter.
 
 ### 9.2 Date range edge cases
@@ -683,12 +684,15 @@ Use a real phone, not just DevTools emulation.
 
 - [ ] **9.3.1** CSV card: header **"CSV export"**, description **"All active documents as CSV — useful for spreadsheets, BI tools, or one-off reporting."** (no date inputs — CSV always exports all active docs).
 - [ ] **9.3.2** Click **"Download CSV"**. **Expect:** toast "Download started", file `complidrop-documents-2026-06-05.csv` (uses the To-date).
-- [ ] **9.3.3** Open it. **Expect:** header row **Id, FileName, Vendor, Type, Status, Compliance, EffectiveDate, ExpirationDate, GeneralLiabilityLimit, UploadedBy, CreatedAt** (Type/Status/Compliance humanized).
-- [ ] **9.3.4** **Don't expect:** soft-deleted documents, or another org's data.
+- [ ] **9.3.3** Open it. **Expect:**
+  - **Row 1 is the header**, with nothing above it: **FileName, Vendor, Type, ProcessingStatus, Compliance, Superseded, EffectiveDate, ExpirationDate, GeneralLiabilityLimit, UploadedBy, CreatedAt, Id** (Type/ProcessingStatus/Compliance humanized). Refreshed for FP-102/#320 + #327: the human columns lead, the extraction-state column is **ProcessingStatus** (not "Status" — it is not the compliance verdict beside it), **Superseded** is Yes/No, **CreatedAt** parses as a date/time rather than opaque text, and the raw GUID **Id** is the **last** column.
+  - **The last row** (#402 / CLM-3, ADR 0047) is the disclaimer as a **single cell in column A**, the rest of the row empty: **"Statuses reflect automated reading of documents as uploaded; certificates do not modify policies. Verify current coverage with the issuing carrier."** It sits **after** the data — never as a preamble above the header — and it is not a document row.
+- [ ] **9.3.4** **Don't expect:** soft-deleted documents, another org's data, a disclaimer row above the header, or the disclaimer spread across all 12 columns.
 
 ### 9.4 Single-vendor PDF (KNOWN GAP)
 
 - [ ] **9.4.1** The endpoint `GET /api/export/vendor/{id}` exists (PDF header "Vendor Compliance Package") but is **NOT** surfaced in the UI — nothing on `/export` links to it. Confirmed still a gap (§16). **Don't test it as a user.** Decide pre-launch whether to surface it.
+- [ ] **9.4.2** If you *do* exercise the endpoint directly (paste `/api/export/vendor/{id}` into the browser while logged in), **expect** the #402 disclaimer footer on **every page** — same sentence as §9.1.5, and check page 2 if the vendor has enough documents to paginate. **Expect deliberately:** **no** "CompliDrop · {org}" attribution line here; the vendor package never loads the organization (ADR 0047 §2), so the disclaimer is the whole footer. **Don't expect:** a bare footer, or the disclaimer only on the last page.
 
 ### 9.5 Error handling
 

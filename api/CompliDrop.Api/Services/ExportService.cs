@@ -31,19 +31,27 @@ public class ExportService(SystemDbContext db) : IExportService
     internal const int AuditCap = 500;
 
     /// <summary>
-    /// The non-advice disclaimer every generated export carries (#402, counsel-gate item CLM-3 —
-    /// <c>docs/rule-engine/G1-COUNSEL-BRIEF.md</c> §0; <c>docs/adr/0047-exports-carry-a-non-advice-disclaimer.md</c>).
+    /// The non-advice disclaimer carried by every export a customer hands to a THIRD PARTY (#402,
+    /// counsel-gate item CLM-3 — <c>docs/rule-engine/G1-COUNSEL-BRIEF.md</c> §0;
+    /// <c>docs/adr/0047-exports-carry-a-non-advice-disclaimer.md</c>).
     /// <para/>
-    /// ONE constant consumed by ALL THREE artifacts — the audit PDF, the vendor package PDF and the
-    /// CSV — because an export is the artifact most likely forwarded to an insurer, broker, auditor or
-    /// opposing counsel, and it is the surface where reliance forms. Three hand-copied literals is how
-    /// two of them silently drift apart, so there is exactly one (pinned by
+    /// ONE constant consumed by ALL THREE such artifacts — the audit PDF, the vendor package PDF and
+    /// the CSV — because an export is the artifact most likely forwarded to an insurer, broker, auditor
+    /// or opposing counsel, and it is the surface where reliance forms. Three hand-copied literals is
+    /// how two of them silently drift apart, so there is exactly one (pinned by
     /// <c>ExportDisclaimerTests</c>).
+    /// <para/>
+    /// Scope is the reliance artifacts, NOT everything the API can serialize: the account data export
+    /// (<c>AuthEndpoints.ExportAccount</c>) is a portability dump of the account's own data back to its
+    /// owner — raw JSON, no masthead, bare numeric enum codes rather than rendered verdict labels — and
+    /// is deliberately excluded, as are the reminder emails and the sample certificate (ADR 0047
+    /// § Consequences → Neutral records each).
     /// <para/>
     /// Consistent with the Terms ("Automatic reading is a head start, not advice") but deliberately
     /// narrower: it states what the statuses ARE and what a certificate cannot do, and it does not
-    /// invent legal claims the Terms do not make. The exact wording is PROVISIONAL pending the CLM-3
-    /// attorney sign-off — refine it there, in one place, not at three call sites.
+    /// invent legal claims the Terms do not make. The exact wording — and its PROMINENCE, which today
+    /// matches the branding line beneath it — is PROVISIONAL pending the CLM-3 attorney sign-off
+    /// (ADR 0047 §5): refine the sentence here, and the treatment in <see cref="ApplyPageDefaults"/>.
     /// </summary>
     internal const string Disclaimer = "Statuses reflect automated reading of documents as uploaded; certificates do not modify policies. Verify current coverage with the issuing carrier.";
 
@@ -354,11 +362,18 @@ public class ExportService(SystemDbContext db) : IExportService
     /// <summary>
     /// Shared QuestPDF page chrome for the PDF reports: Letter size, 40pt margin, default text style —
     /// and the mandatory export FOOTER. The footer lives here rather than at each builder so a fourth
-    /// PDF export cannot ship without the #402 disclaimer (pinned by <c>ExportDisclaimerTests</c>: every
-    /// <c>container.Page</c> in this file must call through here).
+    /// PDF export cannot ship without the #402 disclaimer: <c>ExportDisclaimerTests</c> scans EVERY
+    /// <c>.cs</c> file under <c>api/CompliDrop.Api/</c> and requires every QuestPDF page composition —
+    /// any receiver, any lambda parameter name — to call through here. The single recorded exemption
+    /// (<c>SampleCertificateGenerator</c>, a simulated vendor document) is named there and cited to
+    /// ADR 0047.
     /// <para/>
     /// <paramref name="attribution"/> is the "CompliDrop · {name}" line beneath the disclaimer — the org
     /// name on the audit report; omitted (null) on the vendor package, which never loaded the org.
+    /// <para/>
+    /// The footer's TREATMENT (8pt, <c>#64748b</c> — the same fine print as the attribution line) is
+    /// provisional alongside the wording: ADR 0047 §5 routes "is this conspicuous enough?" to the CLM-3
+    /// attorney pass, and this method is the one place a prominence answer would land.
     /// </summary>
     private static void ApplyPageDefaults(PageDescriptor page, string? attribution)
     {
