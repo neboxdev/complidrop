@@ -274,8 +274,14 @@ public static class DocumentEndpoints
             doc.UploadedBy,
             doc.IsSample,
             doc.GeneralLiabilityLimit,
+            // fieldValueTruncated (#444): the row's value is the ADR 0045 §4 clamp of a longer value the
+            // document still holds in ExtractionFields. Derived here from the two copies the system
+            // already keeps rather than persisted — no migration, and it self-clears the moment
+            // UpdateFields makes the two agree. Both inputs are already loaded (ExtractionFields is a
+            // column on doc; Fields is Include-loaded above), so this costs no extra query.
             doc.Fields.Select(f => new DocumentFieldDto(
-                f.Id, f.FieldName, f.FieldValue, f.FieldType, f.Confidence, f.IsManuallyEdited, f.OriginalValue)).ToArray(),
+                f.Id, f.FieldName, f.FieldValue, f.FieldType, f.Confidence, f.IsManuallyEdited, f.OriginalValue,
+                DocumentFieldTruncation.ValueWasClipped(doc, f))).ToArray(),
             doc.ComplianceChecks
                 .OrderBy(c => c.CheckedAt)
                 .Select(c => new ComplianceCheckDto(
