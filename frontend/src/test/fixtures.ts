@@ -168,6 +168,15 @@ export type DocumentDetailField = {
   confidence: number;
   isManuallyEdited: boolean;
   originalValue: string | null;
+  /** #444 / ADR 0049 — `fieldValue` above is only the START of a longer value the
+   *  document still holds, so the page warns before a Save narrows the record.
+   *  Optional HERE while the page's own `DocField` keeps it REQUIRED (the backend
+   *  always sends it): these fixtures are serialized to JSON by the MSW handlers,
+   *  and an omitted flag deserializes to `undefined`, which the page treats exactly
+   *  as the `false` the backend sends for every un-clipped field. Requiring it would
+   *  mean restating `fieldValueTruncated: false` on ~40 inline field literals that
+   *  are all about something else. */
+  fieldValueTruncated?: boolean;
 };
 
 /**
