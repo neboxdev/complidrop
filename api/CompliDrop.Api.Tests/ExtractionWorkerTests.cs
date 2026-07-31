@@ -1176,6 +1176,33 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     }
 
     [Fact]
+    public async Task A_row_the_worker_clipped_is_reported_clipped_by_the_read_time_derivation()
+    {
+        // #444 / ADR 0049 ties the DISCLOSURE to the write above: DocumentFieldTruncation reproduces
+        // ColumnClamp.To against the jsonb copy instead of persisting a flag, so the two are only ever
+        // in agreement because both go through the same helper at the same width. Asked of a document
+        // the REAL worker wrote — the unit tests hand-build the shape, which cannot catch the worker
+        // changing which value it clamps (or clamping the jsonb copy too, at which point the flag would
+        // silently go false and the detail page would stop warning while still showing a clipped value).
+        var full = new string('d', ExtractionWorker.FieldValueMaxLength + 500);
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.Result = FieldResult(
+            new ExtractedField("description_of_operations", full, "text", 0.95),
+            new ExtractedField("insured_name", "Acme Catering LLC", "text", 0.95));
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.Include(d => d.Fields).FirstAsync(d => d.Id == docId);
+        var clipped = doc.Fields.Single(f => f.FieldName == "description_of_operations");
+        DocumentFieldTruncation.ValueWasClipped(doc, clipped).Should().BeTrue();
+        // Same document, same walk: the short field the worker wrote verbatim must NOT be flagged.
+        DocumentFieldTruncation
+            .ValueWasClipped(doc, doc.Fields.Single(f => f.FieldName == "insured_name"))
+            .Should().BeFalse();
+    }
+
+    [Fact]
     public async Task A_contains_rule_still_matches_text_past_the_field_row_width()
     {
         // The VERDICT-level half of the invariant above: pinning the stored JSON alone would not prove

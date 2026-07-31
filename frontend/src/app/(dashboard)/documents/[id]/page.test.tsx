@@ -30,6 +30,7 @@ import {
   sequencedJsonOk,
   toastSuccess,
   toastError,
+  type DocumentDetailFixture,
 } from "@/test";
 import { api } from "@/lib/api";
 
@@ -2417,6 +2418,90 @@ describe("DocumentDetailPage — ManualRequired review CTA (#193)", () => {
     );
     expect(screen.getByText(/outlined in amber are the least certain/i)).toBeInTheDocument();
     expect(screen.queryByText(/we couldn't read some details/i)).toBeNull();
+  });
+});
+
+describe("DocumentDetailPage — a clipped field value is disclosed (#444 / ADR 0049)", () => {
+  // The input binds to the CLAMPED DocumentField.FieldValue ("the value on screen must be exactly the
+  // value a Save would send"), which is precisely the problem when that value is a truncation: the user
+  // is shown a clipped description_of_operations as the complete extracted value, and saving that field
+  // writes the clip into ExtractionFields — the canonical verdict input.
+  const CLIPPED = "Catering and bar services for events at ".repeat(20);
+
+  function mountWithFields(fields: DocumentDetailFixture["fields"]) {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_clipped",
+            extractionStatus: "Completed",
+            complianceStatus: "Compliant",
+            fields,
+          }),
+        ),
+      ),
+    );
+    return renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_clipped" },
+    });
+  }
+
+  const clippedField = {
+    id: "f-desc",
+    fieldName: "description_of_operations",
+    fieldValue: CLIPPED,
+    fieldType: "text",
+    confidence: 0.95, // high confidence — no amber outline; the clip is invisible without the hint
+    isManuallyEdited: false,
+    originalValue: null,
+  };
+
+  it("warns that the shown value is partial AND that saving it replaces the fuller record", async () => {
+    mountWithFields([{ ...clippedField, fieldValueTruncated: true }]);
+
+    const hint = await screen.findByTestId("field-truncated-f-desc");
+    // Both facts have to be present. "It's shortened" alone leaves the user thinking the record is
+    // fine; "saving replaces it" alone doesn't explain why the box is short.
+    expect(hint).toHaveTextContent(/shown shortened/i);
+    expect(hint).toHaveTextContent(/longer than we can show/i);
+    expect(hint).toHaveTextContent(/saving replaces it with just what's in the box/i);
+    // Points at the original file, because ADR 0046 REJECTS an over-length correction — the user
+    // cannot type the full text back, so "retype it" would be a dead end.
+    expect(hint).toHaveTextContent(/view file/i);
+    // Error-copy policy: no HTTP jargon, no column widths, no field-name jargon leaking through.
+    expect(hint).not.toHaveTextContent(/varchar|2000|truncat/i);
+  });
+
+  it("shows no clip hint on a normal field", async () => {
+    // The discriminating half: the hint keys on the server's flag, not on value length or confidence,
+    // so an ordinary field — even a long one — must stay unmarked.
+    mountWithFields([{ ...clippedField, fieldValueTruncated: false }]);
+
+    await waitFor(() => expect(screen.getByText("coi.pdf")).toBeInTheDocument());
+    expect(screen.queryByTestId("field-truncated-f-desc")).toBeNull();
+    expect(screen.queryByText(/shown shortened/i)).toBeNull();
+  });
+
+  it("marks only the clipped field when the document carries several", async () => {
+    // The flag is per-FIELD. A page-level treatment would either warn over every value or, worse,
+    // warn over none once one field happened to fit.
+    mountWithFields([
+      { ...clippedField, fieldValueTruncated: true },
+      {
+        id: "f-insured",
+        fieldName: "insured_name",
+        fieldValue: "Acme Catering LLC",
+        fieldType: "text",
+        confidence: 0.95,
+        isManuallyEdited: false,
+        originalValue: null,
+        fieldValueTruncated: false,
+      },
+    ]);
+
+    expect(await screen.findByTestId("field-truncated-f-desc")).toBeInTheDocument();
+    expect(screen.queryByTestId("field-truncated-f-insured")).toBeNull();
   });
 });
 
