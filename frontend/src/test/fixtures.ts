@@ -215,10 +215,13 @@ export type DocumentDetailFixture = {
   vendorName: string | null;
   vendorContactEmail: string | null;
   vendorId: string | null;
-  /** #443 / ADR 0048 §4 — whether the assigned vendor has a checklist at all, the
-   *  input that lets the "Not checked yet" card tell "no checklist" apart from "a
-   *  checklist none of whose rules govern this document type". */
+  /** #443 / ADR 0048 §4 — whether the assigned vendor has a checklist at all, and
+   *  how many requirements it holds. Together they let the "Not checked yet" card
+   *  tell "no checklist" apart from "an EMPTY checklist" apart from "a checklist
+   *  none of whose rules govern this document type" — three different claims about
+   *  the customer's own data, with three different remedies. */
   vendorHasChecklist: boolean;
+  vendorChecklistRuleCount: number;
   extractionStatus: string;
   extractionConfidence: number | null;
   complianceStatus: string;
@@ -248,8 +251,9 @@ const DOCUMENT_DETAIL_BASE: Readonly<DocumentDetailFixture> = {
   vendorContactEmail: null,
   vendorId: null,
   // No vendor by default, so no checklist — matching the backend, which reports
-  // false whenever the vendor is unassigned or soft-deleted.
+  // false / 0 whenever the vendor is unassigned or soft-deleted.
   vendorHasChecklist: false,
+  vendorChecklistRuleCount: 0,
   extractionStatus: "Pending",
   extractionConfidence: null,
   complianceStatus: "Pending",

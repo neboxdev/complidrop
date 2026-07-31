@@ -45,3 +45,25 @@ export function documentTypeLabel(value: string | null | undefined): string {
   if (!value || !value.trim()) return "Other";
   return LABELS[value.trim().toLowerCase()] ?? value;
 }
+
+/**
+ * The vocabulary value a stored document type resolves to, or null when the
+ * stored string resolves to nothing in the list.
+ *
+ * `documentTypeLabel` deliberately normalizes case, so a legacy `"COI"` renders
+ * as "Certificate of Insurance" and looks identical to a canonical `"coi"`. The
+ * backend does NOT normalize: `ComputeOutcome`'s applicable-rules filter compares
+ * `DocumentType` with an ORDINAL, case-sensitive `==`, so a `"COI"` document
+ * matches zero `"coi"` rules and is never graded (ADR 0048 § Context / ADR 0045's
+ * un-laundered legacy rows). The "Not checked yet" card needs to tell those two
+ * apart — one is "add a requirement", the other is "the stored value is wrong" —
+ * so compare the RAW value with this function's result rather than with a label.
+ *
+ * PRESENTATIONAL ONLY: it decides which remedy the card leads with, never which
+ * cause the card names — the cause comes from the backend (ADR 0048 §4).
+ */
+export function canonicalDocumentType(value: string | null | undefined): string | null {
+  if (!value || !value.trim()) return null;
+  const norm = value.trim().toLowerCase();
+  return DOCUMENT_TYPES.some((t) => t.value === norm) ? norm : null;
+}
