@@ -486,7 +486,7 @@ public class ExtractionWorker(
         // an ungraded document expiring within 30 days read "Expiring soon" on the list, counted as
         // IN-FORCE coverage in VendorEndpoints.ComputeCoverage, rolled its vendor up to "Covered", and
         // printed "Expiring soon" into the auditor-facing vendor package — over an empty "What we
-        // checked" panel. #443 / ADR 0047 CLOSED that: a document with zero ComplianceCheck rows now
+        // checked" panel. #443 / ADR 0048 CLOSED that: a document with zero ComplianceCheck rows now
         // reads Pending on every read surface, so the residue is visible rather than silent. What
         // survives that fix, and is why this coercion still matters, is the SUPERSESSION half:
         // DocumentSupersession groups on (VendorId, DocumentType), so a "COI" renewal still never

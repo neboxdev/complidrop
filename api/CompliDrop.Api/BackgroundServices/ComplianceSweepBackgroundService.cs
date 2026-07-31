@@ -72,7 +72,7 @@ public class ComplianceSweepBackgroundService(
         // ExpiringSoon — matching ComplianceCheckService.ComputeOutcome. A NonCompliant doc keeps its
         // hard-fail verdict; an already-ExpiringSoon doc is unchanged.
         //
-        // #443 / ADR 0047: this write is deliberately grading-blind — it stores the real DATE verdict for
+        // #443 / ADR 0048: this write is deliberately grading-blind — it stores the real DATE verdict for
         // a never-graded document too, exactly as ComputeOutcome's zero-applicable-rules branch does, and
         // the READ overlay (ComplianceStatusDeriver.Effective + its SQL mirrors) demotes such a document
         // to Pending. Same read-only shape, and the same reason, as the future-effective note below:

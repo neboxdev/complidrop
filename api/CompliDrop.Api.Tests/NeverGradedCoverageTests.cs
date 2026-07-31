@@ -10,7 +10,7 @@ using Microsoft.EntityFrameworkCore;
 namespace CompliDrop.Api.Tests;
 
 /// <summary>
-/// End-to-end HTTP tests for #443 / ADR 0047: a document nothing ever graded — zero
+/// End-to-end HTTP tests for #443 / ADR 0048: a document nothing ever graded — zero
 /// <see cref="ComplianceCheck"/> rows — must not roll up to "Covered" on the vendor page, must not print an
 /// affirmative verdict in the auditor-facing export, and must not read ExpiringSoon anywhere. It reads
 /// Pending on EVERY surface (detail badge, list filter + badge, dashboard counts, vendor rollup, all three

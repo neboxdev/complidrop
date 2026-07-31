@@ -28,7 +28,7 @@ namespace CompliDrop.Api.Services;
 /// list, rolled its vendor up to "Covered", and printed "Expiring soon" into the auditor-facing vendor
 /// package — over an empty "What we checked" panel.
 /// <see href="https://github.com/neboxdev/complidrop/issues/443">#443</see> /
-/// <see href="../../../docs/adr/0047-never-graded-document-asserts-no-affirmative-verdict.md">ADR 0047</see>
+/// <see href="../../../docs/adr/0048-never-graded-document-asserts-no-affirmative-verdict.md">ADR 0048</see>
 /// CLOSED that: such a document now reads <c>Pending</c> on every read surface, so the residue is
 /// VISIBLE rather than silent. The SUPERSESSION half of a mis-cased type survives that fix untouched —
 /// a <c>"COI"</c> renewal still never supersedes the <c>"coi"</c> cert it replaces — and a demoted
@@ -61,7 +61,7 @@ namespace CompliDrop.Api.Services;
 /// KNOWN GAP (ADR 0045): coercion happens only on the next EXTRACTION, and nothing re-extracts an
 /// already-processed row — so a pre-deploy row carrying a non-canonical type keeps grading against zero
 /// rules until a human re-types it or triggers a re-extraction. Deliberately not laundered by a data
-/// migration; see the ADR for why. Since #443 / ADR 0047 that residue at least reads <c>Pending</c>
+/// migration; see the ADR for why. Since #443 / ADR 0048 that residue at least reads <c>Pending</c>
 /// everywhere instead of rolling up to "Covered" — the population still needs re-typing, it just no
 /// longer overclaims while it waits.
 /// <para/>

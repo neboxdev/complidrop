@@ -37,7 +37,7 @@ public static class DashboardEndpoints
         // two answers on one screen (#257). Expired/ExpiringSoon are date-driven; compliant and
         // nonCompliant exclude any doc the date buckets already claim. A future-effective doc is
         // demoted OUT of compliant/expiringSoon into the effective-Pending population (#362) — and so is
-        // a NEVER-GRADED one (#443 / ADR 0047). `d.ComplianceChecks.Any()` is the SQL mirror of
+        // a NEVER-GRADED one (#443 / ADR 0048). `d.ComplianceChecks.Any()` is the SQL mirror of
         // DocumentGrading.IsGraded; the arms below carry it wherever the deriver reads affirmative.
         var compliant = await docs.CountAsync(d =>
             d.ComplianceStatus == Entities.ComplianceStatus.Compliant
@@ -74,7 +74,7 @@ public static class DashboardEndpoints
         // Rate = effective-compliant / documents-that-have-a-verdict. A future-effective doc reads Pending
         // (not yet in force, #362), so it is excluded from the denominator too — treated exactly like a
         // Pending doc, not as a graded non-compliant one; an Expired doc (a real verdict) stays counted.
-        // A NEVER-GRADED doc reading affirmative is excluded on the same footing (#443 / ADR 0047): it
+        // A NEVER-GRADED doc reading affirmative is excluded on the same footing (#443 / ADR 0048): it
         // reads Pending, and "documents that have a verdict" must not count one nothing produced. Its
         // clause is the exact sibling of the future-effective one — a doc can trip either or both.
         // An EXPIRED never-graded doc still counts: a lapsed date is a real verdict, which is also why
@@ -89,7 +89,7 @@ public static class DashboardEndpoints
                 && (d.ExpirationDate == null || d.ExpirationDate >= today)
                 && (d.ComplianceStatus == Entities.ComplianceStatus.Compliant
                     || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon)), ct);
-        // #443 / ADR 0047: the documents this product declines to vouch for. Without it a never-graded
+        // #443 / ADR 0048: the documents this product declines to vouch for. Without it a never-graded
         // cert demoted out of `expiringSoon` appeared in NO tile at all — invisible on the dashboard,
         // the opposite of telling the user nothing graded it. Deliberately the WHOLE effective-Pending
         // population (genuine Pending + the #362 and #443 demotions) rather than a never-graded-only

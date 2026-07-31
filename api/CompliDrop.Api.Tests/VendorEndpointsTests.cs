@@ -127,7 +127,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     private async Task<Guid> SeedVendorDocAsync(
         Guid orgId, Guid vendorId, string documentType, ComplianceStatus status, DateTime? expirationDate = null,
         decimal? glLimit = null, ExtractionStatus extractionStatus = ExtractionStatus.Completed,
-        // #443 / ADR 0047: a stored verdict only counts as one when something actually graded the
+        // #443 / ADR 0048: a stored verdict only counts as one when something actually graded the
         // document, so the seed writes a ComplianceCheck row alongside it — matching what every
         // ComputeOutcome branch that produces an affirmative verdict actually persists. The #443
         // coverage tests pass false to seed the never-graded state.

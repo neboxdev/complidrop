@@ -176,7 +176,7 @@ public static class DocumentEndpoints
                 d.ExpirationDate,
                 d.IsSample,
                 d.CreatedAt,
-                // #443 / ADR 0047: the never-graded input to the deriver below. A scalar COUNT, so the
+                // #443 / ADR 0048: the never-graded input to the deriver below. A scalar COUNT, so the
                 // projection stays narrow — the check ROWS are never shipped to build a list badge.
                 ComplianceCheckCount = d.ComplianceChecks.Count
             })
@@ -240,7 +240,7 @@ public static class DocumentEndpoints
             doc.Vendor?.Name,
             doc.Vendor?.ContactEmail,
             doc.VendorId,
-            // #443 / ADR 0047 §4: the detail page's "Not checked yet" card explains WHY nothing graded
+            // #443 / ADR 0048 §4: the detail page's "Not checked yet" card explains WHY nothing graded
             // this document, and zero check rows has three causes, not two. This distinguishes "the
             // vendor has no checklist" from "the checklist exists but none of its rules govern a
             // {documentType}" — a distinction the page cannot derive from complianceChecks.length, and
@@ -248,7 +248,7 @@ public static class DocumentEndpoints
             doc.Vendor?.ComplianceTemplateId != null,
             doc.ExtractionStatus.ToString(),
             doc.ExtractionConfidence,
-            // #443 / ADR 0047: the ComplianceChecks collection is already Include-loaded (it IS the "What
+            // #443 / ADR 0048: the ComplianceChecks collection is already Include-loaded (it IS the "What
             // we checked" panel below), so the never-graded input costs nothing extra here — and an EMPTY
             // panel can no longer sit under an affirmative badge, the contradiction the ticket names.
             ComplianceStatusDeriver.Effective(

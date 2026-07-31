@@ -64,7 +64,7 @@ type DocDetail = {
   vendorContactEmail: string | null;
   vendorId: string | null;
   // Whether the assigned vendor has a requirements checklist AT ALL (#443 / ADR
-  // 0047 §4). Sourced from the backend because the page cannot derive it:
+  // 0048 §4). Sourced from the backend because the page cannot derive it:
   // `complianceChecks.length === 0` has three causes and only the server can tell
   // "no checklist" from "a checklist whose rules govern other document types".
   // See NotCheckedExplainer.
@@ -381,7 +381,7 @@ const MANUAL_ENTRY_FIELDS: ReadonlyArray<{
 // (a checklist that exists but whose rules all govern other document types,
 // reachable today because the applicable-rules filter compares DocumentType
 // case-SENSITIVELY). Before #443 the third cause read ExpiringSoon inside the
-// 30-day window, so this card never rendered for it; ADR 0047 makes it read
+// 30-day window, so this card never rendered for it; ADR 0048 makes it read
 // Pending, and guessing "no checklist" from `complianceChecks.length === 0`
 // would then print a FALSE claim plus a dead-end CTA over a vendor that plainly
 // has a checklist — while the vendor rollup called that same vendor

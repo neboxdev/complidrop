@@ -45,7 +45,7 @@ const STATS = {
   nonCompliant: 1,
   expiringSoon: 2,
   expired: 1,
-  // #443 / ADR 0047: the effective-Pending population — including every document the
+  // #443 / ADR 0048: the effective-Pending population — including every document the
   // never-graded demotion moved out of compliant/expiringSoon.
   awaitingReview: 5,
   pendingExtraction: 3,
@@ -98,7 +98,7 @@ describe("DashboardPage — clickable stat cards (#317 FP-041)", () => {
   });
 });
 
-describe("DashboardPage — the never-graded population is honest and reachable (#443 / ADR 0047)", () => {
+describe("DashboardPage — the never-graded population is honest and reachable (#443 / ADR 0048)", () => {
   beforeEach(() => {
     server.use(
       http.get(url("/api/dashboard/stats"), () => jsonOk(STATS)),
@@ -125,7 +125,7 @@ describe("DashboardPage — the never-graded population is honest and reachable 
   it("surfaces the effective-Pending population so a demoted document stays reachable", async () => {
     // The counterpart to the demotion: a never-graded cert is dropped from Compliant AND from
     // Expiring soon, so without this tile it appeared in no number on the dashboard at all —
-    // demoting it would have made it INVISIBLE, the opposite of ADR 0047's purpose. The tile
+    // demoting it would have made it INVISIBLE, the opposite of ADR 0048's purpose. The tile
     // deep-links to the very list those documents were demoted into.
     renderWithProviders(<DashboardPage />, { auth: authedMe });
 

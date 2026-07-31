@@ -70,7 +70,7 @@ public static class VendorEndpoints
     /// <summary>Lightweight per-document view the coverage rollup needs (FP-074). EffectiveDate feeds the
     /// future-effective demotion (#362 / ADR 0041) via ComplianceStatusDeriver.Effective. ExtractionStatus
     /// lets the rollup drop a doc the SYSTEM ITSELF distrusts (ManualRequired) from in-force coverage
-    /// (#401 / ADR 0042). ComplianceCheckCount feeds the never-graded demotion (#443 / ADR 0047) through
+    /// (#401 / ADR 0042). ComplianceCheckCount feeds the never-graded demotion (#443 / ADR 0048) through
     /// the SAME deriver — it is a COUNT rather than a bool so the projection stays a plain scalar EF can
     /// translate, and DocumentGrading.IsGraded owns the threshold. No CreatedAt: coverage is decided by
     /// the best CURRENTLY-IN-FORCE cert, not the newest upload (#362 review).</summary>
@@ -88,7 +88,7 @@ public static class VendorEndpoints
     /// stays Covered instead of flipping to ActionNeeded. A doc the extraction system distrusts
     /// (ExtractionStatus.ManualRequired) is NOT counted as in-force coverage either, so a distrusted
     /// extraction can't silently roll up to Covered (#401 / ADR 0042), and neither is one NOTHING EVER
-    /// GRADED (#443 / ADR 0047 — that exclusion arrives through the deriver itself, which reads such a doc
+    /// GRADED (#443 / ADR 0048 — that exclusion arrives through the deriver itself, which reads such a doc
     /// Pending). A required type with no document is "missing"; a type whose only documents are Expired /
     /// NonCompliant / not-yet-in-force (Pending) / never-graded (Pending) / awaiting-review
     /// (ManualRequired) is "action-needed" — a genuine gap still surfaces. The engine re-grades on
@@ -134,7 +134,7 @@ public static class VendorEndpoints
             // extraction on the document detail page. Read-time judgement only; the stored ComplianceStatus
             // is untouched (extraction-trust and rule-verdict are separate axes -- ADR 0042).
             //
-            // #443 / ADR 0047: a doc NOTHING EVER GRADED (zero ComplianceCheck rows -- no checklist, an
+            // #443 / ADR 0048: a doc NOTHING EVER GRADED (zero ComplianceCheck rows -- no checklist, an
             // empty checklist, or a checklist whose rules all govern other document types, which is
             // reachable today because the applicable-rules filter is case-SENSITIVE while the required-type
             // match below is case-INsensitive) likewise contributes no coverage. That exclusion is NOT a

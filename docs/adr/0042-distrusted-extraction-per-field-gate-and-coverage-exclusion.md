@@ -150,7 +150,7 @@ review population shows those mis-reads matter.
 
 ## Amendment 1 (2026-07-30) — the document-level carve-out is conditional, and does not generalize
 
-[ADR 0047](0047-never-graded-document-asserts-no-affirmative-verdict.md) (#443) applies this ADR's
+[ADR 0048](0048-never-graded-document-asserts-no-affirmative-verdict.md) (#443) applies this ADR's
 coverage-exclusion reasoning to a sibling state — a document with **zero `ComplianceCheck` rows**, which the
 machine never graded at all — but **mirrors its demotion onto the document-level surfaces too**, the opposite
 of "What this deliberately does NOT do" above and of Option B.
@@ -167,7 +167,7 @@ never-graded document has no verdict on either axis.
 
 **The test when extending either decision:** ask whether some other surface already discloses the state
 beside the compliance badge. If yes, confine the demotion to the vendor rollup (this ADR). If no, mirror it
-everywhere (ADR 0047).
+everywhere (ADR 0048).
 
 ## References
 

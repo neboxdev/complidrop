@@ -497,7 +497,7 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
             "it WAS graded — this row's Pending is the future-effective demotion, not #443's");
     }
 
-    // ---- #443 / ADR 0047: the auditor-facing export stops asserting a verdict nothing produced ----
+    // ---- #443 / ADR 0048: the auditor-facing export stops asserting a verdict nothing produced ----
 
     [Fact]
     public async Task Csv_export_reads_a_never_graded_doc_as_Pending_and_discloses_zero_requirements_checked()

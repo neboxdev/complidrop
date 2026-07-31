@@ -6,7 +6,7 @@ using FluentAssertions;
 namespace CompliDrop.Api.Tests;
 
 /// <summary>
-/// Pure unit tests for the WRITE side of #443 / ADR 0047 — that the never-graded state is REACHABLE, what
+/// Pure unit tests for the WRITE side of #443 / ADR 0048 — that the never-graded state is REACHABLE, what
 /// <see cref="ComplianceCheckService.ComputeOutcome"/> stores for it, and what a reader then sees.
 /// <para/>
 /// The design contract, the same one ADR 0041 established: the demotion is a READ-only overlay. ComputeOutcome

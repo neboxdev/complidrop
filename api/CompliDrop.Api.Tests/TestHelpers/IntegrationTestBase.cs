@@ -100,7 +100,7 @@ public abstract class IntegrationTestBase(IntegrationTestFixture fixture) : IAsy
     }
 
     /// <summary>
-    /// Marks the given documents as GRADED (#443 / ADR 0047) by seeding one passing
+    /// Marks the given documents as GRADED (#443 / ADR 0048) by seeding one passing
     /// <see cref="ComplianceCheck"/> row against each — the artifact the engine emits when it
     /// actually measured a requirement, and the fact <c>DocumentGrading.IsGraded</c> reads.
     /// <para/>

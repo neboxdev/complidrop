@@ -64,7 +64,7 @@ public sealed class DashboardStatsTests(IntegrationTestFixture fixture) : Integr
         await using var db = CreateSystemDb();
         var now = DateTime.UtcNow;
         var i = 0;
-        // #443 / ADR 0047: a stored verdict counts as one only when something graded the document, so
+        // #443 / ADR 0048: a stored verdict counts as one only when something graded the document, so
         // every seeded row gets a check. Without it the affirmative statuses here would read Pending and
         // these counts would be testing the never-graded path instead of the one they name.
         var seeded = new List<Guid>();

@@ -215,7 +215,7 @@ export type DocumentDetailFixture = {
   vendorName: string | null;
   vendorContactEmail: string | null;
   vendorId: string | null;
-  /** #443 / ADR 0047 §4 — whether the assigned vendor has a checklist at all, the
+  /** #443 / ADR 0048 §4 — whether the assigned vendor has a checklist at all, the
    *  input that lets the "Not checked yet" card tell "no checklist" apart from "a
    *  checklist none of whose rules govern this document type". */
   vendorHasChecklist: boolean;

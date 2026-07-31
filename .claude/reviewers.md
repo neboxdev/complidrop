@@ -162,10 +162,10 @@ Both are defined in this repo's `.claude/agents/`.
     compliance badge, and demoting the counts too would create a #294-class count-vs-badge
     split. The vendor rollup is the one surface with no room for the separate badge. Do NOT
     flag the untouched document-level counts as a missed demotion — that inversion is the bug.
-    Note the CONTRAST with ADR 0047 below, which mirrors its demotion onto the document-level
+    Note the CONTRAST with ADR 0048 below, which mirrors its demotion onto the document-level
     surfaces: that is not an inconsistency, it turns on whether a second badge already discloses
     the state. Here one does; for never-graded none does.
-- A NEVER-GRADED document is ADR 0047 (#443) — zero `ComplianceCheck` rows, i.e. nothing was ever
+- A NEVER-GRADED document is ADR 0048 (#443) — zero `ComplianceCheck` rows, i.e. nothing was ever
   measured against it. The facts that follow are pointers into it, not a second copy.
   - There is ONE recognizer, `Services/DocumentGrading.cs`, shipping exactly ONE shape:
     `IsGraded(int checkCount)` (the in-memory threshold — ONE check row is enough). It deliberately has
@@ -219,7 +219,7 @@ Both are defined in this repo's `.claude/agents/`.
     column so its `Compliance` cell stays machine-filterable. That asymmetry is deliberate.
   - The ordinal-case-SENSITIVE applicable-rules filter vs `ComputeCoverage`'s case-INsensitive
     required-type match is a KNOWN live disagreement (it is how the never-graded state is reachable
-    without any legacy data). ADR 0047 Option E records why it was NOT unified here — widening what
+    without any legacy data). ADR 0048 Option E records why it was NOT unified here — widening what
     a rule governs is a live-data grading change needing its own ticket. Do not re-report it as new.
   - Expiry-pipeline buckets, `expiresWithin` and REMINDERS are untouched (date questions, not verdict
     ones — reminders never read `ComplianceStatus` at all). FOUR raw stored-status readers stay
@@ -277,8 +277,8 @@ Both are defined in this repo's `.claude/agents/`.
   `ComplianceCheckService.ClampToColumn` — do not re-inline either body.
   **NEVER-GRADED IS NOT FAIL-SAFE** — do not repeat the old "nothing is certified, so it's safe"
   framing. CLOSED by [#443](https://github.com/neboxdev/complidrop/issues/443) /
-  [ADR 0047](../docs/adr/0047-never-graded-document-asserts-no-affirmative-verdict.md); see the
-  ADR 0047 block below for the review-time facts. The stored write side is UNCHANGED — do not flag
+  [ADR 0048](../docs/adr/0048-never-graded-document-asserts-no-affirmative-verdict.md); see the
+  ADR 0048 block below for the review-time facts. The stored write side is UNCHANGED — do not flag
   `ComputeOutcome`'s zero-applicable-rules branch still storing `expiringSoon ? ExpiringSoon :
   Pending`, nor the sweep's `Pending -> ExpiringSoon` transition; the demotion is read-only.
   Three KNOWN GAPS, recorded in ADR 0045 — do not re-report them as new findings:
@@ -287,7 +287,7 @@ Both are defined in this repo's `.claude/agents/`.
     supersession group, invisible to `?type=coi`) until a human re-types it. #389 does not touch
     stored rows either. Deliberately NOT fixed by a data migration — because laundering production
     rows is a destructive operation needing human sign-off (measure the population first), NOT
-    because the residue is harmless. Since #443 / ADR 0047 such a row at least reads `Pending`
+    because the residue is harmless. Since #443 / ADR 0048 such a row at least reads `Pending`
     everywhere instead of rolling up to `Covered`, so the residue is now VISIBLE rather than
     silent — the population still needs re-typing.
   - **A clamped field can be narrowed by a manual edit.** `ExtractionFields` (jsonb) keeps the FULL

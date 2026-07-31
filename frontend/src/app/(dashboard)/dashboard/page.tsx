@@ -110,7 +110,7 @@ export default function DashboardPage() {
           <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
             {/* #443 review B5: the documents this product declines to vouch for have to be
                 REACHABLE. A never-graded cert is demoted out of Compliant and Expiring soon
-                by ADR 0047, and before this tile it then appeared in no number on this screen
+                by ADR 0048, and before this tile it then appeared in no number on this screen
                 at all — demoting it made it INVISIBLE, the opposite of telling the user
                 nothing graded it. Labelled with the status it deep-links to (the same wording
                 its badge carries) and counted from the very same predicate that builds that

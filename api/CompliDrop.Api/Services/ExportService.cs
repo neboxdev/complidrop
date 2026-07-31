@@ -290,7 +290,7 @@ public class ExportService(SystemDbContext db) : IExportService
         csv.WriteField("ProcessingStatus");
         csv.WriteField("Compliance");
         csv.WriteField("Superseded"); // #327: "Yes" when a newer cert for the same vendor+type exists
-        // #443 / ADR 0047: how many requirements were actually measured against this document. 0 means the
+        // #443 / ADR 0048: how many requirements were actually measured against this document. 0 means the
         // engine certified NOTHING about it (no checklist, an empty one, or one whose rules all govern
         // other document types) — the fact behind its demoted "Awaiting review" verdict. The CSV carries
         // it as its own column rather than as an inline parenthetical on Compliance (the shape the two
@@ -374,7 +374,7 @@ public class ExportService(SystemDbContext db) : IExportService
 
     /// <summary>
     /// Appended to the compliance verdict in the two PDF artifacts for a document NOTHING EVER GRADED
-    /// (#443 / ADR 0047). The verdict itself already reads "Awaiting review" (the deriver demotes an
+    /// (#443 / ADR 0048). The verdict itself already reads "Awaiting review" (the deriver demotes an
     /// affirmative one — see <see cref="ComplianceStatusDeriver.Effective"/>), but "awaiting review" and
     /// "we measured zero requirements against this" are different facts, and the auditor is entitled to
     /// the second. Same inline-annotation shape as "(superseded)" beside it, for the same reason: the
@@ -383,7 +383,7 @@ public class ExportService(SystemDbContext db) : IExportService
     internal const string NeverGradedAnnotation = " (no requirements checked)";
 
     /// <summary>
-    /// How many requirements were actually measured against each of an org's documents (#443 / ADR 0047),
+    /// How many requirements were actually measured against each of an org's documents (#443 / ADR 0048),
     /// keyed by document id — the export's input to <see cref="DocumentGrading.IsGraded(int)"/>. A single
     /// scalar projection rather than <c>Include(d =&gt; d.ComplianceChecks)</c>: an org's check ROWS carry
     /// two varchar(500) columns each and would multiply the export's payload for a number.
@@ -503,7 +503,7 @@ public class ExportService(SystemDbContext db) : IExportService
     /// FlateDecode-compressed and not text-assertable, and the vendor package is the one export whose
     /// check-count query is its OWN (the CSV and the audit report share theirs), so wiring the counts up
     /// wrong here — in either direction — would otherwise be invisible to every test. Pinned directly
-    /// against a seeded vendor holding one graded and one never-graded document (#443 / ADR 0047).
+    /// against a seeded vendor holding one graded and one never-graded document (#443 / ADR 0048).
     /// <para/>
     /// The count query names the ORG as well as the vendor, matching every other
     /// <see cref="SystemDbContext"/> read in this file: <see cref="SystemDbContext"/> carries no tenant
@@ -516,7 +516,7 @@ public class ExportService(SystemDbContext db) : IExportService
         // Reuse the one shared supersession helper (all these docs share one vendor) so the annotation
         // matches the CSV / audit-report exactly. (#327)
         var supersededIds = SupersededIds([.. vendor.Documents]);
-        // #443 / ADR 0047: this package is THE artifact the ticket names — it printed "Expiring soon" for a
+        // #443 / ADR 0048: this package is THE artifact the ticket names — it printed "Expiring soon" for a
         // document with an EMPTY "What we checked" panel behind it. Same requirement counts, same cell
         // helper as the audit report, so the two PDFs can't diverge.
         var checkCounts = await CheckCountsAsync(

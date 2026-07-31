@@ -29,7 +29,7 @@ public record DocumentDetail(
     // requirements. Null when the vendor is unassigned or has no email. (#193)
     string? VendorContactEmail,
     Guid? VendorId,
-    // Whether the assigned vendor has a requirements checklist at all (#443 / ADR 0047 §4).
+    // Whether the assigned vendor has a requirements checklist at all (#443 / ADR 0048 §4).
     // The detail page's "Not checked yet" card NAMES the reason a document reads Pending, and
     // since #443 zero ComplianceCheck rows has THREE causes, not two: no vendor, a vendor with no
     // checklist, or a checklist whose rules all govern OTHER document types (reachable today —

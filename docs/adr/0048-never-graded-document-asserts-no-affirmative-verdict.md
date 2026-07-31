@@ -1,4 +1,4 @@
-# 0047. A never-graded document asserts no affirmative verdict — on every read surface
+# 0048. A never-graded document asserts no affirmative verdict — on every read surface
 
 - **Status:** accepted
 - **Date:** 2026-07-30
@@ -190,7 +190,7 @@ A demotion that removes a document from `compliant` and `expiringSoon` and puts 
 **no number on the dashboard at all** — the opposite of this ADR's purpose, which is to *tell* the user
 nothing graded it. So the dashboard gains an **`awaitingReview`** tile, deep-linked to `?status=Pending`.
 
-- It counts the **whole effective-Pending population** (genuine Pending + the ADR 0041 and ADR 0047
+- It counts the **whole effective-Pending population** (genuine Pending + the ADR 0041 and ADR 0048
   demotions), not a never-graded-only number, because that is the population its label names and the
   population the list it links to contains. A narrower count over a wider list would be the same
   count-vs-list split, one level down.

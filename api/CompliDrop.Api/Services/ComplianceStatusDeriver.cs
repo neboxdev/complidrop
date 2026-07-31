@@ -18,7 +18,7 @@ namespace CompliDrop.Api.Services;
 ///   * NOT YET in force (EffectiveDate is a date strictly after today) AND the verdict would otherwise
 ///     read Compliant or ExpiringSoon -> Pending ("not yet in force"), #362 / ADR 0041;
 ///   * NEVER GRADED (no ComplianceCheck row — nothing was ever measured against it) AND the verdict
-///     would otherwise read Compliant or ExpiringSoon -> Pending, #443 / ADR 0047;
+///     would otherwise read Compliant or ExpiringSoon -> Pending, #443 / ADR 0048;
 ///   * otherwise                           -> the stored rule verdict unchanged.
 /// A NonCompliant verdict (rules failed) is preserved when merely expiring-soon OR future-effective — a
 /// failing doc is still failing, and a not-yet-active deficient cert is accurately not-compliant — but an
@@ -33,7 +33,7 @@ namespace CompliDrop.Api.Services;
 /// so <see cref="ComplianceCheckService.ComputeOutcome"/> and the nightly sweep deliberately do NOT persist
 /// this demotion; every read surface applies it instead. See ADR 0041.
 /// <para/>
-/// The never-graded demotion (#443 / ADR 0047) is read-only for the SAME reason, and the shape is
+/// The never-graded demotion (#443 / ADR 0048) is read-only for the SAME reason, and the shape is
 /// deliberately identical: an affirmative verdict the engine never actually measured anything to reach
 /// reads Pending. It self-heals the moment the document IS graded (a governing rule is added, its type is
 /// corrected, a checklist is assigned — each of which re-evaluates and writes check rows), and persisting
@@ -94,7 +94,7 @@ public static class ComplianceStatusDeriver
     /// <summary>
     /// The SQL mirror of "this document READS <see cref="ComplianceStatus.Pending"/> today" — the whole
     /// effective-Pending population: a genuinely-stored Pending outside the expiry window, plus every
-    /// affirmative verdict the future-effective (#362 / ADR 0041) or never-graded (#443 / ADR 0047)
+    /// affirmative verdict the future-effective (#362 / ADR 0041) or never-graded (#443 / ADR 0048)
     /// demotion moves here. Expired wins outright, so every arm carries the not-yet-expired guard.
     /// <para/>
     /// A whole-entity <c>Expression</c> — the one shape an EF read site CAN compose (the
@@ -125,7 +125,7 @@ public static class ComplianceStatusDeriver
                 && (d.ComplianceStatus == ComplianceStatus.Compliant
                     || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
                     || d.ComplianceStatus == ComplianceStatus.Pending))
-            // OR the never-graded demotion (#443 / ADR 0047): the same clause on the grading axis — an
+            // OR the never-graded demotion (#443 / ADR 0048): the same clause on the grading axis — an
             // affirmative stored verdict (or one the expiry window would promote) that no ComplianceCheck
             // row backs. `d.ComplianceChecks.Any()` is the SQL spelling of DocumentGrading.IsGraded.
             || (!d.ComplianceChecks.Any()
@@ -141,7 +141,7 @@ public static class ComplianceStatusDeriver
     /// so callers stay deterministically testable and consistent with the rest of the codebase's
     /// UTC-date convention. <paramref name="effectiveDate"/> demotes an affirmative verdict to Pending
     /// while the policy is not yet in force (#362 / ADR 0041); <paramref name="isGraded"/> demotes one
-    /// no requirement was ever measured to produce (#443 / ADR 0047).
+    /// no requirement was ever measured to produce (#443 / ADR 0048).
     /// <para/>
     /// <paramref name="isGraded"/> is REQUIRED rather than defaulted on purpose: a default would be
     /// fail-open (a new read surface that forgot it would silently re-assert the coverage #443 removed),
@@ -178,7 +178,7 @@ public static class ComplianceStatusDeriver
             && IsFutureEffective(effectiveDate, today))
             return ComplianceStatus.Pending;
 
-        // Never-graded demotion (#443 / ADR 0047), the same clause on a third axis: the product may not
+        // Never-graded demotion (#443 / ADR 0048), the same clause on a third axis: the product may not
         // assert an affirmative verdict it never measured anything to reach. Placed AFTER the expiry
         // if/else (like the future-effective clause, and for the same reason — #362 review S2) so it also
         // catches the null-expiry path, and gated on the OVERLAID status so it demotes both a stored

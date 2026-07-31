@@ -21,7 +21,7 @@ public sealed class ComplianceVerdictFreshnessTests(IntegrationTestFixture fixtu
     private async Task<Guid> SeedDocAsync(
         Guid orgId, ComplianceStatus stored, DateTime? expiration, string docType = "coi", Guid? vendorId = null,
         decimal? glLimit = null,
-        // #443 / ADR 0047: an affirmative stored verdict only reads as one when something graded the
+        // #443 / ADR 0048: an affirmative stored verdict only reads as one when something graded the
         // document, so the seed writes a ComplianceCheck row alongside it — the state ComputeOutcome
         // actually persists. These tests are about the DATE overlay, not the grading axis.
         bool graded = true)

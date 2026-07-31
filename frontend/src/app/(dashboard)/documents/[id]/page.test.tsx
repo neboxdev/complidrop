@@ -96,7 +96,7 @@ describe("DocumentDetailPage — not-checked explainer (#316 FP-063)", () => {
   });
 
   it("names the REAL cause when the checklist exists but nothing on it governs this type (#443)", async () => {
-    // ADR 0047 widened what complianceStatus === "Pending" means on this page: a document
+    // ADR 0048 widened what complianceStatus === "Pending" means on this page: a document
     // NOTHING ever graded now reads Pending instead of the affirmative verdict its expiry
     // date used to buy it. Zero check rows has three causes, and only the backend can tell
     // "no checklist" from "a checklist whose rules govern other document types" — the

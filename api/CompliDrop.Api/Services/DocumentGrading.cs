@@ -4,7 +4,7 @@ namespace CompliDrop.Api.Services;
 
 /// <summary>
 /// "Did anything actually GRADE this document?" — the single definition of the NEVER-GRADED state
-/// (#443, ADR 0047). A document is graded when at least one <see cref="ComplianceCheck"/> row exists
+/// (#443, ADR 0048). A document is graded when at least one <see cref="ComplianceCheck"/> row exists
 /// for it: a check row is the only artifact the engine emits when it actually measured the document
 /// against a requirement, and <see cref="ComplianceCheckService.ComputeOutcome"/> writes exactly one
 /// per applicable rule. Every branch that certifies nothing — no checklist assigned, an empty

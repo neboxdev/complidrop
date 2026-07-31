@@ -218,7 +218,7 @@ public sealed class ComplianceStatusDeriverTests
             .Should().Be(ComplianceStatus.NonCompliant);
     }
 
-    // ---- #443 / ADR 0047: never-graded (zero applicable rules) demotion ----
+    // ---- #443 / ADR 0048: never-graded (zero applicable rules) demotion ----
 
     [Fact]
     public void Never_graded_inside_the_expiry_window_reads_Pending_not_ExpiringSoon()
