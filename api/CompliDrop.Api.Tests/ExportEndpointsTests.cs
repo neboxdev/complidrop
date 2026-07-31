@@ -643,6 +643,47 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
     }
 
     [Fact]
+    public async Task Audit_report_rows_annotate_only_the_never_graded_document()
+    {
+        // #443 review S1. The audit report is equally auditor-facing, equally FlateDecode-unassertable,
+        // and does its OWN check-count read — but only a `%PDF` smoke test covered it, which cannot tell a
+        // correctly-wired count map from an empty one. An empty map annotates EVERY row of an auditor's
+        // report "(no requirements checked)"; a dropped annotation prints an affirmative verdict for a
+        // document nothing graded. So the rows are asserted at the seam that builds them, exactly as the
+        // vendor package's are — the count read is pinned along with the formatting.
+        var auth = await RegisterAndLoginAsync();
+        var (_, _, _) = await SeedVendorWithOneGradedAndOneUngradedAsync(auth.OrgId);
+
+        await using var db = CreateSystemDb();
+        var rows = await new ExportService(db).AuditReportRowsAsync(auth.OrgId, DateTime.UtcNow.Date, default);
+
+        rows.Should().HaveCount(2);
+        rows.Should().ContainSingle(r => r.FileName == "never-graded.pdf")
+            .Which.Compliance.Should().Be("Awaiting review (no requirements checked)",
+                "the audit report must not certify a document no requirement was measured against");
+        rows.Should().ContainSingle(r => r.FileName == "measured.pdf")
+            .Which.Compliance.Should().Be("Expiring soon",
+                "the graded cert keeps its real verdict, un-annotated — an empty count map would annotate "
+                + "every row of the report");
+        // The other columns come from the same row build, so a mis-ordered tuple is visible here too.
+        rows.Should().OnlyContain(r => r.Vendor == "V" && r.Type == "Certificate of Insurance");
+    }
+
+    [Fact]
+    public async Task Audit_report_pdf_still_renders_for_a_never_graded_document()
+    {
+        // The end-to-end half of the seam above: the extra check-count query and the annotation must not
+        // break generation for the document that motivated the fix.
+        var auth = await RegisterAndLoginAsync();
+        await SeedVendorWithOneGradedAndOneUngradedAsync(auth.OrgId);
+
+        var resp = await auth.Client.GetAsync("/api/export/audit-report");
+        resp.EnsureSuccessStatusCode();
+        var bytes = await resp.Content.ReadAsByteArrayAsync();
+        System.Text.Encoding.ASCII.GetString(bytes, 0, 4).Should().Be("%PDF");
+    }
+
+    [Fact]
     public async Task Vendor_package_pdf_still_renders_for_a_never_graded_document()
     {
         // The end-to-end guard that the extra check-count query and the annotation don't break generation

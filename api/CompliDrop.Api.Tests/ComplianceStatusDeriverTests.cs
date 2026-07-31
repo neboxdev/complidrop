@@ -313,4 +313,47 @@ public sealed class ComplianceStatusDeriverTests
         ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(300), Today.AddDays(30), isGraded: false, Today)
             .Should().Be(ComplianceStatus.Pending);
     }
+
+    [Fact]
+    public void ReadsPending_agrees_with_Effective_over_the_whole_status_x_expiry_x_effective_x_grading_grid()
+    {
+        // #443 review S2. ReadsPending is the SQL spelling of "Effective(...) == Pending", and it is the
+        // ONE predicate two consumers share (the ?status=Pending list arm and the dashboard's
+        // awaitingReview count). Those two agreeing with EACH OTHER is pinned end-to-end, but nothing
+        // pinned either against the DERIVER — so one of its three OR arms could drift (a dropped
+        // future-effective arm, a missing null-expiry branch, an over-broad grading arm) and every
+        // count-vs-list test would stay green while the list disagreed with the BADGE the deriver renders.
+        // This is that pin, walked over the same grid the deriver's own tests use.
+        //
+        // Compiled and evaluated in memory: the SQL arms use INSTANT comparisons and the deriver uses
+        // calendar DATES, so every date here is UTC midnight — the ADR 0027 convention the read sites are
+        // built on. (Postgres translation itself is covered over HTTP by NeverGradedCoverageTests.)
+        var readsPending = ComplianceStatusDeriver.ReadsPending(Today).Compile();
+        var graded = new ComplianceCheck { Id = Guid.NewGuid(), IsPassed = true, CheckedAt = Today };
+
+        foreach (var stored in Enum.GetValues<ComplianceStatus>())
+            foreach (var expiryDays in new int?[] { null, -30, -1, 0, 10, 30, 31, 200 })
+                foreach (var effectiveDays in new int?[] { null, -30, -1, 0, 1, 20 })
+                    foreach (var isGraded in new[] { true, false })
+                    {
+                        var doc = new Document
+                        {
+                            Id = Guid.NewGuid(),
+                            ComplianceStatus = stored,
+                            ExpirationDate = expiryDays is int e ? Today.AddDays(e) : null,
+                            EffectiveDate = effectiveDays is int f ? Today.AddDays(f) : null,
+                            ComplianceChecks = isGraded ? [graded] : [],
+                        };
+
+                        var effective = ComplianceStatusDeriver.Effective(
+                            doc.ComplianceStatus, doc.ExpirationDate, doc.EffectiveDate, isGraded, Today);
+
+                        readsPending(doc).Should().Be(effective == ComplianceStatus.Pending,
+                            "stored {0}, expiring in {1} days, effective in {2} days, graded={3} derives "
+                            + "{4} — the shared SQL predicate must select exactly the documents whose "
+                            + "badge reads Pending, or the deep-linked list and the badge disagree (#294)",
+                            stored, expiryDays?.ToString() ?? "never", effectiveDays?.ToString() ?? "n/a",
+                            isGraded, effective);
+                    }
+    }
 }

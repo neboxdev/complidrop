@@ -26,9 +26,13 @@ public sealed class NeverGradedCoverageTests(IntegrationTestFixture fixture) : I
 
     /// <param name="graded">false seeds the #443 never-graded state (no check rows) — the default here,
     /// since that IS the subject; true backs the stored verdict with a real check row.</param>
+    /// <param name="effective">A future EffectiveDate seeds the ADR 0041 demotion, so a test can cover
+    /// the OTHER arm of the shared <c>ReadsPending</c> predicate (#443 review S2). The
+    /// <c>FutureEffectiveCoverageGapTests</c> seeder shape.</param>
     private async Task<Guid> SeedDocAsync(
         Guid orgId, ComplianceStatus stored, DateTime? expiration, Guid? vendorId = null,
-        string docType = "coi", bool graded = false, string fileName = "cert.pdf")
+        string docType = "coi", bool graded = false, string fileName = "cert.pdf",
+        DateTime? effective = null)
     {
         var now = DateTime.UtcNow;
         var docId = Guid.NewGuid();
@@ -46,6 +50,7 @@ public sealed class NeverGradedCoverageTests(IntegrationTestFixture fixture) : I
                 DocumentType = docType,
                 ComplianceStatus = stored,
                 ExpirationDate = expiration,
+                EffectiveDate = effective,
                 ExtractionStatus = ExtractionStatus.Completed,
                 CreatedAt = now,
                 UpdatedAt = now
@@ -77,6 +82,43 @@ public sealed class NeverGradedCoverageTests(IntegrationTestFixture fixture) : I
         await db.SaveChangesAsync();
         return vendorId;
     }
+
+    /// <summary>A vendor with NO checklist assigned at all (<c>ComplianceTemplateId == null</c>).</summary>
+    private async Task<Guid> SeedVendorWithoutChecklistAsync(Guid orgId)
+    {
+        var now = DateTime.UtcNow;
+        var vendorId = Guid.NewGuid();
+        await using var db = CreateSystemDb();
+        db.Vendors.Add(new Vendor
+        {
+            Id = vendorId, OrganizationId = orgId, Name = "No-checklist vendor", CreatedAt = now, UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        return vendorId;
+    }
+
+    /// <summary>A vendor assigned a checklist that exists but holds ZERO requirements (#443 review S3).</summary>
+    private async Task<Guid> SeedVendorWithEmptyChecklistAsync(Guid orgId)
+    {
+        var now = DateTime.UtcNow;
+        var vendorId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        await using var db = CreateSystemDb();
+        db.ComplianceTemplates.Add(new ComplianceTemplate
+        {
+            Id = templateId, OrganizationId = orgId, Name = "Empty", CreatedAt = now
+        });
+        db.Vendors.Add(new Vendor
+        {
+            Id = vendorId, OrganizationId = orgId, Name = "Empty-checklist vendor",
+            ComplianceTemplateId = templateId, CreatedAt = now, UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        return vendorId;
+    }
+
+    private static async Task<JsonElement> DetailAsync(HttpClient client, Guid id) =>
+        (await client.GetFromJsonAsync<JsonElement>($"/api/documents/{id}")).GetProperty("data");
 
     private static async Task<string> DetailStatusAsync(HttpClient client, Guid id) =>
         (await client.GetFromJsonAsync<JsonElement>($"/api/documents/{id}"))
@@ -300,16 +342,27 @@ public sealed class NeverGradedCoverageTests(IntegrationTestFixture fixture) : I
         // #443 review B5: a demoted document must be REACHABLE from the dashboard, not merely absent from
         // the affirmative tiles. The awaitingReview stat is what makes it so, and — like every other
         // count/list pair on this screen — it must equal the list it deep-links to (#294).
+        //
+        // The seed carries all THREE arms of ReadsPending on purpose (#443 review S2): a genuine stored
+        // Pending, the #443 never-graded demotion, AND the ADR 0041 future-effective one. With only the
+        // first two, an implementation that dropped the future-effective arm — or narrowed awaitingReview
+        // to never-graded-only — still produced count == list length and passed.
         var auth = await RegisterAndLoginAsync();
         await SeedDocAsync(auth.OrgId, ComplianceStatus.ExpiringSoon, InTenDays, fileName: "ungraded.pdf");
         await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, FarFuture, graded: true, fileName: "graded.pdf");
         await SeedDocAsync(auth.OrgId, ComplianceStatus.Pending, FarFuture, graded: true, fileName: "genuinely-pending.pdf");
+        var futureEffective = await SeedDocAsync(
+            auth.OrgId, ComplianceStatus.Compliant, FarFuture, graded: true,
+            fileName: "not-yet-in-force.pdf", effective: Today.AddDays(20));
 
         var listed = await ListIdsAsync(auth.Client, "Pending");
         (await StatsAsync(auth.Client)).GetProperty("awaitingReview").GetInt32()
             .Should().Be(listed.Length, "the tile and the list it links to are the same population");
-        listed.Length.Should().Be(2, "the never-graded doc joins the genuinely-Pending one; the graded "
-            + "Compliant doc does not");
+        listed.Should().Contain(futureEffective,
+            "the tile counts the WHOLE effective-Pending population, including the ADR 0041 demotion — "
+            + "not a never-graded-only subset");
+        listed.Length.Should().Be(3, "the never-graded doc and the not-yet-in-force one join the "
+            + "genuinely-Pending one; the graded, in-force Compliant doc does not");
     }
 
     [Fact]
@@ -432,6 +485,93 @@ public sealed class NeverGradedCoverageTests(IntegrationTestFixture fixture) : I
         await using var db = CreateSystemDb();
         (await db.ComplianceChecks.Where(c => c.DocumentId == docId).Select(c => c.ComplianceRuleId).SingleAsync())
             .Should().Be(firstRuleId, "the lowest SortOrder wins, not whichever row the planner returned");
+    }
+
+    // ---- the DTO fields the "Not checked yet" card names its cause from (ADR 0048 §4) ----
+
+    [Fact]
+    public async Task The_detail_reports_no_checklist_when_the_document_has_no_vendor()
+    {
+        // #443 review C3. vendorHasChecklist + vendorChecklistRuleCount are the SOLE mechanism preventing
+        // the detail card from printing a FALSE claim about a customer's vendor, and they had no
+        // server-side coverage at all — only a frontend MSW fixture that hard-codes them, which proves the
+        // card branches correctly and nothing about what the API emits. Inverting the expression, dropping
+        // it, or sourcing it from the wrong entity shipped green.
+        var auth = await RegisterAndLoginAsync();
+        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.ExpiringSoon, InTenDays);
+
+        var detail = await DetailAsync(auth.Client, id);
+        detail.GetProperty("vendorHasChecklist").GetBoolean().Should().BeFalse(
+            "no vendor is assigned, so there is no checklist to have");
+        detail.GetProperty("vendorChecklistRuleCount").GetInt32().Should().Be(0);
+    }
+
+    [Fact]
+    public async Task The_detail_reports_no_checklist_for_a_vendor_with_no_template_assigned()
+    {
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorWithoutChecklistAsync(auth.OrgId);
+        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.ExpiringSoon, InTenDays, vendorId);
+
+        var detail = await DetailAsync(auth.Client, id);
+        detail.GetProperty("vendorHasChecklist").GetBoolean().Should().BeFalse(
+            "the vendor exists but ComplianceTemplateId is null");
+        detail.GetProperty("vendorChecklistRuleCount").GetInt32().Should().Be(0);
+    }
+
+    [Fact]
+    public async Task The_detail_reports_a_checklist_with_its_requirement_count()
+    {
+        // The arm whose copy asserts the checklist EXISTS. It has to be true, because the card says so
+        // out loud over a vendor page the user can open in the next tab.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorRequiringCoiAsync(auth.OrgId);
+        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.ExpiringSoon, InTenDays, vendorId, docType: "COI");
+
+        var detail = await DetailAsync(auth.Client, id);
+        detail.GetProperty("vendorHasChecklist").GetBoolean().Should().BeTrue();
+        detail.GetProperty("vendorChecklistRuleCount").GetInt32().Should().Be(1,
+            "the seeded checklist holds exactly the one 'coi' requirement");
+        detail.GetProperty("complianceStatus").GetString().Should().Be("Pending",
+            "this is the headline population: a 'COI' document against a 'coi' rule matched zero rules");
+    }
+
+    [Fact]
+    public async Task The_detail_reports_an_EMPTY_checklist_as_assigned_but_holding_zero_requirements()
+    {
+        // #443 review S3: vendorHasChecklist alone is too coarse. A vendor assigned an EMPTY checklist HAS
+        // one, so it fell into the arm whose copy asserts the checklist holds requirements that govern
+        // other document types — a false claim about the customer's own data, with the wrong remedy.
+        // The count is what separates the two, so the card can offer "add your first requirement" instead.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorWithEmptyChecklistAsync(auth.OrgId);
+        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.ExpiringSoon, InTenDays, vendorId);
+
+        var detail = await DetailAsync(auth.Client, id);
+        detail.GetProperty("vendorHasChecklist").GetBoolean().Should().BeTrue(
+            "a template IS assigned — claiming otherwise sends the user to set up a checklist they have");
+        detail.GetProperty("vendorChecklistRuleCount").GetInt32().Should().Be(0,
+            "…but it holds no requirements, which is a different cause with a different remedy");
+    }
+
+    [Fact]
+    public async Task The_detail_reports_no_checklist_once_the_vendor_is_soft_deleted()
+    {
+        // The DTO comment claims this ("False when no vendor is assigned, or the vendor was soft-deleted"),
+        // and #422 is what makes it reachable: the doc keeps its VendorId but the vendor nav resolves null
+        // through the soft-delete filter. The card keys on vendorName for the same reason — a doc pointing
+        // at a deleted vendor must land on the no-vendor arm with its working assign remedy, not on a
+        // "set up their checklist" link to a dead page.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorRequiringCoiAsync(auth.OrgId);
+        var id = await SeedDocAsync(auth.OrgId, ComplianceStatus.ExpiringSoon, InTenDays, vendorId, docType: "COI");
+        (await auth.Client.DeleteAsync($"/api/vendors/{vendorId}")).EnsureSuccessStatusCode();
+
+        var detail = await DetailAsync(auth.Client, id);
+        detail.GetProperty("vendorName").ValueKind.Should().Be(JsonValueKind.Null);
+        detail.GetProperty("vendorHasChecklist").GetBoolean().Should().BeFalse(
+            "the vendor no longer resolves, so the page must not claim it has a checklist");
+        detail.GetProperty("vendorChecklistRuleCount").GetInt32().Should().Be(0);
     }
 
     [Fact]
