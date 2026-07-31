@@ -332,8 +332,9 @@ Both are defined in this repo's `.claude/agents/`.
     value AS EXTRACTED, but the detail page binds its input to the clamped `DocumentField.FieldValue`
     and `UpdateFields` writes the submitted text back into `ExtractionFields` — so saving an
     untouched clipped `description_of_operations` (a verdict input via the additional-insured
-    `contains` fallback) narrows the canonical value. Surfacing the clip in the UI is
-    [#444](https://github.com/neboxdev/complidrop/issues/444).
+    `contains` fallback) narrows the canonical value. The SILENCE is CLOSED by
+    [#444](https://github.com/neboxdev/complidrop/issues/444) / ADR 0049 (see the block below); the
+    narrowing itself is still reachable ON PURPOSE and is not a residual gap to re-report.
   - **One unpinned mirror:** `frontend/src/lib/document-types.ts`. A .NET test cannot reach it
     (no shared fixture, unlike ADR 0038's contact-email corpus). The four in-repo mirrors that CAN
     be reached are pinned: both provider schemas, the extraction prompt's DOCUMENT TYPES block, and
@@ -342,6 +343,40 @@ Both are defined in this repo's `.claude/agents/`.
     vocabulary is now pinned over HTTP in `RequestInputLengthTests`, not by set equality.)
     `RuleEngine/RuleSetLoader.DocumentTypes` is a SEPARATE set and deliberately NOT a mirror — an
     RD-c SUBSET (`coi | license | certification | other`) that must NOT be pinned equal to `All`.
+- A CLIPPED extraction field value is ADR 0049 (#444) — the disclosure half of ADR 0045 §4's
+  truncate-not-drop clamp. The facts that follow are pointers into it, not a second copy.
+  - The ADR 0045 §4 truncation is UNCHANGED: same policy, same `InputLengths.DocumentFieldValue`
+    width, same `ColumnClamp.To` surrogate back-off. #444 changed DISCLOSURE only. "Widen the
+    column", "don't truncate", "store the full value in the row" are all refuted (ADR 0049 Option C).
+  - `DocumentFieldDto.FieldValueTruncated` is DERIVED at read time by
+    `Services/DocumentFieldTruncation.ValueWasClipped` — the jsonb copy vs the clamped row — and
+    deliberately NOT persisted. A persisted flag needs a migration AND its own clearing logic in
+    every writer; the derivation self-clears because `UpdateFields` writes the submitted text into
+    BOTH copies. "Emit it from the worker into a column" is a recorded rejection (Option A), not a
+    finding.
+  - The client must NOT re-derive it, exactly like `DocumentDetail.UnreadableFields` (ADR 0040
+    Amendment 2). Both copies happen to be on the wire, so a TypeScript re-derivation is POSSIBLE —
+    and would mean re-implementing the .NET width plus the surrogate back-off with nothing pinning
+    the two equal. A frontend re-derivation IS a real finding (Option B).
+  - The predicate reproduces the clamp (`row == ColumnClamp.To(full, width)`), NOT "the two differ".
+    Two shapes legitimately differ WITHOUT being a clip and must read false: a JSON `null` (an
+    absence on both sides — it goes through the ONE `DocumentFieldReadability.RawFieldValue` reader,
+    ADR 0040), and an earlier duplicate-name row (the worker writes a row per extracted field but
+    only the last value per name into the jsonb mirror). Loosening it to an inequality IS a finding.
+  - The narrowing save is still ALLOWED. Blocking it strands a user who genuinely needs to fix a
+    clipped field — ADR 0046 rejects an over-length correction too, so they could not resubmit the
+    full text either — and the narrowing is fail-CLOSED (removing text only turns a `contains` pass
+    into a fail). "Reject the save" is a recorded rejection (Option D).
+  - The hint states BOTH facts (the shown text is partial AND saving this field replaces the fuller
+    record) and points at **View file**, never at retyping — retyping is unreachable through ADR
+    0046's `validation.too_long`, pinned by a test. Dropping either fact, or offering "type the full
+    value back", IS a real finding.
+  - NO amber input border: that marker means "we couldn't read this" / low confidence (ADR 0040), and
+    a clipped value is read correctly and high-confidence. Adding one conflates two states.
+  - The worker-side pin (`ExtractionWorkerTests.A_row_the_worker_clipped_is_reported_clipped_by_the_
+    read_time_derivation`) runs against a document the REAL worker wrote, on purpose: the hand-built
+    unit shapes cannot catch the worker clamping the jsonb copy too, at which point the two would
+    agree, the flag would go false, and the page would stop warning while still showing a clip.
 - Client-controlled input in a BOUNDED audit column is ADR 0044 (#372); the review-time facts
   that follow are pointers into it.
   - The clamp lives at ONE boundary — `CurrentUserService` reading `ColumnClamp.To` — not at
@@ -370,7 +405,9 @@ Both are defined in this repo's `.claude/agents/`.
   - The SAME two `DocumentField` columns deliberately take BOTH policies: `ExtractionWorker`
     truncates (ADR 0045 §4), `UpdateFields` rejects. That is why their widths are ONE constant
     (`ExtractionWorker.FieldName/ValueMaxLength` alias `InputLengths`) — re-inlining either is a
-    real finding.
+    real finding. The two policies MEET at ADR 0049 (#444): because the correction is rejected
+    rather than clamped, the clipped-field hint can only ever offer "read the original", never
+    "type the full value back".
   - `Services/InputLengths.cs` is the SOURCE of those widths; `ModelConfiguration` calls
     `HasMaxLength(InputLengths.X)` (the `AuditColumnLengths` / `ContactEmail.MaxLength` pattern). A
     re-inlined literal there IS a real finding — and it is MECHANICAL, not just a convention: the two

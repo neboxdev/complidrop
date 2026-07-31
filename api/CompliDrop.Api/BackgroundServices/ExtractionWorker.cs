@@ -442,9 +442,12 @@ public class ExtractionWorker(
     /// clamped <c>DocumentField.FieldValue</c>, and <c>DocumentEndpoints.UpdateFields</c> writes the
     /// submitted text back into <c>ExtractionFields</c> — so saving an untouched clipped field narrows the
     /// canonical value to the clipped one, and <c>description_of_operations</c> IS a verdict input (the
-    /// additional-insured <c>contains</c> fallback in <c>ComplianceCheckService.EvaluateRule</c>). Marking
-    /// a clipped field in the UI so a user can't silently save the truncation is
-    /// <see href="https://github.com/neboxdev/complidrop/issues/444">#444</see>.
+    /// additional-insured <c>contains</c> fallback in <c>ComplianceCheckService.EvaluateRule</c>). That
+    /// narrowing is still reachable and still fail-closed, but it is no longer SILENT
+    /// (<see href="https://github.com/neboxdev/complidrop/issues/444">#444</see>, ADR 0049):
+    /// <see cref="DocumentFieldTruncation"/> reproduces the clamp below against the jsonb copy at read
+    /// time, and the detail page warns before a save replaces the fuller record. This truncation is
+    /// unchanged by that — do not "fix" the clip itself.
     /// <para/>
     /// Surrogate-safe: cutting between the halves of a surrogate pair would emit a lone surrogate, which
     /// Postgres rejects as invalid UTF-8 (22021) — trading one write failure for another. The back-off is
