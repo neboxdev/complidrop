@@ -152,6 +152,31 @@ public sealed class DocumentFieldTruncationTests
     }
 
     [Fact]
+    public void A_field_whose_NAME_was_itself_clamped_reads_whole_even_though_its_value_was_clipped()
+    {
+        // The one arm that deliberately SUPPRESSES the warning on a genuinely clipped value, and the
+        // only place the predicate's TWO widths meet. DocumentField.FieldName is bounded at
+        // InputLengths.DocumentFieldName while the JSON mirror is keyed by the FULL name, so an
+        // off-spec >200-character field name makes the row's key and the mirror's key different
+        // strings and the lookup misses — even though the row's VALUE really is the clamp of the
+        // mirror's.
+        //
+        // ADR 0049 §3 calls that the SAFE direction: no hint, exactly today's behaviour, rather than a
+        // hint pointing at a value we cannot line up. Keying the lookup off a clamped or normalised
+        // name would flip this to true — and then the flag would rest on a name match we have no way
+        // to prove is the same field (two distinct >200-character names share a clamp).
+        var name = new string('n', InputLengths.DocumentFieldName + 50);
+        var full = new string('d', Width + 500);
+        var doc = DocWith(name, JsonNodeShape.Text(full));
+
+        DocumentFieldTruncation
+            .ValueWasClipped(
+                doc,
+                Row(ColumnClamp.To(name, InputLengths.DocumentFieldName)!, ColumnClamp.To(full, Width)))
+            .Should().BeFalse();
+    }
+
+    [Fact]
     public void A_document_with_no_extraction_fields_reads_whole()
     {
         var doc = DocWith("description_of_operations", JsonNodeShape.Text("x"));
