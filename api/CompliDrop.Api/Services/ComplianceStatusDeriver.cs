@@ -98,12 +98,22 @@ public static class ComplianceStatusDeriver
     /// demotion moves here. Expired wins outright, so every arm carries the not-yet-expired guard.
     /// <para/>
     /// A whole-entity <c>Expression</c> — the one shape an EF read site CAN compose (the
-    /// <see cref="DocumentSupersession"/> pattern) — precisely because it has two consumers that must
+    /// <see cref="DocumentSupersession"/> pattern) — precisely because it has TWO consumers that must
     /// never disagree: the documents-list <c>?status=Pending</c> arm and the dashboard's
     /// <c>awaitingReview</c> count that deep-links to it. Spelling that predicate twice is the #294
-    /// count-vs-list split this ADR exists to prevent, so it is spelled once. The Compliant /
-    /// ExpiringSoon arms stay inline in their own read sites: each is one clause of a larger composite
-    /// (type / vendor / search filters), where an <c>Expression</c> cannot be invoked.
+    /// count-vs-list split this ADR exists to prevent, so it is spelled once.
+    /// <para/>
+    /// The sibling Compliant / ExpiringSoon arms in <c>DocumentEndpoints</c> are the same SHAPE — each
+    /// is its own top-level <c>query.Where(d =&gt; …)</c>, and each could equally take an
+    /// <c>Expression</c>. They stay inline because each has exactly ONE consumer, so there is no
+    /// two-consumer drift to spend a shared predicate on; extracting them would add public surface
+    /// nothing else calls. (Do not read this as "they structurally cannot be shared" — they can.) The
+    /// sites that genuinely cannot invoke an <c>Expression</c> are the dashboard's counts, where the
+    /// grading/effective-date facts are single clauses of a multi-clause lambda — most sharply the
+    /// compliance-rate denominator, which needs them NEGATED inside a larger composite — and the
+    /// list/rollup/export projections, which need the check COUNT as a projected scalar rather than a
+    /// predicate at all. Those spell the fact inline as <c>d.ComplianceChecks.Any()</c> /
+    /// <c>.Count</c>, and are covered by the count-vs-deep-linked-list pins instead.
     /// <para/>
     /// The demotion arms are deliberately INDEPENDENT of one another: a document can be both
     /// future-effective and never-graded, and either alone must land it here so the list matches the

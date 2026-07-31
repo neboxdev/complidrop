@@ -29,9 +29,13 @@ namespace CompliDrop.Api.Services;
 /// three artifacts).
 /// <para/>
 /// There is deliberately NO EF <c>Expression</c> mirror here. Every SQL read site needs the fact
-/// INSIDE a composite predicate or a projection (the documents-list status arms, the dashboard
-/// counts), where an EF expression cannot be invoked, so each spells it inline as
-/// <c>d.ComplianceChecks.Any()</c> — the same hand-mirroring ADR 0041's future-effective bound
+/// INSIDE something an <c>Expression&lt;Func&lt;Document, bool&gt;&gt;</c> cannot be invoked in: as a
+/// single clause of a multi-clause lambda (the dashboard's <c>compliant</c> / <c>expiringSoon</c>
+/// counts, the documents-list Compliant / ExpiringSoon arms — and the compliance-rate denominator,
+/// which needs it NEGATED inside a larger composite), or as a projected SCALAR rather than a
+/// predicate at all (the list, vendor-rollup and export projections, which read
+/// <c>d.ComplianceChecks.Count</c> and hand it to <see cref="IsGraded(int)"/>). So each spells it
+/// inline as <c>d.ComplianceChecks.Any()</c> — the same hand-mirroring ADR 0041's future-effective bound
 /// already requires, and covered the same way: by cross-surface tests pinning each SQL arm against
 /// the in-memory deriver, plus <c>NeverGradedCoverageTests</c>'
 /// <c>The_SQL_grading_predicate_agrees_with_the_in_memory_one_and_with_the_check_rows</c>, which

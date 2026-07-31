@@ -224,6 +224,18 @@ public static class DocumentEndpoints
             .FirstOrDefaultAsync(d => d.Id == id, ct);
         if (doc is null) return NotFound();
 
+        // #443 review S3 / ADR 0048 §4: how many requirements the assigned vendor's checklist actually
+        // holds. Read through db.ComplianceTemplates (not off the FK) so the org + soft-delete query
+        // filters apply: a vendor pointing at a soft-deleted template reports 0, which lands the card on
+        // the empty-checklist arm — whose copy and remedy are the honest ones for that state too. One
+        // extra scalar query, and only when a checklist is actually assigned.
+        var vendorChecklistRuleCount = doc.Vendor?.ComplianceTemplateId is Guid templateId
+            ? await db.ComplianceTemplates
+                .Where(t => t.Id == templateId)
+                .Select(t => t.Rules.Count)
+                .FirstOrDefaultAsync(ct)
+            : 0;
+
         object? extractionFields = null;
         if (doc.ExtractionFields is not null)
             extractionFields = System.Text.Json.JsonSerializer.Deserialize<object>(doc.ExtractionFields.RootElement.GetRawText());
@@ -241,11 +253,12 @@ public static class DocumentEndpoints
             doc.Vendor?.ContactEmail,
             doc.VendorId,
             // #443 / ADR 0048 §4: the detail page's "Not checked yet" card explains WHY nothing graded
-            // this document, and zero check rows has three causes, not two. This distinguishes "the
-            // vendor has no checklist" from "the checklist exists but none of its rules govern a
-            // {documentType}" — a distinction the page cannot derive from complianceChecks.length, and
-            // one it used to get wrong by asserting the first whenever it saw zero checks.
+            // this document, and zero check rows has four causes, not two. These two fields together
+            // distinguish "no checklist" from "an EMPTY checklist" from "a checklist none of whose rules
+            // govern a {documentType}" — distinctions the page cannot derive from complianceChecks.length,
+            // and ones it used to get wrong by asserting the first whenever it saw zero checks.
             doc.Vendor?.ComplianceTemplateId != null,
+            vendorChecklistRuleCount,
             doc.ExtractionStatus.ToString(),
             doc.ExtractionConfidence,
             // #443 / ADR 0048: the ComplianceChecks collection is already Include-loaded (it IS the "What

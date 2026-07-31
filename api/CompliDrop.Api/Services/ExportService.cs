@@ -86,17 +86,10 @@ public class ExportService(SystemDbContext db) : IExportService
         var (fromUtc, toUtcExclusive, fromDate, toDate) =
             ResolveAuditWindow(from, to, org.TimeZone, DateTime.UtcNow);
 
-        var orgDocs = db.Documents.Where(d => d.OrganizationId == organizationId && d.DeletedAt == null);
-        var docs = await orgDocs
-            .Include(d => d.Vendor)
-            .OrderBy(d => d.ExpirationDate)
-            .ToListAsync(ct);
-        // #327: annotate superseded (renewed) old certs in the audit report so a reader sees the old cert
-        // AND knows it was replaced — same coverage-extending-renewal rule as the CSV (DocumentSupersession).
-        var supersededIds = SupersededIds(docs);
-        // #443: how many requirements were actually measured against each document — the audit report must
-        // not print an affirmative verdict for one nothing graded.
-        var checkCounts = await CheckCountsAsync(orgDocs, ct);
+        // Derive the date-driven verdict at GENERATION time so the audit-ready report can never
+        // certify an expired document as Compliant off a stale cache (#257).
+        var today = DateTime.UtcNow.Date;
+        var rows = await AuditReportRowsAsync(organizationId, today, ct);
         var (audit, auditTruncated) = await QueryAuditSliceAsync(organizationId, fromUtc, toUtcExclusive, ct);
 
         // Resolve UserIds to human names so the report shows WHO acted, not a raw
@@ -114,9 +107,6 @@ public class ExportService(SystemDbContext db) : IExportService
             .ToDictionary(u => u.Id, u => DisplayName(u.FullName, u.Email));
 
         var reportDate = DateTime.UtcNow.ToString("MMMM d, yyyy");
-        // Derive the date-driven verdict at GENERATION time so the audit-ready report can never
-        // certify an expired document as Compliant off a stale cache (#257).
-        var today = DateTime.UtcNow.Date;
 
         return QuestPDF.Fluent.Document.Create(container =>
         {
@@ -146,16 +136,15 @@ public class ExportService(SystemDbContext db) : IExportService
                                 r.RelativeItem(2).Text("Expires").SemiBold();
                                 r.RelativeItem(2).Text("Compliance").SemiBold();
                             });
-                            foreach (var d in docs)
+                            foreach (var row in rows)
                             {
                                 inner.Item().PaddingTop(3).Row(r =>
                                 {
-                                    r.RelativeItem(3).Text(d.OriginalFileName).FontSize(9);
-                                    r.RelativeItem(2).Text(d.Vendor?.Name ?? "—").FontSize(9);
-                                    r.RelativeItem(2).Text(DisplayLabels.DocumentType(d.DocumentType)).FontSize(9);
-                                    r.RelativeItem(2).Text(d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "—").FontSize(9);
-                                    r.RelativeItem(2).Text(ComplianceCell(
-                                        d, today, checkCounts, supersededIds.Contains(d.Id))).FontSize(9);
+                                    r.RelativeItem(3).Text(row.FileName).FontSize(9);
+                                    r.RelativeItem(2).Text(row.Vendor).FontSize(9);
+                                    r.RelativeItem(2).Text(row.Type).FontSize(9);
+                                    r.RelativeItem(2).Text(row.Expires).FontSize(9);
+                                    r.RelativeItem(2).Text(row.Compliance).FontSize(9);
                                 });
                             }
                         }));
@@ -189,6 +178,48 @@ public class ExportService(SystemDbContext db) : IExportService
                 });
             });
         }).GeneratePdf();
+    }
+
+    /// <summary>
+    /// One rendered row of the audit report's Documents table, in column order (#443 review S1). A
+    /// record rather than five loose strings so the test that pins the table asserts the same tuple the
+    /// PDF prints, column for column.
+    /// </summary>
+    internal sealed record AuditReportRow(
+        string FileName, string Vendor, string Type, string Expires, string Compliance);
+
+    /// <summary>
+    /// The exact rows the audit report's Documents table prints, INCLUDING the requirement-count read
+    /// they are built from — an internal seam in the <see cref="VendorPackageLinesAsync"/> shape and for
+    /// the same reason (#443 review S1). The audit report is equally auditor-facing, equally
+    /// FlateDecode-unassertable, and performs its OWN check-count read; a `%PDF` smoke test cannot tell
+    /// a correctly-wired count map from an empty one, so an empty map would silently annotate EVERY row
+    /// of an auditor's report "(no requirements checked)" while a dropped annotation would print an
+    /// affirmative verdict for a document nothing graded. Both directions are pinned here.
+    /// <para/>
+    /// Takes <paramref name="today"/> rather than reading the clock so the date overlay (#257) is
+    /// deterministic under test, exactly as the vendor-package seam does.
+    /// </summary>
+    internal async Task<List<AuditReportRow>> AuditReportRowsAsync(
+        Guid organizationId, DateTime today, CancellationToken ct)
+    {
+        var orgDocs = db.Documents.Where(d => d.OrganizationId == organizationId && d.DeletedAt == null);
+        var docs = await orgDocs
+            .Include(d => d.Vendor)
+            .OrderBy(d => d.ExpirationDate)
+            .ToListAsync(ct);
+        // #327: annotate superseded (renewed) old certs in the audit report so a reader sees the old cert
+        // AND knows it was replaced — same coverage-extending-renewal rule as the CSV (DocumentSupersession).
+        var supersededIds = SupersededIds(docs);
+        // #443: how many requirements were actually measured against each document — the audit report must
+        // not print an affirmative verdict for one nothing graded.
+        var checkCounts = await CheckCountsAsync(orgDocs, ct);
+        return [.. docs.Select(d => new AuditReportRow(
+            d.OriginalFileName,
+            d.Vendor?.Name ?? "—",
+            DisplayLabels.DocumentType(d.DocumentType),
+            d.ExpirationDate?.ToString("yyyy-MM-dd") ?? "—",
+            ComplianceCell(d, today, checkCounts, supersededIds.Contains(d.Id))))];
     }
 
     // Human label for an audit row's actor: the user's name/email, or a
