@@ -22,6 +22,7 @@ import {
   fieldLabel,
   processingErrorMessage,
 } from "@/lib/display-labels";
+import { canonicalDocumentType, documentTypeLabel } from "@/lib/document-types";
 import { requirementSentence } from "@/lib/requirements";
 import { SUPPORT_EMAIL } from "@/lib/site";
 import { formatCalendarDate } from "@/lib/dates";
@@ -62,6 +63,13 @@ type DocDetail = {
   vendorName: string | null;
   vendorContactEmail: string | null;
   vendorId: string | null;
+  // Whether the assigned vendor has a requirements checklist AT ALL, and how many
+  // requirements it holds (#443 / ADR 0048 §4). Sourced from the backend because
+  // the page cannot derive either: `complianceChecks.length === 0` has four causes
+  // and only the server can tell "no checklist" from "an EMPTY checklist" from "a
+  // checklist whose rules govern other document types". See NotCheckedExplainer.
+  vendorHasChecklist: boolean;
+  vendorChecklistRuleCount: number;
   extractionStatus: string;
   extractionConfidence: number | null;
   complianceStatus: string;
@@ -363,15 +371,42 @@ const MANUAL_ENTRY_FIELDS: ReadonlyArray<{
 // Explains WHY a document is "not checked yet" instead of leaving the user at a
 // dead end, and fixes it inline: an orphan doc gets a vendor picker (the only
 // place to assign a vendor to an already-uploaded doc — also FP-065's orphan
-// picker), and a vendor with no checklist links to set one up. Assigning re-runs
-// the check automatically (#257). (#316 FP-063)
+// picker), a vendor with no checklist links to set one up, an EMPTY checklist
+// asks for its first requirement, and a checklist that simply doesn't cover this
+// document's TYPE says so. Assigning a vendor or adding a governing requirement
+// re-runs the check automatically (#257). (#316 FP-063)
+//
+// This card is the ONE place in the product that NAMES the reason a document was
+// never checked, so it may only ever name a cause it can actually KNOW. Zero
+// ComplianceCheck rows has FOUR causes — ComputeOutcome reaches that state from
+// no vendor, no checklist, an EMPTY checklist, and `applicableRules.Count == 0`
+// (a checklist that exists but whose rules all govern other document types,
+// reachable today because the applicable-rules filter compares DocumentType
+// case-SENSITIVELY). Before #443 the last cause read ExpiringSoon inside the
+// 30-day window, so this card never rendered for it; ADR 0048 makes it read
+// Pending, and guessing "no checklist" from `complianceChecks.length === 0`
+// would then print a FALSE claim plus a dead-end CTA over a vendor that plainly
+// has a checklist — while the vendor rollup called that same vendor
+// ActionNeeded against it. `vendorHasChecklist` + `vendorChecklistRuleCount`
+// come from the backend for that reason: it is the one party that knows.
+// (#443 review B4 / C1 / C2 / S3)
 function NotCheckedExplainer({ doc }: { doc: DocDetail }) {
   const updateDoc = useUpdateDocument();
   const [picked, setPicked] = useState<VendorOption | null>(null);
 
-  const isProcessing =
-    doc.extractionStatus === "Pending" || doc.extractionStatus === "Processing";
-  if (doc.complianceStatus !== "Pending" || isProcessing) return null;
+  // Only a SETTLED extraction can have been graded, so only a settled one may
+  // have its non-grading explained. Stated as an allow-list (the same
+  // Completed/ManualRequired pair ResolveManualReview treats as settled) rather
+  // than as exclusions: a terminally FAILED extraction never calls
+  // ApplyEvaluationAsync at all, so it sits at the default Pending compliance
+  // with zero checks — and this card used to answer that with a confident,
+  // verifiably false claim about the customer's checklist plus the wrong remedy.
+  // ProcessingErrorCard states the real reason, and every Failed write sets the
+  // ProcessingError that renders it. An allow-list also fails CLOSED for any
+  // extraction state added later. (#443 review C1)
+  const gradingCouldHaveRun =
+    doc.extractionStatus === "Completed" || doc.extractionStatus === "ManualRequired";
+  if (doc.complianceStatus !== "Pending" || !gradingCouldHaveRun) return null;
 
   // Keyed on the vendor NAME, not the FK: a deleted vendor's surviving doc
   // keeps its VendorId, but the vendor resolves null through the soft-delete
@@ -381,9 +416,33 @@ function NotCheckedExplainer({ doc }: { doc: DocDetail }) {
   // linking to a dead vendor page. Same vendorName keying as the list page's
   // Assign-vendor cell.
   const noVendor = !doc.vendorName;
-  const noChecklist = !noVendor && (doc.complianceChecks?.length ?? 0) === 0;
-  // Pending for some reason we can't name (shouldn't happen) — don't guess.
-  if (!noVendor && !noChecklist) return null;
+  const nothingChecked = !noVendor && (doc.complianceChecks?.length ?? 0) === 0;
+  const noChecklist = nothingChecked && !doc.vendorHasChecklist;
+  // An EMPTY checklist is its own cause with its own remedy (#443 review S3):
+  // the vendor HAS a checklist, so "they don't have one" is false — but it holds
+  // nothing, so "it has requirements, just none for this type" is false too.
+  const emptyChecklist =
+    nothingChecked && doc.vendorHasChecklist && doc.vendorChecklistRuleCount === 0;
+  const noApplicableRule =
+    nothingChecked && doc.vendorHasChecklist && doc.vendorChecklistRuleCount > 0;
+  // The four causes are exhaustive over "nothing was ever checked". Pending for
+  // any OTHER reason — a future-effective cert (#362), whose own banner explains
+  // it — falls through here rather than being guessed at.
+  if (!noVendor && !noChecklist && !emptyChecklist && !noApplicableRule) return null;
+  const typeLabel = documentTypeLabel(doc.documentType);
+  // The ticket's headline population: a document STORED as "COI" against a "coi"
+  // rule. `documentTypeLabel` normalizes case, so both render "Certificate of
+  // Insurance" — and the old copy therefore told the user nothing on the
+  // checklist applied to Certificate of Insurance while the vendor page listed a
+  // Certificate of Insurance requirement, then offered to add a DUPLICATE that
+  // still would not grade this document. The mismatch is in the stored string,
+  // so show the stored string and lead with correcting it. `canonicalType` is
+  // null for a value the vocabulary doesn't recognise at all, which has no
+  // one-click target — the type picker at the top of the page shows that value
+  // as un-selectable and any pick from the list fixes it. (#443 review C2)
+  const storedType = doc.documentType?.trim() ?? "";
+  const canonicalType = canonicalDocumentType(storedType);
+  const nonCanonicalType = noApplicableRule && storedType !== "" && canonicalType !== storedType;
 
   return (
     <Card className="border-sky-200 bg-sky-50/60">
@@ -419,7 +478,7 @@ function NotCheckedExplainer({ doc }: { doc: DocDetail }) {
               }}
             />
           </>
-        ) : (
+        ) : noChecklist ? (
           <>
             <p className="text-sm text-sky-900">
               {doc.vendorName ?? "This vendor"}{" "}
@@ -432,6 +491,93 @@ function NotCheckedExplainer({ doc }: { doc: DocDetail }) {
               className={cn(buttonVariants({ variant: "outline", size: "sm" }), "w-fit")}
             >
               Set up {doc.vendorName ?? "vendor"} requirements
+            </Link>
+          </>
+        ) : emptyChecklist ? (
+          <>
+            {/* The EMPTY-checklist cause (#443 review S3). The vendor HAS a checklist, so
+                the arm above would state a falsehood — but it holds nothing, so the arm
+                below (which asserts it has requirements governing other types) would state
+                a different one. Its own sentence, and the same "add the first one" remedy
+                the no-checklist arm offers. A soft-deleted template reports zero rules and
+                lands here too, where the remedy is equally right. */}
+            <p className="text-sm text-sky-900">
+              {doc.vendorName ?? "This vendor"}&apos;s requirements checklist doesn&apos;t
+              have any requirements on it yet, so there was nothing to check this against.
+              Add what they need to prove and we&apos;ll check it automatically.
+            </p>
+            <Link
+              href={`/vendors/${doc.vendorId}`}
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }), "w-fit")}
+            >
+              Add {doc.vendorName ?? "vendor"} requirements
+            </Link>
+          </>
+        ) : nonCanonicalType ? (
+          <>
+            {/* The ticket's headline population (#443 review C2): the checklist may well
+                list a requirement for this very type — the vendor page shows one — but the
+                document's type is STORED as a value the rules don't match (ordinal,
+                case-sensitive). Saying "nothing on it applies to Certificate of Insurance"
+                over a checklist that visibly requires a Certificate of Insurance is a
+                self-contradiction, and "add a requirement for Certificate of Insurance"
+                adds a duplicate that still won't grade it. So: show the RAW stored value,
+                and lead with the correction. One click when the value resolves to a real
+                type; otherwise the picker at the top of the page, which shows an
+                unrecognised value as un-selectable so any pick from the list fixes it. */}
+            <p className="text-sm text-sky-900">
+              This document&apos;s type is stored as &ldquo;{storedType}&rdquo;, which
+              doesn&apos;t match how requirements are written, so none of{" "}
+              {doc.vendorName ?? "this vendor"}&apos;s could be checked against it.
+              {canonicalType
+                ? ` Set the type to ${typeLabel} and we'll check it again.`
+                : " Pick a type at the top of this page and we'll check it again."}
+            </p>
+            {canonicalType && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="w-fit"
+                disabled={updateDoc.isPending}
+                onClick={() =>
+                  updateDoc.mutate(
+                    { id: doc.id, documentType: canonicalType },
+                    {
+                      onSuccess: () => toast.success(`Type set to ${typeLabel} — checking now…`),
+                      onError: (err) =>
+                        toast.error(
+                          err instanceof Error ? err.message : "Couldn't update the type.",
+                        ),
+                    },
+                  )
+                }
+              >
+                Set type to {typeLabel}
+              </Button>
+            )}
+          </>
+        ) : (
+          <>
+            {/* The last cause (#443): the checklist EXISTS and holds requirements — so we
+                must not claim otherwise — but none of them governs this document's type,
+                which is stored exactly as the vocabulary spells it. The type is named in
+                parentheses rather than inside an article ("a {label}") so the sentence
+                reads correctly for every entry in the vocabulary, "Other" included. Both
+                real remedies are offered, because either could be the mistake: the
+                checklist is missing a requirement, or the type is wrong. */}
+            <p className="text-sm text-sky-900">
+              {doc.vendorName ?? "This vendor"} has a requirements checklist, but nothing
+              on it applies to this document&apos;s type ({typeLabel}), so there was
+              nothing to check it against. Add a requirement that covers it — or, if the
+              type is wrong, change it at the top of this page. Either way we&apos;ll
+              check it automatically.
+            </p>
+            <Link
+              href={`/vendors/${doc.vendorId}`}
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }), "w-fit")}
+            >
+              Add a requirement for {typeLabel}
             </Link>
           </>
         )}

@@ -29,6 +29,26 @@ public record DocumentDetail(
     // requirements. Null when the vendor is unassigned or has no email. (#193)
     string? VendorContactEmail,
     Guid? VendorId,
+    // Whether the assigned vendor has a requirements checklist at all (#443 / ADR 0048 §4).
+    // The detail page's "Not checked yet" card NAMES the reason a document reads Pending, and
+    // since #443 zero ComplianceCheck rows has FOUR causes, not two: no vendor, a vendor with no
+    // checklist, an EMPTY checklist, or a checklist whose rules all govern OTHER document types
+    // (reachable today — ComputeOutcome's applicable-rules filter compares DocumentType
+    // case-SENSITIVELY). The page cannot tell those apart from complianceChecks.length, and
+    // guessing "no checklist" printed a FALSE claim plus a dead-end CTA over a vendor that plainly
+    // has one, while the vendor rollup simultaneously read ActionNeeded against that same
+    // checklist. The backend already knows, so it says. False when no vendor is assigned (or the
+    // vendor was soft-deleted).
+    bool VendorHasChecklist,
+    // How many requirements that checklist actually holds (#443 review S3). VendorHasChecklist
+    // alone is too COARSE for the taxonomy the card names: a vendor assigned an EMPTY checklist
+    // has one, so it fell into the "nothing on it applies to this type" arm, whose copy asserts the
+    // checklist HAS requirements that govern other types — a claim about the customer's own data
+    // that is simply false. The two facts together separate all four causes; neither alone does
+    // ("count > 0" cannot tell an empty checklist from no checklist). 0 when no vendor, no
+    // checklist, an empty checklist, or a checklist whose template was soft-deleted (which reads
+    // as an empty one — the honest remedy is the same: put requirements on this vendor).
+    int VendorChecklistRuleCount,
     string ExtractionStatus,
     double? ExtractionConfidence,
     string ComplianceStatus,

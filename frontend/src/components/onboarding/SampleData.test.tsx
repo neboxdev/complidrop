@@ -30,6 +30,7 @@ const baseStats: DashboardStats = {
   nonCompliant: 0,
   expiringSoon: 0,
   expired: 0,
+  awaitingReview: 0,
   pendingExtraction: 0,
   totalVendors: 0,
   anyVendorWithRequirements: false,

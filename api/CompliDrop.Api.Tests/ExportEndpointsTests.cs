@@ -6,6 +6,7 @@ using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 
 namespace CompliDrop.Api.Tests;
 
@@ -126,17 +127,20 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
             });
             await db.SaveChangesAsync();
         }
+        // #443: back the stored Compliant with a check row so it exports as Compliant — an ungraded one
+        // now exports as the demoted Pending label with RequirementsChecked 0.
+        await MarkGradedAsync(auth.OrgId, docId);
 
         var csv = await (await auth.Client.GetAsync("/api/export/csv")).Content.ReadAsStringAsync();
         var lines = csv.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToArray();
 
         lines[0].Should().Be(
-            "FileName,Vendor,Type,ProcessingStatus,Compliance,Superseded,EffectiveDate,ExpirationDate,GeneralLiabilityLimit,UploadedBy,CreatedAt,Id");
+            "FileName,Vendor,Type,ProcessingStatus,Compliance,Superseded,RequirementsChecked,EffectiveDate,ExpirationDate,GeneralLiabilityLimit,UploadedBy,CreatedAt,Id");
 
         var fields = lines[1].Split(',');
         fields[0].Should().Be("acme-coi.pdf", "the filename leads, not the GUID");
         fields[^1].Should().Be(docId.ToString(), "the raw GUID is last");
-        fields[10].Should().MatchRegex(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", "CreatedAt is Excel-parseable, no trailing Z");
+        fields[11].Should().MatchRegex(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", "CreatedAt is Excel-parseable, no trailing Z");
     }
 
     [Fact]
@@ -451,12 +455,13 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
         // text-assertable (see Audit_report_generates_a_pdf…), and both PDF sites share this exact overlay.
         var auth = await RegisterAndLoginAsync();
         var today = DateTime.UtcNow.Date;
+        var futureEffectiveId = Guid.NewGuid();
         await using (var db = CreateSystemDb())
         {
             var now = DateTime.UtcNow;
             db.Documents.Add(new Document
             {
-                Id = Guid.NewGuid(),
+                Id = futureEffectiveId,
                 OrganizationId = auth.OrgId,
                 OriginalFileName = "future-effective-coi.pdf",
                 BlobStorageUrl = "memory://fe",
@@ -472,6 +477,9 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
             });
             await db.SaveChangesAsync();
         }
+        // #443: back the stored Compliant with a check row, so the Pending this asserts is the
+        // FUTURE-EFFECTIVE demotion and not the never-graded one — otherwise the test passes vacuously.
+        await MarkGradedAsync(auth.OrgId, futureEffectiveId);
 
         var csv = await (await auth.Client.GetAsync("/api/export/csv")).Content.ReadAsStringAsync();
         var lines = csv.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToArray();
@@ -485,5 +493,209 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
             "a not-yet-in-force cert exports as the Pending label (DisplayLabels.Compliance), not Compliant");
         row[compIdx].Should().NotBe("Compliant",
             "the export must not certify present-tense coverage a future-effective cert doesn't yet provide");
+        row[Array.IndexOf(header, "RequirementsChecked")].Should().Be("1",
+            "it WAS graded — this row's Pending is the future-effective demotion, not #443's");
+    }
+
+    // ---- #443 / ADR 0048: the auditor-facing export stops asserting a verdict nothing produced ----
+
+    [Fact]
+    public async Task Csv_export_reads_a_never_graded_doc_as_Pending_and_discloses_zero_requirements_checked()
+    {
+        // The ticket's headline artifact claim: a document nothing ever graded printed "Expiring soon" into
+        // the auditor-facing export, with an EMPTY "What we checked" panel behind it. It must export as the
+        // Pending label, and the RequirementsChecked column must show the 0 that explains why.
+        var auth = await RegisterAndLoginAsync();
+        var today = DateTime.UtcNow.Date;
+        var gradedId = Guid.NewGuid();
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            foreach (var (id, name) in new[] { (gradedId, "graded-coi.pdf"), (Guid.NewGuid(), "never-graded-coi.pdf") })
+                db.Documents.Add(new Document
+                {
+                    Id = id,
+                    OrganizationId = auth.OrgId,
+                    OriginalFileName = name,
+                    BlobStorageUrl = "memory://ng",
+                    FileSizeBytes = 1,
+                    ContentType = "application/pdf",
+                    DocumentType = "coi",
+                    ExtractionStatus = ExtractionStatus.Completed,
+                    // The exact state ComputeOutcome's zero-applicable-rules branch stores inside the window.
+                    ComplianceStatus = ComplianceStatus.ExpiringSoon,
+                    ExpirationDate = today.AddDays(10),
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                });
+            await db.SaveChangesAsync();
+        }
+        await MarkGradedAsync(auth.OrgId, gradedId);
+
+        var csv = await (await auth.Client.GetAsync("/api/export/csv")).Content.ReadAsStringAsync();
+        var lines = csv.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToArray();
+        var header = lines[0].Split(',');
+        var fileIdx = Array.IndexOf(header, "FileName");
+        var compIdx = Array.IndexOf(header, "Compliance");
+        var checkedIdx = Array.IndexOf(header, "RequirementsChecked");
+        checkedIdx.Should().BeGreaterThan(-1, "the export discloses how many requirements were checked (#443)");
+
+        string[] RowFor(string fileName) => lines.Skip(1).Select(l => l.Split(',')).First(f => f[fileIdx] == fileName);
+
+        var ungraded = RowFor("never-graded-coi.pdf");
+        ungraded[compIdx].Should().Be("Awaiting review",
+            "the export must not certify a document no requirement was ever measured against");
+        ungraded[compIdx].Should().NotBe("Expiring soon");
+        ungraded[checkedIdx].Should().Be("0");
+
+        // The control: same dates, same stored verdict, actually graded.
+        var graded = RowFor("graded-coi.pdf");
+        graded[compIdx].Should().Be("Expiring soon");
+        graded[checkedIdx].Should().Be("1");
+    }
+
+    [Fact]
+    public void The_pdf_compliance_cell_annotates_a_never_graded_document()
+    {
+        // Both PDFs (the audit report's Compliance column and the vendor package's bullet line) go through
+        // ExportService.ComplianceCell. They are FlateDecode-compressed and not text-assertable, so this is
+        // where their wording is pinned. The CSV variant deliberately omits the parenthetical — it carries
+        // the fact in its own RequirementsChecked column instead, so its Compliance cell stays filterable.
+        var today = new DateTime(2026, 6, 15, 0, 0, 0, DateTimeKind.Utc);
+        var doc = new Document
+        {
+            Id = Guid.NewGuid(), OriginalFileName = "c.pdf", DocumentType = "coi",
+            ComplianceStatus = ComplianceStatus.ExpiringSoon, ExpirationDate = today.AddDays(10),
+        };
+        var ungraded = new Dictionary<Guid, int> { [doc.Id] = 0 };
+        var graded = new Dictionary<Guid, int> { [doc.Id] = 2 };
+
+        ExportService.ComplianceCell(doc, today, ungraded, superseded: false)
+            .Should().Be("Awaiting review (no requirements checked)");
+        ExportService.ComplianceCell(doc, today, ungraded, superseded: false, annotateNeverGraded: false)
+            .Should().Be("Awaiting review", "the CSV carries the count in its own column");
+        ExportService.ComplianceCell(doc, today, graded, superseded: false)
+            .Should().Be("Expiring soon", "a graded document is untouched");
+        // The two qualifiers compose — a superseded, never-graded old cert discloses both.
+        ExportService.ComplianceCell(doc, today, ungraded, superseded: true)
+            .Should().Be("Awaiting review (no requirements checked) (superseded)");
+        // A document missing from the map entirely (defensive) reads as ungraded, never as graded.
+        ExportService.ComplianceCell(doc, today, new Dictionary<Guid, int>(), superseded: false)
+            .Should().Be("Awaiting review (no requirements checked)");
+    }
+
+    /// <summary>Seeds a vendor holding one GRADED and one never-graded COI, both expiring in 10 days.</summary>
+    private async Task<(Guid VendorId, Guid GradedId, Guid UngradedId)> SeedVendorWithOneGradedAndOneUngradedAsync(
+        Guid orgId)
+    {
+        var vendorId = Guid.NewGuid();
+        var gradedId = Guid.NewGuid();
+        var ungradedId = Guid.NewGuid();
+        var expires = DateTime.UtcNow.Date.AddDays(10);
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            db.Vendors.Add(new Vendor { Id = vendorId, OrganizationId = orgId, Name = "V", CreatedAt = now, UpdatedAt = now });
+            foreach (var (id, name) in new[] { (gradedId, "measured.pdf"), (ungradedId, "never-graded.pdf") })
+                db.Documents.Add(new Document
+                {
+                    Id = id, OrganizationId = orgId, VendorId = vendorId,
+                    OriginalFileName = name, BlobStorageUrl = "memory://v", FileSizeBytes = 1,
+                    ContentType = "application/pdf", DocumentType = "coi",
+                    ExtractionStatus = ExtractionStatus.Completed,
+                    // The exact state ComputeOutcome's zero-applicable-rules branch stores in the window.
+                    ComplianceStatus = ComplianceStatus.ExpiringSoon,
+                    ExpirationDate = expires, CreatedAt = now, UpdatedAt = now,
+                });
+            await db.SaveChangesAsync();
+        }
+        await MarkGradedAsync(orgId, gradedId);
+        return (vendorId, gradedId, ungradedId);
+    }
+
+    [Fact]
+    public async Task Vendor_package_prints_the_never_graded_annotation_only_for_the_ungraded_document()
+    {
+        // The vendor package is THE artifact the ticket names, and it is the one export whose check-count
+        // input is its OWN query — the CSV and the audit report share theirs. Asserting only that the
+        // response bytes are non-empty left that wiring invisible in BOTH directions: an EMPTY count map
+        // would print "(no requirements checked)" beside every line of an auditor package, and a bug that
+        // dropped the annotation would print an affirmative verdict for a document nothing graded. Neither
+        // is visible in the compressed bytes, so the lines are asserted at the seam that builds them —
+        // which does the count read itself, so the query is pinned along with the formatting.
+        var auth = await RegisterAndLoginAsync();
+        var (vendorId, _, _) = await SeedVendorWithOneGradedAndOneUngradedAsync(auth.OrgId);
+
+        await using var db = CreateSystemDb();
+        var vendor = await db.Vendors.Include(v => v.Documents)
+            .FirstAsync(v => v.Id == vendorId);
+        var lines = await new ExportService(db).VendorPackageLinesAsync(vendor, DateTime.UtcNow.Date, default);
+
+        lines.Should().HaveCount(2);
+        lines.Should().ContainSingle(l => l.Contains("never-graded.pdf"))
+            .Which.Should().EndWith("Awaiting review (no requirements checked)",
+                "the auditor package must not certify a document no requirement was measured against, and "
+                + "is entitled to the count that explains why");
+        lines.Should().ContainSingle(l => l.Contains("measured.pdf"))
+            .Which.Should().EndWith("Expiring soon",
+                "the graded cert keeps its real verdict, un-annotated — an empty count map would annotate "
+                + "every line of the package");
+    }
+
+    [Fact]
+    public async Task Audit_report_rows_annotate_only_the_never_graded_document()
+    {
+        // #443 review S1. The audit report is equally auditor-facing, equally FlateDecode-unassertable,
+        // and does its OWN check-count read — but only a `%PDF` smoke test covered it, which cannot tell a
+        // correctly-wired count map from an empty one. An empty map annotates EVERY row of an auditor's
+        // report "(no requirements checked)"; a dropped annotation prints an affirmative verdict for a
+        // document nothing graded. So the rows are asserted at the seam that builds them, exactly as the
+        // vendor package's are — the count read is pinned along with the formatting.
+        var auth = await RegisterAndLoginAsync();
+        var (_, _, _) = await SeedVendorWithOneGradedAndOneUngradedAsync(auth.OrgId);
+
+        await using var db = CreateSystemDb();
+        var rows = await new ExportService(db).AuditReportRowsAsync(auth.OrgId, DateTime.UtcNow.Date, default);
+
+        rows.Should().HaveCount(2);
+        rows.Should().ContainSingle(r => r.FileName == "never-graded.pdf")
+            .Which.Compliance.Should().Be("Awaiting review (no requirements checked)",
+                "the audit report must not certify a document no requirement was measured against");
+        rows.Should().ContainSingle(r => r.FileName == "measured.pdf")
+            .Which.Compliance.Should().Be("Expiring soon",
+                "the graded cert keeps its real verdict, un-annotated — an empty count map would annotate "
+                + "every row of the report");
+        // The other columns come from the same row build, so a mis-ordered tuple is visible here too.
+        rows.Should().OnlyContain(r => r.Vendor == "V" && r.Type == "Certificate of Insurance");
+    }
+
+    [Fact]
+    public async Task Audit_report_pdf_still_renders_for_a_never_graded_document()
+    {
+        // The end-to-end half of the seam above: the extra check-count query and the annotation must not
+        // break generation for the document that motivated the fix.
+        var auth = await RegisterAndLoginAsync();
+        await SeedVendorWithOneGradedAndOneUngradedAsync(auth.OrgId);
+
+        var resp = await auth.Client.GetAsync("/api/export/audit-report");
+        resp.EnsureSuccessStatusCode();
+        var bytes = await resp.Content.ReadAsByteArrayAsync();
+        System.Text.Encoding.ASCII.GetString(bytes, 0, 4).Should().Be("%PDF");
+    }
+
+    [Fact]
+    public async Task Vendor_package_pdf_still_renders_for_a_never_graded_document()
+    {
+        // The end-to-end guard that the extra check-count query and the annotation don't break generation
+        // for the very document that motivated the fix. The %PDF magic bytes are the same assertion every
+        // sibling PDF test in this file makes — a 200 carrying HTML or an empty body would otherwise pass.
+        var auth = await RegisterAndLoginAsync();
+        var (vendorId, _, _) = await SeedVendorWithOneGradedAndOneUngradedAsync(auth.OrgId);
+
+        var resp = await auth.Client.GetAsync($"/api/export/vendor/{vendorId}");
+        resp.EnsureSuccessStatusCode();
+        var bytes = await resp.Content.ReadAsByteArrayAsync();
+        bytes.Length.Should().BeGreaterThan(0);
+        System.Text.Encoding.ASCII.GetString(bytes, 0, 4).Should().Be("%PDF");
     }
 }

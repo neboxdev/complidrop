@@ -20,6 +20,11 @@ public sealed class FutureEffectiveCoverageGapTests(IntegrationTestFixture fixtu
         Guid orgId, ComplianceStatus stored, DateTime? expiration, DateTime? effective,
         Guid? vendorId = null, string docType = "coi", DateTime? createdAt = null)
     {
+        // #443 / ADR 0048: the stored verdict under test here is a REAL rule verdict, so the seed ALWAYS
+        // writes the ComplianceCheck row that backs it. Without one the never-graded overlay would demote
+        // these docs to Pending for the wrong reason and the future-effective assertions would pass
+        // vacuously — so there is deliberately no opt-out knob. The never-graded state is seeded by
+        // NeverGradedCoverageTests' own SeedDocAsync (whose default is the ungraded one).
         var now = DateTime.UtcNow;
         var docId = Guid.NewGuid();
         await using var db = CreateSystemDb();
@@ -41,6 +46,7 @@ public sealed class FutureEffectiveCoverageGapTests(IntegrationTestFixture fixtu
             UpdatedAt = now
         });
         await db.SaveChangesAsync();
+        await MarkGradedAsync(orgId, docId);
         return docId;
     }
 

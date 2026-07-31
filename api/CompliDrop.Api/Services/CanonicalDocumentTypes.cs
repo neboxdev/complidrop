@@ -23,16 +23,17 @@ namespace CompliDrop.Api.Services;
 ///     reminders (ADR 0033).</description></item>
 /// </list>
 /// <para/>
-/// Never-graded is not a harmless silence — it is an affirmative-coverage OVERCLAIM whenever the
-/// document expires within 30 days. <c>ComputeOutcome</c>'s zero-applicable-rules branch stores
-/// <c>expiringSoon ? ExpiringSoon : Pending</c>; <see cref="ComplianceStatusDeriver"/><c>.Effective</c>
-/// promotes even a stored <c>Pending</c> to <c>ExpiringSoon</c> inside that window; and
-/// <c>VendorEndpoints.ComputeCoverage</c> counts <c>Compliant or ExpiringSoon</c> as IN-FORCE coverage.
-/// So a document no rule ever touched reads "Expiring soon" on the list, rolls its vendor up to
-/// "Covered", and prints as "Expiring soon" in the auditor-facing vendor package — while its own
-/// "What we checked" panel is empty. Hardening those READ surfaces so a never-graded document cannot
-/// read as coverage is <see href="https://github.com/neboxdev/complidrop/issues/443">#443</see>;
-/// this class stops NEW documents from joining that population.
+/// Never-graded is not a fail-safe silence. It USED to be an affirmative-coverage OVERCLAIM whenever
+/// the document expired within 30 days: a document no rule ever touched read "Expiring soon" on the
+/// list, rolled its vendor up to "Covered", and printed "Expiring soon" into the auditor-facing vendor
+/// package — over an empty "What we checked" panel.
+/// <see href="https://github.com/neboxdev/complidrop/issues/443">#443</see> /
+/// <see href="../../../docs/adr/0048-never-graded-document-asserts-no-affirmative-verdict.md">ADR 0048</see>
+/// CLOSED that: such a document now reads <c>Pending</c> on every read surface, so the residue is
+/// VISIBLE rather than silent. The SUPERSESSION half of a mis-cased type survives that fix untouched —
+/// a <c>"COI"</c> renewal still never supersedes the <c>"coi"</c> cert it replaces — and a demoted
+/// document still asserts nothing until a human re-types it, so this class still matters: it stops NEW
+/// documents from joining that population.
 /// <para/>
 /// Callers: <c>ExtractionWorker.PersistSuccess</c> (coerces the model's answer before it overwrites the
 /// stored type), the two INGRESS upload paths — <c>DocumentEndpoints.UploadDocument</c> and the PUBLIC
@@ -60,8 +61,9 @@ namespace CompliDrop.Api.Services;
 /// KNOWN GAP (ADR 0045): coercion happens only on the next EXTRACTION, and nothing re-extracts an
 /// already-processed row — so a pre-deploy row carrying a non-canonical type keeps grading against zero
 /// rules until a human re-types it or triggers a re-extraction. Deliberately not laundered by a data
-/// migration; see the ADR for why — and note that residue is the overclaiming population described
-/// above, owned by <see href="https://github.com/neboxdev/complidrop/issues/443">#443</see>.
+/// migration; see the ADR for why. Since #443 / ADR 0048 that residue at least reads <c>Pending</c>
+/// everywhere instead of rolling up to "Covered" — the population still needs re-typing, it just no
+/// longer overclaims while it waits.
 /// <para/>
 /// Exposed as <c>internal</c> for direct unit testing via <c>InternalsVisibleTo CompliDrop.Api.Tests</c>,
 /// matching <see cref="CanonicalDocumentFields"/> / <see cref="VerdictBearingFields"/>.

@@ -57,7 +57,7 @@ public sealed class FutureEffectiveComputeOutcomeTests
             "the demotion is a read-only overlay; the stored verdict keeps the real rule result");
 
         // ...and the effective status a reader sees is Pending (not yet in force).
-        ComplianceStatusDeriver.Effective(outcome.Status, doc.ExpirationDate, doc.EffectiveDate, Today)
+        ComplianceStatusDeriver.Effective(outcome.Status, doc.ExpirationDate, doc.EffectiveDate, DocumentGrading.IsGraded(outcome.NewChecks.Count), Today)
             .Should().Be(ComplianceStatus.Pending, "the read overlay demotes the not-yet-in-force doc to Pending");
     }
 
@@ -71,7 +71,7 @@ public sealed class FutureEffectiveComputeOutcomeTests
         var outcome = ComplianceCheckService.ComputeOutcome(doc, Today);
 
         outcome.Status.Should().Be(ComplianceStatus.NonCompliant);
-        ComplianceStatusDeriver.Effective(outcome.Status, doc.ExpirationDate, doc.EffectiveDate, Today)
+        ComplianceStatusDeriver.Effective(outcome.Status, doc.ExpirationDate, doc.EffectiveDate, DocumentGrading.IsGraded(outcome.NewChecks.Count), Today)
             .Should().Be(ComplianceStatus.NonCompliant, "a future-effective failing cert is not masked to Pending");
     }
 
@@ -96,7 +96,7 @@ public sealed class FutureEffectiveComputeOutcomeTests
         var outcome = ComplianceCheckService.ComputeOutcome(doc, Today);
 
         outcome.Status.Should().Be(ComplianceStatus.Compliant);
-        ComplianceStatusDeriver.Effective(outcome.Status, doc.ExpirationDate, doc.EffectiveDate, Today)
+        ComplianceStatusDeriver.Effective(outcome.Status, doc.ExpirationDate, doc.EffectiveDate, DocumentGrading.IsGraded(outcome.NewChecks.Count), Today)
             .Should().Be(ComplianceStatus.Compliant, "an in-force compliant doc is not demoted");
     }
 }

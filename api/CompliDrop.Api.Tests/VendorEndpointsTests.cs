@@ -128,6 +128,11 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         Guid orgId, Guid vendorId, string documentType, ComplianceStatus status, DateTime? expirationDate = null,
         decimal? glLimit = null, ExtractionStatus extractionStatus = ExtractionStatus.Completed)
     {
+        // #443 / ADR 0048: a stored verdict only counts as one when something actually graded the
+        // document, so the seed ALWAYS writes a ComplianceCheck row alongside it — matching what every
+        // ComputeOutcome branch that produces an affirmative verdict actually persists. No opt-out knob:
+        // the never-graded state is seeded by NeverGradedCoverageTests' own SeedDocAsync, whose default
+        // is the ungraded one, so nothing here would ever have passed false.
         await using var db = CreateSystemDb();
         var now = DateTime.UtcNow;
         var docId = Guid.NewGuid();
@@ -152,6 +157,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             UpdatedAt = now,
         });
         await db.SaveChangesAsync();
+        await MarkGradedAsync(orgId, docId);
         return docId;
     }
 

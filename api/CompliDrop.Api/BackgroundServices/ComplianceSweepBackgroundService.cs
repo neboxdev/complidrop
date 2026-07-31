@@ -68,9 +68,18 @@ public class ComplianceSweepBackgroundService(
                 .SetProperty(d => d.ComplianceStatus, ComplianceStatus.Expired)
                 .SetProperty(d => d.UpdatedAt, now), ct);
 
-        // Within the expiring-soon window, a Compliant or (no-requirements) Pending doc reads
-        // ExpiringSoon — matching ComplianceStatusDeriver. A NonCompliant doc keeps its hard-fail
-        // verdict; an already-ExpiringSoon doc is unchanged.
+        // Within the expiring-soon window, a Compliant or (no-requirements) Pending doc is STORED
+        // ExpiringSoon — matching ComplianceCheckService.ComputeOutcome. A NonCompliant doc keeps its
+        // hard-fail verdict; an already-ExpiringSoon doc is unchanged.
+        //
+        // #443 / ADR 0048: this write is deliberately grading-blind — it stores the real DATE verdict for
+        // a never-graded document too, exactly as ComputeOutcome's zero-applicable-rules branch does, and
+        // the READ overlay (ComplianceStatusDeriver.Effective + its SQL mirrors) demotes such a document
+        // to Pending. Same read-only shape, and the same reason, as the future-effective note below:
+        // grading is not monotonic-forward either (add a governing rule, correct the type, assign a
+        // checklist, and the document IS graded), so persisting Pending here would erase the verdict the
+        // overlay must reveal the moment something grades it — and `Pending` is what the extraction
+        // worker claims on. So a swept never-graded doc reads Pending while its column stays honest.
         var expiringSoon = await db.Documents
             .Where(d => d.DeletedAt == null
                 && d.ExpirationDate != null

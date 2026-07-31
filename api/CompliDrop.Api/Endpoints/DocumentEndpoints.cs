@@ -82,32 +82,28 @@ public static class DocumentEndpoints
                         .Where(DocumentSupersession.IsCurrent(db.Documents)),
                     // #362: a future-effective (not-yet-in-force) doc is demoted out of ExpiringSoon/Compliant
                     // into the effective-Pending arm below — same date↔instant rule the dashboard counts use.
+                    // #443: so is a NEVER-GRADED one (no ComplianceCheck row — nothing was measured against
+                    // it). `d.ComplianceChecks.Any()` is the SQL mirror of DocumentGrading.IsGraded.
                     ComplianceStatus.ExpiringSoon => query.Where(d =>
                         d.ExpirationDate != null && d.ExpirationDate >= today && d.ExpirationDate < expiringSoonUpperExclusive
                         && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)
+                        && d.ComplianceChecks.Any()
                         && (d.ComplianceStatus == ComplianceStatus.Compliant
                             || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
                             || d.ComplianceStatus == ComplianceStatus.Pending)),
                     ComplianceStatus.Compliant => query.Where(d =>
                         d.ComplianceStatus == ComplianceStatus.Compliant
                         && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive)
-                        && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)),
+                        && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)
+                        && d.ComplianceChecks.Any()),
                     ComplianceStatus.NonCompliant => query.Where(d =>
                         d.ComplianceStatus == ComplianceStatus.NonCompliant
                         && (d.ExpirationDate == null || d.ExpirationDate >= today)),
-                    _ => query.Where(d =>
-                        // Genuine Pending — stored Pending, not date-overlaid to ExpiringSoon/Expired.
-                        (d.ComplianceStatus == ComplianceStatus.Pending
-                            && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive))
-                        // OR future-effective demotion (#362): a not-yet-in-force cert whose stored verdict is
-                        // affirmative (Compliant / ExpiringSoon / Pending) and which isn't already Expired
-                        // (Expired wins outright). Mirrors ComplianceStatusDeriver.Effective's demotion set, so
-                        // the ?status=Pending list matches every future-effective row's Pending badge.
-                        || (d.EffectiveDate != null && d.EffectiveDate >= notYetEffectiveBound
-                            && (d.ExpirationDate == null || d.ExpirationDate >= today)
-                            && (d.ComplianceStatus == ComplianceStatus.Compliant
-                                || d.ComplianceStatus == ComplianceStatus.ExpiringSoon
-                                || d.ComplianceStatus == ComplianceStatus.Pending))),
+                    // The effective-Pending population — genuine Pending plus the future-effective (#362)
+                    // and never-graded (#443) demotions — through the ONE shared predicate the dashboard's
+                    // awaitingReview count also uses, so that count and this deep-linked list can never
+                    // disagree about the same document (#294). See ComplianceStatusDeriver.ReadsPending.
+                    _ => query.Where(ComplianceStatusDeriver.ReadsPending(today)),
                 };
         }
         if (!string.IsNullOrWhiteSpace(type))
@@ -179,7 +175,10 @@ public static class DocumentEndpoints
                 d.EffectiveDate,
                 d.ExpirationDate,
                 d.IsSample,
-                d.CreatedAt
+                d.CreatedAt,
+                // #443 / ADR 0048: the never-graded input to the deriver below. A scalar COUNT, so the
+                // projection stays narrow — the check ROWS are never shipped to build a list badge.
+                ComplianceCheckCount = d.ComplianceChecks.Count
             })
             .ToListAsync(ct);
         var items = rows.Select(d => new DocumentListItem(
@@ -190,7 +189,9 @@ public static class DocumentEndpoints
             d.VendorId,
             d.ExtractionStatus.ToString(),
             d.ExtractionConfidence,
-            ComplianceStatusDeriver.Effective(d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, today).ToString(),
+            ComplianceStatusDeriver.Effective(
+                d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate,
+                DocumentGrading.IsGraded(d.ComplianceCheckCount), today).ToString(),
             d.EffectiveDate,
             d.ExpirationDate,
             DaysUntilExpiry(d.ExpirationDate, today),
@@ -223,6 +224,18 @@ public static class DocumentEndpoints
             .FirstOrDefaultAsync(d => d.Id == id, ct);
         if (doc is null) return NotFound();
 
+        // #443 review S3 / ADR 0048 §4: how many requirements the assigned vendor's checklist actually
+        // holds. Read through db.ComplianceTemplates (not off the FK) so the org + soft-delete query
+        // filters apply: a vendor pointing at a soft-deleted template reports 0, which lands the card on
+        // the empty-checklist arm — whose copy and remedy are the honest ones for that state too. One
+        // extra scalar query, and only when a checklist is actually assigned.
+        var vendorChecklistRuleCount = doc.Vendor?.ComplianceTemplateId is Guid templateId
+            ? await db.ComplianceTemplates
+                .Where(t => t.Id == templateId)
+                .Select(t => t.Rules.Count)
+                .FirstOrDefaultAsync(ct)
+            : 0;
+
         object? extractionFields = null;
         if (doc.ExtractionFields is not null)
             extractionFields = System.Text.Json.JsonSerializer.Deserialize<object>(doc.ExtractionFields.RootElement.GetRawText());
@@ -239,9 +252,21 @@ public static class DocumentEndpoints
             doc.Vendor?.Name,
             doc.Vendor?.ContactEmail,
             doc.VendorId,
+            // #443 / ADR 0048 §4: the detail page's "Not checked yet" card explains WHY nothing graded
+            // this document, and zero check rows has four causes, not two. These two fields together
+            // distinguish "no checklist" from "an EMPTY checklist" from "a checklist none of whose rules
+            // govern a {documentType}" — distinctions the page cannot derive from complianceChecks.length,
+            // and ones it used to get wrong by asserting the first whenever it saw zero checks.
+            doc.Vendor?.ComplianceTemplateId != null,
+            vendorChecklistRuleCount,
             doc.ExtractionStatus.ToString(),
             doc.ExtractionConfidence,
-            ComplianceStatusDeriver.Effective(doc.ComplianceStatus, doc.ExpirationDate, doc.EffectiveDate, today).ToString(),
+            // #443 / ADR 0048: the ComplianceChecks collection is already Include-loaded (it IS the "What
+            // we checked" panel below), so the never-graded input costs nothing extra here — and an EMPTY
+            // panel can no longer sit under an affirmative badge, the contradiction the ticket names.
+            ComplianceStatusDeriver.Effective(
+                doc.ComplianceStatus, doc.ExpirationDate, doc.EffectiveDate,
+                DocumentGrading.IsGraded(doc.ComplianceChecks.Count), today).ToString(),
             doc.EffectiveDate,
             doc.ExpirationDate,
             DaysUntilExpiry(doc.ExpirationDate, today),

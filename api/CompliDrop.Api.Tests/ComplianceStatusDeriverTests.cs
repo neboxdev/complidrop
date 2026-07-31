@@ -18,7 +18,7 @@ public sealed class ComplianceStatusDeriverTests
     public void Null_expiration_returns_stored_unchanged()
     {
         foreach (var stored in Enum.GetValues<ComplianceStatus>())
-            ComplianceStatusDeriver.Effective(stored, null, null, Today).Should().Be(stored);
+            ComplianceStatusDeriver.Effective(stored, null, null, isGraded: true, Today).Should().Be(stored);
     }
 
     [Theory]
@@ -30,7 +30,7 @@ public sealed class ComplianceStatusDeriverTests
     {
         // Expired is top precedence — even a rules-failing doc reads Expired once the date passes,
         // matching the service's early-return expiry branch.
-        ComplianceStatusDeriver.Effective(stored, Today.AddDays(-1), null, Today)
+        ComplianceStatusDeriver.Effective(stored, Today.AddDays(-1), null, isGraded: true, Today)
             .Should().Be(ComplianceStatus.Expired);
     }
 
@@ -38,7 +38,7 @@ public sealed class ComplianceStatusDeriverTests
     public void Expiring_today_is_not_yet_expired()
     {
         // Strict `<` for Expired (mirrors the service): expiring exactly today is ExpiringSoon.
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today, null, Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today, null, isGraded: true, Today)
             .Should().Be(ComplianceStatus.ExpiringSoon);
     }
 
@@ -48,7 +48,7 @@ public sealed class ComplianceStatusDeriverTests
     [InlineData(ComplianceStatus.Pending)]
     public void Within_window_overlays_ExpiringSoon_for_non_failing_verdicts(ComplianceStatus stored)
     {
-        ComplianceStatusDeriver.Effective(stored, Today.AddDays(10), null, Today)
+        ComplianceStatusDeriver.Effective(stored, Today.AddDays(10), null, isGraded: true, Today)
             .Should().Be(ComplianceStatus.ExpiringSoon);
     }
 
@@ -56,25 +56,25 @@ public sealed class ComplianceStatusDeriverTests
     public void Within_window_keeps_a_hard_fail_NonCompliant()
     {
         // A failing doc is still failing even when expiring soon — the date doesn't soften the verdict.
-        ComplianceStatusDeriver.Effective(ComplianceStatus.NonCompliant, Today.AddDays(10), null, Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.NonCompliant, Today.AddDays(10), null, isGraded: true, Today)
             .Should().Be(ComplianceStatus.NonCompliant);
     }
 
     [Fact]
     public void Exactly_30_days_is_within_the_window_but_31_is_not()
     {
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(30), null, Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(30), null, isGraded: true, Today)
             .Should().Be(ComplianceStatus.ExpiringSoon);
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(31), null, Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(31), null, isGraded: true, Today)
             .Should().Be(ComplianceStatus.Compliant);
     }
 
     [Fact]
     public void Far_future_expiration_returns_stored_unchanged()
     {
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(200), null, Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(200), null, isGraded: true, Today)
             .Should().Be(ComplianceStatus.Compliant);
-        ComplianceStatusDeriver.Effective(ComplianceStatus.NonCompliant, Today.AddDays(200), null, Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.NonCompliant, Today.AddDays(200), null, isGraded: true, Today)
             .Should().Be(ComplianceStatus.NonCompliant);
     }
 
@@ -83,7 +83,7 @@ public sealed class ComplianceStatusDeriverTests
     {
         // A doc expiring today at any wall-clock time is still "today" — the overlay compares dates.
         var todayAfternoon = new DateTime(2026, 6, 15, 18, 30, 0, DateTimeKind.Utc);
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today, null, todayAfternoon)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today, null, isGraded: true, todayAfternoon)
             .Should().Be(ComplianceStatus.ExpiringSoon);
     }
 
@@ -103,13 +103,13 @@ public sealed class ComplianceStatusDeriverTests
         // matching the deriver's ExpiringSoon — where a naive `<= today+30` midnight bound excluded it.
         var onBoundaryNoon = new DateTime(2026, 7, 15, 12, 0, 0, DateTimeKind.Utc);
         (onBoundaryNoon < bound).Should().BeTrue();
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, onBoundaryNoon, null, todayNoon)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, onBoundaryNoon, null, isGraded: true, todayNoon)
             .Should().Be(ComplianceStatus.ExpiringSoon);
 
         // The day after the window (day 31 at noon) is OUTSIDE (`>= bound`), matching stored Compliant.
         var pastBoundaryNoon = new DateTime(2026, 7, 16, 12, 0, 0, DateTimeKind.Utc);
         (pastBoundaryNoon < bound).Should().BeFalse();
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, pastBoundaryNoon, null, todayNoon)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, pastBoundaryNoon, null, isGraded: true, todayNoon)
             .Should().Be(ComplianceStatus.Compliant);
     }
 
@@ -122,7 +122,7 @@ public sealed class ComplianceStatusDeriverTests
     {
         // A cert effective next month, expiring well beyond the 30-day window, all rules passed. It
         // provides no coverage IN FORCE today, so an affirmative verdict reads Pending ("not yet in force").
-        ComplianceStatusDeriver.Effective(stored, Today.AddDays(300), Today.AddDays(30), Today)
+        ComplianceStatusDeriver.Effective(stored, Today.AddDays(300), Today.AddDays(30), isGraded: true, Today)
             .Should().Be(ComplianceStatus.Pending);
     }
 
@@ -131,7 +131,7 @@ public sealed class ComplianceStatusDeriverTests
     {
         // A short future-effective policy (effective in 5 days, expiring in 20): the expiry overlay would
         // read ExpiringSoon, but a not-yet-in-force cert can't assert "about to lapse" — it reads Pending.
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(20), Today.AddDays(5), Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(20), Today.AddDays(5), isGraded: true, Today)
             .Should().Be(ComplianceStatus.Pending);
     }
 
@@ -140,7 +140,7 @@ public sealed class ComplianceStatusDeriverTests
     {
         // A future-effective cert that FAILS its rules is accurately "not compliant" — the demotion only
         // ever moves a doc OUT of the affirmative tally, never masks a hard fail.
-        ComplianceStatusDeriver.Effective(ComplianceStatus.NonCompliant, Today.AddDays(300), Today.AddDays(30), Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.NonCompliant, Today.AddDays(300), Today.AddDays(30), isGraded: true, Today)
             .Should().Be(ComplianceStatus.NonCompliant);
     }
 
@@ -149,7 +149,7 @@ public sealed class ComplianceStatusDeriverTests
     {
         // A malformed cert (EffectiveDate after today AND ExpirationDate before today, i.e. eff > exp):
         // Expired is top precedence and never demotes to Pending.
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(-1), Today.AddDays(30), Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(-1), Today.AddDays(30), isGraded: true, Today)
             .Should().Be(ComplianceStatus.Expired);
     }
 
@@ -158,7 +158,7 @@ public sealed class ComplianceStatusDeriverTests
     {
         // Strict `>` on the effective boundary: a cert effective EXACTLY today is in force now, so an
         // affirmative verdict is NOT demoted. (One day earlier still in force; one day later demotes.)
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(300), Today, Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(300), Today, isGraded: true, Today)
             .Should().Be(ComplianceStatus.Compliant);
     }
 
@@ -169,9 +169,9 @@ public sealed class ComplianceStatusDeriverTests
         // Compliant the day it does — the demotion is a pure read overlay driven by `today`, so the doc
         // self-heals with no re-evaluation the instant the calendar reaches its EffectiveDate.
         var effectiveDate = Today.AddDays(1);
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(300), effectiveDate, Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(300), effectiveDate, isGraded: true, Today)
             .Should().Be(ComplianceStatus.Pending, "the day before it takes effect it is not yet in force");
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(300), effectiveDate, effectiveDate)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(300), effectiveDate, isGraded: true, effectiveDate)
             .Should().Be(ComplianceStatus.Compliant, "the day it takes effect the real verdict surfaces");
     }
 
@@ -181,7 +181,7 @@ public sealed class ComplianceStatusDeriverTests
         // A time-bearing effective date on tomorrow at any wall-clock time is still future-effective
         // (date comparison), matching the SQL instant bound (EffectiveDate >= today+1 midnight).
         var tomorrowNoon = Today.AddDays(1).AddHours(12);
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(300), tomorrowNoon, Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(300), tomorrowNoon, isGraded: true, Today)
             .Should().Be(ComplianceStatus.Pending);
     }
 
@@ -210,11 +210,150 @@ public sealed class ComplianceStatusDeriverTests
         // count and the ?status=Pending list arm (both of which carry an ExpirationDate == null branch)
         // demote it — a silent count-vs-badge split. Every other #362 test uses a non-null expiry, so
         // without this the null-expiry path of the demotion is untested.
-        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, expirationDate: null, effectiveDate: Today.AddDays(30), Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, expirationDate: null, effectiveDate: Today.AddDays(30), isGraded: true, Today)
             .Should().Be(ComplianceStatus.Pending);
         // Control: a null-expiry future-effective doc that FAILS its rules is accurately NonCompliant,
         // never demoted — the demotion only ever moves a doc OUT of the affirmative tally.
-        ComplianceStatusDeriver.Effective(ComplianceStatus.NonCompliant, expirationDate: null, effectiveDate: Today.AddDays(30), Today)
+        ComplianceStatusDeriver.Effective(ComplianceStatus.NonCompliant, expirationDate: null, effectiveDate: Today.AddDays(30), isGraded: true, Today)
             .Should().Be(ComplianceStatus.NonCompliant);
+    }
+
+    // ---- #443 / ADR 0048: never-graded (zero applicable rules) demotion ----
+
+    [Fact]
+    public void Never_graded_inside_the_expiry_window_reads_Pending_not_ExpiringSoon()
+    {
+        // THE bug. ComputeOutcome's zero-applicable-rules branch stores `expiringSoon ? ExpiringSoon :
+        // Pending`, so a never-graded doc 10 days from expiry was stored ExpiringSoon — and every surface
+        // that groups ExpiringSoon with Compliant then asserted coverage nothing had established.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.ExpiringSoon, Today.AddDays(10), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Pending);
+        // …and the other half of the chain: the overlay used to PROMOTE a stored Pending into the same
+        // affirmative ExpiringSoon. Both stored values must land on Pending, or the two halves disagree.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Pending, Today.AddDays(10), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Pending);
+    }
+
+    [Fact]
+    public void The_grading_axis_no_longer_turns_on_the_expiry_date()
+    {
+        // The tell that the pre-#443 behaviour was arbitrary: the SAME absence of grading read Pending at
+        // 31 days to expiry and ExpiringSoon at 29. The date decided whether the product claimed coverage.
+        // Both sides of the window boundary must now read Pending.
+        foreach (var days in new[] { 0, 1, 29, 30, 31, 200 })
+            ComplianceStatusDeriver.Effective(ComplianceStatus.ExpiringSoon, Today.AddDays(days), null, isGraded: false, Today)
+                .Should().Be(ComplianceStatus.Pending, $"a never-graded doc expiring in {days} days certifies nothing");
+    }
+
+    [Fact]
+    public void Never_graded_demotes_a_stored_Compliant_too()
+    {
+        // Not reachable from ComputeOutcome (an affirmative verdict always comes with its check rows), but
+        // reachable transiently: deleting a rule hard-deletes its check rows and re-grades AFTER the
+        // commit, and the seed's orphan cleanup does the same. If that re-grade never lands, the stored
+        // Compliant is backed by nothing — fail CLOSED rather than certify off missing evidence.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(200), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Pending);
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, expirationDate: null, effectiveDate: null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Pending, "the demotion sits after the expiry if/else, so it catches the null-expiry path too");
+    }
+
+    [Fact]
+    public void Never_graded_does_not_soften_Expired_or_NonCompliant()
+    {
+        // Expired is top precedence and is never demoted: a lapsed date is a real, un-graded fact and a
+        // present liability. The demotion only ever moves a doc OUT of the affirmative tally.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.ExpiringSoon, Today.AddDays(-1), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Expired);
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Pending, Today.AddDays(-1), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Expired);
+        // NonCompliant is unreachable without a failed check row, but is excluded anyway so the clause can
+        // never mask a hard fail (the ADR 0041 rule, on the grading axis).
+        ComplianceStatusDeriver.Effective(ComplianceStatus.NonCompliant, Today.AddDays(10), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.NonCompliant);
+    }
+
+    [Fact]
+    public void A_graded_document_is_completely_unaffected_by_the_new_clause()
+    {
+        // The blast radius: with isGraded true, every stored verdict × date combination must derive exactly
+        // what it did before #443. This is the regression fence around the whole change.
+        foreach (var stored in Enum.GetValues<ComplianceStatus>())
+            foreach (var days in new int?[] { null, -1, 0, 10, 30, 31, 200 })
+            {
+                var exp = days is int d ? Today.AddDays(d) : (DateTime?)null;
+                var expected = exp is null ? stored
+                    : days < 0 ? ComplianceStatus.Expired
+                    : days <= 30 && stored is ComplianceStatus.Compliant or ComplianceStatus.ExpiringSoon or ComplianceStatus.Pending
+                        ? ComplianceStatus.ExpiringSoon
+                        : stored;
+                ComplianceStatusDeriver.Effective(stored, exp, null, isGraded: true, Today)
+                    .Should().Be(expected, $"stored {stored} expiring in {days?.ToString() ?? "never"} days is unchanged when graded");
+            }
+    }
+
+    [Fact]
+    public void The_verdict_self_heals_the_moment_the_document_is_graded()
+    {
+        // The read-only-overlay guarantee, the grading twin of the future-effective self-heal above: the
+        // SAME stored verdict reads Pending while nothing has graded the doc and its real value the instant
+        // a check row exists. Nothing is persisted, so adding a governing rule (or correcting the doc's
+        // type) recovers the verdict with no re-write of ComplianceStatus.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.ExpiringSoon, Today.AddDays(10), null, isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Pending, "nothing has been measured against it yet");
+        ComplianceStatusDeriver.Effective(ComplianceStatus.ExpiringSoon, Today.AddDays(10), null, isGraded: true, Today)
+            .Should().Be(ComplianceStatus.ExpiringSoon, "the stored verdict surfaces the moment a requirement is checked");
+    }
+
+    [Fact]
+    public void Never_graded_and_future_effective_are_independent_clauses()
+    {
+        // A doc can be both. Either alone demotes, and both together still land on Pending — so no read
+        // site can satisfy one clause and skip the other and still look correct.
+        ComplianceStatusDeriver.Effective(ComplianceStatus.Compliant, Today.AddDays(300), Today.AddDays(30), isGraded: false, Today)
+            .Should().Be(ComplianceStatus.Pending);
+    }
+
+    [Fact]
+    public void ReadsPending_agrees_with_Effective_over_the_whole_status_x_expiry_x_effective_x_grading_grid()
+    {
+        // #443 review S2. ReadsPending is the SQL spelling of "Effective(...) == Pending", and it is the
+        // ONE predicate two consumers share (the ?status=Pending list arm and the dashboard's
+        // awaitingReview count). Those two agreeing with EACH OTHER is pinned end-to-end, but nothing
+        // pinned either against the DERIVER — so one of its three OR arms could drift (a dropped
+        // future-effective arm, a missing null-expiry branch, an over-broad grading arm) and every
+        // count-vs-list test would stay green while the list disagreed with the BADGE the deriver renders.
+        // This is that pin, walked over the same grid the deriver's own tests use.
+        //
+        // Compiled and evaluated in memory: the SQL arms use INSTANT comparisons and the deriver uses
+        // calendar DATES, so every date here is UTC midnight — the ADR 0027 convention the read sites are
+        // built on. (Postgres translation itself is covered over HTTP by NeverGradedCoverageTests.)
+        var readsPending = ComplianceStatusDeriver.ReadsPending(Today).Compile();
+        var graded = new ComplianceCheck { Id = Guid.NewGuid(), IsPassed = true, CheckedAt = Today };
+
+        foreach (var stored in Enum.GetValues<ComplianceStatus>())
+            foreach (var expiryDays in new int?[] { null, -30, -1, 0, 10, 30, 31, 200 })
+                foreach (var effectiveDays in new int?[] { null, -30, -1, 0, 1, 20 })
+                    foreach (var isGraded in new[] { true, false })
+                    {
+                        var doc = new Document
+                        {
+                            Id = Guid.NewGuid(),
+                            ComplianceStatus = stored,
+                            ExpirationDate = expiryDays is int e ? Today.AddDays(e) : null,
+                            EffectiveDate = effectiveDays is int f ? Today.AddDays(f) : null,
+                            ComplianceChecks = isGraded ? [graded] : [],
+                        };
+
+                        var effective = ComplianceStatusDeriver.Effective(
+                            doc.ComplianceStatus, doc.ExpirationDate, doc.EffectiveDate, isGraded, Today);
+
+                        readsPending(doc).Should().Be(effective == ComplianceStatus.Pending,
+                            "stored {0}, expiring in {1} days, effective in {2} days, graded={3} derives "
+                            + "{4} — the shared SQL predicate must select exactly the documents whose "
+                            + "badge reads Pending, or the deep-linked list and the badge disagree (#294)",
+                            stored, expiryDays?.ToString() ?? "never", effectiveDays?.ToString() ?? "n/a",
+                            isGraded, effective);
+                    }
     }
 }

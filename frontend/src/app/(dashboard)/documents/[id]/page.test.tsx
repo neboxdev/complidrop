@@ -76,6 +76,7 @@ describe("DocumentDetailPage — not-checked explainer (#316 FP-063)", () => {
             complianceStatus: "Pending",
             vendorId: "v9",
             vendorName: "Bob's Flowers",
+            vendorHasChecklist: false,
             complianceChecks: [],
           }),
         ),
@@ -92,6 +93,175 @@ describe("DocumentDetailPage — not-checked explainer (#316 FP-063)", () => {
       "href",
       "/vendors/v9",
     );
+  });
+
+  it("names the REAL cause when the checklist exists but nothing on it governs this type (#443)", async () => {
+    // ADR 0048 widened what complianceStatus === "Pending" means on this page: a document
+    // NOTHING ever graded now reads Pending instead of the affirmative verdict its expiry
+    // date used to buy it. Zero check rows has three causes, and only the backend can tell
+    // "no checklist" from "a checklist whose rules govern other document types" — the
+    // ticket's own headline population (a "COI" document against a "coi" rule). Claiming
+    // "doesn't have a requirements checklist yet" here is a FALSE statement about the
+    // vendor plus a CTA that resolves nothing, while the vendor rollup simultaneously
+    // reads ActionNeeded against the checklist this card says doesn't exist.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_notype",
+            documentType: "coi",
+            extractionStatus: "Completed",
+            complianceStatus: "Pending",
+            vendorId: "v7",
+            vendorName: "Bob's Flowers",
+            vendorHasChecklist: true,
+            vendorChecklistRuleCount: 2,
+            complianceChecks: [],
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_notype" } });
+
+    expect(await screen.findByText(/not checked yet/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Bob's Flowers has a requirements checklist, but nothing on it applies to this document's type \(Certificate of Insurance\)/i,
+      ),
+    ).toBeInTheDocument();
+    // Never the false "no checklist" claim, nor its dead-end CTA.
+    expect(screen.queryByText(/doesn't have a requirements checklist/i)).toBeNull();
+    expect(screen.queryByRole("link", { name: /set up bob's flowers requirements/i })).toBeNull();
+    // A CTA that resolves the actual cause: add a requirement covering this type.
+    expect(
+      screen.getByRole("link", { name: /add a requirement for certificate of insurance/i }),
+    ).toHaveAttribute("href", "/vendors/v7");
+  });
+
+  it("names the stored type, not the label, when the type is stored non-canonically (#443)", async () => {
+    // THE ticket's headline population, and the case the arm above must NOT answer: a
+    // document stored as "COI" against a "coi" rule. documentTypeLabel normalizes case, so
+    // both render "Certificate of Insurance" — the old copy therefore told the user nothing
+    // on the checklist applied to Certificate of Insurance while the vendor page listed a
+    // Certificate of Insurance requirement, and offered to add a DUPLICATE that still would
+    // not grade this document. The card has to show the raw stored value and lead with the
+    // correction that actually resolves it. (#443 review C2)
+    let patched: unknown = null;
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_miscased",
+            documentType: "COI",
+            extractionStatus: "Completed",
+            complianceStatus: "Pending",
+            vendorId: "v7",
+            vendorName: "Bob's Flowers",
+            vendorHasChecklist: true,
+            vendorChecklistRuleCount: 2,
+            complianceChecks: [],
+          }),
+        ),
+      ),
+      http.patch(url("/api/documents/:id"), async ({ request }) => {
+        patched = await request.json();
+        return jsonOk({ id: "d_miscased" });
+      }),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_miscased" } });
+
+    expect(await screen.findByText(/not checked yet/i)).toBeInTheDocument();
+    // The RAW stored value, so the mismatch the engine sees is visible to the user.
+    expect(
+      screen.getByText(/this document's type is stored as “COI”/i),
+    ).toBeInTheDocument();
+    // Never the self-contradiction, nor the duplicate-adding CTA.
+    expect(
+      screen.queryByText(/nothing on it applies to this document's type/i),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("link", { name: /add a requirement for certificate of insurance/i }),
+    ).toBeNull();
+
+    // …and the remedy is one click, because the type picker at the top of the page shows
+    // "COI" as already-selected "Certificate of Insurance" and re-picking it fires nothing.
+    fireEvent.click(screen.getByRole("button", { name: /set type to certificate of insurance/i }));
+    await waitFor(() => expect(patched).toEqual({ documentType: "coi" }));
+  });
+
+  it("gives an EMPTY checklist its own cause and remedy (#443)", async () => {
+    // #443 review S3: "a template is assigned" is too coarse for the taxonomy this card
+    // names. A vendor assigned an EMPTY checklist HAS one — so "they don't have a checklist"
+    // is false — but it holds nothing, so "it has requirements, just none for this type" is
+    // false too. Its own sentence, with the add-the-first-one remedy.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_emptychk",
+            documentType: "coi",
+            extractionStatus: "Completed",
+            complianceStatus: "Pending",
+            vendorId: "v8",
+            vendorName: "Bob's Flowers",
+            vendorHasChecklist: true,
+            vendorChecklistRuleCount: 0,
+            complianceChecks: [],
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_emptychk" } });
+
+    expect(await screen.findByText(/not checked yet/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/doesn't have any requirements on it yet/i),
+    ).toBeInTheDocument();
+    // Neither of the two claims that would be false about this vendor.
+    expect(screen.queryByText(/doesn't have a requirements checklist yet/i)).toBeNull();
+    expect(screen.queryByText(/nothing on it applies to this document's type/i)).toBeNull();
+    expect(
+      screen.getByRole("link", { name: /add bob's flowers requirements/i }),
+    ).toHaveAttribute("href", "/vendors/v8");
+  });
+
+  it("names NO cause when the extraction terminally failed (#443)", async () => {
+    // #443 review C1: a terminally failed extraction never reaches ApplyEvaluationAsync
+    // (the worker's only call site is inside PersistSuccess), so it sits at the default
+    // Pending compliance with zero check rows — indistinguishable, from the check count
+    // alone, from a checklist that doesn't cover this type. The card used to answer that
+    // with a confident, verifiably false claim about the customer's checklist plus a remedy
+    // that fixes nothing. ProcessingErrorCard already states the real reason.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_failed",
+            documentType: "coi",
+            extractionStatus: "Failed",
+            processingError: "extraction.failed: OCR timed out",
+            complianceStatus: "Pending",
+            vendorId: "v7",
+            vendorName: "Bob's Flowers",
+            vendorHasChecklist: true,
+            vendorChecklistRuleCount: 2,
+            complianceChecks: [],
+          }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_failed" } });
+
+    // The real reason renders…
+    expect(await screen.findByText(/couldn't read this document/i)).toBeInTheDocument();
+    // …and the card that would have blamed the checklist does not render at all.
+    expect(screen.queryByText(/not checked yet/i)).toBeNull();
+    expect(screen.queryByText(/nothing on it applies to this document's type/i)).toBeNull();
+    expect(screen.queryByText(/doesn't have a requirements checklist/i)).toBeNull();
   });
 
   it("treats a deleted vendor's surviving doc as no-vendor, not 'needs a checklist' (#422)", async () => {

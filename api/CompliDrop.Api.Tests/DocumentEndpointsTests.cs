@@ -943,12 +943,14 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     public async Task List_filters_by_status_type_and_expiry()
     {
         var auth = await RegisterAndLoginAsync();
+        var coiId = Guid.NewGuid();
+        var permitId = Guid.NewGuid();
         await using (var db = CreateSystemDb())
         {
             var now = DateTime.UtcNow;
             db.Documents.Add(new Document
             {
-                Id = Guid.NewGuid(),
+                Id = coiId,
                 OrganizationId = auth.OrgId,
                 OriginalFileName = "a-coi.pdf",
                 BlobStorageUrl = "memory://a",
@@ -964,7 +966,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             });
             db.Documents.Add(new Document
             {
-                Id = Guid.NewGuid(),
+                Id = permitId,
                 OrganizationId = auth.OrgId,
                 OriginalFileName = "b-permit.pdf",
                 BlobStorageUrl = "memory://b",
@@ -978,6 +980,9 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             });
             await db.SaveChangesAsync();
         }
+        // #443: both stored verdicts are REAL rule verdicts here, so back them with check rows — an
+        // ungraded affirmative one now reads Pending and would drop out of the Compliant filter.
+        await MarkGradedAsync(auth.OrgId, coiId, permitId);
 
         async Task<JsonElement> Items(string qs) =>
             (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/?{qs}")).GetProperty("data");

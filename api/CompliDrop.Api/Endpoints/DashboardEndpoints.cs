@@ -36,11 +36,14 @@ public static class DashboardEndpoints
         // or a date-expired-but-stored-Compliant doc gets counted as BOTH compliant AND expired —
         // two answers on one screen (#257). Expired/ExpiringSoon are date-driven; compliant and
         // nonCompliant exclude any doc the date buckets already claim. A future-effective doc is
-        // demoted OUT of compliant/expiringSoon into the effective-Pending population (#362).
+        // demoted OUT of compliant/expiringSoon into the effective-Pending population (#362) — and so is
+        // a NEVER-GRADED one (#443 / ADR 0048). `d.ComplianceChecks.Any()` is the SQL mirror of
+        // DocumentGrading.IsGraded; the arms below carry it wherever the deriver reads affirmative.
         var compliant = await docs.CountAsync(d =>
             d.ComplianceStatus == Entities.ComplianceStatus.Compliant
             && (d.ExpirationDate == null || d.ExpirationDate >= expiringSoonUpperExclusive)
-            && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound), ct);
+            && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)
+            && d.ComplianceChecks.Any(), ct);
         var nonCompliant = await docs.CountAsync(d =>
             d.ComplianceStatus == Entities.ComplianceStatus.NonCompliant
             && (d.ExpirationDate == null || d.ExpirationDate >= today), ct);
@@ -50,11 +53,14 @@ public static class DashboardEndpoints
         // it double-counts under both nonCompliant and expiringSoon. Expired stays status-agnostic
         // (Expired is top precedence; the compliant/nonCompliant arms already exclude past-date docs).
         // A future-effective doc is not yet in force, so it is excluded here too (reads Pending) (#362).
+        // A never-graded doc is excluded here too (#443): inside the window it used to be counted as
+        // ExpiringSoon purely because the DATE said so, while nothing had ever been measured against it.
         var expiringSoon = await docs.CountAsync(d =>
             d.ExpirationDate != null
             && d.ExpirationDate >= today
             && d.ExpirationDate < expiringSoonUpperExclusive
             && (d.EffectiveDate == null || d.EffectiveDate < notYetEffectiveBound)
+            && d.ComplianceChecks.Any()
             && (d.ComplianceStatus == Entities.ComplianceStatus.Compliant
                 || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon
                 || d.ComplianceStatus == Entities.ComplianceStatus.Pending), ct);
@@ -68,12 +74,29 @@ public static class DashboardEndpoints
         // Rate = effective-compliant / documents-that-have-a-verdict. A future-effective doc reads Pending
         // (not yet in force, #362), so it is excluded from the denominator too — treated exactly like a
         // Pending doc, not as a graded non-compliant one; an Expired doc (a real verdict) stays counted.
+        // A NEVER-GRADED doc reading affirmative is excluded on the same footing (#443 / ADR 0048): it
+        // reads Pending, and "documents that have a verdict" must not count one nothing produced. Its
+        // clause is the exact sibling of the future-effective one — a doc can trip either or both.
+        // An EXPIRED never-graded doc still counts: a lapsed date is a real verdict, which is also why
+        // both clauses carry the not-yet-expired guard (parity with ADR 0041).
         var evaluated = await docs.CountAsync(d =>
             d.ComplianceStatus != Entities.ComplianceStatus.Pending
             && !(d.EffectiveDate != null && d.EffectiveDate >= notYetEffectiveBound
                 && (d.ExpirationDate == null || d.ExpirationDate >= today)
                 && (d.ComplianceStatus == Entities.ComplianceStatus.Compliant
+                    || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon))
+            && !(!d.ComplianceChecks.Any()
+                && (d.ExpirationDate == null || d.ExpirationDate >= today)
+                && (d.ComplianceStatus == Entities.ComplianceStatus.Compliant
                     || d.ComplianceStatus == Entities.ComplianceStatus.ExpiringSoon)), ct);
+        // #443 / ADR 0048: the documents this product declines to vouch for. Without it a never-graded
+        // cert demoted out of `expiringSoon` appeared in NO tile at all — invisible on the dashboard,
+        // the opposite of telling the user nothing graded it. Deliberately the WHOLE effective-Pending
+        // population (genuine Pending + the #362 and #443 demotions) rather than a never-graded-only
+        // number: it is the population the "Awaiting review" label names, and it is computed from the
+        // SAME shared predicate the ?status=Pending list it deep-links to uses, so the count and the
+        // list are one population by construction rather than by two hand-mirrored SQL arms (#294).
+        var awaitingReview = await docs.CountAsync(ComplianceStatusDeriver.ReadsPending(today), ct);
         var pendingExtraction = await docs.CountAsync(d =>
             d.ExtractionStatus == Entities.ExtractionStatus.Pending
             || d.ExtractionStatus == Entities.ExtractionStatus.Processing, ct);
@@ -108,6 +131,7 @@ public static class DashboardEndpoints
                 nonCompliant,
                 expiringSoon,
                 expired,
+                awaitingReview,
                 pendingExtraction,
                 totalVendors = vendors,
                 anyVendorWithRequirements,

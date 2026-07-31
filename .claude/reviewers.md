@@ -162,6 +162,118 @@ Both are defined in this repo's `.claude/agents/`.
     compliance badge, and demoting the counts too would create a #294-class count-vs-badge
     split. The vendor rollup is the one surface with no room for the separate badge. Do NOT
     flag the untouched document-level counts as a missed demotion — that inversion is the bug.
+    Note the CONTRAST with ADR 0048 below, which mirrors its demotion onto the document-level
+    surfaces: that is not an inconsistency, it turns on whether a second badge already discloses
+    the state. Here one does; for never-graded none does.
+- A NEVER-GRADED document is ADR 0048 (#443) — zero `ComplianceCheck` rows, i.e. nothing was ever
+  measured against it. The facts that follow are pointers into it, not a second copy.
+  - There is ONE recognizer, `Services/DocumentGrading.cs`, shipping exactly ONE shape:
+    `IsGraded(int checkCount)` (the in-memory threshold — ONE check row is enough). It deliberately has
+    NO EF `Expression` mirror — every SQL site needs the fact inside a composite predicate where an
+    expression can't be invoked, so a mirror would be a public form with zero production callers. Adding
+    one back IS a finding, not an improvement. The DECISION is in `ComplianceStatusDeriver.Effective`,
+    whose `isGraded` parameter is REQUIRED, not defaulted: a default would be fail-open for the next read
+    surface added. A read site that re-derives the threshold instead of asking `DocumentGrading` IS a
+    real finding.
+  - The demotion is READ-ONLY, exactly like ADR 0041's. `ComputeOutcome`'s zero-applicable-rules
+    branch and the nightly sweep DELIBERATELY keep storing the real date verdict (`ExpiringSoon`
+    inside the window) — do NOT flag that as a missed demotion; persisting `Pending` would be the
+    bug twice over (it strands the doc, and `Pending` is what `ExtractionWorker` claims on).
+  - Mirrored on EVERY read surface, document-level INCLUDED — badge, `?status=` arms, dashboard
+    `compliant`/`expiringSoon` AND the rate denominator, vendor rollup, CSV/PDF export. This
+    deliberately DIVERGES from ADR 0042's document-level carve-out, whose stated reason (a separate
+    `ManualRequired` extraction badge already sits beside the compliance badge) is FALSE here: no
+    badge anywhere says "nothing graded this", and the detail page's "What we checked" panel is
+    simply EMPTY. Demoting the rollup while leaving the badge affirmative would BE the #294 split.
+  - The demotion must not make a document DISAPPEAR. The dashboard carries an `awaitingReview` tile
+    deep-linked to `?status=Pending` — the WHOLE effective-Pending population (genuine Pending + the
+    #362 and #443 demotions), counted from the SAME `ComplianceStatusDeriver.ReadsPending(today)`
+    expression that builds that list, so the two can't drift. That shared predicate is the ONE
+    exception to the spell-it-inline rule below, and it is allowed precisely because it is a
+    whole-entity predicate on both consumers (the `DocumentSupersession.IsCurrent` shape). The
+    `expiringSoon` tile is labelled "Expiring soon" (the `DisplayLabels.Compliance` wording of the
+    status it links to), NOT a date range: it is a verdict count, and a date label put it in
+    disagreement with the date-only "Next 30 days" pipeline bucket about the same document. Softening
+    a COUNT to fix such a disagreement would re-open the overclaim — change the label, not the number.
+  - The detail page's "Not checked yet" card NAMES the cause, so it may only ever name a cause it can
+    KNOW. Zero check rows has FOUR causes: no vendor, no checklist, an EMPTY checklist, or a checklist
+    whose rules all govern OTHER document types. Only the backend can tell the last three apart, so
+    `DocumentDetail` carries BOTH `vendorHasChecklist` AND `vendorChecklistRuleCount` — neither alone
+    separates them (a bare `count > 0` can't tell an empty checklist from no checklist), and the coarse
+    boolean alone put an empty checklist in the arm asserting it holds rules for other types. Deriving
+    the cause from `complianceChecks.length` prints a FALSE claim about a vendor that plainly has a
+    checklist, plus a dead-end CTA — same reasoning as `DocumentDetail.UnreadableFields` (ADR 0040). A
+    frontend re-derivation of the CAUSE IS a real finding. Three more properties of that card, each
+    load-bearing rather than cosmetic:
+    - It gates on an ALLOW-LIST of settled extraction statuses (`Completed`/`ManualRequired`, the
+      `ResolveManualReview` pair), NOT on excluding `Pending`/`Processing`. A terminally `Failed`
+      extraction never reaches `ApplyEvaluationAsync` (the worker calls it only inside `PersistSuccess`),
+      so it sits at default-`Pending` with zero checks and used to get a confident, false cause named
+      over it; `ProcessingErrorCard` states the real reason. Re-widening that gate to an exclusion list
+      IS a real finding — the allow-list is what fails closed for a future extraction state.
+    - When the stored `documentType` is NOT exactly canonical (the `"COI"` vs `"coi"` headline
+      population), the arm prints the RAW stored value and leads with a one-click "Set type to {label}"
+      PATCH. Load-bearing: `documentTypeLabel` normalizes case, so the old copy denied a requirement the
+      vendor page visibly lists, and its "add a requirement" CTA added a DUPLICATE that still wouldn't
+      grade the doc — while `DocumentTypeSelect` is case-insensitive and already displays the right
+      label, so re-picking it fires no change event and the "just fix the type" advice was unfollowable.
+      `frontend/src/lib/document-types.ts`'s `canonicalDocumentType` is PRESENTATIONAL — it picks which
+      remedy leads, never which cause is named.
+    - KNOWN residue, recorded in ADR 0048 §4 — do not re-report: a rule delete hard-deletes its checks
+      and re-grades AFTER the commit, so a never-landed re-grade reaches zero checks with a governing
+      rule present, and the last arm's copy overstates. Closing it needs the applicable-rules filter
+      re-implemented at read time (a second grading predicate), for a transient that self-heals.
+  - The vendor rollup has NO grading clause of its own — `ComputeCoverage` gets the exclusion for
+    free because `Effective` already reads such a doc `Pending`. Adding a second explicit clause
+    there (the shape ADR 0042's `ManualRequired` exclusion needs) would be a duplicate, not a fix.
+  - `Expired` and `NonCompliant` are NEVER demoted: a lapsed date is a real un-graded fact and a
+    present liability, and the clause must only ever move a doc OUT of the affirmative tally. A
+    stored `Compliant` with zero checks DOES demote — transiently reachable when a rule delete
+    hard-deletes its checks and the post-commit re-grade never lands; fail-closed is intended.
+  - SQL sites spell the fact inline as `d.ComplianceChecks.Any()` — an EF expression cannot be invoked
+    as one clause of a multi-clause lambda (the dashboard counts, most sharply the rate denominator's
+    NEGATED composite) nor as a projected scalar (the list / rollup / export projections), the same
+    hand-mirroring ADR 0041's date bounds already require. Covered by the count-vs-deep-linked-list pins;
+    a NEW SQL read arm missing the clause IS a real finding. The lone shared predicate is `ReadsPending`
+    (see the dashboard bullet above) — it has two consumers that must agree and both take a whole-entity
+    predicate, and it is pinned against `Effective` over the full status × expiry × effective-date ×
+    grading grid so one of its three OR arms can't drift out of the deriver. The documents-list
+    Compliant/ExpiringSoon arms are the SAME shape and COULD take an `Expression`; they stay inline
+    because each has ONE consumer, so there is no drift to prevent — not because they structurally
+    can't. Do not "fix" that as an inconsistency in either direction.
+  - The export discloses the COUNT as well as the demoted label, through the one shared
+    `ExportService.ComplianceCell`: the two PDFs append `" (no requirements checked)"` inline (the
+    `"(superseded)"` shape, and the two compose), the CSV instead carries a `RequirementsChecked`
+    column so its `Compliance` cell stays machine-filterable. That asymmetry is deliberate. Each PDF's
+    rows go through its OWN `internal` seam carrying its OWN check-count read —
+    `AuditReportRowsAsync` and `VendorPackageLinesAsync` — because a `%PDF` smoke test can't tell a
+    wired-up count map from an empty one (empty annotates EVERY row; a dropped annotation certifies a
+    doc nothing graded), and neither is visible in the FlateDecode bytes. Inlining either back into its
+    builder un-pins that wiring.
+  - The ordinal-case-SENSITIVE applicable-rules filter vs `ComputeCoverage`'s case-INsensitive
+    required-type match is a KNOWN live disagreement (it is how the never-graded state is reachable
+    without any legacy data). ADR 0048 Option E records why it was NOT unified here — widening what
+    a rule governs is a live-data grading change needing its own ticket. Do not re-report it as new.
+  - Expiry-pipeline buckets, `expiresWithin` and REMINDERS are untouched (date questions, not verdict
+    ones — reminders never read `ComplianceStatus` at all). FOUR raw stored-status readers stay
+    un-overlaid and out of scope, because they ignore the ADR 0027/0041 overlays too and always did:
+    the portal upload-status poll, the `AuthEndpoints` account data export,
+    `ComplianceEndpoints.OrgStatus`, and `ComplianceEndpoints.RunCheck` (its `status` field has no
+    reader — the only caller is `api.post<void>`). Recorded, not swept; if `RunCheck`'s `status` ever
+    gains a reader it must be overlaid first.
+  - Test fixtures: `IntegrationTestBase.MarkGradedAsync` is the ONE seam for "this seeded doc was
+    actually graded". A fixture writing a stored `Compliant`/`ExpiringSoon` with no check row is
+    seeding a state no production path reaches, and since #443 it silently tests the never-graded
+    path instead of the one it names — that IS a real finding in a new test. Two documented side
+    effects, not bugs: it picks the backing rule by `SortOrder` then `Id` (Postgres gives no row
+    order without an ORDER BY, and the rule shows up in the "What we checked" panel), and with NO
+    rule in the org it mints a real, org-visible `Graded-{guid}` template — a test asserting on
+    template lists or requirement counts should seed its own checklist, which the helper then reuses.
+    The per-suite `SeedDocAsync`/`SeedVendorDocAsync` helpers in `ComplianceVerdictFreshnessTests`,
+    `FutureEffectiveCoverageGapTests` and `VendorEndpointsTests` therefore call it UNCONDITIONALLY and
+    carry no `graded` knob: those suites test the date / effective-date / rollup axes, and an opt-out
+    nothing passes is a dead parameter whose comment misleads. `NeverGradedCoverageTests.SeedDocAsync`
+    is the one that keeps the knob — ungraded is its DEFAULT, because that is its subject.
 - The canonical document-type vocabulary is ONE list — `Services/CanonicalDocumentTypes.cs`
   (#373, [ADR 0045](../docs/adr/0045-canonical-document-type-vocabulary.md)) — and
   `ExtractionWorker.PersistSuccess` coerces the model's `documentType` through it before that
@@ -202,21 +314,20 @@ Both are defined in this repo's `.claude/agents/`.
   shared `Services/ColumnClamp.cs` (#372 / ADR 0044), the same shape as
   `ComplianceCheckService.ClampToColumn` — do not re-inline either body.
   **NEVER-GRADED IS NOT FAIL-SAFE** — do not repeat the old "nothing is certified, so it's safe"
-  framing. `ComputeOutcome`'s zero-applicable-rules branch stores
-  `expiringSoon ? ExpiringSoon : Pending`; `ComplianceStatusDeriver.Effective` promotes even a
-  stored `Pending` to `ExpiringSoon` inside the 30-day window; `VendorEndpoints.ComputeCoverage`
-  counts `Compliant or ExpiringSoon` as in-force and rolls the vendor up to `Covered`; and
-  `ExportService` prints "Expiring soon" in the auditor package — with an EMPTY "What we checked"
-  panel behind it. That is an affirmative-coverage overclaim. Fixing the read surfaces is
-  [#443](https://github.com/neboxdev/complidrop/issues/443) (out of #373's scope, already ticketed —
-  do not re-report).
+  framing. CLOSED by [#443](https://github.com/neboxdev/complidrop/issues/443) /
+  [ADR 0048](../docs/adr/0048-never-graded-document-asserts-no-affirmative-verdict.md); see the
+  ADR 0048 block below for the review-time facts. The stored write side is UNCHANGED — do not flag
+  `ComputeOutcome`'s zero-applicable-rules branch still storing `expiringSoon ? ExpiringSoon :
+  Pending`, nor the sweep's `Pending -> ExpiringSoon` transition; the demotion is read-only.
   Three KNOWN GAPS, recorded in ADR 0045 — do not re-report them as new findings:
   - **Legacy rows are not laundered.** Coercion runs only on the next EXTRACTION and nothing
     re-extracts a processed row, so a pre-deploy non-canonical type persists (never graded, own
     supersession group, invisible to `?type=coi`) until a human re-types it. #389 does not touch
     stored rows either. Deliberately NOT fixed by a data migration — because laundering production
     rows is a destructive operation needing human sign-off (measure the population first), NOT
-    because the residue is harmless. It is not; see #443 above.
+    because the residue is harmless. Since #443 / ADR 0048 such a row at least reads `Pending`
+    everywhere instead of rolling up to `Covered`, so the residue is now VISIBLE rather than
+    silent — the population still needs re-typing.
   - **A clamped field can be narrowed by a manual edit.** `ExtractionFields` (jsonb) keeps the FULL
     value AS EXTRACTED, but the detail page binds its input to the clamped `DocumentField.FieldValue`
     and `UpdateFields` writes the submitted text back into `ExtractionFields` — so saving an
