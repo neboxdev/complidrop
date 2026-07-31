@@ -1,6 +1,5 @@
 using System.Net.Http.Json;
 using System.Text.Json;
-using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
