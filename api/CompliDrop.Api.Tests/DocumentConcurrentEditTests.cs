@@ -545,4 +545,53 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         doc.ExtractionFields!.RootElement.GetProperty("certificate_holder").GetString()
             .Should().Be("Old Hall", "and the rolled-back attempt left nothing of itself in the row either");
     }
+
+    [Fact]
+    public async Task The_attempt_that_loses_at_the_LAST_commit_leaves_no_audit_row_behind_it()
+    {
+        // The sibling above proves the fact is cleared BETWEEN attempts. This proves it is also cleared
+        // when there is no next attempt to clear it — the case a per-attempt-ENTRY reset structurally
+        // cannot reach. RunAsync wraps CommitAsync in the SAME conflict catch as the write, so the
+        // FINAL attempt can run all the way through "this attempt wrote a field edit" and still be
+        // abandoned at its commit; the loop then falls straight out to the 409.
+        //
+        // What that used to produce is the sharpest shape of the bug this suite exists for: a response
+        // that says "nothing was committed" beside a `document.fields_edited` audit row carrying the
+        // rolled-back attempt's values — and IAuditLogger writes on its own SystemDbContext connection,
+        // so the rollback cannot reach that row. The customer's audit export then records an edit that
+        // never happened, against a document still holding the old value.
+        var auth = await RegisterAndLoginAsync();
+        var (vendorId, _) = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "2000000");
+        var docId = await SeedCoiAsync(auth.OrgId, vendorId, gl: 1_000_000m, holder: "Old Hall");
+
+        // EVERY commit fails, so every attempt — the last one included — reaches the line that records
+        // the edit and then loses. No competing writer and no delete hook: the only thing under test is
+        // what the request RECORDS about a write it did not commit.
+        var commits = 0;
+        CommitFault.OnCommitting = ordinal =>
+        {
+            Interlocked.Exchange(ref commits, ordinal);
+            return Task.FromResult(true);
+        };
+
+        var response = await EditFieldAsync(auth.Client, docId, "certificate_holder", "New Hall");
+        CommitFault.Reset();
+
+        commits.Should().Be(DocumentConcurrency.MaxAttempts,
+            "every attempt must have reached its COMMIT — otherwise the terminal one is not under test");
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be(DocumentWriteConcurrency.ConflictCode);
+
+        await using var db = CreateSystemDb();
+        var rows = await db.AuditLogs.Where(a => a.EntityId == docId).ToListAsync();
+        rows.Should().BeEmpty(
+            "the 409 states that nothing was committed, so no audit row may claim otherwise — in either shape");
+
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExtractionFields!.RootElement.GetProperty("certificate_holder").GetString()
+            .Should().Be("Old Hall", "and no abandoned attempt left anything of itself in the row");
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.Pending,
+            "no attempt's recomputed verdict was committed either");
+    }
 }
