@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CompliDrop.Api.Auth;
+using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.DTOs.Compliance;
 using CompliDrop.Api.DTOs.Documents;
@@ -753,20 +754,70 @@ public static class DocumentEndpoints
         IAuditLogger audit,
         CancellationToken ct)
     {
-        var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
-        if (doc is null) return NotFound();
-        doc.ExtractionStatus = ExtractionStatus.Pending;
-        doc.ProcessingStartedAt = null;
-        doc.ProcessingError = null;
-        doc.ProcessingAttempts = 0;
-        // Reset BOTH counters: a manual re-extract is a deliberate fresh start, so it must restore
-        // the full retry budget (FailedAttempts) as well as the claim count — otherwise a document
-        // that previously exhausted its budget would re-fail on the first hiccup with no real
-        // retries (#259 introduced FailedAttempts as the budget gate).
-        doc.FailedAttempts = 0;
-        doc.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(ct);
-        await audit.LogAsync("document.reextract_queued", nameof(Document), doc.Id);
+        // Re-arming is ONE conditional statement, never a read-then-write (#365). Two independent
+        // reasons, and the second is why the guard can't just be an `if` above a SaveChanges:
+        //
+        //  1. It must REFUSE while an extraction claim is still live. ExtractionWorker's claim holds no
+        //     lock across the ~240s processing span — `FOR UPDATE SKIP LOCKED` protects the claim
+        //     INSTANT only — so an unconditional reset to Pending re-arms the queue underneath a running
+        //     worker, and the next 5s poll (a Railway rolling deploy runs two instances) claims the same
+        //     row. Both then pay Document AI + the LLM on the same blob and RecordSpendAsync twice, both
+        //     write a "document.processed" feed row, and on a FIRST extraction — exactly when someone
+        //     re-triggers, since nothing is on screen yet — both PersistSuccess calls RemoveRange an
+        //     empty set and insert the whole field list, so every DocumentField is DUPLICATED. Those
+        //     duplicates persist: there is no (DocumentId, FieldName) unique index, and UpdateFields
+        //     edits only FirstOrDefault, so nothing ever heals them. On a single instance the same reset
+        //     is silently swallowed instead — the in-flight run commits Completed on top of the Pending
+        //     we just wrote and the re-read the user asked for never happens.
+        //
+        //  2. The check itself races the claim. A read-then-write tests a status the worker can flip
+        //     between the SELECT and the UPDATE — the guard would then be exactly as racy as what it
+        //     guards. Folding the predicate into the UPDATE makes Postgres re-evaluate it under the
+        //     row's own UPDATE lock, so a losing re-arm changes nothing and reports it.
+        //
+        // The predicate is the WORKER'S OWN staleness rule, read from the worker's own constant: refuse
+        // only while the claim is one the worker still believes in, and let through exactly what it
+        // would zombie-reclaim anyway. Deliberately NOT a Document concurrency token — that is #366.
+        //
+        // A NULL ProcessingStartedAt counts as "no live claim". No writer produces that shape (every
+        // Processing write sets both), and ClaimSql's comparison yields NULL — i.e. unclaimable — for it,
+        // so refusing it would strand the document with no route back from either side.
+        var liveClaimCutoff = DateTime.UtcNow - ExtractionWorker.ZombieClaimTimeout;
+        var rearmed = await db.Documents
+            .Where(d => d.Id == id
+                && (d.ExtractionStatus != ExtractionStatus.Processing
+                    || d.ProcessingStartedAt == null
+                    || d.ProcessingStartedAt < liveClaimCutoff))
+            .ExecuteUpdateAsync(set => set
+                .SetProperty(d => d.ExtractionStatus, ExtractionStatus.Pending)
+                .SetProperty(d => d.ProcessingStartedAt, (DateTime?)null)
+                .SetProperty(d => d.ProcessingError, (string?)null)
+                .SetProperty(d => d.ProcessingAttempts, 0)
+                // Reset BOTH counters: a manual re-extract is a deliberate fresh start, so it must
+                // restore the full retry budget (FailedAttempts) as well as the claim count — otherwise
+                // a document that previously exhausted its budget would re-fail on the first hiccup with
+                // no real retries (#259 introduced FailedAttempts as the budget gate).
+                .SetProperty(d => d.FailedAttempts, 0)
+                // Set explicitly: ExecuteUpdateAsync bypasses AuditSaveChangesInterceptor, which is what
+                // stamps UpdatedAt on the tracked-entity path.
+                .SetProperty(d => d.UpdatedAt, DateTime.UtcNow),
+                ct);
+
+        if (rearmed == 0)
+        {
+            // Zero rows is ambiguous by itself: no such document (another tenant's row is excluded by
+            // the same global query filter, so it answers identically), or ours with a live claim. Ask,
+            // rather than tell someone their deleted document is busy.
+            return await db.Documents.AnyAsync(d => d.Id == id, ct)
+                ? Error(409, "document.extraction_in_progress",
+                    "We're still reading this document. Give it a moment, then try again.")
+                : NotFound();
+        }
+
+        // ExecuteUpdateAsync bypasses AuditSaveChangesInterceptor (the VendorPortalEndpoints reservation
+        // shape), so this explicit row — already here before the guard — is now the whole audit trace of
+        // a re-extract, and it is the one that names the action rather than the column diff.
+        await audit.LogAsync("document.reextract_queued", nameof(Document), id);
         return Results.Ok(new { data = new { message = "Re-extraction queued." }, error = (object?)null });
     }
 

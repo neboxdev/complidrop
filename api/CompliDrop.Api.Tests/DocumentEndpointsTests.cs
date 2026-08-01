@@ -2332,4 +2332,174 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         doc.FailedAttempts.Should().Be(0, "a manual re-extract must restore the full retry budget");
         doc.ProcessingError.Should().BeNull();
     }
+
+    // ----- #365: the re-extract in-flight guard ------------------------------------------------
+    //
+    // POST /reextract used to reset the row to Pending UNCONDITIONALLY, which re-arms the queue while a
+    // worker's claim is still live — ExtractionWorker holds no lock across the ~240s processing span, so
+    // the next 5s poll of a second instance claims the same row and both pay OCR + LLM, both write a
+    // feed row, and on a FIRST extraction both insert the whole DocumentField list (no unique index on
+    // (DocumentId, FieldName), so the duplicates stick). The guard is the WORKER's own staleness rule.
+
+    /// <summary>
+    /// Seeds a document in a given extraction state. <paramref name="processingStartedAt"/> is what the
+    /// guard reads, so every test below differs only in that value + the status.
+    /// </summary>
+    private async Task<Guid> SeedExtractionStateAsync(
+        Guid orgId,
+        ExtractionStatus status,
+        DateTime? processingStartedAt,
+        int processingAttempts = 1,
+        int failedAttempts = 0)
+    {
+        var docId = Guid.NewGuid();
+        await using var db = CreateSystemDb();
+        db.Documents.Add(new Document
+        {
+            Id = docId,
+            OrganizationId = orgId,
+            OriginalFileName = "inflight.pdf",
+            BlobStorageUrl = "blob://inflight",
+            BlobStoragePath = "blob/inflight.pdf",
+            FileSizeBytes = 1,
+            ContentType = "application/pdf",
+            ExtractionStatus = status,
+            ProcessingStartedAt = processingStartedAt,
+            ProcessingAttempts = processingAttempts,
+            FailedAttempts = failedAttempts,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+        return docId;
+    }
+
+    private static async Task<string> ErrorCode(HttpResponseMessage resp) =>
+        (await resp.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("error").GetProperty("code").GetString()!;
+
+    [Fact]
+    public async Task Reextract_is_refused_while_the_extraction_claim_is_still_live()
+    {
+        // Boundary-tight, and the literal "5m" is duplicated here ON PURPOSE — same reasoning as
+        // ExtractionWorkerTests' own -4m30s / -5m30s pair (#62): these two tests exist to be the
+        // regression discriminator for the threshold, so reading it off ExtractionWorker.ZombieClaimTimeout
+        // would make them pass for any value. -4m30s is inside the 5-minute window, so the worker still
+        // believes this claim; the endpoint must agree and refuse.
+        var auth = await RegisterAndLoginAsync();
+        var startedAt = DateTime.UtcNow.AddMinutes(-4).AddSeconds(-30);
+        var docId = await SeedExtractionStateAsync(
+            auth.OrgId, ExtractionStatus.Processing, startedAt, processingAttempts: 1);
+
+        var resp = await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Conflict,
+            "re-arming a live claim is what lets a second worker double-process the same blob");
+        (await ErrorCode(resp)).Should().Be("document.extraction_in_progress");
+
+        await using var verify = CreateSystemDb();
+        var doc = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+        // The refusal must change NOTHING — a partially-applied reset (counters zeroed but status left
+        // Processing) would still hand the worker a fresh retry budget it never earned.
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Processing);
+        doc.ProcessingStartedAt.Should().BeCloseTo(startedAt, TimeSpan.FromSeconds(1));
+        doc.ProcessingAttempts.Should().Be(1);
+
+        // ExecuteUpdateAsync bypasses the audit interceptor, so "document.reextract_queued" is the whole
+        // trace of a re-extract. A refused one must not claim to have queued anything.
+        var audited = await verify.AuditLogs.AsNoTracking()
+            .AnyAsync(a => a.EntityId == docId && a.Action == "document.reextract_queued");
+        audited.Should().BeFalse("nothing was queued");
+    }
+
+    [Fact]
+    public async Task Reextract_is_allowed_once_the_claim_has_gone_stale_past_the_zombie_threshold()
+    {
+        // The other half of the boundary pair. -5m30s is PAST the 5-minute window, so ExtractionWorker
+        // would zombie-reclaim this row on its own next poll — refusing here would buy no safety and
+        // would leave a wedged document with no manual route back. Literal duplicated deliberately; see
+        // the live-claim test above.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedExtractionStateAsync(
+            auth.OrgId,
+            ExtractionStatus.Processing,
+            DateTime.UtcNow.AddMinutes(-5).AddSeconds(-30),
+            processingAttempts: 3,
+            failedAttempts: 2);
+
+        var resp = await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var verify = CreateSystemDb();
+        var doc = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending);
+        doc.ProcessingStartedAt.Should().BeNull();
+        doc.ProcessingAttempts.Should().Be(0);
+        doc.FailedAttempts.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Reextract_of_a_Processing_row_with_no_claim_timestamp_is_allowed()
+    {
+        // No writer produces Processing + NULL ProcessingStartedAt (ClaimSql sets both), but if one ever
+        // did, ClaimSql's `ProcessingStartedAt < now() - interval` yields NULL for it — so the worker
+        // could never reclaim it either. Refusing here would be the only state in the system with no
+        // route back from either side, so the guard fails OPEN on missing evidence of a live claim.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedExtractionStateAsync(
+            auth.OrgId, ExtractionStatus.Processing, processingStartedAt: null);
+
+        var resp = await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId))
+            .ExtractionStatus.Should().Be(ExtractionStatus.Pending);
+    }
+
+    [Theory]
+    [InlineData(ExtractionStatus.Completed)]
+    [InlineData(ExtractionStatus.ManualRequired)]
+    [InlineData(ExtractionStatus.Pending)]
+    public async Task Reextract_still_queues_every_status_that_is_not_a_live_claim(ExtractionStatus status)
+    {
+        // The guard keys on Processing ONLY. A recent ProcessingStartedAt is left on each row on purpose:
+        // a guard that looked at the timestamp WITHOUT the status would refuse a just-completed document,
+        // which is the single most common "Read again" click there is. (Failed has its own test above.)
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedExtractionStateAsync(auth.OrgId, status, DateTime.UtcNow);
+
+        var resp = await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId))
+            .ExtractionStatus.Should().Be(ExtractionStatus.Pending);
+    }
+
+    [Fact]
+    public async Task Reextract_is_tenant_scoped_and_a_missing_document_is_not_reported_as_busy()
+    {
+        // The re-arm is now an ExecuteUpdateAsync, and "0 rows" alone cannot tell "another tenant's id"
+        // from "mine, but busy" — answering 409 for either would leak that the id exists AND hand the
+        // caller a retry that can never succeed.
+        var orgA = await RegisterAndLoginAsync();
+        var docId = await SeedExtractionStateAsync(
+            orgA.OrgId, ExtractionStatus.Processing, DateTime.UtcNow);
+
+        var orgB = await RegisterAndLoginAsync();
+        var crossOrg = await orgB.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
+        crossOrg.StatusCode.Should().Be(HttpStatusCode.NotFound,
+            "another org's live-claim document must read as absent, not as busy");
+        (await ErrorCode(crossOrg)).Should().Be("document.not_found");
+
+        var missing = await orgA.Client.PostAsync($"/api/documents/{Guid.NewGuid()}/reextract", content: null);
+        missing.StatusCode.Should().Be(HttpStatusCode.NotFound);
+
+        // And org A's own row is untouched by either call.
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId))
+            .ExtractionStatus.Should().Be(ExtractionStatus.Processing);
+    }
+
 }
