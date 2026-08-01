@@ -1,7 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CompliDrop.Api.Auth;
-using CompliDrop.Api.BackgroundServices;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.DTOs.Compliance;
 using CompliDrop.Api.DTOs.Documents;
@@ -775,19 +774,28 @@ public static class DocumentEndpoints
         //     guards. Folding the predicate into the UPDATE makes Postgres re-evaluate it under the
         //     row's own UPDATE lock, so a losing re-arm changes nothing and reports it.
         //
-        // The predicate is the WORKER'S OWN staleness rule, read from the worker's own constant: refuse
+        // The predicate is the WORKER'S OWN staleness rule, from the ONE constant both sides read
+        // (Services/ExtractionClaims — ClaimSql interpolates the same value into its interval): refuse
         // only while the claim is one the worker still believes in, and let through exactly what it
         // would zombie-reclaim anyway. Deliberately NOT a Document concurrency token — that is #366.
         //
         // A NULL ProcessingStartedAt counts as "no live claim". No writer produces that shape (every
         // Processing write sets both), and ClaimSql's comparison yields NULL — i.e. unclaimable — for it,
         // so refusing it would strand the document with no route back from either side.
-        var liveClaimCutoff = DateTime.UtcNow - ExtractionWorker.ZombieClaimTimeout;
+        //
+        // The cutoff is computed INSIDE the predicate on purpose. ProcessingStartedAt is written by the
+        // DATABASE clock (ClaimSql: `"ProcessingStartedAt" = now()`) and ClaimSql's own eligibility test is
+        // `now() - interval …`, so a cutoff captured from the APP clock would compare two clocks: an API
+        // container running ahead of Postgres would stop refusing claims the worker still holds (the guard
+        // silently weakened, with nothing to signal it), one running behind would refuse longer than the
+        // worker holds. Npgsql translates DateTime.UtcNow to bare now() — ADR 0009-clean, the same shape
+        // the .SetProperty(d => d.UpdatedAt, DateTime.UtcNow) below already emits — so both sides read the
+        // DB's clock as well as the one constant.
         var rearmed = await db.Documents
             .Where(d => d.Id == id
                 && (d.ExtractionStatus != ExtractionStatus.Processing
                     || d.ProcessingStartedAt == null
-                    || d.ProcessingStartedAt < liveClaimCutoff))
+                    || d.ProcessingStartedAt < DateTime.UtcNow - ExtractionClaims.ZombieTimeout))
             .ExecuteUpdateAsync(set => set
                 .SetProperty(d => d.ExtractionStatus, ExtractionStatus.Pending)
                 .SetProperty(d => d.ProcessingStartedAt, (DateTime?)null)

@@ -48,24 +48,30 @@ public class ExtractionWorker(
     /// Zombie-reclaim threshold: how long a <c>Processing</c> claim may sit before this worker stops
     /// believing it is live and reclaims the row (<see cref="ClaimSql"/>'s second arm). ONE definition —
     /// which is why <see cref="ClaimSql"/> INTERPOLATES it rather than spelling <c>interval '5 minutes'</c>
-    /// inline — because a second consumer now depends on agreeing with it exactly:
+    /// inline — because a second consumer depends on agreeing with it exactly:
     /// <c>DocumentEndpoints.Reextract</c> refuses to re-arm a document while its claim is still live
     /// (<see href="https://github.com/neboxdev/complidrop/issues/365">#365</see>). The endpoint must refuse
     /// exactly the rows this worker still considers claimed and let through exactly the rows it would
     /// reclaim anyway; two independently-maintained copies of "5 minutes" could drift into a window where
     /// the endpoint re-queues a document a live worker still holds — which is the double-OCR/LLM,
-    /// duplicate-field race #365 exists to close. Public so both the endpoint and the regression suite read
-    /// the source of truth instead of a hand-copied literal.
+    /// duplicate-field race #365 exists to close.
+    /// <para/>
+    /// Because it is a value TWO layers must agree on, the number itself is SOURCED in
+    /// <see cref="ExtractionClaims"/> and this member ALIASES it — the same
+    /// <c>FieldNameMaxLength = InputLengths.DocumentFieldName</c> shape used below, and for the same
+    /// reason: the endpoint reads the <c>Services/</c> constant, so <c>Endpoints/</c> never has to compile
+    /// against <c>BackgroundServices/</c>. Kept public here so this worker's own regression suite reads a
+    /// source of truth rather than a hand-copied literal.
     /// <para/>
     /// The WORKER-SIDE boundary tests deliberately keep their own <c>5m30s</c> / <c>4m30s</c> literals
     /// (#62): their job is to be a regression discriminator for this value, so hoisting them onto this
     /// constant would make them vacuous. Same reason <see cref="AttemptTimeoutCeilingSeconds"/> below stays
     /// a literal rather than being derived from this.
     /// </summary>
-    public static TimeSpan ZombieClaimTimeout => TimeSpan.FromMinutes(ZombieClaimTimeoutMinutes);
+    public static TimeSpan ZombieClaimTimeout => ExtractionClaims.ZombieTimeout;
 
     /// <inheritdoc cref="ZombieClaimTimeout"/>
-    private const int ZombieClaimTimeoutMinutes = 5;
+    private const int ZombieClaimTimeoutMinutes = ExtractionClaims.ZombieTimeoutMinutes;
 
     /// <summary>
     /// Upper bound (seconds) on the configurable per-attempt timeout. Sits below the 300s

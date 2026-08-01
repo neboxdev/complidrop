@@ -51,9 +51,27 @@ zombie-reclaim that row on its own next poll, so refusing buys no safety and wou
 with no manual route back.
 
 That correspondence only holds while the two sides are one value, so the threshold is promoted out of
-`ClaimSql`'s `interval '5 minutes'` into `ExtractionWorker.ZombieClaimTimeout`, and `ClaimSql` is now
-**built** from it (`InvariantCulture` — this is SQL, not display text). A test pins the SQL text back
-against the constant.
+`ClaimSql`'s `interval '5 minutes'` into a single constant, and `ClaimSql` is now **built** from it
+(`InvariantCulture` — this is SQL, not display text). A test pins the SQL text back against the constant.
+
+Because it is now a fact TWO layers must agree on, the value is **sourced in `Services/ExtractionClaims`**,
+not on the hosted-service class: `ExtractionWorker.ZombieClaimTimeout` aliases it (the
+`FieldNameMaxLength = InputLengths.DocumentFieldName` shape) and the endpoint reads the `Services/` constant
+directly, so `Endpoints/` never compiles against `BackgroundServices/` — which nothing outside the
+composition root does. `Services/InputLengths` states the same direction rule and scopes its own exception
+the same way: worker-ONLY numbers (`MaxAttempts`, `MaxClaims`, `AttemptTimeoutCeilingSeconds`, the response
+clamp widths) stay on the worker.
+
+**And the guard reads ONE CLOCK, not one constant on two clocks.** The cutoff is computed *inside* the
+predicate (`d.ProcessingStartedAt < DateTime.UtcNow - ExtractionClaims.ZombieTimeout`), which Npgsql renders
+as `"ProcessingStartedAt" < now() - $interval` — Postgres's own clock, the one that wrote
+`ProcessingStartedAt` (`"ProcessingStartedAt" = now()`) and the one `ClaimSql`'s staleness test uses. It is
+ADR 0009-clean (a bare `now()` on timestamptz, no `AT TIME ZONE`), the same shape
+`.SetProperty(d => d.UpdatedAt, DateTime.UtcNow)` already emitted. Capturing the cutoff into a local from
+the API container's clock instead would have left a second, unpinnable disagreement: a container running
+ahead of Neon stops refusing claims the worker still holds — the guard silently weakened — and no
+behavioural test could see it, because the tests seed `ProcessingStartedAt` from the app clock too. A test
+captures the host's EF command log and asserts the emitted `WHERE` compares against `now()`.
 
 `AttemptTimeoutCeilingSeconds` (240) deliberately stays a literal rather than being derived from the new
 constant: the pin guarding their relationship parses the threshold back out of `ClaimSql` and compares, so
@@ -160,4 +178,5 @@ name. It belongs with Option D's ticket, where the population is measured.
   [0046](0046-request-input-length-guards.md) (the refuted "just add a unique index" precedent),
   [0049](0049-clipped-extraction-field-is-disclosed-not-silent.md) (duplicate-name rows as a tolerated shape)
 - Code: `api/CompliDrop.Api/Endpoints/DocumentEndpoints.cs` (`Reextract`),
-  `api/CompliDrop.Api/BackgroundServices/ExtractionWorker.cs` (`ZombieClaimTimeout`, `ClaimSql`)
+  `api/CompliDrop.Api/Services/ExtractionClaims.cs` (`ZombieTimeout` — the source both layers read),
+  `api/CompliDrop.Api/BackgroundServices/ExtractionWorker.cs` (`ZombieClaimTimeout` alias, `ClaimSql`)

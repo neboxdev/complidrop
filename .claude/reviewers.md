@@ -404,12 +404,21 @@ Both are defined in this repo's `.claude/agents/`.
     `ClaimSql`'s comparison yields NULL for it, i.e. the worker could never reclaim it either, so
     that is the one state with no route back from either side. Both are fail-OPEN by design; do not
     flag either as a hole.
-  - The window is ONE constant, `ExtractionWorker.ZombieClaimTimeout`, and `ClaimSql` is BUILT from
-    it — a re-inlined `interval '5 minutes'` IS a real finding (pinned: the SQL's interval is parsed
+  - The window is ONE constant SOURCED in `Services/ExtractionClaims.ZombieTimeout` (the
+    `InputLengths` direction rule — a value two layers must agree on lives in `Services/`, worker-ONLY
+    numbers stay on the worker). `ExtractionWorker.ZombieClaimTimeout` ALIASES it and `ClaimSql` is
+    BUILT from it; the endpoint reads the `Services/` constant, so `Endpoints/` must NOT re-acquire a
+    `using CompliDrop.Api.BackgroundServices;` — outside the composition root nothing does. A
+    re-inlined `interval '5 minutes'` IS a real finding (pinned: the SQL's interval is parsed
     back and compared to the constant). But `AttemptTimeoutCeilingSeconds` deliberately stays the
     literal 240 rather than `ZombieClaimTimeout - margin`, and the boundary tests on BOTH sides keep
     their own `-4m30s` / `-5m30s` literals (#62): those pins exist to discriminate a drift in this
     value, so deriving them from it makes them vacuous. "Hoist the test literals too" is the bug.
+  - The cutoff is computed INSIDE the predicate so Npgsql emits `"ProcessingStartedAt" < now() - …`:
+    `ProcessingStartedAt` and `ClaimSql`'s own staleness test are both the DATABASE clock, so hoisting
+    it into an app-clock local (`var cutoff = DateTime.UtcNow - …`) silently re-opens a clock-drift gap
+    no behavioural test can see. Pinned by a test that reads the host's EF command log. The bare
+    `now()` is ADR 0009-clean — do not "fix" it with `AT TIME ZONE`.
   - `ExecuteUpdateAsync` bypasses `AuditSaveChangesInterceptor`, so the explicit
     `document.reextract_queued` row (already there pre-#365) is now the WHOLE audit trace — the same
     trade `VendorPortalEndpoints`' upload-permit reservation makes. Not a lost audit trail. A REFUSED
