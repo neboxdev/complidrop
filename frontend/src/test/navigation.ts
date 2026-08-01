@@ -101,6 +101,16 @@ const pendingApplies = new Set<ReturnType<typeof setTimeout>>();
  *     setNavigationCommitDelay(50);  fireEvent.change(typeSelect);    // still in flight
  *     act(() => vi.advanceTimersByTime(10));                          // only the first landed
  *
+ * Under FAKE timers the default 0 is a trap (#450). `applyHistoryUrl` arms its
+ * commit AT the instant `replaceState` runs, so one `advanceTimersByTime` that
+ * reaches a History write also drains that write's echo — and the echo
+ * re-renders through `useSyncExternalStore`, i.e. at SyncLane, so it joins
+ * whatever else the same advance scheduled instead of landing after it.
+ * Production never orders it that way: Next routes ACTION_RESTORE through
+ * `startTransition`, so the echo is always later than the local flush. Push the
+ * delay past the advance to keep it there — see "keeps characters typed in the
+ * same drain as the debounce write" in the documents page test.
+ *
  * Reset to 0 by `resetNavigation()`.
  */
 let commitDelayMs = 0;
