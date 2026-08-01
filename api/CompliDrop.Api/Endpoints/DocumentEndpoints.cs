@@ -906,6 +906,17 @@ public static class DocumentEndpoints
     // "Check again" resolves) rather than fail the user's edit — but NEVER leave a confident verdict
     // computed from now-stale inputs. ApplyEvaluationAsync does all its I/O before any change-tracker
     // mutation, so a throw here leaves no partial check rows for the SaveChanges to commit.
+    //
+    // Both callers now run inside DocumentWriteConcurrency's REPEATABLE READ transaction (#366), which
+    // makes that best-effort CONDITIONAL — see ADR 0030 Amendment 1. The catch below still sets Pending
+    // and the edit still commits when the recompute failed for a non-database reason. But if it failed
+    // because Postgres raised (statement timeout, lock timeout, out of memory), the enclosing
+    // transaction is already ABORTED, so the caller's SaveChanges answers 25P02 and the whole unit of
+    // work rolls back with nothing committed. That is the same fail-closed answer exhaustion gives, and
+    // for the same reason: an abandonable unit of work leaves the last successful writer's consistent
+    // tuple. Do NOT add a 25P02 arm to IsConcurrentUpdateConflict (retrying an aborted transaction fixes
+    // nothing) and do NOT open a second transaction to force the Pending commit — that would be exactly
+    // the half-applied partial write #366 removes.
     private static async Task EvaluateIntoUnitOfWorkAsync(
         IComplianceCheckService compliance, AppDbContext db, Document doc, ILoggerFactory loggerFactory, CancellationToken ct)
     {

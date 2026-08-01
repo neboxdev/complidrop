@@ -492,6 +492,14 @@ Both are defined in this repo's `.claude/agents/`.
     inputs are committing regardless. Here the whole unit of work is still abandonable, so rolling back
     leaves the last successful writer's consistent tuple — strictly stronger. Committing the edit with
     `Pending` would BE the half-applied write #366 removes.
+  - On these two writers the degrade-to-`Pending` rule is now CONDITIONAL, and that is RECORDED (ADR 0030
+    Amendment 1), not overlooked. A recompute failure that is a server-side POSTGRES error has already
+    aborted the enclosing transaction, so `EvaluateIntoUnitOfWorkAsync`'s catch sets `Pending` but the
+    following `SaveChanges` answers `25P02` and the request 500s having committed nothing — the same
+    fail-closed landing as exhaustion. Adding a `25P02` arm to `IsConcurrentUpdateConflict` (retrying a
+    transaction Postgres already aborted) or opening a SECOND transaction to force the `Pending` commit
+    are both the bug, not the fix. Note the pinned `ThrowingComplianceCheckService` throws without
+    touching the DB, so it deliberately does not discriminate the two failure kinds.
   - `Services/DocumentConcurrency.IsConcurrentUpdateConflict` walks the WHOLE inner-exception chain,
     unlike the one-level 23505 siblings (`SampleData.IsDocumentUniqueViolation`,
     `IdempotencyService.IsKeyConflict`). Load-bearing: Npgsql reports 40001 as TRANSIENT and EF (no
@@ -505,6 +513,17 @@ Both are defined in this repo's `.claude/agents/`.
   - The pure re-grade paths (`EvaluateAsync` / `EvaluateForSystemAsync` / the fan-outs) keep their
     read→compute→write window and are OUT of scope by decision — they write no inputs, so they cannot
     lose an update. Recorded in the amendment; not a gap to re-report.
+  - `ExtractionWorker.PersistSuccess` is a whole-tuple writer for every input it EXTRACTS, but `VendorId`
+    is the one canonical verdict input it READS and never WRITES: it grades off the TRACKED FK
+    (`ApplyEvaluationAsync`'s `context.Entry(doc).Reference(d => d.Vendor)`) read before an OCR + LLM run
+    that lasts minutes. So a vendor PATCH inside that window still leaves the NEW vendor with the OLD
+    vendor's verdict — #366 closed the request-path half of scenario B only. Named in ADR 0030
+    Amendment 1 and ticketed as [#460](https://github.com/neboxdev/complidrop/issues/460), so it is not a
+    NEW finding — but two "obvious" fixes for it are, if one ever appears in a diff: widening the RR guard
+    (or an `xmin` token) to the worker costs a re-paid extraction, and re-reading `VendorId` and ASSIGNING
+    it onto the tracked entity makes the worker WRITE the column, clobbering a PATCH that lands between
+    the re-read and the commit — a lost update the code does not have today. A fresh id used to LOAD THE
+    CHECKLIST ONLY is the shape that does not trade one bug for another.
   - NO frontend change: the 409's message is already jargon-free copy that both call sites surface
     through their generic `err.message` toast. This is NOT the ADR 0050 Amendment 1 situation (there
     the client held a payload that actively CONTRADICTED the 409); here the user's edits survive in the
