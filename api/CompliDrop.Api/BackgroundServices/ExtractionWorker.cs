@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
@@ -44,11 +45,42 @@ public class ExtractionWorker(
     public const double ManualReviewConfidenceThreshold = 0.7;
 
     /// <summary>
+    /// Zombie-reclaim threshold: how long a <c>Processing</c> claim may sit before this worker stops
+    /// believing it is live and reclaims the row (<see cref="ClaimSql"/>'s second arm). ONE definition —
+    /// which is why <see cref="ClaimSql"/> INTERPOLATES it rather than spelling <c>interval '5 minutes'</c>
+    /// inline — because a second consumer depends on agreeing with it exactly:
+    /// <c>DocumentEndpoints.Reextract</c> refuses to re-arm a document while its claim is still live
+    /// (<see href="https://github.com/neboxdev/complidrop/issues/365">#365</see>). The endpoint must refuse
+    /// exactly the rows this worker still considers claimed and let through exactly the rows it would
+    /// reclaim anyway; two independently-maintained copies of "5 minutes" could drift into a window where
+    /// the endpoint re-queues a document a live worker still holds — which is the double-OCR/LLM,
+    /// duplicate-field race #365 exists to close.
+    /// <para/>
+    /// Because it is a value TWO layers must agree on, the number itself is SOURCED in
+    /// <see cref="ExtractionClaims"/> and this member ALIASES it — the same
+    /// <c>FieldNameMaxLength = InputLengths.DocumentFieldName</c> shape used below, and for the same
+    /// reason: the endpoint reads the <c>Services/</c> constant, so <c>Endpoints/</c> never has to compile
+    /// against <c>BackgroundServices/</c>. Kept public here so this worker's own regression suite reads a
+    /// source of truth rather than a hand-copied literal.
+    /// <para/>
+    /// The WORKER-SIDE boundary tests deliberately keep their own <c>5m30s</c> / <c>4m30s</c> literals
+    /// (#62): their job is to be a regression discriminator for this value, so hoisting them onto this
+    /// constant would make them vacuous. Same reason <see cref="AttemptTimeoutCeilingSeconds"/> below stays
+    /// a literal rather than being derived from this.
+    /// </summary>
+    public static TimeSpan ZombieClaimTimeout => ExtractionClaims.ZombieTimeout;
+
+    /// <inheritdoc cref="ZombieClaimTimeout"/>
+    private const int ZombieClaimTimeoutMinutes = ExtractionClaims.ZombieTimeoutMinutes;
+
+    /// <summary>
     /// Upper bound (seconds) on the configurable per-attempt timeout. Sits below the 300s
-    /// (5-minute) zombie-reclaim threshold baked into <see cref="ClaimSql"/>'s
-    /// <c>interval '5 minutes'</c>, with a 60s margin so a timed-out attempt can cancel AND requeue
-    /// before a second worker could reclaim the same row. The whole point of the clamp is to keep
-    /// the timeout strictly under that threshold regardless of misconfiguration.
+    /// (5-minute) <see cref="ZombieClaimTimeout"/> baked into <see cref="ClaimSql"/>, with a 60s margin
+    /// so a timed-out attempt can cancel AND requeue before a second worker could reclaim the same row.
+    /// The whole point of the clamp is to keep the timeout strictly under that threshold regardless of
+    /// misconfiguration. Deliberately a LITERAL rather than <c>ZombieClaimTimeout - margin</c>: the pin
+    /// that guards this relationship parses the threshold back out of <see cref="ClaimSql"/> and compares,
+    /// so deriving one side from the other would collapse it into a tautology.
     /// </summary>
     internal const int AttemptTimeoutCeilingSeconds = 240; // = 300s zombie threshold − 60s margin
 
@@ -182,8 +214,14 @@ public class ExtractionWorker(
     /// for the project-wide rule. Exposed as `internal` so the regression suite can drive the
     /// exact same string through a connection with a non-UTC session and prove the SQL is
     /// TZ-independent end-to-end.
+    /// <para/>
+    /// The stale-claim window is INTERPOLATED from <see cref="ZombieClaimTimeout"/> rather than spelled
+    /// as a literal, so the request-side in-flight guard (<c>DocumentEndpoints.Reextract</c>, #365) and
+    /// this claim can never disagree about which claims are still live. Formatted with
+    /// <see cref="CultureInfo.InvariantCulture"/> because this is SQL, not display text — a culture that
+    /// shapes digits differently must not be able to produce an interval Postgres cannot parse.
     /// </summary>
-    internal const string ClaimSql = """
+    internal static readonly string ClaimSql = $"""
         UPDATE "Documents"
         SET "ExtractionStatus" = 'Processing',
             "ProcessingStartedAt" = now(),
@@ -195,7 +233,7 @@ public class ExtractionWorker(
             AND (
                 "ExtractionStatus" = 'Pending'
                 OR ("ExtractionStatus" = 'Processing'
-                    AND "ProcessingStartedAt" < now() - interval '5 minutes')
+                    AND "ProcessingStartedAt" < now() - interval '{ZombieClaimTimeoutMinutes.ToString(CultureInfo.InvariantCulture)} minutes')
             )
           ORDER BY "CreatedAt"
           FOR UPDATE SKIP LOCKED

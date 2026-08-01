@@ -169,8 +169,78 @@ never-graded document has no verdict on either axis.
 beside the compliance badge. If yes, confine the demotion to the vendor rollup (this ADR). If no, mirror it
 everywhere (ADR 0048).
 
+## Amendment 2 (2026-08-01) — a terminally FAILED extraction NOBODY CONFIRMED is excluded from in-force coverage too
+
+Decision 2's exclusion list named only `ManualRequired`. `ExtractionStatus.Failed` joins it, on the same
+read-time clause in `ComputeCoverage`, with the same read-only contract (no persisted `ComplianceStatus`
+change, no document-level surface touched) — **and with the same human exit**, which for `Failed` cannot be
+the status. See "The exit" below; a version of this clause without one is a regression, not a safety fix.
+
+**Why.** `ExtractionStatus` is the ONLY column carrying this ADR's distrust, and it is not durable across a
+re-read. `DocumentEndpoints.Reextract` (#365 / [ADR 0050](0050-reextract-refuses-a-live-extraction-claim.md))
+re-arms the queue by writing `Pending` over whatever was there — including `ManualRequired`. So clicking
+"Read again" on a distrusted document immediately flipped the vendor rollup from ActionNeeded to **Covered**
+on the strength of the OLD verdict, computed from the extraction the system itself flagged unreliable. If the
+re-read then failed terminally, the row landed on `Failed` — which the exclusion list did not name — and
+nothing restored the distrust: `ExtractionWorker.MarkFailed` and `RecordFailedAttempt` write
+`ExtractionStatus` only, leaving `ComplianceStatus`, the `ComplianceCheck` rows and the `DocumentField`s
+exactly as the distrusted read left them. That Covered label was then **permanent**, with no human ever
+confirming the extraction — the same silent false-affirmative this ADR exists to prevent, reached by a
+different route. The at-risk population is precisely the per-field confidence gate above: the value parses,
+the rules pass, the stored verdict is a real `Compliant`, and only the trust flag ever dissented.
+
+An extraction the system could not COMPLETE is at least as untrustworthy as one it distrusted, so the honest
+rollup answer is the same one: a required type covered only by such documents reads ActionNeeded.
+
+**The exit — `IsManuallyVerified`, because the status cannot be one.**
+
+Decision 2's exclusion is explicitly scoped *"until a human confirms the extraction on the document detail
+page"*, and the first cut of this amendment inherited the clause without inheriting the exit. That
+over-reached, and in exactly the direction this ADR is supposed to protect against — it just pointed the
+wrong way. The detail page offers a manual-entry affordance FOR the failed case (*"We couldn't pull the
+details from this file automatically. Enter the key details below and we'll check them against the
+requirements when you save."*, with `effective_date` / `expiration_date` / `general_liability_limit`), and
+that Save is a real grade: `UpdateFields` mirrors the typed values into the canonical inputs and folds
+`IComplianceCheckService.ApplyEvaluationAsync` into its own unit of work (ADR 0030), so the
+`ComplianceCheck` rows and the stored verdict come from values a human vouched for. `DocumentGrading.IsGraded`
+is true and `ComplianceStatusDeriver.Effective` returns the real `Compliant` — and a status-only `Failed`
+exclusion dropped the document BEFORE the deriver ever ran. The vendor then read ActionNeeded with no
+extraction badge, no reason and no remedy on that page, **and no endpoint could move it back** — worse than
+the pre-amendment reading, and a demand for a remedy the product cannot offer.
+
+The exit cannot be the STATUS: `DocumentEndpoints.ResolveManualReview` deliberately refuses to move a
+`Failed` row (*"Failed is its own louder error state"* — it is `Completed`/`ManualRequired` that its
+`wasSettled` allow-list governs), so a confirmed document stays `Failed` forever. What that same helper DOES
+write, unconditionally and on every caller (`PUT /fields`, `PUT /verify`), is `IsManuallyVerified`. So the
+clause is `ExtractionStatus == Failed && !IsManuallyVerified`, and `DocCoverageInfo` carries the flag in both
+projections. Amendment 2's target population is untouched: a distrusted document nobody confirmed carries
+`IsManuallyVerified == false` when it lands on `Failed`.
+
+The flag is STICKY — nothing clears it, so a document confirmed once, then successfully re-extracted, then
+failed again reads as confirmed on values a human never saw. Accepted deliberately: it is strictly narrower
+than the pre-amendment reading (which counted every `Failed` document), the alternative is the schema change
+[#366](https://github.com/neboxdev/complidrop/issues/366) owns, and the `ManualRequired` half is unaffected —
+that clause has no `IsManuallyVerified` escape, so a re-extraction that lands back on `ManualRequired`
+re-excludes the document regardless of what was confirmed before.
+
+**Scope, deliberately narrow.**
+
+- **`Pending` / `Processing` are NOT excluded.** The window while a re-read is genuinely in flight is bounded
+  and self-healing — the worker resolves it within a poll — so excluding in-flight statuses would drop every
+  legitimately-compliant vendor to ActionNeeded during any ordinary re-extract. A test asserts the Covered
+  reading in that window so widening the clause stays a visible choice rather than a silent drift.
+- **The document-level surfaces stay untouched**, exactly as in the original decision and Amendment 1. The
+  documents list already renders a distinct `Failed` extraction badge ("Couldn't read") beside the compliance
+  badge and the detail page carries the extraction-error card, so the Amendment 1 test — *does some other
+  surface already disclose this state beside the compliance badge?* — answers **yes** here, the same as for
+  `ManualRequired`. Demoting the counts would be the #294-class split, not a fix.
+- **Nothing is persisted.** Recovering the distrust signal across a re-arm (a separate column, so
+  extraction-trust stops sharing one column with pipeline position) is a schema change and is deliberately
+  NOT done here; it belongs with [#366](https://github.com/neboxdev/complidrop/issues/366)'s concurrency-token
+  work. The read-time exclusion closes the permanent case without one.
+
 ## References
 
-- Tickets: [#401](https://github.com/neboxdev/complidrop/issues/401), [#443](https://github.com/neboxdev/complidrop/issues/443) (Amendment 1), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
+- Tickets: [#401](https://github.com/neboxdev/complidrop/issues/401), [#443](https://github.com/neboxdev/complidrop/issues/443) (Amendment 1), [#365](https://github.com/neboxdev/complidrop/issues/365) (Amendment 2), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
 - ADRs: [0040](0040-unreadable-canonical-value-fails-closed.md) (the unreadable-value trigger this dovetails with — both raise `ManualRequired`), [0041](0041-future-effective-not-yet-in-force-reads-pending.md) (the read-only-overlay pattern and the vendor-rollup in-force test this extends), [0030](0030-compliance-verdict-combined-unit-of-work.md) (the single unit of work the gate stays inside)
-- Code: `Services/VerdictBearingFields.cs` (the verdict-bearing set), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `ManualReviewConfidenceThreshold`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo` + both projections)
+- Code: `Services/VerdictBearingFields.cs` (the verdict-bearing set), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `ManualReviewConfidenceThreshold`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo` + both projections), `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview` — the `IsManuallyVerified` exit Amendment 2 gates on)

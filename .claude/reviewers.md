@@ -156,6 +156,27 @@ Both are defined in this repo's `.claude/agents/`.
     coverage, so a required type covered ONLY by distrusted docs reads ActionNeeded (like
     an expired-only type). READ-TIME only — the stored `ComplianceStatus` is untouched (no
     persisted `Pending`), extraction-trust and rule-verdict are separate axes.
+  - A terminally `Failed` extraction **nobody has confirmed** is excluded by that SAME clause
+    (Amendment 2, #365). It is where a distrusted doc LANDS: `Reextract` re-arms by writing
+    `Pending` over `ManualRequired` (the only column carrying the distrust) and `MarkFailed` /
+    `RecordFailedAttempt` never restore it, so without this the old distrusted-basis verdict
+    read Covered permanently. `Pending`/`Processing` are deliberately NOT excluded (bounded,
+    self-healing — excluding them would sink every compliant vendor during an ordinary
+    re-extract, and a test asserts the Covered reading in that window); "also exclude the
+    in-flight statuses" is the bug, not a gap.
+  - The `Failed` half's EXIT is `IsManuallyVerified`, and it is LOAD-BEARING — do NOT
+    "simplify" the clause to a bare status test (`is not (ManualRequired or Failed)`). That
+    shape was the round-1 fix and it OVER-REACHES: the detail page's manual-entry affordance
+    exists FOR the failed case, that Save grades the doc for real (`UpdateFields` →
+    `ApplyEvaluationAsync`), and `ResolveManualReview` deliberately will not move a `Failed`
+    row — so status can never be the exit and the exclusion would have NONE. A human-typed,
+    verified cert would read ActionNeeded forever with no endpoint able to move it back. Both
+    directions are pinned: `A_FAILED_extraction_a_human_confirmed_reads_Covered_again` (the
+    exit) and `A_vendor_whose_only_cert_is_a_FAILED_extraction_reads_ActionNeeded_not_Covered`
+    (the target population). The flag is STICKY by accepted design (ADR 0042 Am. 2, "The exit")
+    — a doc confirmed, re-extracted successfully, then failed again reads confirmed; the
+    durable fix is #366's schema work, so do not re-flag it here. The `ManualRequired` half has
+    NO such escape on purpose (confirming it flips the status to `Completed`).
   - Deliberately NOT applied to the document-level surfaces (dashboard compliant/
     expiringSoon counts, `?status=` list/badges, CSV/PDF export, per-doc compliance badge):
     the list already shows a separate `ManualRequired` extraction badge beside the
@@ -384,6 +405,61 @@ Both are defined in this repo's `.claude/agents/`.
     read_time_derivation`) runs against a document the REAL worker wrote, on purpose: the hand-built
     unit shapes cannot catch the worker clamping the jsonb copy too, at which point the two would
     agree, the flag would go false, and the page would stop warning while still showing a clip.
+- The re-extract in-flight guard is ADR 0050 (#365); the facts that follow are pointers into it,
+  not a second copy of the rationale.
+  - `Reextract` re-arms with ONE conditional `ExecuteUpdateAsync`, never a read-then-write. The
+    atomicity IS the fix: an `if (status == Processing) return 409;` above a `SaveChanges` races the
+    very claim it checks (the worker can flip the status between the SELECT and the UPDATE), so
+    "simplify it back to a tracked-entity save with an if" IS a real finding, not a cleanup.
+  - It bites ONLY while the claim is one the WORKER still believes in. A STALE claim passes through
+    on purpose (`ClaimSql` would zombie-reclaim that row on its own next poll, so refusing buys no
+    safety and strands the document), and so does `Processing` with a NULL `ProcessingStartedAt` —
+    `ClaimSql`'s comparison yields NULL for it, i.e. the worker could never reclaim it either, so
+    that is the one state with no route back from either side. Both are fail-OPEN by design; do not
+    flag either as a hole.
+  - The window is ONE constant SOURCED in `Services/ExtractionClaims.ZombieTimeout` (the
+    `InputLengths` direction rule — a value two layers must agree on lives in `Services/`, worker-ONLY
+    numbers stay on the worker). `ExtractionWorker.ZombieClaimTimeout` ALIASES it and `ClaimSql` is
+    BUILT from it; the endpoint reads the `Services/` constant, so `Endpoints/` must NOT re-acquire a
+    `using CompliDrop.Api.BackgroundServices;` — outside the composition root nothing does. A
+    re-inlined `interval '5 minutes'` IS a real finding (pinned: the SQL's interval is parsed
+    back and compared to the constant). But `AttemptTimeoutCeilingSeconds` deliberately stays the
+    literal 240 rather than `ZombieClaimTimeout - margin`, and the boundary tests on BOTH sides keep
+    their own `-4m30s` / `-5m30s` literals (#62): those pins exist to discriminate a drift in this
+    value, so deriving them from it makes them vacuous. "Hoist the test literals too" is the bug.
+  - The cutoff is computed INSIDE the predicate so Npgsql emits `"ProcessingStartedAt" < now() - …`:
+    `ProcessingStartedAt` and `ClaimSql`'s own staleness test are both the DATABASE clock, so hoisting
+    it into an app-clock local (`var cutoff = DateTime.UtcNow - …`) silently re-opens a clock-drift gap
+    no behavioural test can see. Pinned by a test that reads the host's EF command log. The bare
+    `now()` is ADR 0009-clean — do not "fix" it with `AT TIME ZONE`.
+  - `ExecuteUpdateAsync` bypasses `AuditSaveChangesInterceptor`, so the explicit
+    `document.reextract_queued` row (already there pre-#365) is now the WHOLE audit trace — the same
+    trade `VendorPortalEndpoints`' upload-permit reservation makes. Not a lost audit trail. A REFUSED
+    re-arm writes no audit row at all, deliberately: nothing was queued.
+  - The 409 uses the plain `Error(...)` envelope (the `auth.email_taken` shape), NOT
+    `IdempotencyResults.InProgressConflict()` — a different contract (ADR 0029 replays, it does not
+    409), and `friendly(err)` surfaces the message as written.
+  - "No frontend change, the button is already disabled while `isProcessing`" was the ORIGINAL ADR's
+    reasoning and it is FALSE in exactly the state the 409 occupies — do not restore it (ADR 0050
+    Amendment 1). `isProcessing` derives from the LAST SUCCESSFUL payload, so a tab whose payload said
+    `Completed` has the button ENABLED — that tab is the only client state the 409 is reachable FROM,
+    and it never self-corrects (`refetchInterval` returns false for a settled status,
+    `refetchOnWindowFocus` is off). So `reextract.onError` INVALIDATES `["documents", id]` on this ONE
+    code (`err instanceof ApiError && err.code === "document.extraction_in_progress"`): the badge flips
+    to Processing, the 3s poll restarts and the button disables, instead of a "still reading" toast
+    landing over a **Read** badge, the previous read's fields and verdict, and a button that keeps
+    409-ing until a manual reload. Widening it to invalidate on ANY reextract error IS a finding — the
+    other failures assert nothing about the document, and a blanket refetch fires a GET into a backend
+    that just failed one and fights the #97 error short-circuit. Both directions are pinned by test.
+  - **NO `(DocumentId, FieldName)` unique index** — the ticket asks for one and ADR 0050 Option D
+    refutes it, the same reasoning that refuted it for the waitlist table (ADR 0046 + ADR 0016
+    auto-migrate-on-boot). Duplicates are NOT only a race artifact: `PersistSuccess` inserts one row
+    per `extraction.Fields` entry with no `GroupBy` while the two lines above it DO de-dupe for the
+    jsonb mirror and typed columns, and `Clamp(f.Name, …)` collapses two over-length names to one.
+    ADR 0049 already treats a duplicate-name row as a shape the read predicate must tolerate. Adding
+    the index, or de-duping that insert loop (Option E — a DIFFERENT duplicate source, and no help at
+    all for the concurrent one), needs its own ticket with a measured population and a signed-off
+    dedupe. Neither is a finding here.
 - Client-controlled input in a BOUNDED audit column is ADR 0044 (#372); the review-time facts
   that follow are pointers into it.
   - The clamp lives at ONE boundary — `CurrentUserService` reading `ColumnClamp.To` — not at

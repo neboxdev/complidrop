@@ -653,6 +653,25 @@ export default function DocumentDetailPage() {
       toast.success("Reading the file again…");
     },
     onError: (err) => {
+      // The 409 from #365 / ADR 0050 says "We're still reading this document" — but the
+      // ONLY client state it is reachable from is one where THIS page believes reading
+      // FINISHED. `isProcessing` derives from the last successful payload, so a tab whose
+      // payload said Completed leaves "Read again" enabled, which is precisely how the
+      // request gets made; and nothing here self-corrects it. `refetchInterval` returns
+      // false for a settled status and `refetchOnWindowFocus` is off (lib/providers.tsx),
+      // so without this the toast and the page it lands on assert opposite things about
+      // the same document: "still reading" over a Completed badge, the previous read's
+      // fields and verdict, and a button that keeps 409-ing until a manual reload.
+      //
+      // Refetching makes "give it a moment" true ON SCREEN — the badge flips to
+      // Processing, the 3s poll restarts, and the button disables itself until the
+      // re-read lands. Scoped to THIS code rather than any error on purpose: the other
+      // failures (5xx, network-unreachable, queue-at-capacity) carry no claim about the
+      // document's state that the cache contradicts, and a blanket refetch there would
+      // fire a request into a backend that just failed one.
+      if (err instanceof ApiError && err.code === "document.extraction_in_progress") {
+        qc.invalidateQueries({ queryKey: ["documents", params.id] });
+      }
       const message =
         err instanceof Error && err.message?.trim()
           ? err.message
