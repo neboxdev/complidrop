@@ -156,14 +156,27 @@ Both are defined in this repo's `.claude/agents/`.
     coverage, so a required type covered ONLY by distrusted docs reads ActionNeeded (like
     an expired-only type). READ-TIME only — the stored `ComplianceStatus` is untouched (no
     persisted `Pending`), extraction-trust and rule-verdict are separate axes.
-  - A terminally `Failed` extraction is excluded by that SAME clause (Amendment 2, #365) —
-    `Failed` is COUNTABLE nowhere in the rollup. It is where a distrusted doc LANDS:
-    `Reextract` re-arms by writing `Pending` over `ManualRequired` (the only column carrying
-    the distrust) and `MarkFailed` / `RecordFailedAttempt` never restore it, so without this
-    the old distrusted-basis verdict read Covered permanently. `Pending`/`Processing` are
-    deliberately NOT excluded (bounded, self-healing — excluding them would sink every
-    compliant vendor during an ordinary re-extract, and a test asserts the Covered reading
-    in that window); "also exclude the in-flight statuses" is the bug, not a gap.
+  - A terminally `Failed` extraction **nobody has confirmed** is excluded by that SAME clause
+    (Amendment 2, #365). It is where a distrusted doc LANDS: `Reextract` re-arms by writing
+    `Pending` over `ManualRequired` (the only column carrying the distrust) and `MarkFailed` /
+    `RecordFailedAttempt` never restore it, so without this the old distrusted-basis verdict
+    read Covered permanently. `Pending`/`Processing` are deliberately NOT excluded (bounded,
+    self-healing — excluding them would sink every compliant vendor during an ordinary
+    re-extract, and a test asserts the Covered reading in that window); "also exclude the
+    in-flight statuses" is the bug, not a gap.
+  - The `Failed` half's EXIT is `IsManuallyVerified`, and it is LOAD-BEARING — do NOT
+    "simplify" the clause to a bare status test (`is not (ManualRequired or Failed)`). That
+    shape was the round-1 fix and it OVER-REACHES: the detail page's manual-entry affordance
+    exists FOR the failed case, that Save grades the doc for real (`UpdateFields` →
+    `ApplyEvaluationAsync`), and `ResolveManualReview` deliberately will not move a `Failed`
+    row — so status can never be the exit and the exclusion would have NONE. A human-typed,
+    verified cert would read ActionNeeded forever with no endpoint able to move it back. Both
+    directions are pinned: `A_FAILED_extraction_a_human_confirmed_reads_Covered_again` (the
+    exit) and `A_vendor_whose_only_cert_is_a_FAILED_extraction_reads_ActionNeeded_not_Covered`
+    (the target population). The flag is STICKY by accepted design (ADR 0042 Am. 2, "The exit")
+    — a doc confirmed, re-extracted successfully, then failed again reads confirmed; the
+    durable fix is #366's schema work, so do not re-flag it here. The `ManualRequired` half has
+    NO such escape on purpose (confirming it flips the status to `Completed`).
   - Deliberately NOT applied to the document-level surfaces (dashboard compliant/
     expiringSoon counts, `?status=` list/badges, CSV/PDF export, per-doc compliance badge):
     the list already shows a separate `ManualRequired` extraction badge beside the
