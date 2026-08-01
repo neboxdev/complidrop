@@ -69,8 +69,9 @@ public static class VendorEndpoints
 
     /// <summary>Lightweight per-document view the coverage rollup needs (FP-074). EffectiveDate feeds the
     /// future-effective demotion (#362 / ADR 0041) via ComplianceStatusDeriver.Effective. ExtractionStatus
-    /// lets the rollup drop a doc the SYSTEM ITSELF distrusts (ManualRequired) from in-force coverage
-    /// (#401 / ADR 0042). ComplianceCheckCount feeds the never-graded demotion (#443 / ADR 0048) through
+    /// lets the rollup drop a doc the SYSTEM ITSELF distrusts (ManualRequired) or could not read at all
+    /// (Failed) from in-force coverage (#401 / ADR 0042 + Amendment 2, #365). ComplianceCheckCount feeds
+    /// the never-graded demotion (#443 / ADR 0048) through
     /// the SAME deriver — it is a COUNT rather than a bool so the projection stays a plain scalar EF can
     /// translate, and DocumentGrading.IsGraded owns the threshold. No CreatedAt: coverage is decided by
     /// the best CURRENTLY-IN-FORCE cert, not the newest upload (#362 review).</summary>
@@ -86,13 +87,14 @@ public static class VendorEndpoints
     /// currently-in-force cert, NOT strictly the newest upload (#362 review): a vendor still covered by
     /// an in-force earlier cert who PRE-UPLOADS a future-effective renewal (which reads Pending, ADR 0041)
     /// stays Covered instead of flipping to ActionNeeded. A doc the extraction system distrusts
-    /// (ExtractionStatus.ManualRequired) is NOT counted as in-force coverage either, so a distrusted
-    /// extraction can't silently roll up to Covered (#401 / ADR 0042), and neither is one NOTHING EVER
+    /// (ExtractionStatus.ManualRequired) or could not READ AT ALL (ExtractionStatus.Failed) is NOT counted
+    /// as in-force coverage either, so a verdict computed from an extraction the machine itself doubts
+    /// can't silently roll up to Covered (#401 / ADR 0042 + Amendment 2), and neither is one NOTHING EVER
     /// GRADED (#443 / ADR 0048 — that exclusion arrives through the deriver itself, which reads such a doc
     /// Pending). A required type with no document is "missing"; a type whose only documents are Expired /
     /// NonCompliant / not-yet-in-force (Pending) / never-graded (Pending) / awaiting-review
-    /// (ManualRequired) is "action-needed" — a genuine gap still surfaces. The engine re-grades on
-    /// rule/assignment change since #257, so this isn't built on stale verdicts.
+    /// (ManualRequired) / unreadable (Failed) is "action-needed" — a genuine gap still surfaces. The engine
+    /// re-grades on rule/assignment change since #257, so this isn't built on stale verdicts.
     /// </summary>
     private static VendorCoverage ComputeCoverage(
         bool hasTemplate, List<string> requiredTypes, List<DocCoverageInfo> docs, DateTime today)
@@ -134,6 +136,17 @@ public static class VendorEndpoints
             // extraction on the document detail page. Read-time judgement only; the stored ComplianceStatus
             // is untouched (extraction-trust and rule-verdict are separate axes -- ADR 0042).
             //
+            // #365 / ADR 0042 Amendment 2: a TERMINALLY FAILED extraction is excluded on the same clause.
+            // An extraction the system could not complete is at least as untrustworthy as one it distrusted,
+            // and Failed is where a distrusted doc LANDS: Reextract's re-arm writes Pending over
+            // ManualRequired (the only column that carries the distrust), and if the re-read then fails
+            // terminally nothing restores it -- MarkFailed / RecordFailedAttempt write Failed without
+            // touching ComplianceStatus, the ComplianceCheck rows or the DocumentFields. Without this
+            // clause the old distrusted-basis verdict would read Covered PERMANENTLY, with no human ever
+            // confirming the extraction. Deliberately NOT extended to Pending/Processing: that window is
+            // bounded and self-healing (the worker resolves it within a poll), so excluding it would drop
+            // every legitimately-compliant vendor to ActionNeeded during any ordinary re-extract.
+            //
             // #443 / ADR 0048: a doc NOTHING EVER GRADED (zero ComplianceCheck rows -- no checklist, an
             // empty checklist, or a checklist whose rules all govern other document types, which is
             // reachable today because the applicable-rules filter is case-SENSITIVE while the required-type
@@ -142,7 +155,8 @@ public static class VendorEndpoints
             // reads such a doc Pending, so it falls out of the affirmative test the same way an
             // expired or not-yet-in-force cert does -- one demotion, applied identically on every surface.
             var inForce = typeDocs
-                .Where(d => d.ExtractionStatus != Entities.ExtractionStatus.ManualRequired
+                .Where(d => d.ExtractionStatus is not (Entities.ExtractionStatus.ManualRequired
+                        or Entities.ExtractionStatus.Failed)
                     && ComplianceStatusDeriver.Effective(
                         d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate,
                         DocumentGrading.IsGraded(d.ComplianceCheckCount), today)

@@ -156,6 +156,14 @@ Both are defined in this repo's `.claude/agents/`.
     coverage, so a required type covered ONLY by distrusted docs reads ActionNeeded (like
     an expired-only type). READ-TIME only — the stored `ComplianceStatus` is untouched (no
     persisted `Pending`), extraction-trust and rule-verdict are separate axes.
+  - A terminally `Failed` extraction is excluded by that SAME clause (Amendment 2, #365) —
+    `Failed` is COUNTABLE nowhere in the rollup. It is where a distrusted doc LANDS:
+    `Reextract` re-arms by writing `Pending` over `ManualRequired` (the only column carrying
+    the distrust) and `MarkFailed` / `RecordFailedAttempt` never restore it, so without this
+    the old distrusted-basis verdict read Covered permanently. `Pending`/`Processing` are
+    deliberately NOT excluded (bounded, self-healing — excluding them would sink every
+    compliant vendor during an ordinary re-extract, and a test asserts the Covered reading
+    in that window); "also exclude the in-flight statuses" is the bug, not a gap.
   - Deliberately NOT applied to the document-level surfaces (dashboard compliant/
     expiringSoon counts, `?status=` list/badges, CSV/PDF export, per-doc compliance badge):
     the list already shows a separate `ManualRequired` extraction badge beside the

@@ -290,6 +290,96 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     }
 
     [Fact]
+    public async Task A_vendor_whose_only_cert_is_a_FAILED_extraction_reads_ActionNeeded_not_Covered()
+    {
+        // #365 / ADR 0042 Amendment 2: an extraction the system could not COMPLETE is at least as
+        // untrustworthy as one it distrusted, and nothing about a terminal Failed touches the stored
+        // verdict (ExtractionWorker.MarkFailed / RecordFailedAttempt write ExtractionStatus only — the
+        // ComplianceStatus, the ComplianceCheck rows and the DocumentFields all survive from whatever
+        // read them last). So a stored Compliant sitting on a Failed extraction is a verdict with no
+        // trustworthy basis, and it must not roll up to Covered.
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Unreadable LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.Failed);
+
+        var list = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+        CoverageFor(list, vendorId).GetProperty("status").GetString().Should().Be("ActionNeeded",
+            "a doc the extraction system could not read is not in-force coverage (#365 / ADR 0042 Am. 2)");
+
+        var detail = (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/vendors/{vendorId}"))
+            .GetProperty("data").GetProperty("coverage");
+        detail.GetProperty("status").GetString().Should().Be("ActionNeeded",
+            "the detail rollup must exclude a failed extraction too — both projections carry ExtractionStatus");
+    }
+
+    [Fact]
+    public async Task A_distrusted_cert_that_is_re_extracted_and_then_fails_terminally_still_reads_ActionNeeded()
+    {
+        // THE #365 review bug, end to end. ExtractionStatus.ManualRequired is the ONLY column carrying
+        // ADR 0042's distrust, and Reextract's re-arm OVERWRITES it with Pending. Clicking "Read again" on
+        // a distrusted document therefore hands the vendor rollup a clean bill of health computed from the
+        // very extraction the system flagged unreliable — and if the re-read then fails terminally, the row
+        // lands on Failed and NOTHING ever restores the distrust: MarkFailed / RecordFailedAttempt write no
+        // ComplianceStatus, no ComplianceCheck, no DocumentField. Pre-fix that Covered label was PERMANENT,
+        // with no human ever confirming the extraction. This test is the discriminator: revert the Failed
+        // clause in ComputeCoverage and the final assertion flips to "Covered".
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Re-read LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        // The at-risk population: the ADR 0042 per-field confidence gate. The value parses, the rules PASS,
+        // the stored verdict is a real Compliant — only the trust flag dissented.
+        var docId = await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.ManualRequired);
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("ActionNeeded",
+            "the distrusted extraction is excluded from in-force coverage to begin with (#401)");
+
+        (await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // The re-arm wrote Pending over ManualRequired, and the vendor reads Covered again for exactly as
+        // long as the re-read is in flight. That window is DELIBERATELY not excluded (ADR 0042 Amendment 2):
+        // it is bounded and self-healing — the worker resolves it within a poll — whereas excluding
+        // Pending/Processing would drop every legitimately-compliant vendor to ActionNeeded during any
+        // ordinary re-extract. Asserted, not tolerated silently, so widening the clause is a visible choice.
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered",
+            "an in-flight re-read is a bounded, self-healing window — the scope stops at terminal Failed");
+
+        // …and now the re-read fails terminally, exactly as ExtractionWorker.MarkFailed leaves it.
+        await using (var db = CreateSystemDb())
+        {
+            var doc = await db.Documents.SingleAsync(d => d.Id == docId);
+            doc.ExtractionStatus = ExtractionStatus.Failed;
+            doc.ProcessingError = "extraction.failed: boom";
+            await db.SaveChangesAsync();
+        }
+
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("ActionNeeded",
+            "a re-read the system could not complete leaves the old verdict with no trustworthy basis — "
+            + "it must not be a permanent green 'Covered' nobody ever confirmed (#365)");
+
+        // Read-time only (ADR 0042's rule): reading the rollup must never rewrite the stored verdict, or
+        // the document could not self-heal when a later extraction succeeds.
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.Where(d => d.Id == docId).Select(d => d.ComplianceStatus).SingleAsync())
+            .Should().Be(ComplianceStatus.Compliant, "the stored verdict stays real; only the read demotes");
+    }
+
+    /// <summary>The vendor DETAIL rollup's coverage status — the projection the two list-based helpers
+    /// above don't cover, and the one a user lands on from the vendor row.</summary>
+    private static async Task<string?> CoverageStatusAsync(HttpClient client, Guid vendorId) =>
+        (await client.GetFromJsonAsync<JsonElement>($"/api/vendors/{vendorId}"))
+            .GetProperty("data").GetProperty("coverage").GetProperty("status").GetString();
+
+    [Fact]
     public async Task Covered_vendor_surfaces_the_nearest_expiration_as_its_covered_through_horizon()
     {
         // #399: "Covered" means current AS OF TODAY, not covered on a future event date. The rollup
