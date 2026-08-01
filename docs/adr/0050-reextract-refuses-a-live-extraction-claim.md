@@ -122,7 +122,11 @@ busy.
 - A re-extract at t+301s of a still-wedged attempt can still double-process. That is unchanged
   zombie-reclaim semantics — a second *worker* could claim it at that instant too — not something this
   guard regresses or is scoped to fix.
-- Deliberately NOT a `Document` concurrency token. That is [#366](https://github.com/neboxdev/complidrop/issues/366).
+- Deliberately NOT a `Document` concurrency token. That is [#366](https://github.com/neboxdev/complidrop/issues/366)
+  — which shipped as [ADR 0030](0030-compliance-verdict-combined-unit-of-work.md) Amendment 1 and took NO
+  token: an entity-level one would have made every `Document` write optimistic, including the worker
+  persist whose failure costs a re-paid extraction. This endpoint is unaffected either way
+  (`ExecuteUpdateAsync` bypasses the change tracker, and the guard above is its own atomic predicate).
 
 ## Alternatives considered
 
