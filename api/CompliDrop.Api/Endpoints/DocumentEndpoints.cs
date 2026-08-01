@@ -673,6 +673,15 @@ public static class DocumentEndpoints
 
         var result = await DocumentWriteConcurrency.RunAsync(db, loggerFactory, id, async innerCt =>
         {
+            // Both outputs are re-set per attempt, so each describes only the attempt that produced it.
+            // `saved` is the one the audit row keys on, and clearing it here is what makes "did this
+            // request commit a field edit?" structurally true rather than incidentally so: RunAsync
+            // wraps the CommitAsync in the same conflict catch as the write, so a version that assigned
+            // `saved` once and never cleared it would depend on REPEATABLE READ raising 40001 at the
+            // UPDATE and never at COMMIT — a property of the isolation level, not of this code. Raise it
+            // to Serializable (SSI reports at COMMIT) or let a future writer take a row lock and an
+            // abandoned attempt would emit a `document.fields_edited` row for a write that rolled back.
+            saved = null;
             var doc = await db.Documents
                 .Include(d => d.Fields)
                 .FirstOrDefaultAsync(d => d.Id == id, innerCt);
