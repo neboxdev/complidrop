@@ -203,6 +203,29 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             "keep a >=60s margin so a timed-out attempt can cancel AND requeue before a second worker reclaims");
     }
 
+    /// <summary>
+    /// The zombie threshold now has a SECOND consumer outside this worker: <c>DocumentEndpoints.Reextract</c>
+    /// refuses to re-arm a document while its claim is still live, and reads
+    /// <see cref="ExtractionWorker.ZombieClaimTimeout"/> to decide which claims those are
+    /// (<see href="https://github.com/neboxdev/complidrop/issues/365">#365</see>). That only makes the two
+    /// sides agree while <see cref="ExtractionWorker.ClaimSql"/> is BUILT from the same constant — so this
+    /// pins the SQL text back against it. A future re-inline of <c>interval '5 minutes'</c> alongside a
+    /// changed constant fails here rather than silently re-opening the window where the endpoint re-queues
+    /// a document a live worker still holds (double OCR + LLM spend, duplicated DocumentField rows).
+    /// Pure (no DB); it just rides the class's fixture.
+    /// </summary>
+    [Fact]
+    public void The_claim_SQL_interval_is_the_zombie_timeout_the_reextract_guard_reads()
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            ExtractionWorker.ClaimSql, @"interval '(\d+) minutes'");
+        match.Success.Should().BeTrue("ClaimSql must define the zombie-reclaim window as an interval literal");
+
+        TimeSpan.FromMinutes(int.Parse(match.Groups[1].Value))
+            .Should().Be(ExtractionWorker.ZombieClaimTimeout,
+                "the claim SQL and the constant the re-extract guard reads must be one value, not two copies");
+    }
+
     [Fact]
     public async Task Always_failing_extraction_retries_up_to_MaxAttempts_then_marks_failed()
     {
