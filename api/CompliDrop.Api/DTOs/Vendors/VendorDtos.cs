@@ -23,9 +23,13 @@ public record VendorSummary(
 /// distinct document types its rules require (#319 FP-074). Computed server-side in the single
 /// ListVendors projection — never per-vendor round trips. <see cref="Status"/> is one of:
 /// <c>NoRequirements</c> (no checklist / no rules), <c>Missing</c> (a required document type has no
-/// document — <see cref="MissingTypes"/> names them), <c>ActionNeeded</c> (a required type's latest
-/// doc is effectively Expired / NonCompliant / not-yet-graded), or <c>Covered</c> (every required
-/// type's latest doc is effectively Compliant or ExpiringSoon).
+/// document — <see cref="MissingTypes"/> names them), <c>ActionNeeded</c> (a required type has at
+/// least one document but no BEST CURRENTLY-IN-FORCE cert reading Compliant or ExpiringSoon — its
+/// documents are all effectively Expired / NonCompliant / not-yet-in-force / never-graded, or are
+/// excluded from in-force coverage for a distrusted (<c>ManualRequired</c>) or
+/// unreadable-and-unconfirmed (<c>Failed</c> with no manual verification) extraction, ADR 0042 +
+/// Amendment 2), or <c>Covered</c> (every required type has such an in-force cert). Coverage is
+/// judged on the best currently-in-force cert, NOT strictly the newest upload (#362).
 ///
 /// <para><see cref="CoveredThrough"/> is the DISPLAY-ONLY "covered through {date}" honesty line
 /// (#399): the nearest (earliest) expiration among this vendor's covered required docs — the date

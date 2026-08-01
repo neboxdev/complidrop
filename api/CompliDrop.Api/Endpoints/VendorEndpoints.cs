@@ -43,7 +43,7 @@ public static class VendorEndpoints
                 Docs = v.Documents
                     .Select(d => new DocCoverageInfo(
                         d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, d.ExtractionStatus,
-                        d.ComplianceChecks.Count))
+                        d.IsManuallyVerified, d.ComplianceChecks.Count))
                     .ToList(),
                 DocumentCount = v.Documents.Count,
                 ActivePortalLinks = v.PortalLinks.Count(l => l.IsActive),
@@ -70,14 +70,17 @@ public static class VendorEndpoints
     /// <summary>Lightweight per-document view the coverage rollup needs (FP-074). EffectiveDate feeds the
     /// future-effective demotion (#362 / ADR 0041) via ComplianceStatusDeriver.Effective. ExtractionStatus
     /// lets the rollup drop a doc the SYSTEM ITSELF distrusts (ManualRequired) or could not read at all
-    /// (Failed) from in-force coverage (#401 / ADR 0042 + Amendment 2, #365). ComplianceCheckCount feeds
-    /// the never-graded demotion (#443 / ADR 0048) through
+    /// (Failed) from in-force coverage (#401 / ADR 0042 + Amendment 2, #365), and IsManuallyVerified is
+    /// the EXIT from the Failed half of that exclusion — the flag DocumentEndpoints.ResolveManualReview
+    /// writes when a human confirms or types in the values (ADR 0042 Amendment 2). ComplianceCheckCount
+    /// feeds the never-graded demotion (#443 / ADR 0048) through
     /// the SAME deriver — it is a COUNT rather than a bool so the projection stays a plain scalar EF can
     /// translate, and DocumentGrading.IsGraded owns the threshold. No CreatedAt: coverage is decided by
     /// the best CURRENTLY-IN-FORCE cert, not the newest upload (#362 review).</summary>
     private sealed record DocCoverageInfo(
         string DocumentType, Entities.ComplianceStatus ComplianceStatus, DateTime? ExpirationDate,
-        DateTime? EffectiveDate, Entities.ExtractionStatus ExtractionStatus, int ComplianceCheckCount);
+        DateTime? EffectiveDate, Entities.ExtractionStatus ExtractionStatus, bool IsManuallyVerified,
+        int ComplianceCheckCount);
 
     /// <summary>
     /// Rolls a vendor's documents up against the distinct document types its checklist requires
@@ -87,14 +90,17 @@ public static class VendorEndpoints
     /// currently-in-force cert, NOT strictly the newest upload (#362 review): a vendor still covered by
     /// an in-force earlier cert who PRE-UPLOADS a future-effective renewal (which reads Pending, ADR 0041)
     /// stays Covered instead of flipping to ActionNeeded. A doc the extraction system distrusts
-    /// (ExtractionStatus.ManualRequired) or could not READ AT ALL (ExtractionStatus.Failed) is NOT counted
-    /// as in-force coverage either, so a verdict computed from an extraction the machine itself doubts
-    /// can't silently roll up to Covered (#401 / ADR 0042 + Amendment 2), and neither is one NOTHING EVER
-    /// GRADED (#443 / ADR 0048 — that exclusion arrives through the deriver itself, which reads such a doc
-    /// Pending). A required type with no document is "missing"; a type whose only documents are Expired /
-    /// NonCompliant / not-yet-in-force (Pending) / never-graded (Pending) / awaiting-review
-    /// (ManualRequired) / unreadable (Failed) is "action-needed" — a genuine gap still surfaces. The engine
-    /// re-grades on rule/assignment change since #257, so this isn't built on stale verdicts.
+    /// (ExtractionStatus.ManualRequired) or could not READ AT ALL and nobody has confirmed
+    /// (ExtractionStatus.Failed with IsManuallyVerified false) is NOT counted as in-force coverage either,
+    /// so a verdict computed from an extraction the machine itself doubts can't silently roll up to Covered
+    /// (#401 / ADR 0042 + Amendment 2) — each exclusion keeps a human exit: confirming a ManualRequired doc
+    /// clears the status, confirming a Failed one sets IsManuallyVerified. Neither is a doc NOTHING EVER
+    /// GRADED counted (#443 / ADR 0048 — that exclusion arrives through the deriver itself, which reads such
+    /// a doc Pending). A required type with no document is "missing"; a type whose only documents are
+    /// Expired / NonCompliant / not-yet-in-force (Pending) / never-graded (Pending) / awaiting-review
+    /// (ManualRequired) / unreadable-and-unconfirmed (Failed) is "action-needed" — a genuine gap still
+    /// surfaces. The engine re-grades on rule/assignment change since #257, so this isn't built on stale
+    /// verdicts.
     /// </summary>
     private static VendorCoverage ComputeCoverage(
         bool hasTemplate, List<string> requiredTypes, List<DocCoverageInfo> docs, DateTime today)
@@ -136,16 +142,33 @@ public static class VendorEndpoints
             // extraction on the document detail page. Read-time judgement only; the stored ComplianceStatus
             // is untouched (extraction-trust and rule-verdict are separate axes -- ADR 0042).
             //
-            // #365 / ADR 0042 Amendment 2: a TERMINALLY FAILED extraction is excluded on the same clause.
-            // An extraction the system could not complete is at least as untrustworthy as one it distrusted,
-            // and Failed is where a distrusted doc LANDS: Reextract's re-arm writes Pending over
-            // ManualRequired (the only column that carries the distrust), and if the re-read then fails
-            // terminally nothing restores it -- MarkFailed / RecordFailedAttempt write Failed without
-            // touching ComplianceStatus, the ComplianceCheck rows or the DocumentFields. Without this
-            // clause the old distrusted-basis verdict would read Covered PERMANENTLY, with no human ever
-            // confirming the extraction. Deliberately NOT extended to Pending/Processing: that window is
-            // bounded and self-healing (the worker resolves it within a poll), so excluding it would drop
-            // every legitimately-compliant vendor to ActionNeeded during any ordinary re-extract.
+            // #365 / ADR 0042 Amendment 2: a TERMINALLY FAILED extraction NOBODY HAS CONFIRMED is excluded
+            // on the same clause. An extraction the system could not complete is at least as untrustworthy
+            // as one it distrusted, and Failed is where a distrusted doc LANDS: Reextract's re-arm writes
+            // Pending over ManualRequired (the only column that carries the distrust), and if the re-read
+            // then fails terminally nothing restores it -- MarkFailed / RecordFailedAttempt write Failed
+            // without touching ComplianceStatus, the ComplianceCheck rows or the DocumentFields. Without
+            // this clause the old distrusted-basis verdict would read Covered PERMANENTLY, with no human
+            // ever confirming the extraction.
+            //
+            // ...but it carries the SAME HUMAN EXIT its ManualRequired sibling has ("until a human confirms
+            // the extraction on the document detail page", above), because the detail page offers manual
+            // entry for exactly this case -- "We couldn't pull the details from this file automatically.
+            // Enter the key details below" -- and that Save is a REAL grade: UpdateFields mirrors the typed
+            // values into the canonical inputs and folds ApplyEvaluationAsync into its own unit of work, so
+            // the ComplianceCheck rows and the stored verdict are computed from values a human vouched for.
+            // The exit cannot be the STATUS, though: ResolveManualReview deliberately refuses to move a
+            // Failed row ("Failed is its own louder error state"), so a confirmed doc stays Failed forever.
+            // It is IsManuallyVerified -- the flag that same helper sets UNCONDITIONALLY, on every caller
+            // (PUT /fields, PUT /verify), Failed included. Without it the exclusion would have no exit at
+            // all: no endpoint could ever restore coverage, and a vendor whose cert a human typed in and
+            // verified would read ActionNeeded permanently -- a regression on the pre-Amendment reading,
+            // and a demand for a remedy the page cannot offer. Amendment 2's target population is untouched:
+            // a distrusted doc nobody confirmed carries IsManuallyVerified == false when it lands on Failed.
+            //
+            // Deliberately NOT extended to Pending/Processing: that window is bounded and self-healing (the
+            // worker resolves it within a poll), so excluding it would drop every legitimately-compliant
+            // vendor to ActionNeeded during any ordinary re-extract.
             //
             // #443 / ADR 0048: a doc NOTHING EVER GRADED (zero ComplianceCheck rows -- no checklist, an
             // empty checklist, or a checklist whose rules all govern other document types, which is
@@ -155,8 +178,8 @@ public static class VendorEndpoints
             // reads such a doc Pending, so it falls out of the affirmative test the same way an
             // expired or not-yet-in-force cert does -- one demotion, applied identically on every surface.
             var inForce = typeDocs
-                .Where(d => d.ExtractionStatus is not (Entities.ExtractionStatus.ManualRequired
-                        or Entities.ExtractionStatus.Failed)
+                .Where(d => d.ExtractionStatus is not Entities.ExtractionStatus.ManualRequired
+                    && !(d.ExtractionStatus is Entities.ExtractionStatus.Failed && !d.IsManuallyVerified)
                     && ComplianceStatusDeriver.Effective(
                         d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate,
                         DocumentGrading.IsGraded(d.ComplianceCheckCount), today)
@@ -223,7 +246,7 @@ public static class VendorEndpoints
             .Where(d => d.VendorId == id)
             .Select(d => new DocCoverageInfo(
                 d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, d.ExtractionStatus,
-                d.ComplianceChecks.Count))
+                d.IsManuallyVerified, d.ComplianceChecks.Count))
             .ToListAsync(ct);
 
         var coverage = ComputeCoverage(
