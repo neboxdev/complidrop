@@ -346,73 +346,81 @@ public static class DocumentEndpoints
             string.IsNullOrWhiteSpace(doc.ContentType) ? "application/octet-stream" : doc.ContentType);
     }
 
-    private static async Task<IResult> UpdateDocument(
+    private static Task<IResult> UpdateDocument(
         Guid id,
         DocumentPatchRequest req,
         AppDbContext db,
         IComplianceCheckService compliance,
         ILoggerFactory loggerFactory,
-        CancellationToken ct)
-    {
-        var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
-        if (doc is null) return NotFound();
-
-        var changed = false;
-
-        if (req.VendorId is Guid vendorId)
+        CancellationToken ct) =>
+        // #366 / ADR 0030 Amendment 1: this is a PARTIAL writer — it writes VendorId / DocumentType and
+        // the verdict, but not the other canonical inputs — so an overlapping UpdateFields could leave the
+        // committed verdict graded against the OLD vendor's checklist on a row that kept the NEW vendor.
+        // Under REPEATABLE READ that overlap raises 40001 instead of committing silently, and the whole
+        // body below re-runs against a fresh read. Everything inside must therefore be re-runnable: it
+        // re-loads the document itself and derives every decision from THAT load, never from state
+        // captured outside.
+        DocumentWriteConcurrency.RunAsync(db, loggerFactory, id, async innerCt =>
         {
-            // The AppDbContext tenant filter scopes Vendors to the caller's org,
-            // so a cross-org or nonexistent id simply isn't found here — that's
-            // the multi-tenant guard, not just a friendliness check.
-            var vendorExists = await db.Vendors.AnyAsync(v => v.Id == vendorId, ct);
-            if (!vendorExists)
-                return Error(400, "vendor.not_found", "That vendor no longer exists.");
-            if (doc.VendorId != vendorId)
+            var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, innerCt);
+            if (doc is null) return NotFound();
+
+            var changed = false;
+
+            if (req.VendorId is Guid vendorId)
             {
-                doc.VendorId = vendorId;
-                changed = true;
+                // The AppDbContext tenant filter scopes Vendors to the caller's org,
+                // so a cross-org or nonexistent id simply isn't found here — that's
+                // the multi-tenant guard, not just a friendliness check.
+                var vendorExists = await db.Vendors.AnyAsync(v => v.Id == vendorId, innerCt);
+                if (!vendorExists)
+                    return Error(400, "vendor.not_found", "That vendor no longer exists.");
+                if (doc.VendorId != vendorId)
+                {
+                    doc.VendorId = vendorId;
+                    changed = true;
+                }
             }
-        }
 
-        if (!string.IsNullOrWhiteSpace(req.DocumentType))
-        {
-            // REJECTS an unrecognized type where the two UPLOAD paths coerce it to "other" — the same
-            // deliberate asymmetry ADR 0045 §5 draws for UpsertRule. This is a human deliberately
-            // RE-TYPING a document, and the type decides which rules grade it; silently answering
-            // "other" would change what the document is checked against without telling them. An upload
-            // must not lose a file over a stray form value, so it coerces instead.
-            if (!CanonicalDocumentTypes.IsAllowed(req.DocumentType))
-                return Error(400, "document.invalid_type", "That document type isn't recognized.");
-            var type = CanonicalDocumentTypes.Normalize(req.DocumentType);
-            if (!string.Equals(doc.DocumentType, type, StringComparison.Ordinal))
+            if (!string.IsNullOrWhiteSpace(req.DocumentType))
             {
-                doc.DocumentType = type;
-                changed = true;
+                // REJECTS an unrecognized type where the two UPLOAD paths coerce it to "other" — the same
+                // deliberate asymmetry ADR 0045 §5 draws for UpsertRule. This is a human deliberately
+                // RE-TYPING a document, and the type decides which rules grade it; silently answering
+                // "other" would change what the document is checked against without telling them. An upload
+                // must not lose a file over a stray form value, so it coerces instead.
+                if (!CanonicalDocumentTypes.IsAllowed(req.DocumentType))
+                    return Error(400, "document.invalid_type", "That document type isn't recognized.");
+                var type = CanonicalDocumentTypes.Normalize(req.DocumentType);
+                if (!string.Equals(doc.DocumentType, type, StringComparison.Ordinal))
+                {
+                    doc.DocumentType = type;
+                    changed = true;
+                }
             }
-        }
 
-        if (!changed)
-            return Results.Ok(new { data = new { message = "No changes." }, error = (object?)null });
+            if (!changed)
+                return Results.Ok(new { data = new { message = "No changes." }, error = (object?)null });
 
-        doc.UpdatedAt = DateTime.UtcNow;
+            doc.UpdatedAt = DateTime.UtcNow;
 
-        // Combined unit of work (#337 / ADR 0030): assigning a vendor (which may carry a requirement set)
-        // or changing the document type (which changes WHICH rules apply — see ComplianceCheckService's
-        // applicableRules filter) can turn a forever-"Pending" verdict into a real answer. Compute + apply
-        // that verdict on the SAME context BEFORE saving, so the new vendor/type and its verdict commit in
-        // ONE transaction and can't be left torn against a concurrent (re)extraction. The extraction worker
-        // is the only other place that ever triggers a compliance check, and it won't re-run for a doc that
-        // already finished extracting.
-        await EvaluateIntoUnitOfWorkAsync(compliance, db, doc, loggerFactory, ct);
-        await db.SaveChangesAsync(ct);
+            // Combined unit of work (#337 / ADR 0030): assigning a vendor (which may carry a requirement set)
+            // or changing the document type (which changes WHICH rules apply — see ComplianceCheckService's
+            // applicableRules filter) can turn a forever-"Pending" verdict into a real answer. Compute + apply
+            // that verdict on the SAME context BEFORE saving, so the new vendor/type and its verdict commit in
+            // ONE transaction and can't be left torn against a concurrent (re)extraction. The extraction worker
+            // is the only other place that ever triggers a compliance check, and it won't re-run for a doc that
+            // already finished extracting.
+            await EvaluateIntoUnitOfWorkAsync(compliance, db, doc, loggerFactory, innerCt);
+            await db.SaveChangesAsync(innerCt);
 
-        // No explicit IAuditLogger call: the vendor/type change AND the verdict it implies are now one
-        // ENTITY mutation, so AuditSaveChangesInterceptor emits a single "document.updated" row (full
-        // Before/After spanning vendor/type + ComplianceStatus) on the SaveChanges above. Per CLAUDE.md,
-        // manual IAuditLogger is reserved for NON-entity events; re-emitting "document.updated" here would
-        // double the row in the customer's audit export (#186 review — architecture reviewer).
-        return Results.Ok(new { data = new { message = "Document updated." }, error = (object?)null });
-    }
+            // No explicit IAuditLogger call: the vendor/type change AND the verdict it implies are now one
+            // ENTITY mutation, so AuditSaveChangesInterceptor emits a single "document.updated" row (full
+            // Before/After spanning vendor/type + ComplianceStatus) on the SaveChanges above. Per CLAUDE.md,
+            // manual IAuditLogger is reserved for NON-entity events; re-emitting "document.updated" here would
+            // double the row in the customer's audit export (#186 review — architecture reviewer).
+            return Results.Ok(new { data = new { message = "Document updated." }, error = (object?)null });
+        }, ct);
 
     private static async Task<IResult> UploadDocument(
         HttpContext http,
@@ -651,86 +659,117 @@ public static class DocumentEndpoints
                 return tooLong;
         }
 
-        var doc = await db.Documents
-            .Include(d => d.Fields)
-            .FirstOrDefaultAsync(d => d.Id == id, ct);
-        if (doc is null) return NotFound();
+        // #366 / ADR 0030 Amendment 1: everything from here down is RE-RUNNABLE, because it can be. This
+        // is the sharper of the two partial writers — it rebuilds the WHOLE ExtractionFields JSON mirror
+        // from the snapshot it reads below, while EF writes back only the typed columns this request
+        // happened to touch — so an overlapping edit used to be able to commit a typed column, a JSON
+        // mirror and a ComplianceStatus that disagreed with each other. Under REPEATABLE READ that
+        // overlap raises 40001 and this callback re-runs against a FRESH read, so the other writer's
+        // committed values are inputs to the recomputed verdict instead of being half-overwritten.
+        // The `before` audit snapshot and the response are therefore captured INSIDE the callback: a
+        // retried attempt must describe the state it actually wrote, not the one it lost with.
+        List<AuditFieldSnapshot>? before = null;
+        Document? saved = null;
 
-        var before = doc.Fields.Select(f => new { f.FieldName, f.FieldValue }).ToList();
-
-        // The canonical compliance inputs are doc.ExtractionFields (JSON) + the typed columns
-        // (GeneralLiabilityLimit / EffectiveDate / ExpirationDate), NOT the DocumentField rows that
-        // this endpoint writes — so before #216 a correction never moved the verdict. Build the JSON
-        // mirror starting from the existing object so untouched keys keep their original value/type.
-        var fields = doc.ExtractionFields?.RootElement.ValueKind == JsonValueKind.Object
-            ? (JsonObject)JsonNode.Parse(doc.ExtractionFields.RootElement.GetRawText())!
-            : new JsonObject();
-
-        // De-dupe by field name (last value wins): a request that lists the same field twice must
-        // not create two DocumentField rows for a not-yet-existing field, nor leave the row out of
-        // sync with the JSON mirror / typed column (which are themselves last-wins).
-        foreach (var update in req.Fields.GroupBy(u => u.FieldName).Select(g => g.Last()))
+        var result = await DocumentWriteConcurrency.RunAsync(db, loggerFactory, id, async innerCt =>
         {
-            var field = doc.Fields.FirstOrDefault(f => f.FieldName == update.FieldName);
-            if (field is null)
+            var doc = await db.Documents
+                .Include(d => d.Fields)
+                .FirstOrDefaultAsync(d => d.Id == id, innerCt);
+            if (doc is null) return NotFound();
+
+            before = doc.Fields.Select(f => new AuditFieldSnapshot(f.FieldName, f.FieldValue)).ToList();
+
+            // The canonical compliance inputs are doc.ExtractionFields (JSON) + the typed columns
+            // (GeneralLiabilityLimit / EffectiveDate / ExpirationDate), NOT the DocumentField rows that
+            // this endpoint writes — so before #216 a correction never moved the verdict. Build the JSON
+            // mirror starting from the existing object so untouched keys keep their original value/type.
+            var fields = doc.ExtractionFields?.RootElement.ValueKind == JsonValueKind.Object
+                ? (JsonObject)JsonNode.Parse(doc.ExtractionFields.RootElement.GetRawText())!
+                : new JsonObject();
+
+            // De-dupe by field name (last value wins): a request that lists the same field twice must
+            // not create two DocumentField rows for a not-yet-existing field, nor leave the row out of
+            // sync with the JSON mirror / typed column (which are themselves last-wins).
+            foreach (var update in req.Fields.GroupBy(u => u.FieldName).Select(g => g.Last()))
             {
-                // Add through the DbSet, NOT doc.Fields.Add(...). DocumentField.Id
-                // is a client-set Guid key (ValueGeneratedOnAdd); DetectChanges
-                // marks a NEW entity added to a tracked navigation collection with
-                // a non-default key as Modified, which emits an UPDATE … WHERE Id=…
-                // that matches 0 rows → DbUpdateConcurrencyException (500). DbSet.Add
-                // forces the Added state. Mirrors ExtractionWorker.PersistSuccess,
-                // which has always used db.DocumentFields.Add for this reason. (#193)
-                db.DocumentFields.Add(new DocumentField
+                var field = doc.Fields.FirstOrDefault(f => f.FieldName == update.FieldName);
+                if (field is null)
                 {
-                    Id = Guid.NewGuid(),
-                    DocumentId = doc.Id,
-                    FieldName = update.FieldName,
-                    FieldValue = update.FieldValue,
-                    FieldType = "text",
-                    Confidence = 1.0,
-                    IsManuallyEdited = true,
-                    OriginalValue = null
-                });
+                    // Add through the DbSet, NOT doc.Fields.Add(...). DocumentField.Id
+                    // is a client-set Guid key (ValueGeneratedOnAdd); DetectChanges
+                    // marks a NEW entity added to a tracked navigation collection with
+                    // a non-default key as Modified, which emits an UPDATE … WHERE Id=…
+                    // that matches 0 rows → DbUpdateConcurrencyException (500). DbSet.Add
+                    // forces the Added state. Mirrors ExtractionWorker.PersistSuccess,
+                    // which has always used db.DocumentFields.Add for this reason. (#193)
+                    db.DocumentFields.Add(new DocumentField
+                    {
+                        Id = Guid.NewGuid(),
+                        DocumentId = doc.Id,
+                        FieldName = update.FieldName,
+                        FieldValue = update.FieldValue,
+                        FieldType = "text",
+                        Confidence = 1.0,
+                        IsManuallyEdited = true,
+                        OriginalValue = null
+                    });
+                }
+                else
+                {
+                    if (field.OriginalValue is null) field.OriginalValue = field.FieldValue;
+                    field.FieldValue = update.FieldValue;
+                    field.IsManuallyEdited = true;
+                    field.Confidence = 1.0;
+                }
+
+                // Mirror the edit into the canonical compliance inputs (#216): the JSON dict (every
+                // field) and, for the three date/amount fields, the typed columns. The shared
+                // CanonicalDocumentFields helper keeps this parse identical to the extraction worker.
+                fields[update.FieldName] = update.FieldValue;
+                CanonicalDocumentFields.ApplyToTypedColumn(doc, update.FieldName, update.FieldValue);
             }
-            else
-            {
-                if (field.OriginalValue is null) field.OriginalValue = field.FieldValue;
-                field.FieldValue = update.FieldValue;
-                field.IsManuallyEdited = true;
-                field.Confidence = 1.0;
-            }
 
-            // Mirror the edit into the canonical compliance inputs (#216): the JSON dict (every
-            // field) and, for the three date/amount fields, the typed columns. The shared
-            // CanonicalDocumentFields helper keeps this parse identical to the extraction worker.
-            fields[update.FieldName] = update.FieldValue;
-            CanonicalDocumentFields.ApplyToTypedColumn(doc, update.FieldName, update.FieldValue);
-        }
+            doc.ExtractionFields = JsonDocument.Parse(fields.ToJsonString());
+            // Order matters: the JSON mirror and the typed columns above are the state ResolveManualReview
+            // reads to decide whether the review it is clearing is genuinely resolved (#383, ADR 0040).
+            ResolveManualReview(doc);
+            doc.UpdatedAt = DateTime.UtcNow;
 
-        doc.ExtractionFields = JsonDocument.Parse(fields.ToJsonString());
-        // Order matters: the JSON mirror and the typed columns above are the state ResolveManualReview
-        // reads to decide whether the review it is clearing is genuinely resolved (#383, ADR 0040).
-        ResolveManualReview(doc);
-        doc.UpdatedAt = DateTime.UtcNow;
+            // Combined unit of work (#337 / ADR 0030): compute + apply the verdict the edited inputs imply on
+            // the SAME context BEFORE saving, so the corrected inputs (e.g. a misread GL limit fixed above the
+            // required minimum) and the verdict they flip to commit in ONE transaction. The old pattern saved
+            // inputs, then re-evaluated in a SECOND transaction — which a concurrent (re)extraction could
+            // interleave to leave the stored verdict contradicting the stored inputs (a torn pair that did not
+            // self-heal: the hourly sweep only does date transitions). Re-extraction still overwrites manual
+            // edits by design (ADR 0017); the two writers are now each atomic on the whole (inputs, verdict)
+            // tuple, so the terminal state is always one writer's consistent pair, never a mix.
+            await EvaluateIntoUnitOfWorkAsync(compliance, db, doc, loggerFactory, innerCt);
+            await db.SaveChangesAsync(innerCt);
 
-        // Combined unit of work (#337 / ADR 0030): compute + apply the verdict the edited inputs imply on
-        // the SAME context BEFORE saving, so the corrected inputs (e.g. a misread GL limit fixed above the
-        // required minimum) and the verdict they flip to commit in ONE transaction. The old pattern saved
-        // inputs, then re-evaluated in a SECOND transaction — which a concurrent (re)extraction could
-        // interleave to leave the stored verdict contradicting the stored inputs (a torn pair that did not
-        // self-heal: the hourly sweep only does date transitions). Re-extraction still overwrites manual
-        // edits by design (ADR 0017); the two writers are now each atomic on the whole (inputs, verdict)
-        // tuple, so the terminal state is always one writer's consistent pair, never a mix.
-        await EvaluateIntoUnitOfWorkAsync(compliance, db, doc, loggerFactory, ct);
-        await db.SaveChangesAsync(ct);
+            saved = doc;
+            return Results.Ok(new { data = new { message = "Fields updated." }, error = (object?)null });
+        }, ct);
 
-        await audit.LogAsync("document.fields_edited", nameof(Document), doc.Id,
-            before: before,
-            after: doc.Fields.Select(f => new { f.FieldName, f.FieldValue }));
+        // Outside the retry: the audit row describes what actually COMMITTED, and IAuditLogger writes on
+        // its own SystemDbContext (a separate connection), so emitting it inside the callback would put a
+        // row for a rolled-back attempt outside that rollback's reach. `saved` is null on every path that
+        // committed no field edit — 404, or the exhausted 409 — and neither is a "fields edited" event.
+        if (saved is not null)
+            await audit.LogAsync("document.fields_edited", nameof(Document), saved.Id,
+                before: before,
+                after: saved.Fields.Select(f => new AuditFieldSnapshot(f.FieldName, f.FieldValue)));
 
-        return Results.Ok(new { data = new { message = "Fields updated." }, error = (object?)null });
+        return result;
     }
+
+    /// <summary>
+    /// One field's name/value as the <c>document.fields_edited</c> audit row records it. A named record
+    /// rather than the anonymous type this used to build inline: the before-snapshot is now captured
+    /// inside a retryable callback and read back outside it, and an anonymous type cannot be the element
+    /// of a variable declared out there. The serialized JSON shape is identical.
+    /// </summary>
+    private sealed record AuditFieldSnapshot(string FieldName, string? FieldValue);
 
     private static async Task<IResult> MarkVerified(
         Guid id,
@@ -777,7 +816,12 @@ public static class DocumentEndpoints
         // The predicate is the WORKER'S OWN staleness rule, from the ONE constant both sides read
         // (Services/ExtractionClaims — ClaimSql interpolates the same value into its interval): refuse
         // only while the claim is one the worker still believes in, and let through exactly what it
-        // would zombie-reclaim anyway. Deliberately NOT a Document concurrency token — that is #366.
+        // would zombie-reclaim anyway. Deliberately NOT a Document concurrency token — that was #366, and
+        // #366 landed WITHOUT one (ADR 0030 Amendment 1): an entity-level token would have made every
+        // Document write optimistic, worker persist included, where an exception out of SaveChanges costs
+        // a re-paid OCR + LLM run. This route is untouched by it either way — ExecuteUpdateAsync bypasses
+        // the change tracker, and the predicate below is already its own atomic guard. The two writers
+        // that DID need conflict detection are UpdateFields/UpdateDocument.
         //
         // A NULL ProcessingStartedAt counts as "no live claim". No writer produces that shape (every
         // Processing write sets both), and ClaimSql's comparison yields NULL — i.e. unclaimable — for it,
