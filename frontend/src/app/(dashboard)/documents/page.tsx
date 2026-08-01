@@ -50,10 +50,12 @@ import { TIP_IDS } from "@/lib/onboarding";
 const PAGE_SIZE = 25;
 
 /**
- * Search-box debounce. Exported because a regression test has to arm a timer on
- * the SAME deadline to reproduce the one-scheduler-tick window where a keystroke
- * can be overwritten by the write's own echo — duplicating the literal there
- * would let this constant drift and silently close the window under test.
+ * Search-box debounce. Exported because a regression test advances a fake clock
+ * by exactly this interval to construct the one-scheduler-tick window between
+ * the debounce write and React's DefaultLane flush — the window where a
+ * keystroke can be overwritten by the write's own echo (#450). Duplicating the
+ * literal there would let this constant drift and silently close the window
+ * under test.
  */
 export const SEARCH_DEBOUNCE_MS = 300;
 
