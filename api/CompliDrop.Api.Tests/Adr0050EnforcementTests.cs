@@ -24,6 +24,16 @@ namespace CompliDrop.Api.Tests;
 /// those: the method must be FOUND and non-trivial, or the gate fails closed rather than passing on an
 /// empty read.
 /// </para>
+///
+/// <para>
+/// The pin is on the guard's LOCATION, not merely on call counts — counts alone fail OPEN. Option A
+/// re-spelled with an <c>AnyAsync</c> pre-check (instead of a <c>FirstOrDefaultAsync</c> load) presents
+/// exactly the production method's counts: one <c>ExecuteUpdateAsync</c>, one <c>AnyAsync</c>, none of
+/// the forbidden loads — while the race is fully back. So the staleness predicate must be found INSIDE
+/// the <c>WHERE</c> feeding the update, and the single existence read must come AFTER it. Two hermetic
+/// fixtures prove the gate REJECTS each of those shapes, which is the only way to know an enforcement
+/// test still enforces.
+/// </para>
 /// </summary>
 public class Adr0050EnforcementTests
 {
@@ -95,13 +105,17 @@ public class Adr0050EnforcementTests
         return count;
     }
 
-    [Fact]
-    public void Reextract_re_arms_with_one_conditional_ExecuteUpdateAsync_and_one_existence_read()
+    /// <summary>
+    /// The whole gate, so the hermetic fixtures below can drive the SAME assertions the production check
+    /// runs. Call counts alone are not enough: ADR 0050 Option A can be re-spelled with
+    /// <c>AnyAsync</c> as its pre-check, which keeps every count identical (one
+    /// <c>ExecuteUpdateAsync</c>, one <c>AnyAsync</c>, zero forbidden loads) while the guard is once
+    /// again a read-then-write. So the guard's LOCATION is pinned too — the staleness predicate must sit
+    /// inside the UPDATE's own <c>WHERE</c>, and the single existence read must come AFTER the update,
+    /// never before it.
+    /// </summary>
+    internal static void AssertAtomicReArmShape(string body)
     {
-        var body = ExtractMethodBody(
-            File.ReadAllText(ProductionFile("Endpoints", "DocumentEndpoints.cs")),
-            ReextractSignature);
-
         // Anti-no-op floor: the gate must have actually read a real method body. Without this, a renamed
         // method or a brace-counting regression would return "" and every assertion below would pass.
         body.Split('\n').Length.Should().BeGreaterOrEqualTo(MinBodyLines,
@@ -118,10 +132,33 @@ public class Adr0050EnforcementTests
         Count(body, "AnyAsync(").Should().Be(1,
             "the refusal path answers 404-vs-409 with exactly one existence re-read");
 
+        var updateAt = body.IndexOf("ExecuteUpdateAsync(", StringComparison.Ordinal);
+        var anyAt = body.IndexOf("AnyAsync(", StringComparison.Ordinal);
+        anyAt.Should().BeGreaterThan(updateAt,
+            "the one AnyAsync must be the REFUSAL path's existence re-read, which runs after the update — "
+            + "an AnyAsync BEFORE it is a pre-check, i.e. ADR 0050 Option A's read-then-write wearing the "
+            + "call counts of the atomic shape: the worker can flip Pending → Processing between that "
+            + "SELECT and the UPDATE, so the guard would be exactly as racy as the bug it guards");
+
+        // The guard's LOCATION. A WHERE that has lost the staleness predicate is an UNGUARDED update no
+        // matter what ran above it, and the call counts cannot see the difference.
+        var whereAt = body[..updateAt].LastIndexOf(".Where(", StringComparison.Ordinal);
+        whereAt.Should().BeGreaterOrEqualTo(0,
+            "the re-arm UPDATE must be filtered by a .Where( — an unfiltered ExecuteUpdateAsync would "
+            + "re-arm every document in the table");
+        var updateFilter = body[whereAt..updateAt];
+        updateFilter.Should().Contain("ExtractionStatus.Processing",
+            "the staleness guard lives INSIDE the UPDATE's WHERE (ADR 0050 §1) — a WHERE that only "
+            + "matches the id means the guard was hoisted into a separate read-then-write");
+        updateFilter.Should().Contain("ExtractionClaims.ZombieTimeout",
+            "…and it compares against the WORKER'S OWN staleness threshold, from the one shared constant "
+            + "both layers read (ADR 0050 §2) — a hand-rolled interval here lets the endpoint and the "
+            + "worker disagree about which claims are live");
+
         foreach (var readThenWrite in new[]
                  {
-                     "SaveChangesAsync(", "FirstOrDefaultAsync(", "SingleOrDefaultAsync(",
-                     "FirstAsync(", "SingleAsync(", "FindAsync(",
+                     "SaveChangesAsync(", "SaveChanges(", "FirstOrDefaultAsync(", "SingleOrDefaultAsync(",
+                     "FirstAsync(", "SingleAsync(", "FindAsync(", "ToListAsync(", "CountAsync(",
                  })
         {
             Count(body, readThenWrite).Should().Be(0,
@@ -130,6 +167,111 @@ public class Adr0050EnforcementTests
                 + "the double-OCR / duplicate-DocumentField bug #365 closed (ADR 0050 Option A). No "
                 + "single-threaded test can see that regression, which is why this pin exists");
         }
+    }
+
+    [Fact]
+    public void Reextract_re_arms_with_one_conditional_ExecuteUpdateAsync_and_one_existence_read()
+    {
+        AssertAtomicReArmShape(ExtractMethodBody(
+            File.ReadAllText(ProductionFile("Endpoints", "DocumentEndpoints.cs")),
+            ReextractSignature));
+    }
+
+    [Fact]
+    public void The_pin_rejects_a_read_then_write_guard_spelled_with_AnyAsync()
+    {
+        // The shape that used to slip through, and the reason the location assertions exist. Every count
+        // this gate checked before is IDENTICAL to the production method's — one ExecuteUpdateAsync, one
+        // AnyAsync, zero forbidden loads — yet ADR 0050 Option A's race is fully back: the status is read
+        // in one statement and written in another, with the worker free to claim the row in between.
+        const string readThenWrite = """
+            class C
+            {
+                private static async Task<IResult> Reextract(Guid id)
+                {
+                    // Option A, re-spelled so the CALL COUNTS still line up exactly.
+                    if (await db.Documents.AnyAsync(d => d.Id == id
+                            && d.ExtractionStatus == ExtractionStatus.Processing
+                            && d.ProcessingStartedAt > DateTime.UtcNow - ExtractionClaims.ZombieTimeout, ct))
+                    {
+                        return Error(409, "document.extraction_in_progress", "We're still reading this document.");
+                    }
+
+                    var rearmed = await db.Documents
+                        .Where(d => d.Id == id)
+                        .ExecuteUpdateAsync(set => set
+                            .SetProperty(d => d.ExtractionStatus, ExtractionStatus.Pending)
+                            .SetProperty(d => d.ProcessingStartedAt, (DateTime?)null)
+                            .SetProperty(d => d.ProcessingError, (string?)null)
+                            .SetProperty(d => d.ProcessingAttempts, 0)
+                            .SetProperty(d => d.FailedAttempts, 0)
+                            .SetProperty(d => d.UpdatedAt, DateTime.UtcNow),
+                            ct);
+
+                    if (rearmed == 0) return NotFound();
+
+                    await audit.LogAsync("document.reextract_queued", nameof(Document), id);
+                    return Ok();
+                }
+            }
+            """;
+
+        var body = ExtractMethodBody(readThenWrite, ReextractSignature);
+        // Proven, not assumed: the fixture clears the anti-no-op floor and every count the old gate
+        // checked, so the rejection below can only come from the new location assertions.
+        body.Split('\n').Length.Should().BeGreaterOrEqualTo(MinBodyLines);
+        Count(body, "ExecuteUpdateAsync(").Should().Be(1);
+        Count(body, "AnyAsync(").Should().Be(1);
+
+        var act = () => AssertAtomicReArmShape(body);
+        act.Should().Throw<Exception>("this shape re-opens the race the gate exists to prevent")
+            .WithMessage("*existence re-read*");
+    }
+
+    [Fact]
+    public void The_pin_rejects_an_update_whose_WHERE_lost_the_staleness_predicate()
+    {
+        // The other new assertion, isolated: correct ORDER (the existence read follows the update), but
+        // the UPDATE matches on the id alone — an unguarded re-arm that reports 409 for a row it just
+        // overwrote. Counts and ordering both pass; only the WHERE-contents pin catches it.
+        const string unguarded = """
+            class C
+            {
+                private static async Task<IResult> Reextract(Guid id)
+                {
+                    var rearmed = await db.Documents
+                        .Where(d => d.Id == id)
+                        .ExecuteUpdateAsync(set => set
+                            .SetProperty(d => d.ExtractionStatus, ExtractionStatus.Pending)
+                            .SetProperty(d => d.ProcessingStartedAt, (DateTime?)null)
+                            .SetProperty(d => d.ProcessingError, (string?)null)
+                            .SetProperty(d => d.ProcessingAttempts, 0)
+                            .SetProperty(d => d.FailedAttempts, 0)
+                            .SetProperty(d => d.UpdatedAt, DateTime.UtcNow),
+                            ct);
+
+                    if (rearmed == 0)
+                    {
+                        return await db.Documents.AnyAsync(d => d.Id == id, ct)
+                            ? Error(409, "document.extraction_in_progress", "We're still reading this document.")
+                            : NotFound();
+                    }
+
+                    await audit.LogAsync("document.reextract_queued", nameof(Document), id);
+                    return Ok();
+                }
+            }
+            """;
+
+        var body = ExtractMethodBody(unguarded, ReextractSignature);
+        body.Split('\n').Length.Should().BeGreaterOrEqualTo(MinBodyLines);
+        body.IndexOf("AnyAsync(", StringComparison.Ordinal).Should()
+            .BeGreaterThan(body.IndexOf("ExecuteUpdateAsync(", StringComparison.Ordinal),
+                "the ordering assertion must PASS here, so the rejection is the WHERE-contents pin alone");
+
+        var act = () => AssertAtomicReArmShape(body);
+        act.Should().Throw<Exception>("an UPDATE matching only on the id carries no guard at all")
+            .WithMessage("*staleness guard lives INSIDE*");
     }
 
     [Fact]
