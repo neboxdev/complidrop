@@ -13,7 +13,7 @@
  */
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { http } from "msw";
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import DocumentsPage, { SEARCH_DEBOUNCE_MS } from "./page";
 import {
   renderWithProviders,
@@ -573,15 +573,28 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     //
     // The window that IS real is one scheduler tick wide. The debounce's
     // `setPendingWrites` is a DefaultLane update: React schedules it through the
-    // Scheduler's MessageChannel, a separate macrotask. An input event is also a
-    // macrotask, so a keystroke CAN be processed between the timer callback and
-    // that flush — it renders first at SyncLane, then the DefaultLane render
-    // arrives carrying the older `search` and re-seeds over the new characters.
+    // Scheduler, a separate macrotask. An input event is also a macrotask, so a
+    // keystroke CAN be processed between the timer callback and that flush — it
+    // renders first at SyncLane, then the DefaultLane render arrives carrying
+    // the older `search` and re-seeds over the new characters. Deleting the
+    // `searchEcho` guard truncates "acme roofing" back to "acme" here.
     //
-    // Reproduced by registering the keystroke on a timer with the SAME deadline
-    // as the page's debounce: ours was armed second, so it runs immediately
-    // after the write, inside the gap. Deleting the `searchEcho` guard truncates
-    // "acme roofing" back to "acme" here.
+    // The window is CONSTRUCTED, not raced (#450). It used to be reproduced by
+    // arming the keystroke on a real timer with the same deadline as the page's
+    // debounce, relying on Node bucketing two same-duration timers armed in one
+    // tick so they run back-to-back. That only holds while the gap between the
+    // two `setTimeout` calls is smaller than the timer phase's own lateness — on
+    // a loaded runner it is not, the two land in different phases, React's flush
+    // slips between them and assertion (b) throws INSIDE the timer callback, so
+    // the promise never settles and the failure surfaces as "Test timed out in
+    // 5000ms". (Reproduced on demand by busy-waiting ~50ms before arming.)
+    //
+    // `act` replaces the race. React holds every update raised inside an act
+    // scope on the act queue and flushes nothing until the scope exits, so
+    // putting the debounce callback and the keystroke in ONE scope makes the
+    // interleaving a property of React's lane priorities — SyncLane renders
+    // before DefaultLane — instead of wall-clock luck. Same two renders, same
+    // order, on every run and under any load.
     server.use(
       http.get(url("/api/documents"), () => jsonOk(makeDocumentsResponse({ items: [], total: 0 }))),
     );
@@ -589,17 +602,48 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     await waitFor(() => expect(screen.getByText(/no documents yet/i)).toBeInTheDocument());
 
     const box = screen.getByLabelText(/search documents/i);
-    fireEvent.change(box, { target: { value: "acme" } });
 
-    await new Promise<void>((resolve) => {
-      setTimeout(() => {
-        // ASSERT the interleaving rather than assuming it. This test's power
-        // rests on a Node timer property — both timers armed in the same tick
-        // with the same duration share an expiry bucket and run back-to-back —
-        // and if that ever stops holding (the page's debounce constant changes,
-        // React/RTL start flushing differently) the window silently closes and
-        // the test would pass with the guard deleted. These two checks turn
-        // every such ordering into a loud red instead.
+    // Hold the harness's router echo outside the window, and outside both
+    // advances below. `applyHistoryUrl` arms its deferred commit AT the instant
+    // `replaceState` runs, so at the default 0ms the very advance that fires the
+    // debounce also drains the echo — and the echo re-renders through
+    // `useSyncExternalStore`, i.e. at SyncLane, so it would join the keystroke's
+    // render already reporting `search=acme` while `searchEcho` is still an
+    // unflushed DefaultLane update, and the box would truncate WITH the guard in
+    // place. Production cannot order it that way: the History patch does wrap
+    // its ACTION_RESTORE dispatch in `startTransition`, but `dispatchAction`
+    // SKIPS the transition branch for ACTION_RESTORE and only reaches `setState`
+    // from the async reducer's `.then` microtask — so the echo is a DefaultLane
+    // update that lands WITH the page's own DefaultLane updates or later, never
+    // at SyncLane ahead of them. That same-commit ordering is the one production
+    // actually takes and the harness cannot express it, which is why the delay
+    // is the lever. Full derivation in the `setNavigationCommitDelay` JSDoc
+    // (`src/test/navigation.ts`) — the authority; keep this in step with it.
+    const ROUTER_ECHO_MS = SEARCH_DEBOUNCE_MS * 10;
+    setNavigationCommitDelay(ROUTER_ECHO_MS);
+    // `shouldAdvanceTime` stays OFF here, deliberately — this is the one site in
+    // the suite that omits it. Nothing inside the fake window polls (no
+    // `waitFor`, no `findBy*`), so the usual reason for auto-advance does not
+    // apply; and auto-advance would let real CI-load time fire the 300ms
+    // debounce on its own, outside the `act` scope below, which re-opens exactly
+    // the #450 flake this test was rewritten to remove. Do not "make it
+    // consistent" with the other call sites.
+    vi.useFakeTimers();
+    try {
+      // Arms the page's 300ms debounce on the fake clock.
+      fireEvent.change(box, { target: { value: "acme" } });
+
+      act(() => {
+        // Runs the debounce callback: `replaceState` moves the address bar
+        // synchronously, while `setSearchEcho` + `setPendingWrites` are
+        // DefaultLane updates this scope holds unflushed.
+        vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS);
+
+        // ASSERT the interleaving rather than assuming it. Both checks hold by
+        // construction now, which is the point: if React or RTL ever stop
+        // holding a DefaultLane update inside an act scope, the window closes
+        // and this goes loud red instead of silently passing with the
+        // `searchEcho` guard deleted.
         //
         // (a) the debounce write already ran…
         expect(new URLSearchParams(window.location.search).get("search")).toBe("acme");
@@ -607,18 +651,26 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
         // `search` becomes "acme", `hasActiveFilters` flips and Clear appears.
         expect(screen.queryByRole("button", { name: /^clear$/i })).toBeNull();
 
+        // The keystroke lands inside the window, at SyncLane.
         fireEvent.change(box, { target: { value: "acme roofing" } });
-        resolve();
-      }, SEARCH_DEBOUNCE_MS);
-    });
+      });
 
-    await new Promise((r) => setTimeout(r, 50));
-    expect(box).toHaveValue("acme roofing");
+      // Leaving the scope flushes both, highest lane first: the keystroke's
+      // SyncLane render commits "acme roofing", then the debounce's DefaultLane
+      // render arrives carrying `search === "acme"` — the re-seed the guard has
+      // to swallow.
+      expect(box).toHaveValue("acme roofing");
 
-    // The guard is spent, not sticky: the full text still reaches the URL.
-    await waitFor(() => expect(currentQuery().get("search")).toBe("acme roofing"), {
-      timeout: 3000,
-    });
+      // The guard is spent, not sticky: the re-armed debounce still carries the
+      // full text out to the URL.
+      act(() => {
+        vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS);
+      });
+      expect(currentQuery().get("search")).toBe("acme roofing");
+    } finally {
+      vi.useRealTimers();
+      setNavigationCommitDelay(0);
+    }
   });
 
   it("restores the search box on Back after an external clear (#370)", async () => {

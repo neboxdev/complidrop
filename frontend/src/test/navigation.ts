@@ -83,9 +83,10 @@ const pendingApplies = new Set<ReturnType<typeof setTimeout>>();
  * Applies to BOTH commit paths — `router.push`/`replace` and the History-API
  * bridge — because both are deferred in the real App Router (see
  * `applyHistoryUrl`). The underlying latencies differ in kind (an RSC fetch vs
- * a `startTransition` commit React may schedule late or interrupt), but for a
- * test the useful knob is the same one: how long the component keeps rendering
- * against the OLD `useSearchParams()` after it dispatched a write.
+ * the action queue's async reducer microtask, which React may then schedule late
+ * or interrupt), but for a test the useful knob is the same one: how long the
+ * component keeps rendering against the OLD `useSearchParams()` after it
+ * dispatched a write.
  *
  * The real App Router's commit latency is per-navigation: each one waits on its
  * own RSC fetch, so two navigations dispatched together land at different times
@@ -100,6 +101,33 @@ const pendingApplies = new Set<ReturnType<typeof setTimeout>>();
  *     setNavigationCommitDelay(5);   fireEvent.change(statusSelect);  // lands first
  *     setNavigationCommitDelay(50);  fireEvent.change(typeSelect);    // still in flight
  *     act(() => vi.advanceTimersByTime(10));                          // only the first landed
+ *
+ * Under FAKE timers the default 0 is a trap (#450). `applyHistoryUrl` arms its
+ * commit AT the instant `replaceState` runs, so one `advanceTimersByTime` that
+ * reaches a History write also drains that write's echo — and the echo
+ * re-renders through `useSyncExternalStore`, i.e. at SyncLane, so it joins
+ * whatever else the same advance scheduled instead of landing after it.
+ *
+ * Production cannot order it that way. The History patch does wrap its
+ * ACTION_RESTORE dispatch in `startTransition` (`app-router.js`,
+ * `applyUrlFromHistoryPushReplace`), but that wrapper never reaches the state
+ * update: `dispatchAction` explicitly SKIPS the
+ * `startTransition(() => setState(deferredPromise))` branch for ACTION_RESTORE
+ * (the guard is `if (payload.type !== ACTION_RESTORE)`) and instead sets
+ * `resolve: setState`, and the queue's reducer is an `async` arrow — so
+ * `setState` is only ever reached from the `actionResult.then(handleResult)`
+ * microtask, after `startTransition` has already returned. (Verified in
+ * `next/dist/client/components/app-router-instance.js`; it is the same async
+ * reducer microtask #435 and the `pendingWrites` drain in `documents/page.tsx`
+ * reason about.)
+ *
+ * So the echo is a DefaultLane update on the AppRouter's `useState`: it lands
+ * WITH the page's own DefaultLane updates or LATER — never at SyncLane ahead of
+ * them, which is the only ordering this harness's notify can produce. The
+ * same-commit case, which is what production usually takes, is not expressible
+ * here at all; pushing the delay past the advance is the lever we do have. See
+ * "keeps characters typed in the same drain as the debounce write" in the
+ * documents page test.
  *
  * Reset to 0 by `resetNavigation()`.
  */
@@ -255,12 +283,15 @@ function applyNavigation(href: unknown): void {
  *
  * So after a `replaceState` returns:
  *   - `window.location.search` is ALREADY the new value (the native call), and
- *   - `useSearchParams()` still returns the OLD one until the transition
- *     commits.
+ *   - `useSearchParams()` still returns the OLD one, because the dispatch above
+ *     only reaches the AppRouter's `setState` from the action queue's async
+ *     reducer microtask. (Note the `startTransition` there does NOT make that
+ *     update a transition — see `setNavigationCommitDelay` above for why. What
+ *     defers the snapshot is the microtask, not the lane.)
  *
  * Skipping the RSC fetch makes the window narrower than `router.replace`'s, not
- * absent. Modelling it as absent let a page compose filter writes on a
- * transition-deferred value and still pass its own regression test.
+ * absent. Modelling it as absent let a page compose filter writes on a deferred
+ * value and still pass its own regression test.
  *
  * The synchronous half is handled by the bridge below calling the ORIGINAL
  * method; this function is only the deferred half.
