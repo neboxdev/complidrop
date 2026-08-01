@@ -319,12 +319,22 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
             "the row is the last competing writer's own consistent tuple");
         terminal.Doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant);
 
-        // And no audit row claims an edit that never happened.
+        // And no audit row claims an edit that never happened — in EITHER shape. The explicit
+        // "document.fields_edited" row is written after the commit, so the abandoned request never
+        // reaches it; the interceptor's "document.updated" row is staged INSIDE the failing SaveChanges
+        // on the same context, so it has to roll back with the attempt. Exactly one of each per
+        // competing write, and nothing from the three abandoned attempts.
         await using var db = CreateSystemDb();
-        var edits = await db.AuditLogs.CountAsync(a =>
-            a.EntityId == docId && a.Action == "document.fields_edited");
-        edits.Should().Be(DocumentConcurrency.MaxAttempts,
-            "only the competing writes logged an edit — the abandoned request logged none");
+        var rows = await db.AuditLogs
+            .Where(a => a.EntityId == docId)
+            .GroupBy(a => a.Action)
+            .Select(g => new { Action = g.Key, Count = g.Count() })
+            .ToListAsync();
+        rows.Should().BeEquivalentTo(new[]
+        {
+            new { Action = "document.fields_edited", Count = DocumentConcurrency.MaxAttempts },
+            new { Action = "document.updated", Count = DocumentConcurrency.MaxAttempts },
+        }, "only the competing writes are audited — an abandoned attempt's staged rows roll back with it");
     }
 
     [Fact]
