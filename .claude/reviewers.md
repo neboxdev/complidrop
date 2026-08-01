@@ -425,8 +425,19 @@ Both are defined in this repo's `.claude/agents/`.
     re-arm writes no audit row at all, deliberately: nothing was queued.
   - The 409 uses the plain `Error(...)` envelope (the `auth.email_taken` shape), NOT
     `IdempotencyResults.InProgressConflict()` — a different contract (ADR 0029 replays, it does not
-    409). No frontend change: the button is already disabled while `isProcessing` and `friendly(err)`
-    surfaces the message.
+    409), and `friendly(err)` surfaces the message as written.
+  - "No frontend change, the button is already disabled while `isProcessing`" was the ORIGINAL ADR's
+    reasoning and it is FALSE in exactly the state the 409 occupies — do not restore it (ADR 0050
+    Amendment 1). `isProcessing` derives from the LAST SUCCESSFUL payload, so a tab whose payload said
+    `Completed` has the button ENABLED — that tab is the only client state the 409 is reachable FROM,
+    and it never self-corrects (`refetchInterval` returns false for a settled status,
+    `refetchOnWindowFocus` is off). So `reextract.onError` INVALIDATES `["documents", id]` on this ONE
+    code (`err instanceof ApiError && err.code === "document.extraction_in_progress"`): the badge flips
+    to Processing, the 3s poll restarts and the button disables, instead of a "still reading" toast
+    landing over a **Read** badge, the previous read's fields and verdict, and a button that keeps
+    409-ing until a manual reload. Widening it to invalidate on ANY reextract error IS a finding — the
+    other failures assert nothing about the document, and a blanket refetch fires a GET into a backend
+    that just failed one and fights the #97 error short-circuit. Both directions are pinned by test.
   - **NO `(DocumentId, FieldName)` unique index** — the ticket asks for one and ADR 0050 Option D
     refutes it, the same reasoning that refuted it for the waitlist table (ADR 0046 + ADR 0016
     auto-migrate-on-boot). Duplicates are NOT only a race artifact: `PersistSuccess` inserts one row

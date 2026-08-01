@@ -117,6 +117,8 @@ busy.
 - No frontend change. The detail page already disables "Read again" while `isProcessing`, and
   `api.post` surfaces `error.message` through `friendly(err)` into a toast, so the 409 copy lands as
   written with no HTTP jargon.
+  **Amended — the first sentence is wrong, and wrong in exactly the state the 409 occupies. See
+  [Amendment 1](#amendment-1-2026-08-01--the-409-must-reconcile-the-page-it-lands-on).**
 - A re-extract at t+301s of a still-wedged attempt can still double-process. That is unchanged
   zombie-reclaim semantics — a second *worker* could claim it at that instant too — not something this
   guard regresses or is scoped to fix.
@@ -168,6 +170,45 @@ concurrent runs), it changes a shape ADR 0049 explicitly documents and tests aro
 the concurrent case at all — two workers each write a full de-duplicated set and still land two rows per
 name. It belongs with Option D's ticket, where the population is measured.
 
+## Amendment 1 (2026-08-01) — the 409 must reconcile the page it lands on
+
+The Neutral consequence above claimed "**No frontend change.** The detail page already disables 'Read
+again' while `isProcessing`". That justification is **false in exactly the state the 409 occupies**, and it
+is the reason the 409 is reachable at all.
+
+`isProcessing` is derived from the LAST SUCCESSFUL payload
+(`doc.extractionStatus === "Pending" || "Processing"`). A tab whose last payload said `Completed` therefore
+has `isProcessing === false` and an ENABLED button — which is precisely the client state that can send a
+re-arm into a live claim. And that tab never self-corrects: `refetchInterval` returns `false` for a settled
+status, `refetchOnWindowFocus` is off (`frontend/src/lib/providers.tsx`), and `onError` only toasted. So the
+toast said *"We're still reading this document"* while the extraction badge one line above it said **Read**,
+the fields and verdict on screen were the previous read's, and every further click 409'd until a manual
+reload. Two assertions about one document, contradicting each other, with nothing to break the tie — the
+overclaim lens this repo's compliance-claims reviewer owns.
+
+**Decision.** `reextract.onError` invalidates the detail query when — and only when — the error is this
+conflict:
+
+```ts
+if (err instanceof ApiError && err.code === "document.extraction_in_progress") {
+  qc.invalidateQueries({ queryKey: ["documents", params.id] });
+}
+```
+
+The refetch lands the live `Processing` row, so the badge agrees with the toast, the 3-second poll restarts
+off that same status, and the button disables itself — *"give it a moment"* becomes enforced rather than
+merely advised, and the page self-heals when the read finishes instead of needing the reload.
+
+**Why it is scoped to the one code**, rather than a blanket invalidate-on-any-error: the other failures
+(5xx, `network.unreachable`, a queue-at-capacity 503) make no claim about the document's state, so there is
+nothing for the cache to be reconciled against — while a blanket refetch fires a fresh GET into a backend
+that just failed one and fights the deliberate #97 handling, where the detail query short-circuits its own
+polling while erroring and the `StaleDataBanner`'s Try-again is the manual affordance. Both directions are
+pinned by test (`page.test.tsx`, "the in-progress 409 reconciles the page it lands on"), the negative one
+against a positive control in the same test rather than a timer.
+
+The 409 envelope, the copy and every backend decision above are unchanged.
+
 ## References
 
 - Tickets: [#365](https://github.com/neboxdev/complidrop/issues/365); adjacent, deliberately separate:
@@ -179,4 +220,5 @@ name. It belongs with Option D's ticket, where the population is measured.
   [0049](0049-clipped-extraction-field-is-disclosed-not-silent.md) (duplicate-name rows as a tolerated shape)
 - Code: `api/CompliDrop.Api/Endpoints/DocumentEndpoints.cs` (`Reextract`),
   `api/CompliDrop.Api/Services/ExtractionClaims.cs` (`ZombieTimeout` — the source both layers read),
-  `api/CompliDrop.Api/BackgroundServices/ExtractionWorker.cs` (`ZombieClaimTimeout` alias, `ClaimSql`)
+  `api/CompliDrop.Api/BackgroundServices/ExtractionWorker.cs` (`ZombieClaimTimeout` alias, `ClaimSql`),
+  `frontend/src/app/(dashboard)/documents/[id]/page.tsx` (`reextract.onError` — Amendment 1)
