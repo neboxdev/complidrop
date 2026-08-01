@@ -1953,6 +1953,208 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             .EnumerateArray().Should().BeEmpty();
     }
 
+    // ---- #444 / ADR 0049: a CLIPPED field value is disclosed, so a Save can't narrow it silently ----
+
+    /// <summary>The venue name a real additional-insured `contains` rule looks for.</summary>
+    private const string ClipVenue = "GARDEN-HALL-SENTINEL";
+
+    /// <summary>
+    /// Seeds the exact post-extraction shape #444 is about: <c>ExtractionFields</c> (jsonb, no width)
+    /// holds the FULL description with the venue name PAST the column width, while the
+    /// <c>DocumentField</c> row the detail page renders holds only <c>ColumnClamp.To</c>'s output — and
+    /// the stored verdict is the Compliant that full value genuinely earned. Built by hand rather than
+    /// by running the worker because this suite owns the REQUEST paths; the worker's own half of the
+    /// invariant is pinned in <c>ExtractionWorkerTests</c>.
+    /// <para/>
+    /// #443 / ADR 0048: that affirmative verdict is only REAL when something graded the document, so the
+    /// seed ends in <c>MarkGradedAsync</c> — which reuses the <c>description_of_operations</c> rule
+    /// above (the org's only one). Without it the doc has zero <c>ComplianceCheck</c> rows,
+    /// <c>ComplianceStatusDeriver.Effective</c> demotes it, every read surface answers <c>Pending</c>,
+    /// and the pass→fail narrative below would be told over a pre-state no production path reaches.
+    /// </summary>
+    private async Task<Guid> SeedDocWithClippedDescriptionAsync(Guid orgId)
+    {
+        var full = new string('d', InputLengths.DocumentFieldValue + 100) + ClipVenue;
+        await using var db = CreateSystemDb();
+        var now = DateTime.UtcNow;
+        var template = new ComplianceTemplate
+        {
+            Id = Guid.NewGuid(), OrganizationId = orgId, Name = "Venue COI", CreatedAt = now
+        };
+        db.ComplianceTemplates.Add(template);
+        db.ComplianceRules.Add(new ComplianceRule
+        {
+            Id = Guid.NewGuid(),
+            ComplianceTemplateId = template.Id,
+            DocumentType = "coi",
+            FieldName = "description_of_operations",
+            Operator = "contains",
+            ExpectedValue = ClipVenue,
+            ErrorMessage = "The description of operations doesn't name this venue.",
+            SortOrder = 1
+        });
+        var vendor = new Vendor
+        {
+            Id = Guid.NewGuid(), OrganizationId = orgId, Name = "Acme Catering",
+            ComplianceTemplateId = template.Id, CreatedAt = now, UpdatedAt = now
+        };
+        db.Vendors.Add(vendor);
+        var doc = new Document
+        {
+            Id = Guid.NewGuid(),
+            OrganizationId = orgId,
+            VendorId = vendor.Id,
+            OriginalFileName = "coi.pdf",
+            BlobStorageUrl = "memory://x",
+            FileSizeBytes = 1,
+            ContentType = "application/pdf",
+            DocumentType = "coi",
+            ExtractionStatus = ExtractionStatus.Completed,
+            ComplianceStatus = ComplianceStatus.Compliant,
+            ExpirationDate = now.AddYears(1),
+            ExtractionFields = JsonDocument.Parse(JsonSerializer.Serialize(new Dictionary<string, string>
+            {
+                ["description_of_operations"] = full,
+                ["insured_name"] = "Acme Catering LLC"
+            })),
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        db.Documents.Add(doc);
+        db.DocumentFields.Add(new DocumentField
+        {
+            Id = Guid.NewGuid(), DocumentId = doc.Id, FieldName = "description_of_operations",
+            FieldValue = ColumnClamp.To(full, InputLengths.DocumentFieldValue),
+            FieldType = "text", Confidence = 0.95
+        });
+        db.DocumentFields.Add(new DocumentField
+        {
+            Id = Guid.NewGuid(), DocumentId = doc.Id, FieldName = "insured_name",
+            FieldValue = "Acme Catering LLC", FieldType = "text", Confidence = 0.95
+        });
+        await db.SaveChangesAsync();
+        await MarkGradedAsync(orgId, doc.Id);
+        return doc.Id;
+    }
+
+    private static JsonElement FieldNamed(JsonElement data, string fieldName) =>
+        data.GetProperty("fields").EnumerateArray()
+            .First(f => f.GetProperty("fieldName").GetString() == fieldName);
+
+    [Fact]
+    public async Task The_detail_payload_marks_a_field_whose_shown_value_was_clipped()
+    {
+        // #444: ExtractionWorker.Clamp truncates FieldValue at the column width with NO marker, and the
+        // detail page binds its editable input to that clamped value ("the value on screen must be
+        // exactly the value a Save would send") — so a clipped description_of_operations was rendered as
+        // if it were the complete extracted value. The flag has to come from the server: deciding
+        // "is this row the clamp of that value?" means reproducing the .NET column width AND
+        // ColumnClamp's surrogate back-off, and a TypeScript copy would drift (the ADR 0040
+        // unreadableFields reasoning).
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithClippedDescriptionAsync(auth.OrgId);
+
+        var data = (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}")).GetProperty("data");
+
+        var clipped = FieldNamed(data, "description_of_operations");
+        clipped.GetProperty("fieldValueTruncated").GetBoolean().Should().BeTrue();
+        clipped.GetProperty("fieldValue").GetString().Should()
+            .HaveLength(InputLengths.DocumentFieldValue)
+            .And.NotContain(ClipVenue,
+                "the shown value genuinely lacks the text the record still holds — that IS the gap");
+
+        // The discriminating other half, on the SAME document: an ordinary field must not be marked, or
+        // the page prints "shown shortened" over every value.
+        FieldNamed(data, "insured_name").GetProperty("fieldValueTruncated").GetBoolean()
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task The_clip_flag_clears_once_a_save_makes_the_record_hold_what_is_shown()
+    {
+        // Why the flag is DERIVED at read time rather than persisted: after a save the record genuinely
+        // holds what the page shows, so the warning must stop — a persisted flag would keep asserting
+        // a fuller value that no longer exists. UpdateFields writes the submitted text into BOTH copies
+        // (and REJECTS an over-length one, ADR 0046), which is what makes them agree.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithClippedDescriptionAsync(auth.OrgId);
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "description_of_operations", fieldValue = "Catering services." } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var data = (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}")).GetProperty("data");
+        FieldNamed(data, "description_of_operations").GetProperty("fieldValueTruncated").GetBoolean()
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Saving_a_clipped_field_untouched_narrows_the_canonical_value_and_fails_the_check()
+    {
+        // The reported consequence, pinned so it can't drift: description_of_operations IS a verdict
+        // input (the additional-insured `contains` fallback), the jsonb copy carried the venue name past
+        // the column width, and PUTting back exactly what the page displayed replaces the canonical
+        // value with the clip — flipping a genuine pass to a fail.
+        //
+        // This test does NOT assert the narrowing is desirable; #444 deliberately changes DISCLOSURE
+        // only, and the direction is fail-CLOSED (removing text can only turn a `contains` pass into a
+        // fail). It pins the behaviour the WARNING is about, so a future change that quietly removed the
+        // narrowing — or made it fail OPEN — surfaces here rather than in a customer's audit export.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithClippedDescriptionAsync(auth.OrgId);
+
+        var before = (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}")).GetProperty("data");
+        // The PRE-STATE this whole narrative rests on, asserted rather than assumed: the pass being
+        // flipped has to be a pass the user can actually see. #443 / ADR 0048 demotes an ungraded
+        // affirmative verdict to Pending on every read surface, so a seed that skipped MarkGradedAsync
+        // would leave "a genuine pass" that reads Pending here and this test would compare a fail
+        // against a fail.
+        before.GetProperty("complianceStatus").GetString().Should().Be("Compliant");
+        var shown = FieldNamed(before, "description_of_operations").GetProperty("fieldValue").GetString();
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "description_of_operations", fieldValue = shown } }
+        });
+        put.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        doc.ExtractionFields!.RootElement.GetProperty("description_of_operations").GetString()
+            .Should().Be(shown, "the submitted text becomes the canonical compliance input");
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant,
+            "the venue name lived past the clipped window, so the requirement it met is now unmet");
+    }
+
+    [Fact]
+    public async Task Typing_the_full_value_back_is_rejected_rather_than_silently_clamped()
+    {
+        // Why the hint points at "View file" instead of telling the user to retype the whole thing:
+        // ADR 0046 REJECTS an over-length correction (user-typed content is never clamped), so there is
+        // no path by which a person restores the full text through this field. Copy that implied
+        // otherwise would send them into a 400 loop.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithClippedDescriptionAsync(auth.OrgId);
+
+        var put = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[]
+            {
+                new
+                {
+                    fieldName = "description_of_operations",
+                    fieldValue = new string('d', InputLengths.DocumentFieldValue + 1)
+                }
+            }
+        });
+
+        put.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await put.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("error").GetProperty("code").GetString().Should().Be("validation.too_long");
+    }
+
     [Fact]
     public async Task Editing_a_gl_limit_with_a_currency_symbol_parses_instead_of_nulling_the_column()
     {

@@ -100,7 +100,20 @@ public record DocumentFieldDto(
     string? FieldType,
     double Confidence,
     bool IsManuallyEdited,
-    string? OriginalValue);
+    string? OriginalValue,
+    // True when FieldValue above is only the FIRST InputLengths.DocumentFieldValue characters of a
+    // longer value the document still holds in ExtractionFields — the ADR 0045 §4 clamp, which is
+    // deliberate and unchanged, but was silent (#444). The detail page binds its editable input to
+    // FieldValue ("the value on screen must be exactly the value a Save would send"), so without this
+    // flag a clipped description_of_operations is shown as the whole extracted value, and saving that
+    // field writes the clipped copy into ExtractionFields — the canonical verdict input.
+    //
+    // Sourced from DocumentFieldTruncation, which reproduces the SAME ColumnClamp.To decision the
+    // extraction worker made, never re-derived on the client: the browser is sent the clamped value and
+    // the parsed extractionFields object, but "is this row the clamp of that value?" has to honour the
+    // surrogate back-off and the column width, and a TypeScript copy of that would drift from the .NET
+    // clamp it mirrors — the same reasoning as UnreadableFields above (ADR 0040 Amendment 2).
+    bool FieldValueTruncated);
 
 public record FieldUpdateRequest(string FieldName, string? FieldValue);
 

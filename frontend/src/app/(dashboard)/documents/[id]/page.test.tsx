@@ -30,6 +30,7 @@ import {
   sequencedJsonOk,
   toastSuccess,
   toastError,
+  type DocumentDetailFixture,
 } from "@/test";
 import { api } from "@/lib/api";
 
@@ -2417,6 +2418,128 @@ describe("DocumentDetailPage — ManualRequired review CTA (#193)", () => {
     );
     expect(screen.getByText(/outlined in amber are the least certain/i)).toBeInTheDocument();
     expect(screen.queryByText(/we couldn't read some details/i)).toBeNull();
+  });
+});
+
+describe("DocumentDetailPage — a clipped field value is disclosed (#444 / ADR 0049)", () => {
+  // The input binds to the CLAMPED DocumentField.FieldValue ("the value on screen must be exactly the
+  // value a Save would send"), which is precisely the problem when that value is a truncation: the user
+  // is shown a clipped description_of_operations as the complete extracted value, and saving that field
+  // writes the clip into ExtractionFields — the canonical verdict input.
+  const CLIPPED = "Catering and bar services for events at ".repeat(20);
+
+  function mountWithFields(fields: DocumentDetailFixture["fields"]) {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_clipped",
+            extractionStatus: "Completed",
+            complianceStatus: "Compliant",
+            fields,
+          }),
+        ),
+      ),
+    );
+    return renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_clipped" },
+    });
+  }
+
+  const clippedField = {
+    id: "f-desc",
+    fieldName: "description_of_operations",
+    fieldValue: CLIPPED,
+    fieldType: "text",
+    confidence: 0.95, // high confidence — no amber outline; the clip is invisible without the hint
+    isManuallyEdited: false,
+    originalValue: null,
+  };
+
+  it("warns that the shown value is partial AND that saving it replaces the fuller record", async () => {
+    mountWithFields([{ ...clippedField, fieldValueTruncated: true }]);
+
+    const hint = await screen.findByTestId("field-truncated-f-desc");
+    // Both facts have to be present. "It's shortened" alone leaves the user thinking the record is
+    // fine; "saving replaces it" alone doesn't explain why the box is short.
+    expect(hint).toHaveTextContent(/shown shortened/i);
+    expect(hint).toHaveTextContent(/longer than we can show/i);
+    expect(hint).toHaveTextContent(/saving replaces it with just what's in the box/i);
+    // Points at the original file, because ADR 0046 REJECTS an over-length correction — the user
+    // cannot type the full text back, so "retype it" would be a dead end.
+    expect(hint).toHaveTextContent(/view file/i);
+    // Error-copy policy: no HTTP jargon, no column widths, no field-name jargon leaking through.
+    expect(hint).not.toHaveTextContent(/varchar|2000|truncat/i);
+
+    // And it reaches a screen reader as part of the input it warns about — a sibling paragraph is
+    // silent until the user goes looking, and by then they have already typed over the value.
+    expect(screen.getByLabelText("Description of operations")).toHaveAttribute(
+      "aria-describedby",
+      "field-truncated-f-desc",
+    );
+  });
+
+  it("shows no clip hint on a normal field", async () => {
+    // The discriminating half: the hint keys on the server's flag, not on value length or confidence,
+    // so an ordinary field — even a long one — must stay unmarked.
+    mountWithFields([{ ...clippedField, fieldValueTruncated: false }]);
+
+    await waitFor(() => expect(screen.getByText("coi.pdf")).toBeInTheDocument());
+    expect(screen.queryByTestId("field-truncated-f-desc")).toBeNull();
+    expect(screen.queryByText(/shown shortened/i)).toBeNull();
+    // No dangling pointer at a description that isn't rendered.
+    expect(screen.getByLabelText("Description of operations")).not.toHaveAttribute(
+      "aria-describedby",
+    );
+  });
+
+  it("marks only the clipped field when the document carries several", async () => {
+    // The flag is per-FIELD. A page-level treatment would either warn over every value or, worse,
+    // warn over none once one field happened to fit.
+    mountWithFields([
+      { ...clippedField, fieldValueTruncated: true },
+      {
+        id: "f-insured",
+        fieldName: "insured_name",
+        fieldValue: "Acme Catering LLC",
+        fieldType: "text",
+        confidence: 0.95,
+        isManuallyEdited: false,
+        originalValue: null,
+        fieldValueTruncated: false,
+      },
+    ]);
+
+    expect(await screen.findByTestId("field-truncated-f-desc")).toBeInTheDocument();
+    expect(screen.queryByTestId("field-truncated-f-insured")).toBeNull();
+  });
+
+  it("keeps the hint while an edit is pending on the clipped field", async () => {
+    // The state the hint EXISTS for, and the only one it was not pinned in. The flag comes from the
+    // server payload while the input switches to the `edits` overlay the moment the user types, so
+    // "does the hint survive its own warning coming true?" is a real branch, not a detail.
+    //
+    // It must survive (ADR 0049 §4): this is the instant the second sentence matters most — the
+    // record still holds the fuller value, the box no longer does, and a Save now is exactly the
+    // narrowing the hint was raised about. Dropping it here would take the warning away at the one
+    // moment it is actionable, and §4 forbids showing either fact without the other.
+    mountWithFields([{ ...clippedField, fieldValueTruncated: true }]);
+
+    const input = await screen.findByLabelText("Description of operations");
+    expect(input).toHaveValue(CLIPPED);
+    fireEvent.change(input, { target: { value: "Catering services for the gala." } });
+    // The overlay really is in force — otherwise this test would pass without ever leaving the
+    // server-rendered state it means to leave.
+    expect(input).toHaveValue("Catering services for the gala.");
+
+    const hint = screen.getByTestId("field-truncated-f-desc");
+    expect(hint).toHaveTextContent(/shown shortened/i);
+    expect(hint).toHaveTextContent(/saving replaces it with just what's in the box/i);
+    expect(hint).toHaveTextContent(/view file/i);
+    // And still announced with the input, so the warning reaches someone who is mid-edit rather
+    // than only someone who read the page before touching it.
+    expect(input).toHaveAttribute("aria-describedby", "field-truncated-f-desc");
   });
 });
 

@@ -37,6 +37,12 @@ type DocField = {
   confidence: number;
   isManuallyEdited: boolean;
   originalValue: string | null;
+  // True when fieldValue is only the START of a longer value the document still
+  // holds (#444 / ADR 0045 §4 + ADR 0049). The page can't re-derive it: knowing
+  // whether this row is the clamp of the full value means reproducing the .NET
+  // column width AND its surrogate back-off, which would drift — so the backend
+  // sends the answer, the ADR 0040 `unreadableFields` shape.
+  fieldValueTruncated: boolean;
 };
 
 // Mirror of the backend ComplianceCheckDto (camelCased over JSON). Carries both
@@ -1163,8 +1169,41 @@ export default function DocumentDetailPage() {
                       fieldBorderClass(f.confidence),
                       unreadableSet.has(f.fieldName) && UNREADABLE_FIELD_BORDER,
                     )}
+                    // The clip warning is about what happens if you EDIT this input, so it has to
+                    // reach a screen reader as part of the input — a sibling paragraph is silent
+                    // until the user goes looking for it, and by then they've typed. (#444)
+                    aria-describedby={
+                      f.fieldValueTruncated ? `field-truncated-${f.id}` : undefined
+                    }
                     onChange={(e) => setEdits((prev) => ({ ...prev, [f.fieldName]: e.target.value }))}
                   />
+                  {/* #444 / ADR 0049: the box above holds only the START of this value —
+                      the backend clipped it to the column width (ADR 0045 §4) while the
+                      record still carries the whole thing. Two facts, both needed: the
+                      display is partial, AND a Save on THIS field replaces the fuller
+                      record with what's shown (the input binds to the clipped value, and
+                      the server writes the submitted text into the canonical compliance
+                      input). Pasting the full text back is not an escape hatch either —
+                      an over-length value is rejected (ADR 0046) — so the honest remedy
+                      we can offer is "read the original", not "retype it". No amber
+                      border: that marker means "we couldn't read this" (ADR 0040), and a
+                      clipped value IS read correctly, just not shown whole.
+                      Deliberately NOT gated on `edits[f.fieldName] === undefined`
+                      (ADR 0049 §4): the flag describes the RECORD, which still holds the
+                      fuller value until a Save lands, so a pending edit is the moment the
+                      warning is most actionable — not the moment to withdraw it. */}
+                  {f.fieldValueTruncated && (
+                    <p
+                      id={`field-truncated-${f.id}`}
+                      data-testid={`field-truncated-${f.id}`}
+                      className="text-xs leading-snug text-amber-800"
+                    >
+                      <span className="font-medium">Shown shortened.</span> This value is longer
+                      than we can show here — open <span className="font-medium">View file</span>{" "}
+                      above to read all of it. We check requirements against the full text, so
+                      editing this field and saving replaces it with just what&apos;s in the box.
+                    </p>
+                  )}
                   <div className="flex items-center gap-2 text-xs">
                     {unreadableSet.has(f.fieldName) && (
                       <span className="px-2 py-0.5 rounded font-medium text-amber-800 bg-amber-100">

@@ -114,6 +114,15 @@ untouched clipped field narrows the canonical value — and `description_of_oper
 (the additional-insured `contains` fallback). Marking a clipped field in the UI so a user cannot silently
 save the truncation is [#444](https://github.com/neboxdev/complidrop/issues/444).
 
+> **Landed in #444** ([ADR 0049](0049-clipped-extraction-field-is-disclosed-not-silent.md)). The clip is
+> now DISCLOSED: `DocumentFieldDto.FieldValueTruncated`, derived at read time by
+> `Services/DocumentFieldTruncation` reproducing `ColumnClamp.To` against the jsonb copy, drives a hint
+> on the detail page stating both that the shown text is partial and that saving this field replaces the
+> fuller record with it. The truncation decided in this section — truncate-not-drop, the width, the
+> surrogate back-off — is UNCHANGED; #444 changed disclosure only, and the narrowing itself is still
+> reachable (deliberately: it is fail-closed, and blocking it would strand a user who needs to correct a
+> clipped field, since ADR 0046 also rejects an over-length correction).
+
 Every width is pinned against the EF model.
 
 **5. The rule write boundary VALIDATES rather than coerces.** `ComplianceEndpoints.UpsertRule` rejects a
