@@ -34,11 +34,15 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
     private ConcurrentDocumentWriteInterceptor Interleave =>
         Fixture.Factory.Services.GetRequiredService<ConcurrentDocumentWriteInterceptor>();
 
+    private CommitFaultInterceptor CommitFault =>
+        Fixture.Factory.Services.GetRequiredService<CommitFaultInterceptor>();
+
     public override async Task DisposeAsync()
     {
         // Belt and braces with the fixture reset: a callback surviving a failed assertion would fire
-        // another test's competing write.
+        // another test's competing write — or fail its commit.
         Interleave.Reset();
+        CommitFault.Reset();
         await base.DisposeAsync();
     }
 
@@ -204,7 +208,41 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         terminal.MirrorHolder.Should().Be("New Hall", "and this request's own edit still landed");
         terminal.Doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant,
             "3M clears the 2M floor — the pre-#366 terminal row said NonCompliant beside a compliant limit");
+
+        // The re-runnability invariant, in the one place it is observable from OUTSIDE the row: the
+        // audit payload must come from the attempt that COMMITTED. UpdateFields captures `before`
+        // inside the retryable callback precisely so the retried attempt describes the state it
+        // actually wrote — the row as it stood AFTER the competing 1M -> 3M correction landed.
+        //
+        // Nothing else here can see the difference. Capture `before` once (outside the callback, or
+        // `before ??=` so only the first attempt sets it) and every assertion above stays green while
+        // this document's history claims THIS user's certificate_holder edit found a 1M limit and left
+        // it at 3M — the other user's correction, attributed to the wrong edit, in the artifact the
+        // product sells as the audit trail.
+        await using var auditDb = CreateSystemDb();
+        var edits = await auditDb.AuditLogs
+            .Where(a => a.EntityId == docId && a.Action == "document.fields_edited")
+            .ToListAsync();
+        // Two: the competing edit is a real request through the same host, so it audits itself too.
+        edits.Should().HaveCount(2);
+        var underTest = edits.Single(a => AuditFields(a.AfterJson).Any(f => f.FieldValue == "New Hall"));
+
+        AuditFields(underTest.BeforeJson)
+            .Single(f => f.FieldName == "general_liability_limit").FieldValue
+            .Should().Be("3000000",
+                "the committing attempt re-read the row after the competing correction, so its before-state is 3M — "
+                + "1000000 here would be the snapshot the abandoned first attempt lost with");
+        AuditFields(underTest.BeforeJson)
+            .Single(f => f.FieldName == "certificate_holder").FieldValue
+            .Should().Be("Old Hall", "and this request's own field is unchanged in its before-state");
     }
+
+    /// <summary>One field's name/value as a <c>document.fields_edited</c> payload records it.</summary>
+    private sealed record AuditFieldRow(string FieldName, string? FieldValue);
+
+    private static IReadOnlyList<AuditFieldRow> AuditFields(string? json) =>
+        JsonSerializer.Deserialize<List<AuditFieldRow>>(
+            json!, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
 
     [Fact]
     public async Task A_field_edit_racing_a_vendor_reassignment_is_graded_against_the_vendor_the_row_keeps()
@@ -369,5 +407,142 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         terminal.Doc.IsManuallyVerified.Should().BeTrue("this request's own column landed");
         terminal.Doc.GeneralLiabilityLimit.Should().Be(3_000_000m,
             "and the competing edit's columns survived alongside it — unchanged last-writer-wins semantics");
+    }
+
+    /// <summary>
+    /// The competing write in the shape <c>ExtractionWorker.PersistSuccess</c> commits it, minus the OCR
+    /// and the LLM: ONE unguarded, plain <c>READ COMMITTED</c> unit of work that rewrites the WHOLE tuple
+    /// — every key of the <c>ExtractionFields</c> mirror, the typed columns it implies, the
+    /// <c>DocumentField</c> rows (removed and re-inserted, never updated in place) and the verdict.
+    /// </summary>
+    private async Task WriteWholeTupleLikeTheExtractionWorkerAsync(Guid docId, string gl, string holder)
+    {
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents
+            .Include(d => d.Fields)
+            .Include(d => d.Vendor)
+                .ThenInclude(v => v!.ComplianceTemplate)
+                    .ThenInclude(t => t!.Rules)
+            .FirstAsync(d => d.Id == docId);
+
+        doc.ExtractionFields = JsonDocument.Parse(
+            $$"""{"general_liability_limit":"{{gl}}","certificate_holder":"{{holder}}"}""");
+        CanonicalDocumentFields.ApplyToTypedColumn(doc, "general_liability_limit", gl);
+
+        // ToList first: marking these Deleted fixes up doc.Fields, which is the collection being walked.
+        db.DocumentFields.RemoveRange(doc.Fields.ToList());
+        foreach (var (name, value) in new[] { ("general_liability_limit", gl), ("certificate_holder", holder) })
+            db.DocumentFields.Add(new DocumentField
+            {
+                Id = Guid.NewGuid(), DocumentId = docId, FieldName = name, FieldValue = value,
+                FieldType = "text", Confidence = 0.95
+            });
+
+        // Combined unit of work (ADR 0030): the verdict rides the inputs' own SaveChanges, so this
+        // competitor commits a consistent tuple of its own — it is a faithful competitor, not a torn one.
+        var outcome = ComplianceCheckService.ComputeOutcome(doc, DateTime.UtcNow);
+        if (outcome.ClearExistingChecks)
+            db.ComplianceChecks.RemoveRange(
+                await db.ComplianceChecks.Where(c => c.DocumentId == docId).ToListAsync());
+        if (outcome.NewChecks.Count > 0) db.ComplianceChecks.AddRange(outcome.NewChecks);
+        doc.ComplianceStatus = outcome.Status;
+        doc.UpdatedAt = DateTime.UtcNow;
+
+        await db.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task A_field_edit_conflicts_with_an_UNGUARDED_whole_tuple_write_and_still_retries()
+    {
+        // The SECOND realistic population DocumentConcurrency names: "an edit landing on top of a
+        // re-extraction". Every other interleave in this suite drives a GUARDED writer as the
+        // competitor, so none of them shows the 40001 firing against one that never opted in.
+        // ExtractionWorker.PersistSuccess is that competitor — it keeps READ COMMITTED
+        // last-writer-wins BY DECISION (ADR 0030 Amendment 1: an entity-level token there costs a
+        // re-paid OCR + LLM run) and it writes the whole tuple in one go.
+        //
+        // Its DocumentField handling is a hazard of its own. It DELETES every row and re-inserts, so
+        // the row the guarded writer loaded and is about to UPDATE by Id no longer exists. Under READ
+        // COMMITTED that UPDATE matches zero rows and EF raises DbUpdateConcurrencyException — a 500
+        // over an ordinary re-extraction. Under REPEATABLE READ Postgres refuses it as a
+        // serialization failure instead, which is a signal the guard knows what to do with.
+        var auth = await RegisterAndLoginAsync();
+        var (vendorId, _) = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "2000000");
+        var docId = await SeedCoiAsync(auth.OrgId, vendorId, gl: 1_000_000m, holder: "Old Hall");
+
+        var competingWrites = 0;
+        Interleave.OnSavingChanges = async () =>
+        {
+            if (Interlocked.Increment(ref competingWrites) > 1) return;
+            await WriteWholeTupleLikeTheExtractionWorkerAsync(docId, gl: "3000000", holder: "Old Hall");
+        };
+
+        var response = await EditFieldAsync(auth.Client, docId, "certificate_holder", "New Hall");
+        Interleave.Reset();
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK,
+            "a re-extraction committing inside the window is a conflict to re-run, not a 500 and not a lost edit");
+        competingWrites.Should().Be(2, "the retry re-entered the save hook, proving the write really was re-run");
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.GeneralLiabilityLimit.Should().Be(3_000_000m, "the re-extraction's values must not be rolled back");
+        terminal.MirrorGl.Should().Be("3000000", "the mirror was rebuilt from the RELOADED row, not the stale snapshot");
+        terminal.FieldRowGl.Should().Be("3000000");
+        terminal.MirrorHolder.Should().Be("New Hall", "and this request's own edit still landed");
+        terminal.Doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant,
+            "3M clears the 2M floor, and the verdict is the RETRIED attempt's — computed from what the row now holds");
+
+        // The retried attempt edited the row the competitor INSERTED: it neither resurrected the one it
+        // had loaded nor added a third row beside the new one.
+        terminal.Doc.Fields.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task An_attempt_that_loses_at_COMMIT_leaves_no_audit_row_behind_it()
+    {
+        // "Did this request commit a field edit?" must be a fact about the attempt that ANSWERED, and
+        // the endpoint has to make it one itself. Today REPEATABLE READ reports first-updater-wins at
+        // the UPDATE statement, so a conflicted attempt never reaches the line that records it — but
+        // that is a property of the isolation level, not of the endpoint. SERIALIZABLE reports at
+        // COMMIT (SSI), and so would any future writer taking an explicit row lock.
+        //
+        // So: fail attempt 1 at its COMMIT, and make the document vanish before attempt 2 reads. The
+        // request then answers 404 having committed nothing — and must audit nothing. With the
+        // per-attempt reset removed, attempt 1's rolled-back write is still sitting in the outer
+        // variable when the 404 returns, and the customer's audit export gains a "fields edited" row
+        // for an edit that never happened, against a document that no longer exists.
+        var auth = await RegisterAndLoginAsync();
+        var (vendorId, _) = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "2000000");
+        var docId = await SeedCoiAsync(auth.OrgId, vendorId, gl: 1_000_000m, holder: "Old Hall");
+
+        var rollbacks = 0;
+        CommitFault.OnCommitting = ordinal => Task.FromResult(ordinal == 1);
+        CommitFault.OnRolledBack = async () =>
+        {
+            // AFTER the rollback, never inside the commit hook: the faulted attempt still holds the
+            // document row's UPDATE lock until it rolls back, so a delete from another connection
+            // would block on a lock only this callback's own return could release.
+            if (Interlocked.Increment(ref rollbacks) > 1) return;
+            await using var db = CreateSystemDb();
+            var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+            db.Documents.Remove(doc); // interceptor translates to the soft delete AppDbContext filters out
+            await db.SaveChangesAsync();
+        };
+
+        var response = await EditFieldAsync(auth.Client, docId, "certificate_holder", "New Hall");
+        CommitFault.Reset();
+
+        rollbacks.Should().Be(1, "attempt 1 must have been rolled back — otherwise nothing below is under test");
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound,
+            "the retry re-reads, and the document is gone");
+
+        await using var db = CreateSystemDb();
+        var edits = await db.AuditLogs
+            .CountAsync(a => a.EntityId == docId && a.Action == "document.fields_edited");
+        edits.Should().Be(0, "no attempt committed a field edit, so none may be audited as one");
+
+        var doc = await db.Documents.IgnoreQueryFilters().FirstAsync(d => d.Id == docId);
+        doc.ExtractionFields!.RootElement.GetProperty("certificate_holder").GetString()
+            .Should().Be("Old Hall", "and the rolled-back attempt left nothing of itself in the row either");
     }
 }
