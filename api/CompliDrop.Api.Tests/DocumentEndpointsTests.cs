@@ -11,6 +11,8 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Serilog.Core;
+using Serilog.Events;
 using static CompliDrop.Api.Tests.TestHelpers.UploadFixtures;
 
 namespace CompliDrop.Api.Tests;
@@ -2344,13 +2346,17 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     /// <summary>
     /// Seeds a document in a given extraction state. <paramref name="processingStartedAt"/> is what the
     /// guard reads, so every test below differs only in that value + the status.
+    /// <paramref name="updatedAt"/> backdates the row's last-write stamp — it needs its own
+    /// <c>ExecuteUpdateAsync</c> because <c>AuditSaveChangesInterceptor</c> stamps <c>UpdatedAt</c> on
+    /// every tracked save, which is exactly the interceptor the endpoint under test bypasses.
     /// </summary>
     private async Task<Guid> SeedExtractionStateAsync(
         Guid orgId,
         ExtractionStatus status,
         DateTime? processingStartedAt,
         int processingAttempts = 1,
-        int failedAttempts = 0)
+        int failedAttempts = 0,
+        DateTime? updatedAt = null)
     {
         var docId = Guid.NewGuid();
         await using var db = CreateSystemDb();
@@ -2371,6 +2377,11 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             UpdatedAt = DateTime.UtcNow,
         });
         await db.SaveChangesAsync();
+        if (updatedAt is DateTime backdated)
+        {
+            await db.Documents.Where(d => d.Id == docId)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.UpdatedAt, backdated));
+        }
         return docId;
     }
 
@@ -2420,12 +2431,14 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         // would leave a wedged document with no manual route back. Literal duplicated deliberately; see
         // the live-claim test above.
         var auth = await RegisterAndLoginAsync();
+        var seededUpdatedAt = DateTime.UtcNow.AddDays(-7);
         var docId = await SeedExtractionStateAsync(
             auth.OrgId,
             ExtractionStatus.Processing,
             DateTime.UtcNow.AddMinutes(-5).AddSeconds(-30),
             processingAttempts: 3,
-            failedAttempts: 2);
+            failedAttempts: 2,
+            updatedAt: seededUpdatedAt);
 
         var resp = await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
 
@@ -2436,6 +2449,23 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         doc.ProcessingStartedAt.Should().BeNull();
         doc.ProcessingAttempts.Should().Be(0);
         doc.FailedAttempts.Should().Be(0);
+
+        // UpdatedAt has to ADVANCE, and only the endpoint's explicit .SetProperty does it: ExecuteUpdateAsync
+        // bypasses AuditSaveChangesInterceptor, the thing that stamps UpdatedAt everywhere else. Dropping
+        // that one line would be silent without this — and the detail page derives its "taking longer than
+        // usual" banner from `updatedAt`, so re-reading a week-old document would render a false alarm on
+        // the very first poll.
+        doc.UpdatedAt.Should().BeAfter(seededUpdatedAt, "the re-arm is a write and must stamp UpdatedAt");
+        doc.UpdatedAt.Should().BeCloseTo(DateTime.UtcNow, TimeSpan.FromMinutes(1),
+            "…and stamp it with NOW, not merely with something later than the seeded value");
+
+        // The POSITIVE half of the audit pair. ExecuteUpdateAsync bypasses the interceptor's entity-mutation
+        // row, so this explicit one is the WHOLE audit trace of a re-extract (ADR 0050 §4) — and the only
+        // other assertion about it in the suite is the refusal test's BeFalse, which would stay green if the
+        // LogAsync call were deleted outright.
+        var audited = await verify.AuditLogs.AsNoTracking()
+            .AnyAsync(a => a.EntityId == docId && a.Action == "document.reextract_queued");
+        audited.Should().BeTrue("a queued re-extract must leave the one audit row that names the action");
     }
 
     [Fact]
@@ -2461,11 +2491,16 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     [InlineData(ExtractionStatus.Completed)]
     [InlineData(ExtractionStatus.ManualRequired)]
     [InlineData(ExtractionStatus.Pending)]
+    [InlineData(ExtractionStatus.Failed)]
     public async Task Reextract_still_queues_every_status_that_is_not_a_live_claim(ExtractionStatus status)
     {
         // The guard keys on Processing ONLY. A recent ProcessingStartedAt is left on each row on purpose:
         // a guard that looked at the timestamp WITHOUT the status would refuse a just-completed document,
-        // which is the single most common "Read again" click there is. (Failed has its own test above.)
+        // which is the single most common "Read again" click there is. Failed carries one in PRODUCTION
+        // too — RecordFailedAttempt clears ProcessingStartedAt only on the requeue branch, never on the
+        // terminal Failed one — and a failed read is the other most-clicked "Read again" target, so it
+        // belongs in this timestamp-bearing theory. (The pre-existing Failed test above covers the counter
+        // reset from an exhausted retry budget, not this timestamp dimension.)
         var auth = await RegisterAndLoginAsync();
         var docId = await SeedExtractionStateAsync(auth.OrgId, status, DateTime.UtcNow);
 
@@ -2486,6 +2521,14 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         var orgA = await RegisterAndLoginAsync();
         var docId = await SeedExtractionStateAsync(
             orgA.OrgId, ExtractionStatus.Processing, DateTime.UtcNow);
+        // A SECOND org-A document, in a RE-ARMABLE state, is what makes this a tenant test at all. The
+        // live-claim row above is refused by the guard on its own merits, so its 404 would survive the
+        // global query filter ceasing to apply to ExecuteUpdateAsync (a stray IgnoreQueryFilters, a
+        // hand-rolled predicate without the org bind): the update would still match 0 rows and the
+        // existence re-read is what answers. This row would be re-armed by a leaking bulk UPDATE, so its
+        // untouched columns below are the assertion that pins the filter on the WRITE.
+        var rearmableId = await SeedExtractionStateAsync(
+            orgA.OrgId, ExtractionStatus.Completed, DateTime.UtcNow, processingAttempts: 3, failedAttempts: 2);
 
         var orgB = await RegisterAndLoginAsync();
         var crossOrg = await orgB.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
@@ -2493,13 +2536,84 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             "another org's live-claim document must read as absent, not as busy");
         (await ErrorCode(crossOrg)).Should().Be("document.not_found");
 
+        var crossOrgRearmable = await orgB.Client.PostAsync($"/api/documents/{rearmableId}/reextract", content: null);
+        crossOrgRearmable.StatusCode.Should().Be(HttpStatusCode.NotFound,
+            "another org's re-armable document must read as absent too — the tenant filter, not the guard");
+        (await ErrorCode(crossOrgRearmable)).Should().Be("document.not_found");
+
         var missing = await orgA.Client.PostAsync($"/api/documents/{Guid.NewGuid()}/reextract", content: null);
         missing.StatusCode.Should().Be(HttpStatusCode.NotFound);
 
-        // And org A's own row is untouched by either call.
+        // And org A's own rows are untouched by any of those calls.
         await using var verify = CreateSystemDb();
         (await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId))
             .ExtractionStatus.Should().Be(ExtractionStatus.Processing);
+        var rearmable = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == rearmableId);
+        rearmable.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "org B's POST must not re-arm org A's document — 404 alone doesn't prove the write was scoped");
+        rearmable.ProcessingAttempts.Should().Be(3);
+        rearmable.FailedAttempts.Should().Be(2, "…and it must not hand org A's row a fresh retry budget");
     }
 
+    [Fact]
+    public async Task The_reextract_guard_reads_the_DATABASE_clock_not_the_API_container_clock()
+    {
+        // The guard compares against ProcessingStartedAt, which the DATABASE writes (ClaimSql:
+        // `"ProcessingStartedAt" = now()`), and it must agree with ClaimSql's own staleness test
+        // (`now() - interval …`). A cutoff captured from the APP clock into a local before the query
+        // compares TWO clocks: an API container running ahead of Postgres stops refusing claims the worker
+        // still holds (the guard silently weakened), one running behind refuses longer than the worker
+        // holds. No behavioural test can see that axis — the suite seeds ProcessingStartedAt from
+        // DateTime.UtcNow too, so both sides drift together — so this asserts on the SQL the endpoint
+        // ACTUALLY issues. Npgsql renders DateTime.UtcNow as bare now() (ADR 0009-clean: a timestamptz
+        // expression, no AT TIME ZONE) only while it stays INSIDE the predicate; hoisting it back into a
+        // local turns the comparison into a parameter and fails here.
+        //
+        // Captured through a Serilog sink because Program.cs composes Serilog with ReadFrom.Services, so a
+        // DI-registered ILogEventSink receives every event the host logs — the StartupEnvironmentBanner
+        // wiring test's shape, pointed at EF's command log instead of the boot banner.
+        var sink = new CapturingLogEventSink();
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+
+        var reg = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            email = $"user-{Guid.NewGuid():N}@example.com",
+            password = "Password1234",
+            fullName = "Test User",
+            companyName = "Test Co",
+            industry = (string?)null,
+            companySize = (string?)null,
+            timeZone = "America/New_York",
+        });
+        reg.EnsureSuccessStatusCode();
+        var orgId = (await reg.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("organizationId").GetGuid();
+        var docId = await SeedExtractionStateAsync(orgId, ExtractionStatus.Completed, DateTime.UtcNow);
+
+        (await client.PostAsync($"/api/documents/{docId}/reextract", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // Serilog renders the command text as a quoted string, so the SQL's own quotes arrive escaped.
+        var update = sink.Events
+            .Select(e => e.RenderMessage().Replace("\\\"", "\"", StringComparison.Ordinal))
+            .LastOrDefault(m => m.Contains("UPDATE \"Documents\"", StringComparison.Ordinal)
+                && m.Contains("\"ProcessingStartedAt\"", StringComparison.Ordinal));
+        update.Should().NotBeNull(
+            "the endpoint's re-arm UPDATE must appear in the host's EF command log — if it does not, this "
+            + "test is a no-op and proves nothing about which clock the guard reads");
+        update.Should().Contain("\"ProcessingStartedAt\" < now()",
+            "the staleness cutoff must be computed by POSTGRES (now() - the interval), the same clock that "
+            + "wrote ProcessingStartedAt and the same one ClaimSql compares against — not captured from the "
+            + "API container's DateTime.UtcNow and shipped as a timestamp parameter");
+    }
+
+    /// <summary>Serilog sink that records every emitted event; thread-safe for the host's loggers.</summary>
+    private sealed class CapturingLogEventSink : ILogEventSink
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<LogEvent> _events = new();
+        public void Emit(LogEvent logEvent) => _events.Enqueue(logEvent);
+        public IReadOnlyCollection<LogEvent> Events => _events.ToArray();
+    }
 }
