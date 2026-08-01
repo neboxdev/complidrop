@@ -28,6 +28,7 @@ import {
   makeDocumentDetail,
   makeComplianceCheck,
   sequencedJsonOk,
+  sequencedResponses,
   toastSuccess,
   toastError,
   type DocumentDetailFixture,
@@ -1603,6 +1604,139 @@ describe("DocumentDetailPage — reextract mutation toasts (#122 / #74 followup)
     const args = toastError.mock.calls[0]?.[0];
     expect(args).not.toMatch(/typeerror/i);
     expect(args).not.toMatch(/failed to fetch/i);
+  });
+});
+
+describe("DocumentDetailPage — the in-progress 409 reconciles the page it lands on (#365 / ADR 0050)", () => {
+  // ADR 0050's guard refuses a re-arm that would collide with a LIVE extraction claim,
+  // answering `409 document.extraction_in_progress` — "We're still reading this document.
+  // Give it a moment, then try again."
+  //
+  // The ONLY client state that 409 is reachable from is one where this page believes the
+  // read FINISHED: `isProcessing` derives from the last successful payload and disables
+  // "Read again" while it is Pending/Processing, so the request only ever leaves a tab
+  // whose payload said Completed / ManualRequired / Failed. Nothing then reconciled the
+  // two — `refetchInterval` returns false for a settled status and `refetchOnWindowFocus`
+  // is off (lib/providers.tsx) — so the toast said "still reading" while the badge beside
+  // it said "Read", the fields and verdict on screen were the previous read's, and every
+  // further click 409'd until a manual reload. Two assertions that say opposite things
+  // about one document, with nothing to break the tie.
+  const IN_PROGRESS_MESSAGE =
+    "We're still reading this document. Give it a moment, then try again.";
+
+  const settled = (overrides: Partial<DocumentDetailFixture> = {}) =>
+    makeDocumentDetail({
+      id: "d_inflight_409",
+      extractionStatus: "Completed",
+      complianceStatus: "Compliant",
+      ...overrides,
+    });
+
+  const liveClaim = () =>
+    settled({ extractionStatus: "Processing", complianceStatus: "Pending" });
+
+  it("refetches the detail on document.extraction_in_progress, so the page stops claiming the read finished", async () => {
+    let getCalls = 0;
+    const seq = sequencedJsonOk(settled(), liveClaim());
+    server.use(
+      http.get(url("/api/documents/:id"), () => {
+        getCalls += 1;
+        return seq();
+      }),
+      http.post(url("/api/documents/:id/reextract"), () =>
+        jsonError("document.extraction_in_progress", IN_PROGRESS_MESSAGE, { status: 409 }),
+      ),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_inflight_409" },
+    });
+
+    // The precondition that makes the 409 reachable at all — this tab's last payload said
+    // the read was done, so nothing here is disabled. (`/^Read$/`, not the substring
+    // "Read": "Reading…" contains it, and the whole point is telling those two apart.)
+    const button = await screen.findByRole("button", { name: /read again/i });
+    expect(screen.getByTestId("extraction-status")).toHaveTextContent(/^Read$/);
+    expect(button).not.toBeDisabled();
+
+    fireEvent.click(button);
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    expect(toastError).toHaveBeenCalledWith(IN_PROGRESS_MESSAGE);
+
+    // The fix: the toast's claim is now TRUE of the screen it lands on. The refetch lands
+    // the live state, so the badge agrees with the toast instead of contradicting it…
+    await waitFor(() =>
+      expect(screen.getByTestId("extraction-status")).toHaveTextContent("Reading…"),
+    );
+    // …and "give it a moment" is enforced rather than merely advised: the button is
+    // disabled until the read settles, instead of 409-ing on every further click. The 3s
+    // poll is live again too (refetchInterval reads the same Processing status), so the
+    // page self-heals without the manual reload the pre-fix state required.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /read again/i })).toBeDisabled(),
+    );
+    expect(getCalls).toBe(2);
+  });
+
+  it("leaves the cache alone on an unrelated failure — only the conflict contradicts it", async () => {
+    // Scope pin. A blanket invalidate-on-ANY-error would fight this page's deliberate
+    // error handling: it fires a fresh GET into a backend that just failed one, and the
+    // detail query short-circuits its own polling while erroring (#97) precisely so a
+    // brown-out isn't hammered — the StaleDataBanner's Try-again is the manual affordance
+    // there. A 5xx from the re-arm makes no claim about the document's state, so there is
+    // nothing for the cache to be reconciled against.
+    //
+    // The negative is measured against a POSITIVE CONTROL in the same test rather than
+    // against a timer: the second click gets the 409 and DOES refetch, so a final GET
+    // count of exactly 2 proves the first click contributed none. A blanket version lands
+    // 3 and fails here.
+    let getCalls = 0;
+    const seq = sequencedJsonOk(settled(), liveClaim());
+    const reextractResponses = sequencedResponses(
+      () =>
+        jsonError(
+          "extraction.queue_at_capacity",
+          "Extraction queue is at capacity, please retry in a few minutes.",
+          { status: 503 },
+        ),
+      () => jsonError("document.extraction_in_progress", IN_PROGRESS_MESSAGE, { status: 409 }),
+    );
+    server.use(
+      http.get(url("/api/documents/:id"), () => {
+        getCalls += 1;
+        return seq();
+      }),
+      http.post(url("/api/documents/:id/reextract"), () => reextractResponses()),
+    );
+
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_inflight_409" },
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: /read again/i }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    expect(toastError).toHaveBeenLastCalledWith(
+      "Extraction queue is at capacity, please retry in a few minutes.",
+    );
+    // The 5xx left the cached payload exactly where it was — still settled, still clickable.
+    expect(screen.getByTestId("extraction-status")).toHaveTextContent(/^Read$/);
+    expect(screen.getByRole("button", { name: /read again/i })).not.toBeDisabled();
+
+    // Positive control: the same button, the same harness, now answered with the conflict.
+    // Its refetch landing is what makes the count below a real negative rather than a race
+    // the assertions happened to win.
+    fireEvent.click(screen.getByRole("button", { name: /read again/i }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(2));
+    expect(toastError).toHaveBeenLastCalledWith(IN_PROGRESS_MESSAGE);
+    await waitFor(() =>
+      expect(screen.getByTestId("extraction-status")).toHaveTextContent("Reading…"),
+    );
+    expect(getCalls).toBe(2);
   });
 });
 
