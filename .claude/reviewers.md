@@ -384,6 +384,41 @@ Both are defined in this repo's `.claude/agents/`.
     read_time_derivation`) runs against a document the REAL worker wrote, on purpose: the hand-built
     unit shapes cannot catch the worker clamping the jsonb copy too, at which point the two would
     agree, the flag would go false, and the page would stop warning while still showing a clip.
+- The re-extract in-flight guard is ADR 0050 (#365); the facts that follow are pointers into it,
+  not a second copy of the rationale.
+  - `Reextract` re-arms with ONE conditional `ExecuteUpdateAsync`, never a read-then-write. The
+    atomicity IS the fix: an `if (status == Processing) return 409;` above a `SaveChanges` races the
+    very claim it checks (the worker can flip the status between the SELECT and the UPDATE), so
+    "simplify it back to a tracked-entity save with an if" IS a real finding, not a cleanup.
+  - It bites ONLY while the claim is one the WORKER still believes in. A STALE claim passes through
+    on purpose (`ClaimSql` would zombie-reclaim that row on its own next poll, so refusing buys no
+    safety and strands the document), and so does `Processing` with a NULL `ProcessingStartedAt` —
+    `ClaimSql`'s comparison yields NULL for it, i.e. the worker could never reclaim it either, so
+    that is the one state with no route back from either side. Both are fail-OPEN by design; do not
+    flag either as a hole.
+  - The window is ONE constant, `ExtractionWorker.ZombieClaimTimeout`, and `ClaimSql` is BUILT from
+    it — a re-inlined `interval '5 minutes'` IS a real finding (pinned: the SQL's interval is parsed
+    back and compared to the constant). But `AttemptTimeoutCeilingSeconds` deliberately stays the
+    literal 240 rather than `ZombieClaimTimeout - margin`, and the boundary tests on BOTH sides keep
+    their own `-4m30s` / `-5m30s` literals (#62): those pins exist to discriminate a drift in this
+    value, so deriving them from it makes them vacuous. "Hoist the test literals too" is the bug.
+  - `ExecuteUpdateAsync` bypasses `AuditSaveChangesInterceptor`, so the explicit
+    `document.reextract_queued` row (already there pre-#365) is now the WHOLE audit trace — the same
+    trade `VendorPortalEndpoints`' upload-permit reservation makes. Not a lost audit trail. A REFUSED
+    re-arm writes no audit row at all, deliberately: nothing was queued.
+  - The 409 uses the plain `Error(...)` envelope (the `auth.email_taken` shape), NOT
+    `IdempotencyResults.InProgressConflict()` — a different contract (ADR 0029 replays, it does not
+    409). No frontend change: the button is already disabled while `isProcessing` and `friendly(err)`
+    surfaces the message.
+  - **NO `(DocumentId, FieldName)` unique index** — the ticket asks for one and ADR 0050 Option D
+    refutes it, the same reasoning that refuted it for the waitlist table (ADR 0046 + ADR 0016
+    auto-migrate-on-boot). Duplicates are NOT only a race artifact: `PersistSuccess` inserts one row
+    per `extraction.Fields` entry with no `GroupBy` while the two lines above it DO de-dupe for the
+    jsonb mirror and typed columns, and `Clamp(f.Name, …)` collapses two over-length names to one.
+    ADR 0049 already treats a duplicate-name row as a shape the read predicate must tolerate. Adding
+    the index, or de-duping that insert loop (Option E — a DIFFERENT duplicate source, and no help at
+    all for the concurrent one), needs its own ticket with a measured population and a signed-off
+    dedupe. Neither is a finding here.
 - Client-controlled input in a BOUNDED audit column is ADR 0044 (#372); the review-time facts
   that follow are pointers into it.
   - The clamp lives at ONE boundary — `CurrentUserService` reading `ColumnClamp.To` — not at
