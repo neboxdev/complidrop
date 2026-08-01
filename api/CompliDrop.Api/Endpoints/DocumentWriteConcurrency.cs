@@ -47,7 +47,11 @@ internal static class DocumentWriteConcurrency
     /// Executes <paramref name="write"/> inside a <c>REPEATABLE READ</c> transaction, retrying the WHOLE
     /// callback on a concurrent-commit conflict up to <see cref="DocumentConcurrency.MaxAttempts"/>
     /// times. The callback owns the load, the mutation and the <c>SaveChanges</c>; this owns the
-    /// transaction, the change-tracker reset between attempts, and the answer when the retries run out.
+    /// transaction, discarding an abandoned attempt, and the answer when the retries run out.
+    /// <para/>
+    /// <paramref name="onAttemptAbandoned"/> is how a caller discards state an abandoned attempt
+    /// produced OUTSIDE the change tracker — see its own remarks. Required rather than optional so every
+    /// call site answers the question; <c>null</c> is the legible "this caller keeps none".
     /// <para/>
     /// Exhaustion commits NOTHING and answers <c>409</c>. That is deliberately stronger than ADR 0030's
     /// degrade-to-<c>Pending</c> rule rather than a departure from it: that rule exists for a RECOMPUTE
@@ -58,11 +62,21 @@ internal static class DocumentWriteConcurrency
     /// persisted that contradicts anything. Committing the edit with <c>Pending</c> instead would BE a
     /// half-applied write of the shape this ticket exists to remove.
     /// </summary>
+    /// <param name="onAttemptAbandoned">
+    /// Invoked once per attempt that is rolled back, alongside the change-tracker clear that discards
+    /// the same attempt's ENTITY state — the caller-side twin of it. It fires for the terminal attempt
+    /// too, which is the whole point: a conflict can surface at the <c>CommitAsync</c> below rather than
+    /// at the UPDATE (SSI under <c>SERIALIZABLE</c>, or any future writer taking an explicit row lock),
+    /// so an attempt can run to completion and still be abandoned with no next attempt to tidy up after
+    /// it. A caller that instead re-set such state at the START of each attempt would leave the last
+    /// one's behind, and would be relying on WHERE Postgres happens to report the conflict.
+    /// </param>
     internal static async Task<IResult> RunAsync(
         AppDbContext db,
         ILoggerFactory loggerFactory,
         Guid documentId,
         Func<CancellationToken, Task<IResult>> write,
+        Action? onAttemptAbandoned,
         CancellationToken ct)
     {
         var logger = loggerFactory.CreateLogger(typeof(DocumentWriteConcurrency));
@@ -85,8 +99,12 @@ internal static class DocumentWriteConcurrency
                 // change tracker afterwards is what makes the next attempt a genuine re-read: without it
                 // the retry would re-attach this attempt's stale entities (including the AuditLog rows
                 // the interceptor staged) and re-apply exactly the snapshot that just lost.
+                // onAttemptAbandoned is the same discard for whatever the CALLER kept outside the
+                // tracker, so one abandonment throws away both halves of the attempt and they cannot
+                // disagree about whether it happened.
                 await tx.RollbackAsync(ct);
                 db.ChangeTracker.Clear();
+                onAttemptAbandoned?.Invoke();
                 logger.LogWarning(ex,
                     "Concurrent write conflict on document {DocumentId} (attempt {Attempt} of {MaxAttempts}); reloading and recomputing",
                     documentId, attempt, DocumentConcurrency.MaxAttempts);

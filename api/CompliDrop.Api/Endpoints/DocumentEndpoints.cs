@@ -420,7 +420,12 @@ public static class DocumentEndpoints
             // manual IAuditLogger is reserved for NON-entity events; re-emitting "document.updated" here would
             // double the row in the customer's audit export (#186 review — architecture reviewer).
             return Results.Ok(new { data = new { message = "Document updated." }, error = (object?)null });
-        }, ct);
+            // Nothing to discard when an attempt is abandoned: this writer keeps NO state outside the
+            // callback. Its audit row is staged by the interceptor on this same AppDbContext inside the
+            // transaction, so an abandoned attempt's row rolls back with it and the tracker clear drops
+            // it — which is exactly what UpdateFields cannot rely on, because IAuditLogger writes on a
+            // separate connection.
+        }, onAttemptAbandoned: null, ct);
 
     private static async Task<IResult> UploadDocument(
         HttpContext http,
@@ -673,15 +678,6 @@ public static class DocumentEndpoints
 
         var result = await DocumentWriteConcurrency.RunAsync(db, loggerFactory, id, async innerCt =>
         {
-            // Both outputs are re-set per attempt, so each describes only the attempt that produced it.
-            // `saved` is the one the audit row keys on, and clearing it here is what makes "did this
-            // request commit a field edit?" structurally true rather than incidentally so: RunAsync
-            // wraps the CommitAsync in the same conflict catch as the write, so a version that assigned
-            // `saved` once and never cleared it would depend on REPEATABLE READ raising 40001 at the
-            // UPDATE and never at COMMIT — a property of the isolation level, not of this code. Raise it
-            // to Serializable (SSI reports at COMMIT) or let a future writer take a row lock and an
-            // abandoned attempt would emit a `document.fields_edited` row for a write that rolled back.
-            saved = null;
             var doc = await db.Documents
                 .Include(d => d.Fields)
                 .FirstOrDefaultAsync(d => d.Id == id, innerCt);
@@ -758,12 +754,24 @@ public static class DocumentEndpoints
 
             saved = doc;
             return Results.Ok(new { data = new { message = "Fields updated." }, error = (object?)null });
-        }, ct);
+            // `saved` says "an attempt wrote a field edit", and it is set as late as it can be — after
+            // the SaveChanges, with only the CommitAsync left to go. RunAsync wraps that commit in the
+            // SAME conflict catch as the write, so the assignment above can survive an attempt that goes
+            // on to be abandoned; onAttemptAbandoned is what un-says it, at the one event that makes it
+            // untrue. Doing that at the START of the next attempt instead would look equivalent and is
+            // not: the LAST attempt has no next one, so its rolled-back edit would ride out to the 409 as
+            // a `document.fields_edited` row — committed on IAuditLogger's own connection, where the
+            // rollback cannot reach it. It would also make the fix a property of the isolation level
+            // rather than of this code (REPEATABLE READ reports first-updater-wins at the UPDATE, but
+            // SERIALIZABLE's SSI reports at COMMIT, and so would any future writer taking a row lock).
+        }, onAttemptAbandoned: () => { saved = null; before = null; }, ct);
 
         // Outside the retry: the audit row describes what actually COMMITTED, and IAuditLogger writes on
         // its own SystemDbContext (a separate connection), so emitting it inside the callback would put a
-        // row for a rolled-back attempt outside that rollback's reach. `saved` is null on every path that
-        // committed no field edit — 404, or the exhausted 409 — and neither is a "fields edited" event.
+        // row for a rolled-back attempt outside that rollback's reach. `saved` is non-null only while it
+        // describes an attempt that is still live — set after that attempt's SaveChanges, cleared the
+        // moment RunAsync abandons it — so a 404, an exhausted 409, and every abandoned attempt behind
+        // either of them all reach here with nothing to audit.
         if (saved is not null)
             await audit.LogAsync("document.fields_edited", nameof(Document), saved.Id,
                 before: before,
