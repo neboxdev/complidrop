@@ -610,10 +610,24 @@ describe("DocumentsPage — filter<->URL sync is two-way (#370)", () => {
     // `useSyncExternalStore`, i.e. at SyncLane, so it would join the keystroke's
     // render already reporting `search=acme` while `searchEcho` is still an
     // unflushed DefaultLane update, and the box would truncate WITH the guard in
-    // place. That is not the production ordering: Next routes ACTION_RESTORE
-    // through `startTransition`, so the echo always lands after the local flush.
+    // place. Production cannot order it that way: the History patch does wrap
+    // its ACTION_RESTORE dispatch in `startTransition`, but `dispatchAction`
+    // SKIPS the transition branch for ACTION_RESTORE and only reaches `setState`
+    // from the async reducer's `.then` microtask — so the echo is a DefaultLane
+    // update that lands WITH the page's own DefaultLane updates or later, never
+    // at SyncLane ahead of them. That same-commit ordering is the one production
+    // actually takes and the harness cannot express it, which is why the delay
+    // is the lever. Full derivation in the `setNavigationCommitDelay` JSDoc
+    // (`src/test/navigation.ts`) — the authority; keep this in step with it.
     const ROUTER_ECHO_MS = SEARCH_DEBOUNCE_MS * 10;
     setNavigationCommitDelay(ROUTER_ECHO_MS);
+    // `shouldAdvanceTime` stays OFF here, deliberately — this is the one site in
+    // the suite that omits it. Nothing inside the fake window polls (no
+    // `waitFor`, no `findBy*`), so the usual reason for auto-advance does not
+    // apply; and auto-advance would let real CI-load time fire the 300ms
+    // debounce on its own, outside the `act` scope below, which re-opens exactly
+    // the #450 flake this test was rewritten to remove. Do not "make it
+    // consistent" with the other call sites.
     vi.useFakeTimers();
     try {
       // Arms the page's 300ms debounce on the fake clock.
