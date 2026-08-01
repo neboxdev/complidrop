@@ -148,6 +148,14 @@ public sealed class CustomWebApplicationFactory(
             // PostCommitFaultInterceptor.HeaderName.
             services.AddSingleton<PostCommitFaultInterceptor>();
             services.AddSingleton<IDbContextOptionsConfiguration<AppDbContext>, PostCommitFaultOptionsConfiguration>();
+
+            // Lets a test commit a COMPETING document write from inside another request's SaveChanges
+            // (#366) — the deterministic way to construct the "someone else wrote this row between my
+            // snapshot and my UPDATE" interleave. Attached through the same EF options-configuration hook;
+            // inert unless the request carries ConcurrentDocumentWriteInterceptor.HeaderName AND a test
+            // has set the callback.
+            services.AddSingleton<ConcurrentDocumentWriteInterceptor>();
+            services.AddSingleton<IDbContextOptionsConfiguration<AppDbContext>, ConcurrentDocumentWriteOptionsConfiguration>();
         });
     }
 }
