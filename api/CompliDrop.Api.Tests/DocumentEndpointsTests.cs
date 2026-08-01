@@ -2344,8 +2344,18 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     // (DocumentId, FieldName), so the duplicates stick). The guard is the WORKER's own staleness rule.
 
     /// <summary>
-    /// Seeds a document in a given extraction state. <paramref name="processingStartedAt"/> is what the
-    /// guard reads, so every test below differs only in that value + the status.
+    /// Seeds a document in a given extraction state. <paramref name="claimAge"/> is how long ago the
+    /// claim was staked — what the guard reads — so every test below differs only in that value + the
+    /// status. <c>null</c> seeds a NULL <c>ProcessingStartedAt</c>.
+    /// <para/>
+    /// The claim timestamp is written by the DATABASE, as a Postgres interval back from bare
+    /// <c>now()</c> — never from this process's <c>DateTime.UtcNow</c>. Since the guard's own cutoff is
+    /// computed inside its predicate (ADR 0050 §2, <c>"ProcessingStartedAt" &lt; now() - $interval</c>),
+    /// seeding from the host clock would straddle TWO clocks and make the boundary pair below pass only
+    /// while |host − Postgres| stays under 30 seconds — a flake that has nothing to do with the guard.
+    /// It is also what production does: <c>ClaimSql</c> writes <c>"ProcessingStartedAt" = now()</c>.
+    /// ADR 0009-clean — a bare <c>now()</c> on a timestamptz, no <c>AT TIME ZONE</c> anywhere.
+    /// <para/>
     /// <paramref name="updatedAt"/> backdates the row's last-write stamp — it needs its own
     /// <c>ExecuteUpdateAsync</c> because <c>AuditSaveChangesInterceptor</c> stamps <c>UpdatedAt</c> on
     /// every tracked save, which is exactly the interceptor the endpoint under test bypasses.
@@ -2353,7 +2363,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     private async Task<Guid> SeedExtractionStateAsync(
         Guid orgId,
         ExtractionStatus status,
-        DateTime? processingStartedAt,
+        string? claimAge,
         int processingAttempts = 1,
         int failedAttempts = 0,
         DateTime? updatedAt = null)
@@ -2370,19 +2380,37 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             FileSizeBytes = 1,
             ContentType = "application/pdf",
             ExtractionStatus = status,
-            ProcessingStartedAt = processingStartedAt,
+            ProcessingStartedAt = null,
             ProcessingAttempts = processingAttempts,
             FailedAttempts = failedAttempts,
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
         });
         await db.SaveChangesAsync();
+        if (claimAge is not null)
+        {
+            // Interpolated (i.e. parameterized), not string-concatenated: the interval text never reaches
+            // the statement as SQL.
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"""UPDATE "Documents" SET "ProcessingStartedAt" = now() - CAST({claimAge} AS interval) WHERE "Id" = {docId}""");
+        }
         if (updatedAt is DateTime backdated)
         {
             await db.Documents.Where(d => d.Id == docId)
                 .ExecuteUpdateAsync(s => s.SetProperty(d => d.UpdatedAt, backdated));
         }
         return docId;
+    }
+
+    /// <summary>The claim timestamp Postgres actually stored — the reference the refusal test asserts
+    /// "nothing changed" against, since the seed no longer produces a host-clock value to compare to.</summary>
+    private async Task<DateTime?> ClaimTimestampAsync(Guid docId)
+    {
+        await using var db = CreateSystemDb();
+        return await db.Documents.AsNoTracking()
+            .Where(d => d.Id == docId)
+            .Select(d => d.ProcessingStartedAt)
+            .SingleAsync();
     }
 
     private static async Task<string> ErrorCode(HttpResponseMessage resp) =>
@@ -2396,11 +2424,12 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         // ExtractionWorkerTests' own -4m30s / -5m30s pair (#62): these two tests exist to be the
         // regression discriminator for the threshold, so reading it off ExtractionWorker.ZombieClaimTimeout
         // would make them pass for any value. -4m30s is inside the 5-minute window, so the worker still
-        // believes this claim; the endpoint must agree and refuse.
+        // believes this claim; the endpoint must agree and refuse. The offset is applied by POSTGRES
+        // (SeedExtractionStateAsync), so this boundary and the guard's cutoff read the SAME clock.
         var auth = await RegisterAndLoginAsync();
-        var startedAt = DateTime.UtcNow.AddMinutes(-4).AddSeconds(-30);
         var docId = await SeedExtractionStateAsync(
-            auth.OrgId, ExtractionStatus.Processing, startedAt, processingAttempts: 1);
+            auth.OrgId, ExtractionStatus.Processing, "4 minutes 30 seconds", processingAttempts: 1);
+        var seededClaim = await ClaimTimestampAsync(docId);
 
         var resp = await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
 
@@ -2411,9 +2440,10 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         await using var verify = CreateSystemDb();
         var doc = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
         // The refusal must change NOTHING — a partially-applied reset (counters zeroed but status left
-        // Processing) would still hand the worker a fresh retry budget it never earned.
+        // Processing) would still hand the worker a fresh retry budget it never earned. Compared against
+        // the value Postgres stored (exactly, not "close to" a host-clock guess).
         doc.ExtractionStatus.Should().Be(ExtractionStatus.Processing);
-        doc.ProcessingStartedAt.Should().BeCloseTo(startedAt, TimeSpan.FromSeconds(1));
+        doc.ProcessingStartedAt.Should().Be(seededClaim);
         doc.ProcessingAttempts.Should().Be(1);
 
         // ExecuteUpdateAsync bypasses the audit interceptor, so "document.reextract_queued" is the whole
@@ -2435,7 +2465,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         var docId = await SeedExtractionStateAsync(
             auth.OrgId,
             ExtractionStatus.Processing,
-            DateTime.UtcNow.AddMinutes(-5).AddSeconds(-30),
+            "5 minutes 30 seconds",
             processingAttempts: 3,
             failedAttempts: 2,
             updatedAt: seededUpdatedAt);
@@ -2477,7 +2507,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         // route back from either side, so the guard fails OPEN on missing evidence of a live claim.
         var auth = await RegisterAndLoginAsync();
         var docId = await SeedExtractionStateAsync(
-            auth.OrgId, ExtractionStatus.Processing, processingStartedAt: null);
+            auth.OrgId, ExtractionStatus.Processing, claimAge: null);
 
         var resp = await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
 
@@ -2502,7 +2532,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         // belongs in this timestamp-bearing theory. (The pre-existing Failed test above covers the counter
         // reset from an exhausted retry budget, not this timestamp dimension.)
         var auth = await RegisterAndLoginAsync();
-        var docId = await SeedExtractionStateAsync(auth.OrgId, status, DateTime.UtcNow);
+        var docId = await SeedExtractionStateAsync(auth.OrgId, status, "0 seconds");
 
         var resp = await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
 
@@ -2520,7 +2550,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         // caller a retry that can never succeed.
         var orgA = await RegisterAndLoginAsync();
         var docId = await SeedExtractionStateAsync(
-            orgA.OrgId, ExtractionStatus.Processing, DateTime.UtcNow);
+            orgA.OrgId, ExtractionStatus.Processing, "0 seconds");
         // A SECOND org-A document, in a RE-ARMABLE state, is what makes this a tenant test at all. The
         // live-claim row above is refused by the guard on its own merits, so its 404 would survive the
         // global query filter ceasing to apply to ExecuteUpdateAsync (a stray IgnoreQueryFilters, a
@@ -2528,7 +2558,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         // existence re-read is what answers. This row would be re-armed by a leaking bulk UPDATE, so its
         // untouched columns below are the assertion that pins the filter on the WRITE.
         var rearmableId = await SeedExtractionStateAsync(
-            orgA.OrgId, ExtractionStatus.Completed, DateTime.UtcNow, processingAttempts: 3, failedAttempts: 2);
+            orgA.OrgId, ExtractionStatus.Completed, "0 seconds", processingAttempts: 3, failedAttempts: 2);
 
         var orgB = await RegisterAndLoginAsync();
         var crossOrg = await orgB.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
@@ -2563,11 +2593,13 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         // (`now() - interval …`). A cutoff captured from the APP clock into a local before the query
         // compares TWO clocks: an API container running ahead of Postgres stops refusing claims the worker
         // still holds (the guard silently weakened), one running behind refuses longer than the worker
-        // holds. No behavioural test can see that axis — the suite seeds ProcessingStartedAt from
-        // DateTime.UtcNow too, so both sides drift together — so this asserts on the SQL the endpoint
-        // ACTUALLY issues. Npgsql renders DateTime.UtcNow as bare now() (ADR 0009-clean: a timestamptz
-        // expression, no AT TIME ZONE) only while it stays INSIDE the predicate; hoisting it back into a
-        // local turns the comparison into a parameter and fails here.
+        // holds. No behavioural test can see that axis — it is invisible until host and Postgres actually
+        // disagree, and nothing in a test run makes them — so this asserts on the SQL the endpoint ACTUALLY
+        // issues. (SeedExtractionStateAsync stakes its claims with `now() - interval …` for the same
+        // reason: the boundary pair below must not straddle two clocks either, or it would flake on skew
+        // that says nothing about the guard.) Npgsql renders DateTime.UtcNow as bare now() (ADR 0009-clean:
+        // a timestamptz expression, no AT TIME ZONE) only while it stays INSIDE the predicate; hoisting it
+        // back into a local turns the comparison into a parameter and fails here.
         //
         // Captured through a Serilog sink because Program.cs composes Serilog with ReadFrom.Services, so a
         // DI-registered ILogEventSink receives every event the host logs — the StartupEnvironmentBanner
@@ -2590,7 +2622,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         reg.EnsureSuccessStatusCode();
         var orgId = (await reg.Content.ReadFromJsonAsync<JsonElement>())
             .GetProperty("data").GetProperty("organizationId").GetGuid();
-        var docId = await SeedExtractionStateAsync(orgId, ExtractionStatus.Completed, DateTime.UtcNow);
+        var docId = await SeedExtractionStateAsync(orgId, ExtractionStatus.Completed, "0 seconds");
 
         (await client.PostAsync($"/api/documents/{docId}/reextract", content: null))
             .StatusCode.Should().Be(HttpStatusCode.OK);
