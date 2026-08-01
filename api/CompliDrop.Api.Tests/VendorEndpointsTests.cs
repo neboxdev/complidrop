@@ -373,6 +373,57 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             .Should().Be(ComplianceStatus.Compliant, "the stored verdict stays real; only the read demotes");
     }
 
+    [Fact]
+    public async Task A_FAILED_extraction_a_human_confirmed_reads_Covered_again()
+    {
+        // The EXIT from ADR 0042 Amendment 2's Failed exclusion, and the reason it must exist. The
+        // ManualRequired half is explicitly scoped "until a human confirms the extraction on the document
+        // detail page", and the detail page offers manual entry for precisely the failed case ("We couldn't
+        // pull the details from this file automatically. Enter the key details below…"). But that
+        // confirmation CANNOT show up as a status change: DocumentEndpoints.ResolveManualReview refuses to
+        // move a Failed row ("Failed is its own louder error state"). The signal it DOES leave is
+        // IsManuallyVerified, which it sets unconditionally on every caller — so that is what the exclusion
+        // gates on. Without this, a cert a human typed in and verified would read ActionNeeded PERMANENTLY,
+        // with no endpoint able to move it back and no reason shown on the vendor page — a regression on
+        // the pre-Amendment reading rather than the safety fix Amendment 2 is.
+        //
+        // Driven through the REAL endpoint (PUT /verify), not a seeded column: the whole fix rests on
+        // IsManuallyVerified being REACHABLE from a Failed row, and a seeded bool would assert that away.
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Typed-In LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        var docId = await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.Failed);
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("ActionNeeded",
+            "an unreadable extraction nobody has confirmed is not in-force coverage (#365 / ADR 0042 Am. 2)");
+
+        (await auth.Client.PutAsync($"/api/documents/{docId}/verify", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // Reachability, asserted rather than assumed: the confirmation leaves the row on Failed (its error
+        // card and "Couldn't read" badge stay, which is correct — the extraction really did fail) and the
+        // ONLY thing that changed is the flag the exclusion now reads.
+        await using (var verify = CreateSystemDb())
+        {
+            var doc = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+            doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed,
+                "ResolveManualReview deliberately does not move a Failed row — so the status can't be the exit");
+            doc.IsManuallyVerified.Should().BeTrue("…which makes IsManuallyVerified the signal that can be");
+        }
+
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered",
+            "a human confirmed the values the verdict was computed from — the exclusion's exit, the same one "
+            + "ADR 0042 gives its ManualRequired sibling (#365 round 2)");
+
+        var list = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
+            .GetProperty("data").EnumerateArray().ToArray();
+        CoverageFor(list, vendorId).GetProperty("status").GetString().Should().Be("Covered",
+            "the LIST projection carries IsManuallyVerified too — both projections or the two rollups split");
+    }
+
     /// <summary>The vendor DETAIL rollup's coverage status — the projection the two list-based helpers
     /// above don't cover, and the one a user lands on from the vendor row.</summary>
     private static async Task<string?> CoverageStatusAsync(HttpClient client, Guid vendorId) =>
