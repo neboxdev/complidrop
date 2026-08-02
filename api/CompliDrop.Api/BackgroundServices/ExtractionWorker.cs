@@ -403,11 +403,13 @@ public class ExtractionWorker(
     /// intended semantics — forcing the column is what makes this writer actually be one.
     /// <para/>
     /// #460 has since shipped on this very method (ADR 0030 Amendment 2, see <see cref="PersistSuccess"/>),
-    /// and the two sit side by side on purpose rather than by oversight. It reads a FRESH value and writes
-    /// NOTHING back, because a vendor id or a document type is a fact a REQUEST owns and re-asserting it
-    /// would be a lost update. This writes, because trust is a fact THIS read owns and not writing it would
-    /// leave someone else's answer standing. Making the two agree — unforcing this, or forcing the verdict
-    /// inputs (ADR 0030 Amendment 2 Option G) — is a defect in whichever direction it goes.
+    /// and the two sit side by side on purpose rather than by oversight — the axis between them is
+    /// OWNERSHIP, not mechanism. #460 reads a FRESH value and writes no verdict INPUT back, because a
+    /// vendor id or a document type is a fact a REQUEST owns and re-asserting it would be a lost update.
+    /// It DOES force the verdict it computes (<see cref="ForceVerdictWrite"/>), for exactly the reason this
+    /// forces trust: both are facts THIS read owns, and not writing them would leave someone else's answer
+    /// standing. Making the two agree along the wrong axis — unforcing either conclusion, or forcing a
+    /// verdict INPUT (ADR 0030 Amendment 2 Option G) — is a defect in whichever direction it goes.
     /// </summary>
     private static void SetTrust(SystemDbContext db, Document doc, ExtractionTrust trust)
     {
@@ -800,6 +802,42 @@ public class ExtractionWorker(
             logger.LogError(ex, "Compliance evaluation failed for {DocumentId} during extraction persist; verdict left Pending", doc.Id);
         }
 
+        ForceVerdictWrite(db, doc);
+
         await db.SaveChangesAsync(ct);
     }
+
+    /// <summary>
+    /// Puts <see cref="Document.ComplianceStatus"/> into the persist's UPDATE unconditionally, covering BOTH
+    /// arms above — the graded verdict and the degrade-to-<c>Pending</c> (#460 review round 2, C1).
+    /// <para/>
+    /// Grading the right row is only half of ADR 0030 Amendment 2; the verdict also has to be WRITTEN. The
+    /// plain assignment is not enough, for exactly the reason spelled out on <see cref="SetTrust"/>: `doc`
+    /// is the snapshot <see cref="ProcessDocumentAsync"/> loaded before OCR + the LLM, and EF Core emits
+    /// only properties whose current value DIFFERS from it. So a freshly-computed verdict that happens to
+    /// EQUAL what the row held at claim time produces no SET clause at all — while the
+    /// <c>ComplianceCheck</c> rows are rewritten unconditionally and <c>UpdatedAt</c> guarantees the UPDATE
+    /// still runs. A request that moved the stored verdict inside the window then keeps ITS verdict beside
+    /// THIS read's inputs and THIS read's check rows: the torn pair ADR 0030 exists to prevent, in the
+    /// false-affirmative direction. The reachable shape is one PATCH: a document on a strict checklist
+    /// stored <c>NonCompliant</c>, reassigned mid-read to a lenient one (which re-grades it
+    /// <c>Compliant</c>), extracted at a limit that fails even the lenient floor — the recomputed verdict
+    /// is <c>NonCompliant</c>, equal to the pre-run snapshot, so the column is omitted and the row commits
+    /// <c>Compliant</c> over the lowered limit and a FAILING check row. Nothing re-grades it (the sweep
+    /// does date transitions only). The catch arm has the identical hole: a <c>Pending</c> snapshot
+    /// swallows the degrade and leaves a competitor's confident verdict standing over inputs this persist
+    /// just overwrote.
+    /// <para/>
+    /// This is NOT ADR 0030 Amendment 2 Option G, and the distinction is the whole reason the basis is
+    /// read-only. Option G forces verdict INPUTS — <c>VendorId</c>, <c>DocumentType</c>, a typed column —
+    /// which a REQUEST owns, so forcing them is the lost update Amendment 1 refutes. The verdict is this
+    /// read's OWN conclusion about the basis it just graded, the same thing <see cref="SetTrust"/> forces
+    /// one column over (ADR 0052 §2). Making the two agree in either direction is a defect.
+    /// <para/>
+    /// WORKER-ONLY on purpose. The request-path callers of <c>ApplyEvaluationAsync</c> run inside
+    /// <c>DocumentWriteConcurrency</c>'s <c>REPEATABLE READ</c> guard, whose entire point is that a
+    /// stale-basis UPDATE is REFUSED (40001 → re-run against a fresh read) rather than forced.
+    /// </summary>
+    private static void ForceVerdictWrite(SystemDbContext db, Document doc) =>
+        db.Entry(doc).Property(d => d.ComplianceStatus).IsModified = true;
 }
