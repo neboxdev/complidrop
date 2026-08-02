@@ -459,7 +459,11 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         // competitor, so none of them shows the 40001 firing against one that never opted in.
         // ExtractionWorker.PersistSuccess is that competitor — it keeps READ COMMITTED
         // last-writer-wins BY DECISION (ADR 0030 Amendment 1: an entity-level token there costs a
-        // re-paid OCR + LLM run) and it writes the whole tuple in one go.
+        // re-paid OCR + LLM run) and it writes the whole tuple in one go, for every input it EXTRACTS.
+        // The double below is faithful to THAT: it writes the inputs it changes plus the verdict they
+        // imply, in one SaveChanges. It does not model the worker's own stale-basis residual (anything
+        // EF sees unmodified on its minutes-old snapshot is graded from the pre-run value and never
+        // written back — #460), which is a different interleave and out of scope for this suite.
         //
         // Its DocumentField handling is a hazard of its own. It DELETES every row and re-inserts, so
         // the row the guarded writer loaded and is about to UPDATE by Id no longer exists. Under READ

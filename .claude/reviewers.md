@@ -492,6 +492,18 @@ Both are defined in this repo's `.claude/agents/`.
     inputs are committing regardless. Here the whole unit of work is still abandonable, so rolling back
     leaves the last successful writer's consistent tuple — strictly stronger. Committing the edit with
     `Pending` would BE the half-applied write #366 removes.
+  - "Commits nothing" covers the AUDIT trail too, and that costs a mechanism: `RunAsync` takes a
+    required `onAttemptAbandoned` and invokes it in the same catch that clears the change tracker, so
+    one abandonment discards both the entity state and whatever the caller kept outside it.
+    `UpdateFields` uses it to un-say `saved` (its "an attempt wrote a field edit" fact, read AFTER the
+    retry loop because `IAuditLogger` writes on a separate connection the rollback cannot reach);
+    `UpdateDocument` passes `null` because it keeps nothing outside the callback. Moving that reset to
+    the START of each attempt looks equivalent and is a real finding: `RunAsync` wraps `CommitAsync` in
+    the same conflict catch as the write, so the LAST attempt can set the fact and be abandoned with no
+    next attempt to clear it — a `document.fields_edited` row beside a 409 that says nothing committed.
+    It would also make the code depend on WHERE Postgres reports the conflict (REPEATABLE READ reports
+    first-updater-wins at the UPDATE; SSI under SERIALIZABLE, and any future row lock, report at
+    COMMIT). Pinned by `The_attempt_that_loses_at_the_LAST_commit_leaves_no_audit_row_behind_it`.
   - On these two writers the degrade-to-`Pending` rule is now CONDITIONAL, and that is RECORDED (ADR 0030
     Amendment 1), not overlooked. A recompute failure that is a server-side POSTGRES error has already
     aborted the enclosing transaction, so `EvaluateIntoUnitOfWorkAsync`'s catch sets `Pending` but the
@@ -511,19 +523,32 @@ Both are defined in this repo's `.claude/agents/`.
     the guard reorders no lock acquisition, so a deadlock here would be a NEW inversion that must
     surface. "Also retry deadlocks" is the bug, not the fix.
   - The pure re-grade paths (`EvaluateAsync` / `EvaluateForSystemAsync` / the fan-outs) keep their
-    read→compute→write window and are OUT of scope by decision — they write no inputs, so they cannot
-    lose an update. Recorded in the amendment; not a gap to re-report.
-  - `ExtractionWorker.PersistSuccess` is a whole-tuple writer for every input it EXTRACTS, but `VendorId`
-    is the one canonical verdict input it READS and never WRITES: it grades off the TRACKED FK
-    (`ApplyEvaluationAsync`'s `context.Entry(doc).Reference(d => d.Vendor)`) read before an OCR + LLM run
-    that lasts minutes. So a vendor PATCH inside that window still leaves the NEW vendor with the OLD
-    vendor's verdict — #366 closed the request-path half of scenario B only. Named in ADR 0030
-    Amendment 1 and ticketed as [#460](https://github.com/neboxdev/complidrop/issues/460), so it is not a
-    NEW finding — but two "obvious" fixes for it are, if one ever appears in a diff: widening the RR guard
-    (or an `xmin` token) to the worker costs a re-paid extraction, and re-reading `VendorId` and ASSIGNING
-    it onto the tracked entity makes the worker WRITE the column, clobbering a PATCH that lands between
-    the re-read and the commit — a lost update the code does not have today. A fresh id used to LOAD THE
-    CHECKLIST ONLY is the shape that does not trade one bug for another.
+    read→compute→write window and are OUT of scope by DECISION — not because they are harmless. They
+    write no INPUTS so they cannot lose an update, but `EvaluateInternalAsync` is a bare
+    `FirstOrDefaultAsync → ApplyEvaluationAsync → SaveChangesAsync` with no lock or token, so a
+    "Check again" that loaded before an `UpdateFields` LOWERED a limit writes its stale verdict back
+    after it: EF marks only `ComplianceStatus`/`UpdatedAt`, so the row keeps the lowered limit with a
+    stored `Compliant` and passing check rows citing values it no longer holds, and NOTHING re-grades
+    it (the sweep does date transitions only). Recorded in ADR 0030 Amendment 1 residual 1 and
+    ticketed as [#461](https://github.com/neboxdev/complidrop/issues/461) — not a NEW finding, but do
+    not let a diff or a doc call this window benign or self-healing either.
+  - `ExtractionWorker.PersistSuccess` is a whole-tuple writer for every input it EXTRACTS — and that
+    qualifier is the whole point. It grades from a tracked snapshot read before an OCR + LLM run that
+    lasts minutes, and EF writes back only what it MODIFIED, so EVERY canonical verdict input it leaves
+    unmodified keeps a request's committed value beside a verdict computed from the pre-run one. Treat
+    that as the mechanism, NOT as a list to close: `VendorId` always (it grades off the TRACKED FK,
+    `ApplyEvaluationAsync`'s `context.Entry(doc).Reference(d => d.Vendor)`); `DocumentType` whenever
+    `CanonicalDocumentTypes.NormalizeExtracted` returns the STORED value (blank/absent answer, or a
+    canonical answer equal to what it read), which decides which rules apply; any typed column whose
+    field the model OMITTED, since `ApplyToTypedColumn` runs only for returned fields. #366 closed the
+    request-path half of scenario B only. Named in ADR 0030 Amendment 1 and ticketed as
+    [#460](https://github.com/neboxdev/complidrop/issues/460), so no instance of it is a NEW finding —
+    but two "obvious" fixes ARE, if one ever appears in a diff: widening the RR guard (or an `xmin`
+    token) to the worker costs a re-paid extraction, and re-reading an input and ASSIGNING it onto the
+    tracked entity makes the worker WRITE that column, clobbering a request that lands between the
+    re-read and the commit — a lost update the code does not have today. A fresh value used to DECIDE
+    THE GRADING ONLY (e.g. a vendor id passed to the grading path, tracked FK untouched) is the shape
+    that does not trade one bug for another.
   - NO frontend change: the 409's message is already jargon-free copy that both call sites surface
     through their generic `err.message` toast. This is NOT the ADR 0050 Amendment 1 situation (there
     the client held a payload that actively CONTRADICTED the 409); here the user's edits survive in the

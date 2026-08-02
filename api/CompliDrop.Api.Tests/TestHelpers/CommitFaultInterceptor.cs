@@ -38,8 +38,18 @@ public sealed class CommitFaultInterceptor : DbTransactionInterceptor
     private bool _insideCallback;
 
     /// <summary>
-    /// Invoked with the 1-based ordinal of each commit on this context while armed; return <c>true</c>
-    /// to fail that commit with 40001 instead of committing. Null means inert.
+    /// Invoked with the 1-based ordinal of each explicit-transaction commit on ANY <c>AppDbContext</c>
+    /// in this host while armed; return <c>true</c> to fail that commit with 40001 instead of
+    /// committing. Null means inert.
+    /// <para/>
+    /// Host-wide, not per-context: <c>CommitFaultOptionsConfiguration</c> registers ONE singleton
+    /// instance onto every <c>AppDbContext</c>, so the counter is shared. That is invisible while the
+    /// only armed request is the one under test, and it SHIFTS the moment a test combines this with
+    /// <see cref="ConcurrentDocumentWriteInterceptor"/> — that hook's callback drives a real in-process
+    /// request which commits its own <c>AppDbContext</c> work, so those commits take ordinals too and an
+    /// ordinal picked for "the request under test's Nth attempt" would fault someone else's. A test that
+    /// needs both should target a predicate other than the raw ordinal (or key the counter on the
+    /// transaction/context first).
     /// </summary>
     public Func<int, Task<bool>>? OnCommitting { get; set; }
 

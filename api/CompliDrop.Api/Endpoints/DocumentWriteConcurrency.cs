@@ -11,8 +11,15 @@ namespace CompliDrop.Api.Endpoints;
 /// The #366 half of ADR 0030 (Amendment 1).
 /// <para/>
 /// ADR 0030 made each writer commit its inputs and the verdict they imply in ONE transaction, which
-/// removed the torn pair between a WHOLE-TUPLE writer (<c>ExtractionWorker.PersistSuccess</c>) and
-/// anything else. It does not help two PARTIAL writers: <c>UpdateFields</c> and <c>UpdateDocument</c>
+/// removed the torn pair between a whole-tuple writer (<c>ExtractionWorker.PersistSuccess</c>, for every
+/// input it EXTRACTS) and anything else. That qualifier is load-bearing, and this guard does not close
+/// what it leaves out: the worker grades from a tracked snapshot read minutes earlier and EF writes back
+/// only what it MODIFIED, so every canonical verdict input the worker leaves unmodified in that snapshot
+/// keeps a request's committed value beside a verdict computed from the pre-run one — <c>VendorId</c>
+/// always, <c>DocumentType</c> whenever <c>CanonicalDocumentTypes.NormalizeExtracted</c> returns the
+/// stored value, any typed column whose field the model omitted (ADR 0030 Amendment 1 residual 2, #460).
+/// <para/>
+/// It does not help two PARTIAL writers either: <c>UpdateFields</c> and <c>UpdateDocument</c>
 /// each rebuild the entire <c>ExtractionFields</c> JSON mirror from their own read snapshot, but EF's
 /// modified-property tracking writes only the typed columns / FK THEY touched. So two overlapping edits
 /// could commit a row whose typed <c>GeneralLiabilityLimit</c> was writer A's, whose JSON mirror said
