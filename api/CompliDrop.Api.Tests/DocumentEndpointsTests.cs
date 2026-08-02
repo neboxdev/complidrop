@@ -1759,6 +1759,8 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         doc.ExpirationDate.Should().BeNull();
         doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
             "looking at a document does not make its expiration parseable");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "#459 / ADR 0052: the two move together, so the empty save cannot restore vendor coverage either");
         doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant);
     }
 
@@ -1812,6 +1814,83 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
             "asserting a document is verified cannot make an unreadable expiration readable");
         doc.IsManuallyVerified.Should().BeTrue("the human did look — that part of the verify still lands");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "#459 / ADR 0052: trust follows the RESULTING state, so the re-raised review re-withdraws it — "
+            + "a verify that left Trusted behind would restore vendor coverage on a value nothing can read");
+    }
+
+    [Theory]
+    [InlineData(ExtractionStatus.Pending)]
+    [InlineData(ExtractionStatus.Processing)]
+    [InlineData(ExtractionStatus.Failed)]
+    public async Task Marking_verified_cannot_buy_trust_over_an_unreadable_value_on_an_unsettled_row(
+        ExtractionStatus seeded)
+    {
+        // #459 review, C2. The sibling test above proves the SETTLED case; these are the three statuses
+        // the escalation deliberately refuses to overwrite — and gating TRUST on the same `wasSettled`
+        // check handed each of them a clean bill of health for one click:
+        //   Pending    — exactly where POST /reextract leaves a re-armed distrusted document. Trust was
+        //                the one thing that survived the re-arm (that survival IS the #459 fix); a bare
+        //                PUT /verify then handed it straight back, on a value nothing can parse.
+        //   Processing — the same window, one poll later.
+        //   Failed     — the DURABLE one: the detail page's manual-entry affordance exists for this case,
+        //                so a human typing an expiration the parser rejects is ordinary use. The status
+        //                can never move here, so nothing else would ever take the trust back.
+        // The status gate stays (withdrawing trust de-queues nothing; overwriting Pending would), which
+        // is asserted below alongside the trust — the two must move independently, not together.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+        await using (var seed = CreateSystemDb())
+        {
+            var doc0 = await seed.Documents.FirstAsync(d => d.Id == docId);
+            doc0.ExpirationDate = null;
+            doc0.ExtractionFields = JsonDocument.Parse("""{"expiration_date":"12/31/2026 (per endorsement)"}""");
+            doc0.ExtractionStatus = seeded;
+            doc0.ExtractionTrust = ExtractionTrust.Distrusted; // as the read that routed it here left it
+            await seed.SaveChangesAsync();
+        }
+
+        (await auth.Client.PutAsync($"/api/documents/{docId}/verify", null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "asserting a document is verified cannot make an unreadable expiration readable, and the "
+            + "vendor rollup reads trust and nothing else — so a Trusted here is a false 'Covered'");
+        doc.ExtractionStatus.Should().Be(seeded,
+            "…while the STATUS gate is untouched: it exists only so the escalation can't de-queue the "
+            + "document, and withdrawing trust de-queues nothing");
+        doc.IsManuallyVerified.Should().BeTrue("the human did look — that part of the verify still lands");
+    }
+
+    [Fact]
+    public async Task Marking_verified_restores_trust_even_when_the_status_cannot_move()
+    {
+        // The human exit from the ADR 0042 coverage exclusion, now carried by the trust column (#459 /
+        // ADR 0052). For a Failed row the status can NEVER be the exit — ResolveManualReview deliberately
+        // refuses to move one ("Failed is its own louder error state"), and the detail page's manual-entry
+        // affordance exists precisely for that case — so before #459 the exclusion had to gate on
+        // IsManuallyVerified, a flag nothing ever cleared. The trust column is the same exit without the
+        // stickiness: a later extraction re-decides it.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedExtractionStateAsync(auth.OrgId, ExtractionStatus.Failed, claimAge: null);
+        await using (var seed = CreateSystemDb())
+        {
+            var doc0 = await seed.Documents.FirstAsync(d => d.Id == docId);
+            doc0.ExtractionTrust = ExtractionTrust.Distrusted; // as MarkFailed leaves it
+            await seed.SaveChangesAsync();
+        }
+
+        (await auth.Client.PutAsync($"/api/documents/{docId}/verify", null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed,
+            "the extraction really did fail — the error card and 'Couldn't read' badge must stay");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+            "…but a human has now vouched for the values, which is what the rollup asks about");
     }
 
     [Fact]
@@ -2542,6 +2621,37 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             .ExtractionStatus.Should().Be(ExtractionStatus.Pending);
     }
 
+    [Theory]
+    [InlineData(ExtractionStatus.ManualRequired)]
+    [InlineData(ExtractionStatus.Failed)]
+    public async Task Reextract_re_arms_the_queue_without_clearing_the_distrust(ExtractionStatus status)
+    {
+        // #459 / ADR 0052 at the write site. Re-arming moves PIPELINE POSITION back to the queue; it says
+        // nothing about whether the values currently on the row can be trusted. While trust lived in
+        // ExtractionStatus this statement DESTROYED it — Pending written over ManualRequired — so one click
+        // flipped the vendor rollup to Covered on the strength of the extraction the system had flagged,
+        // and if the re-read then failed nothing restored it (ADR 0042 Amendment 2's whole subject).
+        // The absence of ExtractionTrust from the SetProperty list is the fix, and this is its pin:
+        // add a .SetProperty(d => d.ExtractionTrust, Trusted) and this goes red.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedExtractionStateAsync(auth.OrgId, status, claimAge: null);
+        await using (var seed = CreateSystemDb())
+        {
+            var doc0 = await seed.Documents.FirstAsync(d => d.Id == docId);
+            doc0.ExtractionTrust = ExtractionTrust.Distrusted; // as PersistSuccess / MarkFailed leave it
+            await seed.SaveChangesAsync();
+        }
+
+        (await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var verify = CreateSystemDb();
+        var doc = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "the queue re-arm still happens");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "the distrust must survive the re-arm — recovering it is what #459 exists to do");
+    }
+
     [Fact]
     public async Task Reextract_is_tenant_scoped_and_a_missing_document_is_not_reported_as_busy()
     {
@@ -2639,6 +2749,90 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             "the staleness cutoff must be computed by POSTGRES (now() - the interval), the same clock that "
             + "wrote ProcessingStartedAt and the same one ClaimSql compares against — not captured from the "
             + "API container's DateTime.UtcNow and shipped as a timestamp parameter");
+    }
+
+    [Fact]
+    public async Task Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read()
+    {
+        // #459 review round 2, C1 — the pin behind the THIRD reachability path ADR 0052 § Consequences
+        // now records for an incoherent (status, trust) pair. MarkVerified is an unforced READ-COMMITTED
+        // partial write: it SELECTs the document, and EF then emits only the properties that differ from
+        // that snapshot. On an UNSETTLED row ResolveManualReview leaves ExtractionStatus alone by design
+        // (moving Pending would de-queue the document), so the UPDATE carries trust and NOT status.
+        //
+        // That partiality is exactly what makes the pair reachable without any deploy overlap: land
+        // ExtractionWorker.PersistSuccess's whole-tuple commit (ManualRequired + Distrusted) inside this
+        // request's load→save window and the row ends ManualRequired + TRUSTED — a distrusted basis
+        // rolling up as Covered, the ADR 0042 hole. The mirror (Completed + Distrusted) comes from the
+        // other seed. This is the ADR 0030 last-writer-wins class, the same family as #460 / #461.
+        //
+        // The interleave itself has no seam to construct through — one HTTP request, no injection point —
+        // so what is pinned is the PROPERTY that makes it reachable rather than the race. If this writer
+        // is ever made whole-tuple (the conditional-ExecuteUpdateAsync shape ADR 0052 weighs and declines,
+        // because it would drop the AuditSaveChangesInterceptor row on a human confirmation), this test is
+        // the one that must be updated deliberately, together with the residue bullet it backs.
+        //
+        // Read off the host's EF command log through a Serilog sink — the shape
+        // The_reextract_guard_compares_against_the_DATABASE_clock uses, for the same reason: no
+        // behavioural assertion can see which columns an UPDATE carried.
+        var sink = new CapturingLogEventSink();
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+
+        var reg = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            email = $"user-{Guid.NewGuid():N}@example.com",
+            password = "Password1234",
+            fullName = "Test User",
+            companyName = "Test Co",
+            industry = (string?)null,
+            companySize = (string?)null,
+            timeZone = "America/New_York",
+        });
+        reg.EnsureSuccessStatusCode();
+        var orgId = (await reg.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("organizationId").GetGuid();
+
+        // The state a re-armed distrusted document is really in — Pending in the queue, still carrying the
+        // previous read's dissent — and with READABLE values, so the confirmation genuinely flips trust
+        // (a no-op assignment would emit no SET clause at all and this test would pass vacuously).
+        var docId = await SeedExtractionStateAsync(orgId, ExtractionStatus.Pending, claimAge: null);
+        await using (var seed = CreateSystemDb())
+        {
+            var doc0 = await seed.Documents.FirstAsync(d => d.Id == docId);
+            doc0.ExtractionTrust = ExtractionTrust.Distrusted;
+            await seed.SaveChangesAsync();
+        }
+
+        (await client.PutAsync($"/api/documents/{docId}/verify", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using (var verify = CreateSystemDb())
+        {
+            var doc = await verify.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+            doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+                "precondition: the confirmation really did change trust, so the UPDATE below is not empty");
+            doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending,
+                "…and really did leave the status alone, which is the de-queue guard doing its job");
+        }
+
+        // Serilog renders the command text as a quoted string, so the SQL's own quotes arrive escaped.
+        var update = sink.Events
+            .Select(e => e.RenderMessage().Replace("\\\"", "\"", StringComparison.Ordinal))
+            .LastOrDefault(m => m.Contains("UPDATE \"Documents\"", StringComparison.Ordinal)
+                && m.Contains("\"IsManuallyVerified\"", StringComparison.Ordinal));
+        update.Should().NotBeNull(
+            "the confirmation's UPDATE must appear in the host's EF command log — if it does not, this "
+            + "test is a no-op and proves nothing about which columns the write carried");
+        update.Should().Contain("\"ExtractionTrust\" =",
+            "anti-no-op: the statement we are reading must be the one that writes trust");
+        update.Should().NotContain("\"ExtractionStatus\" =",
+            "the write is PARTIAL — trust without the status it was decided beside — so a worker commit "
+            + "landing between this request's SELECT and this UPDATE leaves the two columns disagreeing. "
+            + "Recorded as an accepted residue in ADR 0052 § Consequences (the ADR 0030 last-writer-wins "
+            + "class, family of #460/#461), NOT closed by widening DocumentWriteConcurrency's REPEATABLE "
+            + "READ guard to this writer");
     }
 
     /// <summary>Serilog sink that records every emitted event; thread-safe for the host's loggers.</summary>

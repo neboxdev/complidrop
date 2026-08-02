@@ -42,8 +42,8 @@ public static class VendorEndpoints
                     : new List<string>(),
                 Docs = v.Documents
                     .Select(d => new DocCoverageInfo(
-                        d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, d.ExtractionStatus,
-                        d.IsManuallyVerified, d.ComplianceChecks.Count))
+                        d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate,
+                        d.ExtractionTrust, d.ComplianceChecks.Count))
                     .ToList(),
                 DocumentCount = v.Documents.Count,
                 ActivePortalLinks = v.PortalLinks.Count(l => l.IsActive),
@@ -68,18 +68,21 @@ public static class VendorEndpoints
     }
 
     /// <summary>Lightweight per-document view the coverage rollup needs (FP-074). EffectiveDate feeds the
-    /// future-effective demotion (#362 / ADR 0041) via ComplianceStatusDeriver.Effective. ExtractionStatus
-    /// lets the rollup drop a doc the SYSTEM ITSELF distrusts (ManualRequired) or could not read at all
-    /// (Failed) from in-force coverage (#401 / ADR 0042 + Amendment 2, #365), and IsManuallyVerified is
-    /// the EXIT from the Failed half of that exclusion — the flag DocumentEndpoints.ResolveManualReview
-    /// writes when a human confirms or types in the values (ADR 0042 Amendment 2). ComplianceCheckCount
+    /// future-effective demotion (#362 / ADR 0041) via ComplianceStatusDeriver.Effective. ExtractionTrust
+    /// lets the rollup drop a doc whose extracted basis the system does not stand behind (#401 / ADR 0042,
+    /// #365 / Amendment 2, #459 / ADR 0052). ComplianceCheckCount
     /// feeds the never-graded demotion (#443 / ADR 0048) through
     /// the SAME deriver — it is a COUNT rather than a bool so the projection stays a plain scalar EF can
     /// translate, and DocumentGrading.IsGraded owns the threshold. No CreatedAt: coverage is decided by
-    /// the best CURRENTLY-IN-FORCE cert, not the newest upload (#362 review).</summary>
+    /// the best CURRENTLY-IN-FORCE cert, not the newest upload (#362 review).
+    /// <para/>
+    /// It deliberately carries NEITHER ExtractionStatus NOR IsManuallyVerified any more (#459 / ADR 0052).
+    /// Both were here only to infer trust from pipeline position plus an escape hatch, and the rollup
+    /// having no way to see the status is what makes "the re-arm cannot move coverage" structural rather
+    /// than a rule someone has to remember.</summary>
     private sealed record DocCoverageInfo(
         string DocumentType, Entities.ComplianceStatus ComplianceStatus, DateTime? ExpirationDate,
-        DateTime? EffectiveDate, Entities.ExtractionStatus ExtractionStatus, bool IsManuallyVerified,
+        DateTime? EffectiveDate, Entities.ExtractionTrust ExtractionTrust,
         int ComplianceCheckCount);
 
     /// <summary>
@@ -89,16 +92,16 @@ public static class VendorEndpoints
     /// IN FORCE today (EffectiveDate &lt;= today) and not expired. Coverage is judged on the best
     /// currently-in-force cert, NOT strictly the newest upload (#362 review): a vendor still covered by
     /// an in-force earlier cert who PRE-UPLOADS a future-effective renewal (which reads Pending, ADR 0041)
-    /// stays Covered instead of flipping to ActionNeeded. A doc the extraction system distrusts
-    /// (ExtractionStatus.ManualRequired) or could not READ AT ALL and nobody has confirmed
-    /// (ExtractionStatus.Failed with IsManuallyVerified false) is NOT counted as in-force coverage either,
+    /// stays Covered instead of flipping to ActionNeeded. A doc whose extracted basis the system does not
+    /// stand behind (ExtractionTrust.Distrusted — the machine routed the read to a human, or the extraction
+    /// terminally failed) is NOT counted as in-force coverage either,
     /// so a verdict computed from an extraction the machine itself doubts can't silently roll up to Covered
-    /// (#401 / ADR 0042 + Amendment 2) — each exclusion keeps a human exit: confirming a ManualRequired doc
-    /// clears the status, confirming a Failed one sets IsManuallyVerified. Neither is a doc NOTHING EVER
+    /// (#401 / ADR 0042 + Amendment 2, #459 / ADR 0052) — and the exclusion keeps a human exit: confirming
+    /// the document (PUT /fields or PUT /verify) restores trust. Neither is a doc NOTHING EVER
     /// GRADED counted (#443 / ADR 0048 — that exclusion arrives through the deriver itself, which reads such
     /// a doc Pending). A required type with no document is "missing"; a type whose only documents are
-    /// Expired / NonCompliant / not-yet-in-force (Pending) / never-graded (Pending) / awaiting-review
-    /// (ManualRequired) / unreadable-and-unconfirmed (Failed) is "action-needed" — a genuine gap still
+    /// Expired / NonCompliant / not-yet-in-force (Pending) / never-graded (Pending) / distrusted is
+    /// "action-needed" — a genuine gap still
     /// surfaces. The engine re-grades on rule/assignment change since #257, so this isn't built on stale
     /// verdicts.
     /// </summary>
@@ -133,42 +136,60 @@ public static class VendorEndpoints
             // (which reads Pending — not yet in force). An expired-only / non-compliant-only /
             // future-effective-only type still has NO in-force cert, so a real lapse is never masked.
             //
-            // #401 / ADR 0042: a doc the extraction system ITSELF flagged as unreliable (ManualRequired
-            // -- a low-confidence verdict-bearing field, an unreadable canonical value, or the model's
-            // reprocess signal) does NOT count as in-force coverage, even if its stored rule verdict reads
+            // #401 / ADR 0042: a doc the extraction system ITSELF flagged as unreliable (a low-confidence
+            // verdict-bearing field, an unreadable canonical value, or the model's reprocess signal) does
+            // NOT count as in-force coverage, even if its stored rule verdict reads
             // Compliant. For a compliance product a verdict the machine distrusts must not silently roll up
-            // to "Covered": a required type covered ONLY by ManualRequired docs falls to ActionNeeded -- a
+            // to "Covered": a required type covered ONLY by distrusted docs falls to ActionNeeded -- a
             // genuine gap surfaces, exactly like an expired-only type -- until a human confirms the
             // extraction on the document detail page. Read-time judgement only; the stored ComplianceStatus
-            // is untouched (extraction-trust and rule-verdict are separate axes -- ADR 0042).
+            // is untouched (extraction-trust and rule-verdict are separate axes -- ADR 0042). #365 / ADR
+            // 0042 Amendment 2 added a TERMINALLY FAILED extraction to the same population: an extraction
+            // the system could not complete is at least as untrustworthy as one it distrusted, and nothing
+            // about the failure touches ComplianceStatus, the ComplianceCheck rows or the DocumentFields --
+            // whatever read them last is still the basis.
             //
-            // #365 / ADR 0042 Amendment 2: a TERMINALLY FAILED extraction NOBODY HAS CONFIRMED is excluded
-            // on the same clause. An extraction the system could not complete is at least as untrustworthy
-            // as one it distrusted, and Failed is where a distrusted doc LANDS: Reextract's re-arm writes
-            // Pending over ManualRequired (the only column that carries the distrust), and if the re-read
-            // then fails terminally nothing restores it -- MarkFailed / RecordFailedAttempt write Failed
-            // without touching ComplianceStatus, the ComplianceCheck rows or the DocumentFields. Without
-            // this clause the old distrusted-basis verdict would read Covered PERMANENTLY, with no human
-            // ever confirming the extraction.
+            // #459 / ADR 0052: the clause reads ONE column, and it is not the pipeline's. ExtractionStatus
+            // carried both facts -- WHERE the document sits in the queue and WHETHER its extracted basis is
+            // trustworthy -- so Reextract's re-arm to Pending destroyed the distrust, and the two clauses
+            // above had to reconstruct it from where the document happened to LAND (plus IsManuallyVerified
+            // as the Failed half's exit, a flag nothing ever cleared). ExtractionTrust is written by the
+            // events that actually establish or undermine the basis -- PersistSuccess, the terminal-failure
+            // writers, and ResolveManualReview -- and by nothing else, so it survives the re-arm and the
+            // rollup can ask the question directly.
             //
-            // ...but it carries the SAME HUMAN EXIT its ManualRequired sibling has ("until a human confirms
-            // the extraction on the document detail page", above), because the detail page offers manual
-            // entry for exactly this case -- "We couldn't pull the details from this file automatically.
-            // Enter the key details below" -- and that Save is a REAL grade: UpdateFields mirrors the typed
-            // values into the canonical inputs and folds ApplyEvaluationAsync into its own unit of work, so
-            // the ComplianceCheck rows and the stored verdict are computed from values a human vouched for.
-            // The exit cannot be the STATUS, though: ResolveManualReview deliberately refuses to move a
-            // Failed row ("Failed is its own louder error state"), so a confirmed doc stays Failed forever.
-            // It is IsManuallyVerified -- the flag that same helper sets UNCONDITIONALLY, on every caller
-            // (PUT /fields, PUT /verify), Failed included. Without it the exclusion would have no exit at
-            // all: no endpoint could ever restore coverage, and a vendor whose cert a human typed in and
-            // verified would read ActionNeeded permanently -- a regression on the pre-Amendment reading,
-            // and a demand for a remedy the page cannot offer. Amendment 2's target population is untouched:
-            // a distrusted doc nobody confirmed carries IsManuallyVerified == false when it lands on Failed.
+            // The HUMAN EXIT is preserved and is now one mechanism instead of two: ResolveManualReview (the
+            // shared helper behind PUT /fields and PUT /verify) writes Trusted, so confirming a document
+            // restores coverage whatever its status. That matters most for Failed, where the status can
+            // never be the exit -- the same helper deliberately refuses to move a Failed row -- and the
+            // detail page offers manual entry for exactly that case ("We couldn't pull the details from this
+            // file automatically. Enter the key details below"), whose Save is a REAL grade: UpdateFields
+            // mirrors the typed values into the canonical inputs and folds ApplyEvaluationAsync into its own
+            // unit of work. Unlike IsManuallyVerified the trust flag is NOT sticky: a later extraction
+            // re-decides it, so a document confirmed once, successfully re-read, then failed again is
+            // distrusted again rather than reading as confirmed on values no human ever saw (the residue
+            // ADR 0042 Amendment 2 recorded and this closes).
             //
-            // Deliberately NOT extended to Pending/Processing: that window is bounded and self-healing (the
-            // worker resolves it within a poll), so excluding it would drop every legitimately-compliant
-            // vendor to ActionNeeded during any ordinary re-extract.
+            // Pending/Processing are still not excluded BY THEIR STATUS -- the clause cannot see the status
+            // at all. An in-flight document is excluded exactly when it is Distrusted, and there are TWO
+            // ways it can be (#459 review round 2 -- the second one used to be impossible, which is why
+            // this comment claimed the exclusion was continuous "by construction"):
+            //   1. It was ALREADY distrusted and the re-arm carried the distrust through. The queue writers
+            //      (Reextract, RecordFailedAttempt's retry arm, RequeueInterruptedAsync) leave trust alone,
+            //      so the document read ActionNeeded the instant before the click -- continuous.
+            //   2. It is distrusted WHILE in flight, by ResolveManualReview: trust follows READABILITY on
+            //      every status (only the escalation back to ManualRequired is de-queue-gated), so a
+            //      PUT /fields or PUT /verify that leaves an unreadable canonical value on a Pending/
+            //      Processing row withdraws trust there too. That IS a new mid-read demotion, and it is
+            //      the intended one: fail-CLOSED per ADR 0040 and user-initiated, with the detail page
+            //      naming the field to correct (ManualReviewCard renders off unreadableFields, not off the
+            //      status). It clears when the read the user is watching lands cleanly, or when a later
+            //      save leaves nothing unreadable. Pinned by
+            //      A_field_save_that_leaves_an_unreadable_value_demotes_a_cert_that_is_already_in_flight.
+            // What is unchanged is the protection ADR 0042 Amendment 2's carve-out actually exists for: an
+            // ordinary re-extract of a trusted document keeps its vendor Covered throughout, because
+            // nothing in the queue path touches trust. What Amendment 3 changed is that a re-read of a
+            // DISTRUSTED document no longer buys a clean bill of health for the length of the read.
             //
             // #443 / ADR 0048: a doc NOTHING EVER GRADED (zero ComplianceCheck rows -- no checklist, an
             // empty checklist, or a checklist whose rules all govern other document types, which is
@@ -178,8 +199,7 @@ public static class VendorEndpoints
             // reads such a doc Pending, so it falls out of the affirmative test the same way an
             // expired or not-yet-in-force cert does -- one demotion, applied identically on every surface.
             var inForce = typeDocs
-                .Where(d => d.ExtractionStatus is not Entities.ExtractionStatus.ManualRequired
-                    && !(d.ExtractionStatus is Entities.ExtractionStatus.Failed && !d.IsManuallyVerified)
+                .Where(d => d.ExtractionTrust is not Entities.ExtractionTrust.Distrusted
                     && ComplianceStatusDeriver.Effective(
                         d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate,
                         DocumentGrading.IsGraded(d.ComplianceCheckCount), today)
@@ -245,8 +265,8 @@ public static class VendorEndpoints
         var coverageDocs = await db.Documents
             .Where(d => d.VendorId == id)
             .Select(d => new DocCoverageInfo(
-                d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate, d.ExtractionStatus,
-                d.IsManuallyVerified, d.ComplianceChecks.Count))
+                d.DocumentType, d.ComplianceStatus, d.ExpirationDate, d.EffectiveDate,
+                d.ExtractionTrust, d.ComplianceChecks.Count))
             .ToListAsync(ct);
 
         var coverage = ComputeCoverage(

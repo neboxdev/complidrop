@@ -152,34 +152,19 @@ Both are defined in this repo's `.claude/agents/`.
     `ExtractionWorker.ManualReviewConfidenceThreshold` (0.7) — a per-field gate on a
     DIFFERENT threshold is a real finding. An ABSENT field never trips it (only a
     present-but-low-confidence one).
-  - `VendorEndpoints.ComputeCoverage` excludes a `ManualRequired` doc from in-force
-    coverage, so a required type covered ONLY by distrusted docs reads ActionNeeded (like
-    an expired-only type). READ-TIME only — the stored `ComplianceStatus` is untouched (no
-    persisted `Pending`), extraction-trust and rule-verdict are separate axes.
-  - A terminally `Failed` extraction **nobody has confirmed** is excluded by that SAME clause
-    (Amendment 2, #365). It is where a distrusted doc LANDS: `Reextract` re-arms by writing
-    `Pending` over `ManualRequired` (the only column carrying the distrust) and `MarkFailed` /
-    `RecordFailedAttempt` never restore it, so without this the old distrusted-basis verdict
-    read Covered permanently. `Pending`/`Processing` are deliberately NOT excluded (bounded,
-    self-healing — excluding them would sink every compliant vendor during an ordinary
-    re-extract, and a test asserts the Covered reading in that window); "also exclude the
-    in-flight statuses" is the bug, not a gap.
-  - The `Failed` half's EXIT is `IsManuallyVerified`, and it is LOAD-BEARING — do NOT
-    "simplify" the clause to a bare status test (`is not (ManualRequired or Failed)`). That
-    shape was the round-1 fix and it OVER-REACHES: the detail page's manual-entry affordance
-    exists FOR the failed case, that Save grades the doc for real (`UpdateFields` →
-    `ApplyEvaluationAsync`), and `ResolveManualReview` deliberately will not move a `Failed`
-    row — so status can never be the exit and the exclusion would have NONE. A human-typed,
-    verified cert would read ActionNeeded forever with no endpoint able to move it back. Both
-    directions are pinned: `A_FAILED_extraction_a_human_confirmed_reads_Covered_again` (the
-    exit) and `A_vendor_whose_only_cert_is_a_FAILED_extraction_reads_ActionNeeded_not_Covered`
-    (the target population). The flag is STICKY by accepted design (ADR 0042 Am. 2, "The exit")
-    — a doc confirmed, re-extracted successfully, then failed again reads confirmed; the
-    durable fix is the separate extraction-trust COLUMN, which is
-    [#459](https://github.com/neboxdev/complidrop/issues/459) — it used to say #366, a loose
-    same-table association; #366 shipped as ADR 0030 Amendment 1 with NO schema change — so do
-    not re-flag it here. The `ManualRequired` half has
-    NO such escape on purpose (confirming it flips the status to `Completed`).
+  - `VendorEndpoints.ComputeCoverage` excludes a DISTRUSTED doc from in-force coverage, so a
+    required type covered ONLY by distrusted docs reads ActionNeeded (like an expired-only
+    type). READ-TIME only — the stored `ComplianceStatus` is untouched (no persisted
+    `Pending`), extraction-trust and rule-verdict are separate axes. Since #459 / ADR 0052
+    (Amendment 3) the clause reads ONE column, `Document.ExtractionTrust`, and `DocCoverageInfo`
+    carries NEITHER `ExtractionStatus` NOR `IsManuallyVerified` any more — see the ADR 0052
+    block below for the whole mechanism. The historical shape (two status clauses plus an
+    `IsManuallyVerified` escape) is described in Amendments 1–2; do not restore it.
+  - A terminally `Failed` extraction is in that population too (Amendment 2, #365) — an
+    extraction the system could not COMPLETE is at least as untrustworthy as one it distrusted,
+    and nothing about the failure touches `ComplianceStatus`, the check rows or the fields.
+    Since ADR 0052 it gets there because `MarkFailed` / `RecordFailedAttempt`'s terminal arm
+    WRITE `Distrusted`, not because the read infers it from the status.
   - Deliberately NOT applied to the document-level surfaces (dashboard compliant/
     expiringSoon counts, `?status=` list/badges, CSV/PDF export, per-doc compliance badge):
     the list already shows a separate `ManualRequired` extraction badge beside the
@@ -189,6 +174,121 @@ Both are defined in this repo's `.claude/agents/`.
     Note the CONTRAST with ADR 0048 below, which mirrors its demotion onto the document-level
     surfaces: that is not an inconsistency, it turns on whether a second badge already discloses
     the state. Here one does; for never-graded none does.
+- Extraction TRUST as its own column is ADR 0052 (#459 / ADR 0042 Amendment 3); the facts that
+  follow are pointers into it, not a second copy of the rationale.
+  - `Document.ExtractionStatus` is PIPELINE POSITION and `Document.ExtractionTrust` is TRUST, and
+    the split is the point: they used to be one column, so `Reextract` writing `Pending` over
+    `ManualRequired` DESTROYED the ADR 0042 distrust signal. Re-conflating them in either
+    direction IS a real finding.
+  - FOUR writers, and only four: `PersistSuccess` (ONE boolean drives BOTH columns — a review-routed
+    read that forgets to withdraw trust re-opens the ADR 0042 hole, a clean read that forgets to
+    restore it strands the doc at ActionNeeded), `MarkFailed`, `RecordFailedAttempt`'s TERMINAL arm,
+    and `ResolveManualReview`. The retry arm deliberately leaves trust alone — a requeued attempt
+    says nothing about the values already on the row, and distrusting on a transient hiccup sinks a
+    covered vendor for the whole retry cycle.
+  - The three WORKER writers go through `ExtractionWorker.SetTrust`, which sets `IsModified` on the
+    column — a plain assignment is NOT enough and removing the force is a real finding.
+    `ProcessDocumentAsync` loads the doc BEFORE OCR+LLM and holds that snapshot for minutes; EF emits
+    only changed properties, so assigning the snapshot's own value emits no `SET` at all while the row
+    may have moved (a mid-read `PUT /verify` commits the opposite value). Do NOT file this as the ADR
+    0030 / #460 stale-snapshot residual: #460 is a writer RE-ASSERTING verdict INPUTS it graded from;
+    this is the writer's OWN conclusion, which ADR 0052 §2 says it owns. Pinned by
+    `PersistSuccess_forces_its_trust_decision_over_a_write_that_landed_mid_extraction` and
+    `A_terminal_failure_forces_its_distrust_over_a_confirmation_that_landed_mid_attempt`
+    (`FakeExtractionClient.DuringExtract` constructs the interleaving; do not "simplify" it away).
+  - `ResolveManualReview` decides trust from READABILITY on every status; only the escalation back to
+    `ManualRequired` is gated on `wasSettled`. That gate exists solely so the escalation cannot
+    DE-QUEUE the doc — withdrawing trust de-queues nothing — so re-gating trust on it is the bug, not
+    tidiness: on a re-armed `Pending` row or a `Failed` one, one click would buy `Trusted` over an
+    unparseable canonical value (and on `Failed` nothing would ever take it back). Pinned by
+    `Marking_verified_cannot_buy_trust_over_an_unreadable_value_on_an_unsettled_row` (all three
+    unsettled statuses), with the status half still pinned by
+    `An_unreadable_edit_does_not_overwrite_an_unsettled_extraction_status`.
+  - `Reextract`'s `ExecuteUpdateAsync` does NOT set trust, and that ABSENCE is the fix. Adding a
+    `.SetProperty(d => d.ExtractionTrust, …)` there (it looks like tidy bookkeeping) restores the
+    original bug exactly. `Reextract` is pinned twice: a behavioural Theory in `DocumentEndpointsTests`
+    and `Adr0052EnforcementTests.The_queue_re_arm_does_not_write_trust`. `RequeueInterruptedAsync` is
+    the same rule with its own pin —
+    `Graceful_shutdown_mid_attempt_requeues_without_counting_a_failure` seeds `Distrusted` and asserts
+    it survives, plus the member-level source assertion in `Adr0052EnforcementTests`. The whole-file
+    source scan exists because no behavioural test can pin "no OTHER surface reads trust" — the ADR
+    0042 document-level carve-out.
+  - The `IsManuallyVerified` clause is RETIRED from `ComputeCoverage`, which is how Amendment 2's
+    recorded stickiness residue closes. The flag STAYS on the entity + detail DTO (a real fact about
+    the doc); re-adding it to the coverage predicate re-opens "confirmed once, re-extracted, failed
+    again reads confirmed". The human EXIT is unchanged in substance —`ResolveManualReview` writes
+    `Trusted`, still reachable from a `Failed` row where the status can never move — and both
+    directions stay pinned by the same two tests
+    (`A_FAILED_extraction_a_human_confirmed_reads_Covered_again`,
+    `A_vendor_whose_only_cert_is_a_FAILED_extraction_reads_ActionNeeded_not_Covered`).
+  - `Pending`/`Processing` are still not excluded BY STATUS — the clause cannot see the status. An
+    in-flight doc is excluded exactly when it is `Distrusted`, and TWO paths reach that (round 2 of the
+    #459 review corrected this bullet: the second one used to be unreachable, so the record said the
+    exclusion was continuous "by construction"). (1) It was ALREADY distrusted and the re-arm carried the
+    distrust through — the queue writers leave trust alone, so it read ActionNeeded the instant before the
+    click. (2) `ResolveManualReview` distrusts it WHILE in flight, because trust follows READABILITY on
+    every status and only the `ManualRequired` escalation is de-queue-gated — so a `PUT /fields` /
+    `PUT /verify` leaving an unreadable canonical value on a `Pending`/`Processing` row withdraws trust
+    there too. Path 2 is a genuinely NEW mid-read demotion and it is ACCEPTED: fail-CLOSED (ADR 0040),
+    user-initiated, disclosed by the detail page's `ManualReviewCard` (which renders off
+    `unreadableFields`, not off the status), and cleared by the read the user is watching landing cleanly
+    or by a later save that leaves nothing unreadable. Pinned:
+    `A_field_save_that_leaves_an_unreadable_value_demotes_a_cert_that_is_already_in_flight`. ADR 0042
+    Amendment 2's carve-out keeps its actual protection either way — an ordinary re-extract of a TRUSTED
+    doc stays Covered throughout (pinned:
+    `A_trusted_cert_being_re_extracted_stays_Covered_for_the_whole_in_flight_window`). Amendment 2's
+    OLD assertion that a re-armed DISTRUSTED doc reads Covered in flight was reversed deliberately
+    in Amendment 3 — do not "restore" it, and do not read the reversal as licence to exclude
+    in-flight statuses BY STATUS.
+  - The migration is ADDITIVE and its BACKFILL is a decision, not a default: it reproduces the
+    pre-#459 read predicate verbatim (`ManualRequired`, or `Failed AND NOT IsManuallyVerified`) so
+    no row excluded before the deploy is re-covered after it. "Just default everything to Trusted"
+    (re-covers the excluded population) and "default everything to Distrusted" (sinks every covered
+    vendor, re-paying the whole corpus's OCR+LLM to recover) are both recorded rejections, ADR 0052
+    Options C/D. The store default `'Trusted'` is load-bearing: EF's implicit `""` for a required
+    text column is unreadable by the enum.
+  - KNOWN residue, ADR 0052 § Consequences, BOTH DIRECTIONS — do not re-report either. During a
+    Railway deploy overlap the OLD container writes `ExtractionStatus` without trust (it does not know
+    the column exists). NOT closable by the column default: the exposed transition is an `UPDATE`, not
+    an `INSERT`. The nullable-column-with-legacy-fallback fix is Option E, refuted (keeps the
+    status→trust inference alive forever with no forcing function to remove it); splitting the release
+    so the read switch ships a deploy later is also recorded and declined.
+    - Fail-OPEN: `ManualRequired`/`Failed` + `Trusted` — a distrusted doc reads Covered. SELF-HEALS on
+      the next extraction and keeps its own extraction badge meanwhile. Pinned by
+      `A_ManualRequired_row_the_backfill_never_reached_reads_Covered_by_design`.
+    - Fail-CLOSED: `Completed` + `Distrusted` — the old container's `PersistSuccess`/
+      `ResolveManualReview` lands on a row the boot backfill marked `Distrusted`. Excluded from
+      coverage with **no badge and no self-heal** (extraction badge reads `Read`, compliance badge
+      reads `Compliant`) — the ONE shape where ADR 0042's carve-out disclosure premise is false. The
+      REMEDY is user-reachable and is the exclusion's normal exit: any new-container writer rewrites
+      trust, i.e. a re-extract that lands cleanly, or one `Mark verified`. Pinned (remedy included) by
+      `A_Completed_row_the_boot_backfill_distrusted_reads_ActionNeeded_with_nothing_disclosing_why`.
+    - A THIRD path reaches BOTH pairs with no deploy overlap, corrected in round 2 of the #459 review and
+      ticketed as [#465](https://github.com/neboxdev/complidrop/issues/465) — the record used to say
+      "neither shape is reachable through the NEW writers", which is true of any ONE writer and false of
+      two INTERLEAVED. `MarkVerified` is an unforced READ COMMITTED partial write (SELECT, then EF emits
+      only what differs from that snapshot), and on an unsettled row `ResolveManualReview` leaves the
+      status alone — so the UPDATE carries trust WITHOUT it, and a `PersistSuccess` commit landing in that
+      window leaves `ManualRequired` + `Trusted`. ADR 0030 last-writer-wins class, same family as
+      #460/#461 and plausibly absorbed by #461's shape; `UpdateFields` is exempt (REPEATABLE READ + 40001
+      re-run). ACCEPTED, not overlooked: widening the RR guard to `MarkVerified` is itself a finding (see
+      the ADR 0030 block), and the conditional-`ExecuteUpdateAsync` alternative drops the
+      `AuditSaveChangesInterceptor` diff row on a human confirmation while still grading from the stale
+      snapshot. Pinned by
+      `Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read` (EF command log).
+  - KNOWN in-flight disclosure gap, also ADR 0052 § Consequences — do not re-report: a re-armed
+    DISTRUSTED doc (`Pending`/`Processing` + `Distrusted`) makes the vendor read ActionNeeded while the
+    extraction badge reads `Reading…` rather than `Needs your review`. Bounded by one poll,
+    self-healing, and in the safe direction (it read ActionNeeded the instant before the click).
+  - NO wire field: trust itself is not surfaced. The disclosure the carve-out rests on is the detail
+    page's existing extraction badge and review / error cards — except in the recorded windows above,
+    where that premise is explicitly noted as not holding. ONE frontend change went with it (round 2 of
+    the #459 review): `ManualReviewCard` is gated on `unreadableFields` being non-empty as well as on
+    `extractionStatus === "ManualRequired"`, because an unreadable canonical value now withdraws trust on
+    EVERY status while the escalation is refused on `Failed` (where manual entry is the affordance the
+    page offers) and on `Pending`/`Processing`. Re-narrowing that gate back to the status IS a finding —
+    it leaves those users a page reading "Verified: Yes" with nothing naming the value blocking coverage.
+    The card still renders NOTHING when there is neither cause; both directions are pinned by test.
 - A NEVER-GRADED document is ADR 0048 (#443) — zero `ComplianceCheck` rows, i.e. nothing was ever
   measured against it. The facts that follow are pointers into it, not a second copy.
   - There is ONE recognizer, `Services/DocumentGrading.cs`, shipping exactly ONE shape:

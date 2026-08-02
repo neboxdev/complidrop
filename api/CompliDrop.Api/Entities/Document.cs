@@ -11,6 +11,33 @@ public enum ExtractionStatus
     ManualRequired
 }
 
+/// <summary>
+/// Whether the system stands behind the values this document's compliance verdict was computed from
+/// (#459, <see href="../../../docs/adr/0052-extraction-trust-is-its-own-column.md">ADR 0052</see>) —
+/// the ADR 0042 distrust signal, on its OWN column so it is not destroyed by a pipeline re-arm.
+/// <para/>
+/// Orthogonal to <see cref="ExtractionStatus"/>, which is PIPELINE POSITION (where the document sits in
+/// the queue). The two used to share one column: <c>ManualRequired</c> meant both "settled" and
+/// "distrusted", so <c>DocumentEndpoints.Reextract</c> writing <c>Pending</c> over it erased the distrust
+/// with nothing to restore it.
+/// <para/>
+/// <c>Trusted</c> is the ABSENCE of a distrust event, not a positive endorsement — a freshly-uploaded
+/// document nothing has read yet is <c>Trusted</c> here and withheld from affirmative coverage by the
+/// never-graded axis instead (ADR 0048).
+/// </summary>
+public enum ExtractionTrust
+{
+    /// <summary>No distrust event on record: the last read completed cleanly, or a human confirmed the
+    /// values, or nothing has read the document yet.</summary>
+    Trusted,
+
+    /// <summary>The last event to touch this document's basis did NOT vouch for it — the machine routed
+    /// the read to a human (low average / low verdict-bearing-field confidence, the model's reprocess
+    /// signal, or an unreadable canonical value), or the extraction terminally FAILED. Withheld from
+    /// in-force vendor coverage (ADR 0042) until a clean re-read or a human confirmation clears it.</summary>
+    Distrusted
+}
+
 public enum ComplianceStatus
 {
     Pending,
@@ -35,6 +62,18 @@ public class Document
     public string? DocumentSubType { get; set; }
 
     public ExtractionStatus ExtractionStatus { get; set; } = ExtractionStatus.Pending;
+
+    /// <summary>
+    /// Does the system stand behind the values this document's verdict was computed from? See
+    /// <see cref="Entities.ExtractionTrust"/>. Written by the four events that establish or undermine the
+    /// basis — <c>ExtractionWorker.PersistSuccess</c> (clean read vs routed-to-review),
+    /// <c>ExtractionWorker.MarkFailed</c> / <c>RecordFailedAttempt</c> (terminal failure), and
+    /// <c>DocumentEndpoints.ResolveManualReview</c> (a human confirmed) — and deliberately NOT by
+    /// <c>Reextract</c>, whose whole point is that the distrust must survive the re-arm (#459 / ADR 0052).
+    /// The vendor coverage rollup reads THIS, never <see cref="ExtractionStatus"/>.
+    /// </summary>
+    public ExtractionTrust ExtractionTrust { get; set; } = ExtractionTrust.Trusted;
+
     public double? ExtractionConfidence { get; set; }
     public string? ExtractionRawJson { get; set; }
     public JsonDocument? ExtractionFields { get; set; }

@@ -369,17 +369,52 @@ public class ExtractionWorker(
             // here — a per-attempt timeout or graceful shutdown must propagate to ProcessClaimedAsync,
             // which records it correctly (a shutdown is an interruption, not a counted failure).
             logger.LogError(ex, "Extraction failed for {DocumentId}", doc.Id);
-            RecordFailedAttempt(doc, "extraction.failed", ex.Message);
+            RecordFailedAttempt(db, doc, "extraction.failed", ex.Message);
             await db.SaveChangesAsync(ct);
         }
     }
 
     /// <summary>
+    /// Writes this worker's TRUST DECISION and FORCES the column into the UPDATE (#459 / ADR 0052 §2).
+    /// <para/>
+    /// The plain assignment is not enough. <see cref="ProcessDocumentAsync"/> loads the document BEFORE
+    /// OCR + the LLM call and holds that tracked snapshot for the minutes the read takes, and EF Core
+    /// emits only properties whose current value DIFFERS from the snapshot. So assigning the snapshot's
+    /// own value produces no SET clause at all — and the row in the database may have moved: a human who
+    /// clicks "Mark verified" mid-read commits <c>Trusted</c> on another connection
+    /// (<c>DocumentEndpoints.ResolveManualReview</c>), and the extraction that was supposed to RE-DECIDE
+    /// trust would silently leave that confirmation standing. The row then reads
+    /// <c>ManualRequired</c>/<c>Failed</c> paired with <c>Trusted</c> — a distrusted basis rolling up as
+    /// Covered, the exact ADR 0042 hole. The mirror image is just as wrong: a clean re-read that means to
+    /// RESTORE trust over a mid-read escalation would no-op and strand the document at ActionNeeded.
+    /// <para/>
+    /// Forcing the column closes this writer's half only. ADR 0052 § Consequences records the OTHER two
+    /// paths to the same incoherent pairs, and neither is a deploy overlap alone: the request-side
+    /// <c>MarkVerified</c> is an unforced READ COMMITTED partial write, so a commit from HERE landing
+    /// inside ITS load→save window leaves the pair disagreeing the other way round
+    /// (<see href="https://github.com/neboxdev/complidrop/issues/465">#465</see>, the ADR 0030
+    /// last-writer-wins class). Do not read this comment as "the pairs are otherwise deploy-only".
+    /// <para/>
+    /// This is NOT the ADR 0030 stale-snapshot residual (<see
+    /// href="https://github.com/neboxdev/complidrop/issues/460">#460</see>), which is about a writer
+    /// grading from verdict INPUTS the row has moved on from and re-asserting them. Nothing is being
+    /// re-asserted here: the value is this read's OWN conclusion, computed from what the model just
+    /// returned, and ADR 0052 §2 says these writers own it. "Last writer wins on the whole tuple" is the
+    /// intended semantics — forcing the column is what makes this writer actually be one.
+    /// </summary>
+    private static void SetTrust(SystemDbContext db, Document doc, ExtractionTrust trust)
+    {
+        doc.ExtractionTrust = trust;
+        db.Entry(doc).Property(d => d.ExtractionTrust).IsModified = true;
+    }
+
+    /// <summary>
     /// Records one genuine failure against the retry budget: increments <see cref="Document.FailedAttempts"/>
     /// and either marks the document <c>Failed</c> (budget spent) or returns it to <c>Pending</c> for
-    /// another attempt. Does not save — the caller owns the unit of work.
+    /// another attempt. Does not save — the caller owns the unit of work. Takes the context only so the
+    /// terminal arm can go through <see cref="SetTrust"/>.
     /// </summary>
-    private static void RecordFailedAttempt(Document doc, string code, string message)
+    private static void RecordFailedAttempt(SystemDbContext db, Document doc, string code, string message)
     {
         doc.FailedAttempts += 1;
         // Clamped for the same reason the extracted fields are: `message` is an arbitrary exception
@@ -390,6 +425,14 @@ public class ExtractionWorker(
         if (doc.FailedAttempts >= MaxAttempts)
         {
             doc.ExtractionStatus = ExtractionStatus.Failed;
+            // TERMINAL failure ⇒ distrusted (#459 / ADR 0052), the durable form of ADR 0042 Amendment 2's
+            // premise: an extraction the system could not COMPLETE is at least as untrustworthy as one it
+            // distrusted, and nothing here touches the fields, the ComplianceCheck rows or the stored
+            // verdict — so whatever read them last is still the basis. Written on the TERMINAL arm only:
+            // while retries remain the document is merely back in the queue, its basis unchanged, and
+            // distrusting a good prior read over one transient hiccup would sink a legitimately-covered
+            // vendor for the length of the retry cycle.
+            SetTrust(db, doc, ExtractionTrust.Distrusted);
         }
         else
         {
@@ -412,7 +455,7 @@ public class ExtractionWorker(
         var db = scope.ServiceProvider.GetRequiredService<SystemDbContext>();
         var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == documentId, cts.Token);
         if (doc is null) return;
-        RecordFailedAttempt(doc, code, message);
+        RecordFailedAttempt(db, doc, code, message);
         await db.SaveChangesAsync(cts.Token);
     }
 
@@ -457,6 +500,10 @@ public class ExtractionWorker(
         CancellationToken ct)
     {
         doc.ExtractionStatus = ExtractionStatus.Failed;
+        // Terminal, so distrusted — same rule and same reason as RecordFailedAttempt's terminal arm
+        // (#459 / ADR 0052). Every writer of ExtractionStatus.Failed pairs it with Distrusted; a Failed
+        // row that reads Trusted can only come from a human confirmation AFTER the failure.
+        SetTrust(db, doc, ExtractionTrust.Distrusted);
         doc.ProcessingError = Clamp($"{code}: {message}", ProcessingErrorMaxLength);
         doc.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -644,7 +691,7 @@ public class ExtractionWorker(
         // expiration date, the additional-insured party). So if ANY verdict-bearing field the model
         // actually returned came back below the SAME threshold, route the document to a human regardless
         // of the average, rather than let an extraction the system itself distrusts grade and roll up as
-        // "Covered" (VendorEndpoints.ComputeCoverage drops a ManualRequired doc from in-force coverage).
+        // "Covered" (VendorEndpoints.ComputeCoverage drops a Distrusted doc from in-force coverage).
         // An ABSENT field never trips this (only a present-but-low-confidence one): the model omits what
         // it can't find, and a missing required field is the rule engine's concern, not the gate's.
         var hasLowConfidenceVerdictField = extraction.Fields.Any(f =>
@@ -655,12 +702,19 @@ public class ExtractionWorker(
         // model's own reprocess signal; and an unreadable canonical value (#383) — a confidently-read
         // date/amount in a shape we can't parse fires none of the other three yet leaves a
         // compliance-critical column silently null.
-        doc.ExtractionStatus = avgConf < ManualReviewConfidenceThreshold
-                || hasLowConfidenceVerdictField
-                || extraction.NeedsReprocessing
-                || unreadableFields.Length > 0
-            ? ExtractionStatus.ManualRequired
-            : ExtractionStatus.Completed;
+        var distrusted = avgConf < ManualReviewConfidenceThreshold
+            || hasLowConfidenceVerdictField
+            || extraction.NeedsReprocessing
+            || unreadableFields.Length > 0;
+
+        // ONE boolean, TWO columns (#459 / ADR 0052). Pipeline POSITION and extraction TRUST used to be
+        // the same column, so Reextract's re-arm to Pending erased the distrust and nothing restored it.
+        // This read is what establishes the document's current basis, so it decides BOTH — and it is the
+        // only writer that can restore trust without a human: a clean re-read of a previously-distrusted
+        // document earns Trusted back here, which is what stops the flag being sticky the way
+        // IsManuallyVerified was (ADR 0042 Amendment 2's recorded residue).
+        doc.ExtractionStatus = distrusted ? ExtractionStatus.ManualRequired : ExtractionStatus.Completed;
+        SetTrust(db, doc, distrusted ? ExtractionTrust.Distrusted : ExtractionTrust.Trusted);
         if (unreadableFields.Length > 0)
             logger.LogWarning(
                 "Document {DocumentId} returned {Count} canonical field(s) we could not parse ({Fields}); routed to manual review",

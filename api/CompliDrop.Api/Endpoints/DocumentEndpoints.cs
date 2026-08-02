@@ -852,6 +852,16 @@ public static class DocumentEndpoints
         // worker holds. Npgsql translates DateTime.UtcNow to bare now() — ADR 0009-clean, the same shape
         // the .SetProperty(d => d.UpdatedAt, DateTime.UtcNow) below already emits — so both sides read the
         // DB's clock as well as the one constant.
+        //
+        // ExtractionTrust is DELIBERATELY absent from the SetProperty list below, and that absence IS the
+        // #459 fix (ADR 0052). Re-arming moves the document's PIPELINE POSITION back to the queue; it says
+        // nothing about whether the values currently on the row can be trusted, and until trust had its own
+        // column this statement destroyed the ADR 0042 distrust signal by writing Pending over
+        // ManualRequired — so one click flipped the vendor rollup to Covered on the strength of the very
+        // extraction the system had flagged, and if the re-read then failed, nothing restored it. The trust
+        // column now rides through the re-arm untouched and is re-decided by whatever the re-read lands on
+        // (PersistSuccess) or by a human confirmation (ResolveManualReview). Adding a
+        // .SetProperty(d => d.ExtractionTrust, ExtractionTrust.Trusted) here re-opens exactly that hole.
         var rearmed = await db.Documents
             .Where(d => d.Id == id
                 && (d.ExtractionStatus != ExtractionStatus.Processing
@@ -961,16 +971,39 @@ public static class DocumentEndpoints
     // the worker's queue states and overwriting Pending would DE-QUEUE the document (ExtractionWorker
     // claims on ExtractionStatus == Pending), while Failed is its own louder error state with a
     // processing-error card. Either way the extraction path re-decides this flag when it lands.
+    //
+    // #459 / ADR 0052: this is also the one REQUEST-side writer of ExtractionTrust, and it is the human
+    // exit from the ADR 0042 coverage exclusion — for a Failed row it is the ONLY exit, since the status
+    // deliberately does not move. That pairing is what lets the rollup stop reading IsManuallyVerified,
+    // whose stickiness was the residue ADR 0042 Amendment 2 recorded — trust is re-decided by every later
+    // extraction, so a successful re-read followed by a terminal failure no longer reads as "a human
+    // confirmed it".
+    //
+    // TRUST AND STATUS TAKE THE SAME QUESTION BUT NOT THE SAME GATE. Both ask "is a canonical value still
+    // unreadable?" — one predicate, asked once, of the document's RESULTING state. But the `wasSettled`
+    // guard belongs to the STATUS write ALONE. Its only job is not to de-queue: overwriting Pending would
+    // strand the document forever (the worker claims on ExtractionStatus == Pending) and Failed is its own
+    // louder error state. WITHDRAWING TRUST DE-QUEUES NOTHING — no worker, sweep or endpoint dispatches on
+    // the trust column; the vendor rollup merely reads it. So gating trust on the status too was a real
+    // hole (#459 review): on a re-armed row sitting at Pending, or a Failed row where a human typed an
+    // expiration the parser rejects, one click bought Trusted over a value nothing can read — precisely
+    // the clean bill of health ADR 0040 requires to fail closed and ADR 0052 says the click can no longer
+    // buy. Trust now follows readability on every status; only the escalation back to ManualRequired stays
+    // gated.
     private static void ResolveManualReview(Document doc)
     {
         var wasSettled = doc.ExtractionStatus
             is ExtractionStatus.Completed or ExtractionStatus.ManualRequired;
+        // Asked AFTER the caller has finalized the field mirror and the typed columns, and asked of the
+        // DOCUMENT rather than of the field names this request happened to submit (see above).
+        var unreadable = DocumentFieldReadability.HasUnreadableCanonicalValue(doc);
 
         doc.IsManuallyVerified = true;
+        doc.ExtractionTrust = unreadable ? ExtractionTrust.Distrusted : ExtractionTrust.Trusted;
         if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
             doc.ExtractionStatus = ExtractionStatus.Completed;
 
-        if (wasSettled && DocumentFieldReadability.HasUnreadableCanonicalValue(doc))
+        if (wasSettled && unreadable)
             doc.ExtractionStatus = ExtractionStatus.ManualRequired;
     }
 

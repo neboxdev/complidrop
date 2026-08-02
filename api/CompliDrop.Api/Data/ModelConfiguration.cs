@@ -113,6 +113,15 @@ internal static class ModelConfiguration
             e.Property(d => d.DocumentSubType).HasMaxLength(100);
             e.Property(d => d.UploadedBy).HasMaxLength(50);
             e.Property(d => d.ExtractionStatus).HasConversion<string>().HasMaxLength(50);
+            // #459 / ADR 0052: extraction TRUST, on its own column beside pipeline POSITION. The store
+            // default is load-bearing, not cosmetic — during a Railway deploy overlap the OLD instance
+            // still INSERTs Documents without this column, and a required text column added with EF's
+            // implicit "" default would store a value no enum can read. 'Trusted' is the safe default
+            // (it matches what an unread document is worth on this axis; the never-graded axis, ADR 0048,
+            // is what withholds it from coverage) and the migration BACKFILLS 'Distrusted' onto the rows
+            // that were excluded from coverage before the column existed.
+            e.Property(d => d.ExtractionTrust).HasConversion<string>().HasMaxLength(50)
+                .HasDefaultValue(ExtractionTrust.Trusted);
             e.Property(d => d.ComplianceStatus).HasConversion<string>().HasMaxLength(50);
             e.Property(d => d.ExtractionPromptVersion).HasMaxLength(100);
             e.Property(d => d.ExtractionRawJson).HasColumnType("jsonb");
