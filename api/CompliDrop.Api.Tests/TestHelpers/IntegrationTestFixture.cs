@@ -108,9 +108,11 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
         if (Factory.Services.GetService<IStripeService>() is FakeStripeService stripe)
             stripe.Reset();
 
-        // Same for the two #366 hooks: each is a host singleton holding a test-supplied callback, so
-        // one a test forgot to clear would fire a competing write — or fail a commit — inside the next.
+        // Same for the two #366 hooks and the #460 SystemDbContext one: each is a host singleton holding a
+        // test-supplied callback, so one a test forgot to clear would fire a competing write — or fail a
+        // commit — inside the next.
         Factory.Services.GetService<ConcurrentDocumentWriteInterceptor>()?.Reset();
+        Factory.Services.GetService<ConcurrentSystemWriteInterceptor>()?.Reset();
         Factory.Services.GetService<CommitFaultInterceptor>()?.Reset();
     }
 

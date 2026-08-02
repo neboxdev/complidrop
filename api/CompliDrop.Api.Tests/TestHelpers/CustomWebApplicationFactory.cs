@@ -161,6 +161,12 @@ public sealed class CustomWebApplicationFactory(
             services.AddSingleton<ConcurrentDocumentWriteInterceptor>();
             services.AddSingleton<IDbContextOptionsConfiguration<AppDbContext>, ConcurrentDocumentWriteOptionsConfiguration>();
 
+            // The same hook on SystemDbContext, the context the background workers save through (#460).
+            // Its own singleton with its own callback — see ConcurrentSystemWriteInterceptor for why it is
+            // not the instance above wired twice. Inert unless a test sets the callback.
+            services.AddSingleton<ConcurrentSystemWriteInterceptor>();
+            services.AddSingleton<IDbContextOptionsConfiguration<SystemDbContext>, ConcurrentSystemWriteOptionsConfiguration>();
+
             // The other half of the #366 harness: fails an explicit transaction's COMMIT with 40001 and
             // runs a callback once the rollback has released the row locks. Same arming and containment
             // as the hook above (callback, not header) — see CommitFaultInterceptor for why the

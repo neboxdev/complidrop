@@ -41,7 +41,7 @@ namespace CompliDrop.Api.Tests.TestHelpers;
 /// exactly one conflict lets its own callback stop after the first call, and the retry-exhaustion test
 /// wants every attempt to conflict. A fire-once rule in here would make the second shape untestable.
 /// </summary>
-public sealed class ConcurrentDocumentWriteInterceptor : SaveChangesInterceptor
+public class ConcurrentDocumentWriteInterceptor : SaveChangesInterceptor
 {
     private bool _insideCompetingWrite;
 
@@ -87,6 +87,35 @@ public sealed class ConcurrentDocumentWriteInterceptor : SaveChangesInterceptor
 /// </summary>
 public sealed class ConcurrentDocumentWriteOptionsConfiguration(ConcurrentDocumentWriteInterceptor interceptor)
     : IDbContextOptionsConfiguration<AppDbContext>
+{
+    public void Configure(IServiceProvider serviceProvider, DbContextOptionsBuilder optionsBuilder) =>
+        optionsBuilder.AddInterceptors(interceptor);
+}
+
+/// <summary>
+/// The same hook on the OTHER context — <see cref="SystemDbContext"/>, which is what the background
+/// workers save through. A SEPARATE type (and therefore a separate singleton with its own callback)
+/// rather than the AppDbContext instance wired twice, deliberately: <c>IAuditLogger</c> writes on its own
+/// <see cref="SystemDbContext"/> during ordinary requests, so sharing one armed callback across both
+/// contexts would make every existing #366 test fire its competing write from a place it never chose.
+/// <para/>
+/// It exists for #460 (ADR 0030 Amendment 2). <c>ExtractionWorker.PersistSuccess</c> reads its grading
+/// basis and THEN saves, so the only window that can distinguish "grade the fresh row, write nothing back"
+/// from "re-read the input and ASSIGN it" is the one BETWEEN those two — and
+/// <see cref="FakeExtractionClient.DuringExtract"/> cannot reach it (it fires before the basis read, where
+/// an assign-back writes the value the row already holds and every behavioural assertion still passes).
+/// This one fires from inside the worker's own <c>SavingChanges</c>, i.e. after the basis read and before
+/// the UPDATE, which is where a lost update becomes visible.
+/// <para/>
+/// A successful <c>ProcessDocumentAsync</c> saves through this context exactly once (the persist), but the
+/// cost tracker may save again afterwards, so a test that wants a single competing write disarms its own
+/// callback on first fire — the same rule as the AppDbContext hook.
+/// </summary>
+public sealed class ConcurrentSystemWriteInterceptor : ConcurrentDocumentWriteInterceptor;
+
+/// <inheritdoc cref="ConcurrentSystemWriteInterceptor"/>
+public sealed class ConcurrentSystemWriteOptionsConfiguration(ConcurrentSystemWriteInterceptor interceptor)
+    : IDbContextOptionsConfiguration<SystemDbContext>
 {
     public void Configure(IServiceProvider serviceProvider, DbContextOptionsBuilder optionsBuilder) =>
         optionsBuilder.AddInterceptors(interceptor);
