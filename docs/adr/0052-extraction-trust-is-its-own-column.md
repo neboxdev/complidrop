@@ -72,9 +72,12 @@ Core emits only properties whose current value differs from the snapshot. So ass
 value produces no `SET` clause — while the row itself may have moved, because a human clicking "Mark
 verified" mid-read commits the opposite value on another connection. Without the force, the extraction that
 was supposed to *re-decide* trust silently leaves the other writer's value standing: `ManualRequired`/
-`Failed` + `Trusted` (a distrusted basis rolling up as Covered — the ADR 0042 hole, in a shape this ADR
-otherwise records as reachable only through a deploy overlap), or the mirror image, a clean re-read that
-no-ops and strands the document at ActionNeeded.
+`Failed` + `Trusted` (a distrusted basis rolling up as Covered — the ADR 0042 hole), or the mirror image, a
+clean re-read that no-ops and strands the document at ActionNeeded. Forcing the column closes this
+writer's half of that pair only; § Consequences records the two remaining paths to it, and neither is a
+deploy overlap alone — the request-side `MarkVerified` is an unforced partial write, so a commit from
+*here* landing inside *its* window produces the same shapes
+([#465](https://github.com/neboxdev/complidrop/issues/465)).
 
 This is **not** the [ADR 0030](0030-compliance-verdict-combined-unit-of-work.md) stale-snapshot residual
 ([#460](https://github.com/neboxdev/complidrop/issues/460)) and must not be filed under it. That residual is
