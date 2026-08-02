@@ -221,7 +221,10 @@ The 409 envelope, the copy and every backend decision above are unchanged.
 - ADRs: [0016](0016-apply-ef-migrations-on-startup.md) (auto-migrate on startup — why Option D is deferred),
   [0044](0044-audit-client-input-clamped-at-the-boundary.md) (the audit trail this endpoint still writes),
   [0046](0046-request-input-length-guards.md) (the refuted "just add a unique index" precedent),
-  [0049](0049-clipped-extraction-field-is-disclosed-not-silent.md) (duplicate-name rows as a tolerated shape)
+  [0049](0049-clipped-extraction-field-is-disclosed-not-silent.md) (duplicate-name rows as a tolerated shape),
+  [0052](0052-extraction-trust-is-its-own-column.md) (#459 — what the re-arm must NOT write: `ExtractionTrust`
+  is deliberately absent from this endpoint's `SetProperty` list, because the ADR 0042 distrust signal has to
+  survive the re-arm)
 - Code: `api/CompliDrop.Api/Endpoints/DocumentEndpoints.cs` (`Reextract`),
   `api/CompliDrop.Api/Services/ExtractionClaims.cs` (`ZombieTimeout` — the source both layers read),
   `api/CompliDrop.Api/BackgroundServices/ExtractionWorker.cs` (`ZombieClaimTimeout` alias, `ClaimSql`),

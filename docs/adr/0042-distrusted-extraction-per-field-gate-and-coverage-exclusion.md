@@ -241,8 +241,51 @@ re-excludes the document regardless of what was confirmed before.
   as ADR 0030 Amendment 1 with no schema change at all, so the pointer is corrected to the ticket that
   actually owns the column.) The read-time exclusion closes the permanent case without one.
 
+## Amendment 3 (2026-08-02) — the distrust signal moves to its own column; the exclusion reads trust, not status
+
+[ADR 0052](0052-extraction-trust-is-its-own-column.md) (#459) gives this ADR's distrust signal a column of
+its own, `Document.ExtractionTrust` (`Trusted` / `Distrusted`), because `ExtractionStatus` was carrying both
+**pipeline position** and **extraction trust** — which is why the re-arm could destroy the trust in the first
+place, and why Amendment 2 had to reconstruct it from where the document landed.
+
+**What changes here.** `ComputeCoverage`'s extraction clause is now a single test on the new column, and
+`DocCoverageInfo` carries neither `ExtractionStatus` nor `IsManuallyVerified` any more. Everything else in
+this ADR stands: the per-field confidence gate is untouched, the exclusion is still read-time only (the
+stored `ComplianceStatus` is never rewritten), and the document-level carve-out survives unchanged — the
+documents list still discloses the state with its own extraction badge, which is Amendment 1's test for when
+a demotion may stay confined to the rollup (ADR 0052 Option F).
+
+**Two things this ADR recorded as accepted are now closed, and one is reversed:**
+
+- **The `IsManuallyVerified` stickiness (Amendment 2, "The exit") is CLOSED.** The clause no longer reads
+  that flag. `DocumentEndpoints.ResolveManualReview` writes `Trusted` instead, which is the same human exit —
+  still reachable from a `Failed` row, where the status can never be the exit — except that a later
+  extraction re-decides it. A document confirmed once, successfully re-extracted, then failed again is
+  distrusted again, rather than reading as confirmed on values no human ever saw. The flag itself stays on
+  the entity and the detail DTO; it just stops gating coverage.
+- **"Nothing is persisted" (Amendment 2, § Scope) no longer holds, deliberately.** That line pointed at
+  #459 as the ticket that owned the column, and this is it. The *verdict* is still never persisted from a
+  read; what is persisted is the trust fact itself, written by the events that establish or undermine the
+  document's basis.
+- **The in-flight carve-out is REVERSED for distrusted documents.** Amendment 2 asserted, with a test, that a
+  re-armed distrusted document reads **Covered** while the re-read is in flight. It now reads
+  **ActionNeeded**, and the test's middle assertion was updated to match. That is not a widening of the
+  status clause — the clause cannot see the status at all. An in-flight document is excluded only if it was
+  ALREADY distrusted, which by construction means it was already excluded the instant before the re-arm:
+  every writer of `Distrusted` writes it onto a settled `ManualRequired`/`Failed` row, and every queue writer
+  (`Reextract`, `RecordFailedAttempt`'s retry arm, `RequeueInterruptedAsync`) leaves trust alone. The
+  carve-out's stated rationale — *"excluding in-flight statuses would drop every legitimately-compliant
+  vendor to ActionNeeded during any ordinary re-extract"* — is fully intact and separately pinned: an
+  ordinary re-extract of a **trusted** document keeps its vendor Covered at `Pending` and at `Processing`.
+
+**One new residue, recorded in ADR 0052 § Consequences:** during a Railway deploy overlap the OLD container
+can write `ManualRequired`/`Failed` without writing trust, leaving a distrusted document reading `Trusted`
+until it is re-read or confirmed. Not closable by the column default (the exposed transition is an `UPDATE`,
+not an `INSERT`); bounded by the health-check overlap; pinned by a test so it is known rather than
+surprising.
+
 ## References
 
-- Tickets: [#401](https://github.com/neboxdev/complidrop/issues/401), [#443](https://github.com/neboxdev/complidrop/issues/443) (Amendment 1), [#365](https://github.com/neboxdev/complidrop/issues/365) (Amendment 2), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
-- ADRs: [0040](0040-unreadable-canonical-value-fails-closed.md) (the unreadable-value trigger this dovetails with — both raise `ManualRequired`), [0041](0041-future-effective-not-yet-in-force-reads-pending.md) (the read-only-overlay pattern and the vendor-rollup in-force test this extends), [0030](0030-compliance-verdict-combined-unit-of-work.md) (the single unit of work the gate stays inside)
-- Code: `Services/VerdictBearingFields.cs` (the verdict-bearing set), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `ManualReviewConfidenceThreshold`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo` + both projections), `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview` — the `IsManuallyVerified` exit Amendment 2 gates on)
+- Tickets: [#401](https://github.com/neboxdev/complidrop/issues/401), [#443](https://github.com/neboxdev/complidrop/issues/443) (Amendment 1), [#365](https://github.com/neboxdev/complidrop/issues/365) (Amendment 2), [#459](https://github.com/neboxdev/complidrop/issues/459) (Amendment 3), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
+- ADRs: [0040](0040-unreadable-canonical-value-fails-closed.md) (the unreadable-value trigger this dovetails with — both raise `ManualRequired`), [0041](0041-future-effective-not-yet-in-force-reads-pending.md) (the read-only-overlay pattern and the vendor-rollup in-force test this extends), [0030](0030-compliance-verdict-combined-unit-of-work.md) (the single unit of work the gate stays inside), [0052](0052-extraction-trust-is-its-own-column.md) (Amendment 3 — the distrust signal's own column)
+- Code: `Services/VerdictBearingFields.cs` (the verdict-bearing set), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `ManualReviewConfidenceThreshold`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo` + both projections), `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview` — the exit; `IsManuallyVerified` until Amendment 3, `ExtractionTrust` after it)
