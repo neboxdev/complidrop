@@ -1759,6 +1759,8 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         doc.ExpirationDate.Should().BeNull();
         doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
             "looking at a document does not make its expiration parseable");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "#459 / ADR 0052: the two move together, so the empty save cannot restore vendor coverage either");
         doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant);
     }
 
@@ -1812,6 +1814,38 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
             "asserting a document is verified cannot make an unreadable expiration readable");
         doc.IsManuallyVerified.Should().BeTrue("the human did look — that part of the verify still lands");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "#459 / ADR 0052: trust follows the RESULTING state, so the re-raised review re-withdraws it — "
+            + "a verify that left Trusted behind would restore vendor coverage on a value nothing can read");
+    }
+
+    [Fact]
+    public async Task Marking_verified_restores_trust_even_when_the_status_cannot_move()
+    {
+        // The human exit from the ADR 0042 coverage exclusion, now carried by the trust column (#459 /
+        // ADR 0052). For a Failed row the status can NEVER be the exit — ResolveManualReview deliberately
+        // refuses to move one ("Failed is its own louder error state"), and the detail page's manual-entry
+        // affordance exists precisely for that case — so before #459 the exclusion had to gate on
+        // IsManuallyVerified, a flag nothing ever cleared. The trust column is the same exit without the
+        // stickiness: a later extraction re-decides it.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedExtractionStateAsync(auth.OrgId, ExtractionStatus.Failed, claimAge: null);
+        await using (var seed = CreateSystemDb())
+        {
+            var doc0 = await seed.Documents.FirstAsync(d => d.Id == docId);
+            doc0.ExtractionTrust = ExtractionTrust.Distrusted; // as MarkFailed leaves it
+            await seed.SaveChangesAsync();
+        }
+
+        (await auth.Client.PutAsync($"/api/documents/{docId}/verify", null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed,
+            "the extraction really did fail — the error card and 'Couldn't read' badge must stay");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+            "…but a human has now vouched for the values, which is what the rollup asks about");
     }
 
     [Fact]
@@ -2540,6 +2574,37 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         await using var verify = CreateSystemDb();
         (await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId))
             .ExtractionStatus.Should().Be(ExtractionStatus.Pending);
+    }
+
+    [Theory]
+    [InlineData(ExtractionStatus.ManualRequired)]
+    [InlineData(ExtractionStatus.Failed)]
+    public async Task Reextract_re_arms_the_queue_without_clearing_the_distrust(ExtractionStatus status)
+    {
+        // #459 / ADR 0052 at the write site. Re-arming moves PIPELINE POSITION back to the queue; it says
+        // nothing about whether the values currently on the row can be trusted. While trust lived in
+        // ExtractionStatus this statement DESTROYED it — Pending written over ManualRequired — so one click
+        // flipped the vendor rollup to Covered on the strength of the extraction the system had flagged,
+        // and if the re-read then failed nothing restored it (ADR 0042 Amendment 2's whole subject).
+        // The absence of ExtractionTrust from the SetProperty list is the fix, and this is its pin:
+        // add a .SetProperty(d => d.ExtractionTrust, Trusted) and this goes red.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedExtractionStateAsync(auth.OrgId, status, claimAge: null);
+        await using (var seed = CreateSystemDb())
+        {
+            var doc0 = await seed.Documents.FirstAsync(d => d.Id == docId);
+            doc0.ExtractionTrust = ExtractionTrust.Distrusted; // as PersistSuccess / MarkFailed leave it
+            await seed.SaveChangesAsync();
+        }
+
+        (await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var verify = CreateSystemDb();
+        var doc = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "the queue re-arm still happens");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "the distrust must survive the re-arm — recovering it is what #459 exists to do");
     }
 
     [Fact]

@@ -124,9 +124,19 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             documentType, fieldName, @operator = op, expectedValue, errorMessage = "required", sortOrder = 1,
         });
 
+    /// <summary>
+    /// Seeds one vendor document. <paramref name="extractionTrust"/> defaults to the value the PRODUCTION
+    /// writers pair with <paramref name="extractionStatus"/> (#459 / ADR 0052): the worker writes
+    /// Distrusted alongside ManualRequired and alongside a terminal Failed, Trusted alongside Completed,
+    /// and nothing in the queue path writes trust at all. Seeding a pair no writer produces would test a
+    /// state production cannot reach — the MarkGradedAsync reasoning applied to the trust axis — so a test
+    /// that genuinely wants a divergent pair (a legacy row, a human-confirmed failure) passes it
+    /// explicitly.
+    /// </summary>
     private async Task<Guid> SeedVendorDocAsync(
         Guid orgId, Guid vendorId, string documentType, ComplianceStatus status, DateTime? expirationDate = null,
-        decimal? glLimit = null, ExtractionStatus extractionStatus = ExtractionStatus.Completed)
+        decimal? glLimit = null, ExtractionStatus extractionStatus = ExtractionStatus.Completed,
+        ExtractionTrust? extractionTrust = null)
     {
         // #443 / ADR 0048: a stored verdict only counts as one when something actually graded the
         // document, so the seed ALWAYS writes a ComplianceCheck row alongside it — matching what every
@@ -153,6 +163,10 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             // Defaults to Completed (trusted) so every existing caller is unchanged; the #401 coverage tests
             // pass ManualRequired to prove a distrusted extraction is excluded from in-force coverage.
             ExtractionStatus = extractionStatus,
+            ExtractionTrust = extractionTrust ?? (extractionStatus
+                is ExtractionStatus.ManualRequired or ExtractionStatus.Failed
+                    ? ExtractionTrust.Distrusted
+                    : ExtractionTrust.Trusted),
             CreatedAt = now,
             UpdatedAt = now,
         });
@@ -321,14 +335,14 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     [Fact]
     public async Task A_distrusted_cert_that_is_re_extracted_and_then_fails_terminally_still_reads_ActionNeeded()
     {
-        // THE #365 review bug, end to end. ExtractionStatus.ManualRequired is the ONLY column carrying
-        // ADR 0042's distrust, and Reextract's re-arm OVERWRITES it with Pending. Clicking "Read again" on
-        // a distrusted document therefore hands the vendor rollup a clean bill of health computed from the
-        // very extraction the system flagged unreliable — and if the re-read then fails terminally, the row
-        // lands on Failed and NOTHING ever restores the distrust: MarkFailed / RecordFailedAttempt write no
-        // ComplianceStatus, no ComplianceCheck, no DocumentField. Pre-fix that Covered label was PERMANENT,
-        // with no human ever confirming the extraction. This test is the discriminator: revert the Failed
-        // clause in ComputeCoverage and the final assertion flips to "Covered".
+        // THE #365 review bug, end to end — and, since #459 / ADR 0052, closed at its root rather than at
+        // the place the document happened to land. ExtractionStatus used to be the ONLY column carrying
+        // ADR 0042's distrust, and Reextract's re-arm OVERWRITES it with Pending, so clicking "Read again"
+        // on a distrusted document handed the vendor rollup a clean bill of health computed from the very
+        // extraction the system flagged unreliable. If the re-read then failed terminally the row landed on
+        // Failed with NOTHING to restore the distrust (MarkFailed / RecordFailedAttempt write no
+        // ComplianceStatus, no ComplianceCheck, no DocumentField), so that Covered label was PERMANENT.
+        // ExtractionTrust now rides through the re-arm untouched, so the whole sequence stays ActionNeeded.
         var auth = await RegisterAndLoginAsync();
         var template = await CreateTemplateAsync(auth.Client, "Caterer");
         (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
@@ -345,19 +359,23 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         (await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null))
             .StatusCode.Should().Be(HttpStatusCode.OK);
 
-        // The re-arm wrote Pending over ManualRequired, and the vendor reads Covered again for exactly as
-        // long as the re-read is in flight. That window is DELIBERATELY not excluded (ADR 0042 Amendment 2):
-        // it is bounded and self-healing — the worker resolves it within a poll — whereas excluding
-        // Pending/Processing would drop every legitimately-compliant vendor to ActionNeeded during any
-        // ordinary re-extract. Asserted, not tolerated silently, so widening the clause is a visible choice.
-        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered",
-            "an in-flight re-read is a bounded, self-healing window — the scope stops at terminal Failed");
+        // The re-arm moves PIPELINE POSITION back to the queue and says nothing about whether the values on
+        // the row can be trusted, so the distrust survives it (#459 / ADR 0052, ADR 0042 Amendment 3). This
+        // assertion read "Covered" before #459: the window was tolerated because the status was the only
+        // lever and excluding Pending/Processing would have sunk every ordinary re-extract. It no longer
+        // has to be — see the sibling test below, which pins that a TRUSTED document being re-extracted
+        // still reads Covered throughout, i.e. the carve-out's actual protection is intact.
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("ActionNeeded",
+            "a re-read does not itself make a distrusted basis trustworthy — the click must not buy a clean "
+            + "bill of health for the length of the read (#459)");
 
-        // …and now the re-read fails terminally, exactly as ExtractionWorker.MarkFailed leaves it.
         await using (var db = CreateSystemDb())
         {
+            // …and now the re-read fails terminally, exactly as ExtractionWorker.MarkFailed leaves it:
+            // status Failed, trust Distrusted, and nothing else touched.
             var doc = await db.Documents.SingleAsync(d => d.Id == docId);
             doc.ExtractionStatus = ExtractionStatus.Failed;
+            doc.ExtractionTrust = ExtractionTrust.Distrusted;
             doc.ProcessingError = "extraction.failed: boom";
             await db.SaveChangesAsync();
         }
@@ -371,6 +389,131 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         await using var verify = CreateSystemDb();
         (await verify.Documents.Where(d => d.Id == docId).Select(d => d.ComplianceStatus).SingleAsync())
             .Should().Be(ComplianceStatus.Compliant, "the stored verdict stays real; only the read demotes");
+    }
+
+    [Fact]
+    public async Task A_trusted_cert_being_re_extracted_stays_Covered_for_the_whole_in_flight_window()
+    {
+        // The other half of #459, and the protection ADR 0042 Amendment 2's "Pending/Processing are NOT
+        // excluded" carve-out actually exists for: an ORDINARY re-extract of a document nothing distrusts
+        // must not drop its vendor to ActionNeeded while the worker works. The trust column keeps that
+        // true by construction — the queue writers never touch trust, so a Trusted document is still
+        // Trusted at Pending and at Processing — and this pins it, so a future change that starts
+        // distrusting in-flight documents (or that re-couples the clause to pipeline position) goes red
+        // here rather than silently sinking every compliant vendor during a re-read.
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Ordinary Re-read LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        var docId = await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.Completed);
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered", "precondition");
+
+        (await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using (var verify = CreateSystemDb())
+        {
+            var doc = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+            doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "the re-arm moved pipeline position");
+            doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted, "…and left trust exactly where it was");
+        }
+
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered",
+            "an ordinary re-extract of a trusted cert must not cost the vendor its coverage while queued");
+
+        // …and the same through the worker's own in-flight status.
+        await using (var db = CreateSystemDb())
+        {
+            var doc = await db.Documents.SingleAsync(d => d.Id == docId);
+            doc.ExtractionStatus = ExtractionStatus.Processing;
+            doc.ProcessingStartedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+        }
+
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered",
+            "nor while it is actually being read");
+    }
+
+    [Fact]
+    public async Task A_confirmed_cert_re_extracted_cleanly_and_then_failed_again_reads_ActionNeeded()
+    {
+        // THE residue #459 owes: ADR 0042 Amendment 2 gated the Failed exclusion on IsManuallyVerified,
+        // which nothing ever clears. So a document confirmed once, then SUCCESSFULLY re-extracted (which
+        // overwrites the fields with machine values no human has seen), then failed again, read as
+        // "a human confirmed this" on a basis nobody vouched for — recorded as deliberately accepted
+        // because the status could not carry the distinction.
+        //
+        // ExtractionTrust is re-decided by every extraction, so the clean re-read supersedes the human's
+        // confirmation (correctly — the values changed) and the later terminal failure distrusts the row.
+        // Revert to the IsManuallyVerified clause and the last assertion flips to "Covered".
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Sticky Flag LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        var docId = await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.Failed);
+
+        // 1. A human confirms it — the exit, through the real endpoint.
+        (await auth.Client.PutAsync($"/api/documents/{docId}/verify", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered", "the human exit works");
+
+        // 2. A later extraction succeeds cleanly: PersistSuccess rewrites the fields and re-decides trust.
+        await using (var db = CreateSystemDb())
+        {
+            var doc = await db.Documents.SingleAsync(d => d.Id == docId);
+            doc.ExtractionStatus = ExtractionStatus.Completed;
+            doc.ExtractionTrust = ExtractionTrust.Trusted;
+            await db.SaveChangesAsync();
+        }
+
+        // 3. …and the NEXT read fails terminally. The values on the row are now the machine's, from step 2,
+        //    and no human has ever looked at them — but IsManuallyVerified still says true.
+        await using (var db = CreateSystemDb())
+        {
+            var doc = await db.Documents.SingleAsync(d => d.Id == docId);
+            doc.ExtractionStatus = ExtractionStatus.Failed;
+            doc.ExtractionTrust = ExtractionTrust.Distrusted;
+            doc.ProcessingError = "extraction.failed: boom";
+            await db.SaveChangesAsync();
+        }
+
+        await using (var verify = CreateSystemDb())
+        {
+            (await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId))
+                .IsManuallyVerified.Should().BeTrue(
+                    "the flag is still sticky — which is exactly why the rollup no longer reads it");
+        }
+
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("ActionNeeded",
+            "a confirmation cannot vouch for values written after it (#459 / ADR 0042 Amendment 3)");
+    }
+
+    [Fact]
+    public async Task A_ManualRequired_row_the_backfill_never_reached_reads_Covered_by_design()
+    {
+        // The migration backfills 'Distrusted' onto every row the pre-#459 predicate excluded, so this
+        // shape — ManualRequired sitting beside Trusted — is unreachable for real rows. It IS reachable for
+        // one bounded population ADR 0052 records and accepts: a row the OLD container writes during a
+        // Railway deploy overlap, after the new container's boot migration has already run. Asserted rather
+        // than tolerated silently, the ADR 0042 Amendment 2 convention: the rollup reads trust and nothing
+        // else, and if that window is ever worth closing this is the test that must flip, deliberately.
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Deploy Overlap LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.ManualRequired, extractionTrust: ExtractionTrust.Trusted);
+
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered",
+            "the rollup asks trust, not pipeline position — the backfill is what closes this for real rows");
     }
 
     [Fact]
@@ -411,7 +554,9 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             var doc = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
             doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed,
                 "ResolveManualReview deliberately does not move a Failed row — so the status can't be the exit");
-            doc.IsManuallyVerified.Should().BeTrue("…which makes IsManuallyVerified the signal that can be");
+            doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+                "…so the exit is the trust column the same helper writes (#459 / ADR 0052), which — unlike "
+                + "the IsManuallyVerified flag it replaces — a later extraction can take back");
         }
 
         (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered",
