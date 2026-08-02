@@ -148,6 +148,25 @@ public sealed class CustomWebApplicationFactory(
             // PostCommitFaultInterceptor.HeaderName.
             services.AddSingleton<PostCommitFaultInterceptor>();
             services.AddSingleton<IDbContextOptionsConfiguration<AppDbContext>, PostCommitFaultOptionsConfiguration>();
+
+            // Lets a test commit a COMPETING document write from inside another request's SaveChanges
+            // (#366) — the deterministic way to construct the "someone else wrote this row between my
+            // snapshot and my UPDATE" interleave. Attached through the same EF options-configuration hook.
+            // Unlike the two hooks above it is NOT header-armed — it is inert unless a test has set the
+            // callback, and its containment is the suite being serial (AssemblyInfo's
+            // CollectionBehavior(DisableTestParallelization = true)) plus the fixture reset and the
+            // suite's DisposeAsync clearing it. See the interceptor's remarks for why arming on a request
+            // header was rejected: the competing writer is itself an in-process request through this same
+            // TestServer, so IHttpContextAccessor is the one thing it must not depend on.
+            services.AddSingleton<ConcurrentDocumentWriteInterceptor>();
+            services.AddSingleton<IDbContextOptionsConfiguration<AppDbContext>, ConcurrentDocumentWriteOptionsConfiguration>();
+
+            // The other half of the #366 harness: fails an explicit transaction's COMMIT with 40001 and
+            // runs a callback once the rollback has released the row locks. Same arming and containment
+            // as the hook above (callback, not header) — see CommitFaultInterceptor for why the
+            // competing-write hook cannot construct a commit-time conflict.
+            services.AddSingleton<CommitFaultInterceptor>();
+            services.AddSingleton<IDbContextOptionsConfiguration<AppDbContext>, CommitFaultOptionsConfiguration>();
         });
     }
 }

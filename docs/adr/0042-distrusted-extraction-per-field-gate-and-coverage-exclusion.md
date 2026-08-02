@@ -219,7 +219,7 @@ projections. Amendment 2's target population is untouched: a distrusted document
 The flag is STICKY — nothing clears it, so a document confirmed once, then successfully re-extracted, then
 failed again reads as confirmed on values a human never saw. Accepted deliberately: it is strictly narrower
 than the pre-amendment reading (which counted every `Failed` document), the alternative is the schema change
-[#366](https://github.com/neboxdev/complidrop/issues/366) owns, and the `ManualRequired` half is unaffected —
+[#459](https://github.com/neboxdev/complidrop/issues/459) owns, and the `ManualRequired` half is unaffected —
 that clause has no `IsManuallyVerified` escape, so a re-extraction that lands back on `ManualRequired`
 re-excludes the document regardless of what was confirmed before.
 
@@ -236,8 +236,10 @@ re-excludes the document regardless of what was confirmed before.
   `ManualRequired`. Demoting the counts would be the #294-class split, not a fix.
 - **Nothing is persisted.** Recovering the distrust signal across a re-arm (a separate column, so
   extraction-trust stops sharing one column with pipeline position) is a schema change and is deliberately
-  NOT done here; it belongs with [#366](https://github.com/neboxdev/complidrop/issues/366)'s concurrency-token
-  work. The read-time exclusion closes the permanent case without one.
+  NOT done here; it is [#459](https://github.com/neboxdev/complidrop/issues/459). (This line originally
+  pointed at #366 — a loose "it touches the same table" association, not a shared decision. #366 shipped
+  as ADR 0030 Amendment 1 with no schema change at all, so the pointer is corrected to the ticket that
+  actually owns the column.) The read-time exclusion closes the permanent case without one.
 
 ## References
 

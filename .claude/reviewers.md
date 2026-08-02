@@ -175,7 +175,10 @@ Both are defined in this repo's `.claude/agents/`.
     exit) and `A_vendor_whose_only_cert_is_a_FAILED_extraction_reads_ActionNeeded_not_Covered`
     (the target population). The flag is STICKY by accepted design (ADR 0042 Am. 2, "The exit")
     — a doc confirmed, re-extracted successfully, then failed again reads confirmed; the
-    durable fix is #366's schema work, so do not re-flag it here. The `ManualRequired` half has
+    durable fix is the separate extraction-trust COLUMN, which is
+    [#459](https://github.com/neboxdev/complidrop/issues/459) — it used to say #366, a loose
+    same-table association; #366 shipped as ADR 0030 Amendment 1 with NO schema change — so do
+    not re-flag it here. The `ManualRequired` half has
     NO such escape on purpose (confirming it flips the status to `Completed`).
   - Deliberately NOT applied to the document-level surfaces (dashboard compliant/
     expiringSoon counts, `?status=` list/badges, CSV/PDF export, per-doc compliance badge):
@@ -460,6 +463,96 @@ Both are defined in this repo's `.claude/agents/`.
     the index, or de-duping that insert loop (Option E — a DIFFERENT duplicate source, and no help at
     all for the concurrent one), needs its own ticket with a measured population and a signed-off
     dedupe. Neither is a finding here.
+- The two PARTIAL document writers' concurrency guard is ADR 0030 **Amendment 1** (#366); the facts
+  that follow are pointers into it, not a second copy of the rationale.
+  - There is NO `Document` concurrency token and NO schema change, and that is the DECISION, not an
+    omission. The ticket suggested `xmin` first, on the premise that the retry could be confined to
+    `UpdateFields`/`UpdateDocument` and leave other paths undisturbed; `UseXminAsConcurrencyToken` is
+    ENTITY-level, so it makes every tracked `Document` write optimistic whether or not that path
+    handles the exception. The worst landing is `ExtractionWorker.PersistSuccess`, whose window is the
+    whole OCR + LLM run and whose own remarks record the cost of a throw there (the catch's bookkeeping
+    save re-throws on the same context, `FailedAttempts` never increments, zombie reclaim every 5 min,
+    **re-paying Document AI + the LLM each time**). "Just add the xmin token" is a refuted suggestion,
+    not a finding — and so is `FOR UPDATE` (ADR 0030 § Option B): it takes the `Documents` row lock
+    BEFORE the transaction touches `ComplianceChecks` while every other writer's EF batch takes them
+    the other way round, a lock-order inversion the current code does not have.
+  - The mechanism is `REPEATABLE READ` on those two writers ONLY
+    (`Endpoints/DocumentWriteConcurrency.RunAsync`), so Postgres raises `40001` instead of applying a
+    stale-basis UPDATE. Every other `Document` writer — worker, `MarkVerified`, delete, re-grade
+    fan-outs, nightly sweep — keeps `READ COMMITTED` last-writer-wins ON PURPOSE. A change that widens
+    the guard to "all document writes" IS a real finding, and it is pinned:
+    `An_unrelated_document_writer_still_wins_last_without_conflicting`.
+  - The retry RELOADS and RECOMPUTES — the whole callback re-runs against a fresh read, so the winner's
+    committed change is an INPUT to the retried verdict. A version that re-applies the losing snapshot
+    (or retries inside the SAME transaction, whose snapshot is exactly what lost) fixes nothing. Both
+    endpoint bodies must therefore stay re-runnable: deriving anything from state captured OUTSIDE the
+    callback — including `UpdateFields`' `before` audit snapshot — is a real finding.
+  - Exhaustion commits NOTHING and answers `409 document.concurrent_update`. Do NOT flag this as
+    violating ADR 0030's degrade-to-`Pending` rule: that rule is for a RECOMPUTE failure, where the
+    inputs are committing regardless. Here the whole unit of work is still abandonable, so rolling back
+    leaves the last successful writer's consistent tuple — strictly stronger. Committing the edit with
+    `Pending` would BE the half-applied write #366 removes.
+  - "Commits nothing" covers the AUDIT trail too, and that costs a mechanism: `RunAsync` takes a
+    required `onAttemptAbandoned` and invokes it in the same catch that clears the change tracker, so
+    one abandonment discards both the entity state and whatever the caller kept outside it.
+    `UpdateFields` uses it to un-say `saved` (its "an attempt wrote a field edit" fact, read AFTER the
+    retry loop because `IAuditLogger` writes on a separate connection the rollback cannot reach);
+    `UpdateDocument` passes `null` because it keeps nothing outside the callback. Moving that reset to
+    the START of each attempt looks equivalent and is a real finding: `RunAsync` wraps `CommitAsync` in
+    the same conflict catch as the write, so the LAST attempt can set the fact and be abandoned with no
+    next attempt to clear it — a `document.fields_edited` row beside a 409 that says nothing committed.
+    It would also make the code depend on WHERE Postgres reports the conflict (REPEATABLE READ reports
+    first-updater-wins at the UPDATE; SSI under SERIALIZABLE, and any future row lock, report at
+    COMMIT). Pinned by `The_attempt_that_loses_at_the_LAST_commit_leaves_no_audit_row_behind_it`.
+  - On these two writers the degrade-to-`Pending` rule is now CONDITIONAL, and that is RECORDED (ADR 0030
+    Amendment 1), not overlooked. A recompute failure that is a server-side POSTGRES error has already
+    aborted the enclosing transaction, so `EvaluateIntoUnitOfWorkAsync`'s catch sets `Pending` but the
+    following `SaveChanges` answers `25P02` and the request 500s having committed nothing — the same
+    fail-closed landing as exhaustion. Adding a `25P02` arm to `IsConcurrentUpdateConflict` (retrying a
+    transaction Postgres already aborted) or opening a SECOND transaction to force the `Pending` commit
+    are both the bug, not the fix. Note the pinned `ThrowingComplianceCheckService` throws without
+    touching the DB, so it deliberately does not discriminate the two failure kinds.
+  - `Services/DocumentConcurrency.IsConcurrentUpdateConflict` walks the WHOLE inner-exception chain,
+    unlike the one-level 23505 siblings (`SampleData.IsDocumentUniqueViolation`,
+    `IdempotencyService.IsKeyConflict`). Load-bearing: Npgsql reports 40001 as TRANSIENT and EF (no
+    retrying execution strategy configured) re-wraps a transient `DbUpdateException` in an
+    `InvalidOperationException`, so the cause sits TWO levels down out of `SaveChanges` — "make it
+    consistent with its siblings" turns every conflict into a 500. A unique violation is not transient,
+    which is why the siblings can look one level in. Pinned by test.
+  - It deliberately does NOT match `40P01 deadlock_detected` even though Postgres calls it retryable:
+    the guard reorders no lock acquisition, so a deadlock here would be a NEW inversion that must
+    surface. "Also retry deadlocks" is the bug, not the fix.
+  - The pure re-grade paths (`EvaluateAsync` / `EvaluateForSystemAsync` / the fan-outs) keep their
+    read→compute→write window and are OUT of scope by DECISION — not because they are harmless. They
+    write no INPUTS so they cannot lose an update, but `EvaluateInternalAsync` is a bare
+    `FirstOrDefaultAsync → ApplyEvaluationAsync → SaveChangesAsync` with no lock or token, so a
+    "Check again" that loaded before an `UpdateFields` LOWERED a limit writes its stale verdict back
+    after it: EF marks only `ComplianceStatus`/`UpdatedAt`, so the row keeps the lowered limit with a
+    stored `Compliant` and passing check rows citing values it no longer holds, and NOTHING re-grades
+    it (the sweep does date transitions only). Recorded in ADR 0030 Amendment 1 residual 1 and
+    ticketed as [#461](https://github.com/neboxdev/complidrop/issues/461) — not a NEW finding, but do
+    not let a diff or a doc call this window benign or self-healing either.
+  - `ExtractionWorker.PersistSuccess` is a whole-tuple writer for every input it EXTRACTS — and that
+    qualifier is the whole point. It grades from a tracked snapshot read before an OCR + LLM run that
+    lasts minutes, and EF writes back only what it MODIFIED, so EVERY canonical verdict input it leaves
+    unmodified keeps a request's committed value beside a verdict computed from the pre-run one. Treat
+    that as the mechanism, NOT as a list to close: `VendorId` always (it grades off the TRACKED FK,
+    `ApplyEvaluationAsync`'s `context.Entry(doc).Reference(d => d.Vendor)`); `DocumentType` whenever
+    `CanonicalDocumentTypes.NormalizeExtracted` returns the STORED value (blank/absent answer, or a
+    canonical answer equal to what it read), which decides which rules apply; any typed column whose
+    field the model OMITTED, since `ApplyToTypedColumn` runs only for returned fields. #366 closed the
+    request-path half of scenario B only. Named in ADR 0030 Amendment 1 and ticketed as
+    [#460](https://github.com/neboxdev/complidrop/issues/460), so no instance of it is a NEW finding —
+    but two "obvious" fixes ARE, if one ever appears in a diff: widening the RR guard (or an `xmin`
+    token) to the worker costs a re-paid extraction, and re-reading an input and ASSIGNING it onto the
+    tracked entity makes the worker WRITE that column, clobbering a request that lands between the
+    re-read and the commit — a lost update the code does not have today. A fresh value used to DECIDE
+    THE GRADING ONLY (e.g. a vendor id passed to the grading path, tracked FK untouched) is the shape
+    that does not trade one bug for another.
+  - NO frontend change: the 409's message is already jargon-free copy that both call sites surface
+    through their generic `err.message` toast. This is NOT the ADR 0050 Amendment 1 situation (there
+    the client held a payload that actively CONTRADICTED the 409); here the user's edits survive in the
+    page's `edits` overlay and the copy tells them to reload.
 - Client-controlled input in a BOUNDED audit column is ADR 0044 (#372); the review-time facts
   that follow are pointers into it.
   - The clamp lives at ONE boundary — `CurrentUserService` reading `ColumnClamp.To` — not at
