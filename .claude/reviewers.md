@@ -280,9 +280,15 @@ Both are defined in this repo's `.claude/agents/`.
     DISTRUSTED doc (`Pending`/`Processing` + `Distrusted`) makes the vendor read ActionNeeded while the
     extraction badge reads `Reading…` rather than `Needs your review`. Bounded by one poll,
     self-healing, and in the safe direction (it read ActionNeeded the instant before the click).
-  - NO frontend change and NO wire field: trust is not surfaced. The detail page already shows the
-    extraction badge and the review / error cards, which is the disclosure the carve-out rests on —
-    except in the two recorded windows above, where that premise is explicitly noted as not holding.
+  - NO wire field: trust itself is not surfaced. The disclosure the carve-out rests on is the detail
+    page's existing extraction badge and review / error cards — except in the recorded windows above,
+    where that premise is explicitly noted as not holding. ONE frontend change went with it (round 2 of
+    the #459 review): `ManualReviewCard` is gated on `unreadableFields` being non-empty as well as on
+    `extractionStatus === "ManualRequired"`, because an unreadable canonical value now withdraws trust on
+    EVERY status while the escalation is refused on `Failed` (where manual entry is the affordance the
+    page offers) and on `Pending`/`Processing`. Re-narrowing that gate back to the status IS a finding —
+    it leaves those users a page reading "Verified: Yes" with nothing naming the value blocking coverage.
+    The card still renders NOTHING when there is neither cause; both directions are pinned by test.
 - A NEVER-GRADED document is ADR 0048 (#443) — zero `ComplianceCheck` rows, i.e. nothing was ever
   measured against it. The facts that follow are pointers into it, not a second copy.
   - There is ONE recognizer, `Services/DocumentGrading.cs`, shipping exactly ONE shape:

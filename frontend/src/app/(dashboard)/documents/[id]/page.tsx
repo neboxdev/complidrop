@@ -296,13 +296,18 @@ function WhatWeCheckedCard({
   );
 }
 
-// Amber call-to-action for the ManualRequired state. TWO causes, two messages
-// (#193, #383): low extraction confidence points the user at the amber-outlined
-// fields; an UNREADABLE canonical value (ADR 0040) has no such outline — it's
-// high-confidence — so that variant NAMES the field we couldn't read and says
-// how to clear it. Getting this wrong is a dead end: the confidence copy tells
-// the user to fix "the ones outlined in amber" when nothing is outlined, on a
-// document whose flag they can't clear until the named value is corrected.
+// Amber call-to-action. TWO causes, two messages (#193, #383): low extraction
+// confidence points the user at the amber-outlined fields; an UNREADABLE
+// canonical value (ADR 0040) has no such outline — it's high-confidence — so
+// that variant NAMES the field we couldn't read and says how to clear it.
+// Getting this wrong is a dead end: the confidence copy tells the user to fix
+// "the ones outlined in amber" when nothing is outlined, on a document whose
+// flag they can't clear until the named value is corrected.
+//
+// The confidence variant belongs to ManualRequired; the unreadable variant
+// belongs to `unreadableFields`, which is why the call site gates on both (see
+// there). An unreadable value is reachable on Failed and on Pending/Processing
+// too, and on those the status can never carry the signal.
 function ManualReviewCard({ unreadableFields }: { unreadableFields: string[] }) {
   const unreadable = unreadableFields.length > 0;
   return (
@@ -1089,7 +1094,17 @@ export default function DocumentDetailPage() {
 
       <WhatWeCheckedCard doc={doc} correctedAdditionalInsuredWording={correctedAdditionalInsuredWording} />
 
-      {doc.extractionStatus === "ManualRequired" && (
+      {/* Gated on the FACT the card describes, not only on the status (#459 review). The
+          unreadable-value variant is the one card that NAMES the field we couldn't read and says
+          how to clear it — and since #459 an unreadable canonical value withdraws extraction trust
+          (dropping the vendor to "Action needed") on EVERY status, not just ManualRequired. The two
+          statuses that reach it without ManualRequired are precisely the ones where the escalation
+          is refused: Failed, where the page's own manual-entry affordance invites a human to type a
+          value the parser may reject and nothing would ever move the status; and Pending/Processing
+          during a re-extract. Status-only gating left those users a page reading "Verified: Yes"
+          with no mention of the value blocking their coverage. */}
+      {(doc.extractionStatus === "ManualRequired" ||
+        (doc.unreadableFields?.length ?? 0) > 0) && (
         <ManualReviewCard unreadableFields={doc.unreadableFields ?? []} />
       )}
 

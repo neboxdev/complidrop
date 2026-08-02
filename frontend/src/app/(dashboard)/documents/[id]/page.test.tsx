@@ -2553,6 +2553,78 @@ describe("DocumentDetailPage — ManualRequired review CTA (#193)", () => {
     expect(screen.getByText(/outlined in amber are the least certain/i)).toBeInTheDocument();
     expect(screen.queryByText(/we couldn't read some details/i)).toBeNull();
   });
+
+  it("names the unreadable field on a FAILED document, where the status can never say so (#459)", async () => {
+    // #459 review round 2, S2. Since #459 an unreadable canonical value withdraws extraction TRUST on
+    // every status, so it drops the vendor to "Action needed" from a Failed row too — and Failed is
+    // exactly where the page invites manual entry ("Enter the key details below"), so a human typing
+    // something the parser rejects (e.g. "1,000,000 USD", whose currency word is not at an edge) is
+    // ordinary use, not an edge case. ResolveManualReview refuses to move a Failed row, so the status
+    // can never carry the signal, and gating this card on ManualRequired left the page showing
+    // "Verified: Yes — A person confirmed these fields" with nothing naming the value that is actually
+    // blocking coverage. The card is gated on the fact it describes instead.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_failed_unreadable",
+            extractionStatus: "Failed",
+            complianceStatus: "NonCompliant",
+            isManuallyVerified: true,
+            processingError: "extraction.failed: boom",
+            unreadableFields: ["general_liability_limit"],
+            fields: [
+              {
+                id: "f-gl",
+                fieldName: "general_liability_limit",
+                fieldValue: "1,000,000 USD",
+                fieldType: "string",
+                confidence: 1.0,
+                isManuallyEdited: true,
+                originalValue: null,
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_failed_unreadable" },
+    });
+
+    expect(await screen.findByText(/we couldn't read some details/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/couldn't read the .*liability limit.* on this document/i),
+    ).toBeInTheDocument();
+    // The processing-error card still renders beside it: they answer different questions ("the
+    // extraction failed" vs "this specific value is unreadable"), and the second is the actionable one.
+    expect(screen.getByText(/couldn't read this document/i)).toBeInTheDocument();
+  });
+
+  it("still renders no amber card on a settled document with nothing unreadable", async () => {
+    // The other direction of the widened gate: it keys on unreadableFields, so an ordinary Completed
+    // document must stay card-free — the gate must not become "always show it".
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(
+          makeDocumentDetail({
+            id: "d_failed_clean",
+            extractionStatus: "Failed",
+            processingError: "extraction.failed: boom",
+            unreadableFields: [],
+          }),
+        ),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, {
+      auth: authedMe,
+      params: { id: "d_failed_clean" },
+    });
+    await waitFor(() => expect(screen.getByText("coi.pdf")).toBeInTheDocument());
+    expect(screen.queryByText(/we couldn't read some details/i)).toBeNull();
+    expect(screen.queryByText(/double-check these details/i)).toBeNull();
+  });
 });
 
 describe("DocumentDetailPage — a clipped field value is disclosed (#444 / ADR 0049)", () => {

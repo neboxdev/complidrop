@@ -250,8 +250,17 @@ throw on materialization.
   CSV/PDF export and the per-document compliance badge do NOT move on the trust axis; the documents list
   already renders a distinct extraction badge beside the compliance badge, which is Amendment 1's test for
   when a demotion may stay confined to the rollup. Enforced mechanically.
-- **No frontend change.** Trust is not surfaced on the wire: the detail page already shows the extraction
-  status badge and the review / error cards, which is the disclosure the carve-out rests on.
+- **Trust is not on the wire, and ONE frontend change goes with that.** No new field is surfaced: the
+  disclosure the carve-out rests on is the detail page's existing extraction badge and review / error
+  cards. But the card that carries the actionable half — `ManualReviewCard`'s unreadable variant, the one
+  that NAMES the field and says how to clear it — was gated on `extractionStatus === "ManualRequired"`,
+  and since this decision an unreadable canonical value withdraws TRUST on every status. It is now gated
+  on `unreadableFields` being non-empty as well (#459 review round 2). The two statuses that reach it
+  without `ManualRequired` are exactly the ones where the escalation is refused: `Failed`, where the
+  page's own manual-entry affordance invites a human to type a value the parser may reject and nothing
+  would ever move the status, and `Pending`/`Processing` during a re-extract. Without it those users saw
+  "Verified: Yes — A person confirmed these fields" with nothing naming the value blocking their
+  coverage.
 - **No index.** The column is read only inside per-vendor document projections already filtered by
   `VendorId`; it filters nothing on its own.
 
@@ -311,4 +320,4 @@ door open without forcing it, and it reads the same way `ExtractionStatus` and `
 
 - Tickets: [#459](https://github.com/neboxdev/complidrop/issues/459), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic); the read-time predecessors [#401](https://github.com/neboxdev/complidrop/issues/401) and [#365](https://github.com/neboxdev/complidrop/issues/365)
 - ADRs: [0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) (the distrust signal and the coverage exclusion this makes durable — Amendment 3 records the reversal of its in-flight carve-out), [0040](0040-unreadable-canonical-value-fails-closed.md) (the unreadable-value escalation `ResolveManualReview` re-raises), [0048](0048-never-graded-document-asserts-no-affirmative-verdict.md) (the OTHER axis that withholds an unread document from coverage), [0050](0050-reextract-refuses-a-live-extraction-claim.md) (the re-arm this must survive), [0016](0016-apply-ef-migrations-on-startup.md) (auto-migrate on boot — why the migration is additive and cheap), [0030](0030-compliance-verdict-combined-unit-of-work.md) (the unit of work `PersistSuccess` writes both columns inside)
-- Code: `Entities/Document.cs` (`ExtractionTrust`), `Data/ModelConfiguration.cs` (mapping + store default), `Migrations/20260802080136_AddDocumentExtractionTrust.cs` (the additive migration + seed), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `MarkFailed`, `RecordFailedAttempt`), `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview`, `Reextract`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo`), `DTOs/Vendors/VendorDtos.cs` (`VendorCoverage`'s contract comment), `CompliDrop.Api.Tests/Adr0052EnforcementTests.cs` (the read-surface / writer-set gate), `CompliDrop.Api.Tests/TestHelpers/SourceScan.cs` (the shared scanner the gates use)
+- Code: `Entities/Document.cs` (`ExtractionTrust`), `Data/ModelConfiguration.cs` (mapping + store default), `Migrations/20260802080136_AddDocumentExtractionTrust.cs` (the additive migration + seed), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `MarkFailed`, `RecordFailedAttempt`), `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview`, `Reextract`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo`), `DTOs/Vendors/VendorDtos.cs` (`VendorCoverage`'s contract comment), `frontend/src/app/(dashboard)/documents/[id]/page.tsx` (the one frontend change — `ManualReviewCard`'s gate), `CompliDrop.Api.Tests/Adr0052EnforcementTests.cs` (the read-surface / writer-set gate), `CompliDrop.Api.Tests/TestHelpers/SourceScan.cs` (the shared scanner the gates use)
