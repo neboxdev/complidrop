@@ -722,12 +722,39 @@ Both are defined in this repo's `.claude/agents/`.
       named instances fall out of the one rule and so does the next column added to `Document`.
       Re-writing it as an enumeration (a vendor-id parameter, a per-column patch) IS a real finding —
       ADR 0030 Amendment 2 Option E.
-    - The basis is READ-ONLY and nothing is copied back onto the tracked entity, so the worker still
-      emits exactly the columns it emitted before. Assigning a re-read input onto the tracked entity
-      (or onto the `Vendor` navigation, which EF fixup turns into the same thing) makes the worker WRITE
+    - The basis is READ-ONLY with respect to the TRACKED entity — nothing is copied back onto it, so the
+      worker still emits exactly the columns it emitted before. (It DOES write the basis's own `Vendor`
+      navigation; "read-only" scopes to `doc`.) Assigning a re-read input onto the tracked entity (or
+      onto its `Vendor` navigation, which EF fixup turns into the same thing) makes the worker WRITE
       that column and clobber a request that landed mid-run — a LOST UPDATE the code does not have.
       Still a real finding. So is widening the RR guard or an `xmin` token to the worker (see the first
       bullet of this block: a throw out of that `SaveChanges` re-pays Document AI + the LLM).
+      Pinned TWICE, because no value assertion can see it — every `DuringExtract` interleave commits
+      BEFORE the basis read, where an assign-back writes the value the row already holds and every
+      assertion still passes. `The_persist_emits_what_it_extracted_and_no_verdict_input_it_only_read`
+      reads the persist's `UPDATE "Documents"` SET clause off the host's EF command log (the
+      `Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read` shape) and requires
+      `"VendorId" =` / `"DocumentType" =` / `"GeneralLiabilityLimit" =` absent with `"ExtractionStatus" =`
+      present as the anti-no-op; `A_write_that_lands_AFTER_the_basis_read_is_not_clobbered_by_the_persist`
+      drives a competing PATCH from inside the worker's own `SavingChanges` through the test harness's
+      `ConcurrentSystemWriteInterceptor` (the `SystemDbContext` twin of the #366 hook — a SEPARATE
+      singleton on purpose, since `IAuditLogger` saves on `SystemDbContext` during ordinary requests).
+      Neither is decoration: the mid-run request in the first must move all three columns or the
+      absences prove nothing, and the two vendors in the second must share ONE checklist that does NOT
+      govern the document's type (see #468 — a competing regrade that deletes the check rows this
+      persist has staged throws out of `SaveChanges`). "Simplify" either and the pin goes vacuous.
+    - The basis overload ENFORCES two preconditions with `ArgumentException` — same `Id` as the tracked
+      doc (check rows are stamped from the BASIS while the clear-existing predicate keys on the TRACKED
+      one) and DETACHED (its `Vendor` navigation is assigned from an `AsNoTracking` query, which on a
+      tracked principal EF turns into spurious inserts). Today's single caller satisfies both by
+      construction, so "dead guard, drop it" IS a real finding. Pinned by
+      `The_basis_overload_refuses_a_basis_that_is_not_this_document` and
+      `The_basis_overload_refuses_a_TRACKED_basis`.
+    - The basis vendor chain is a NEW query (`context.Set<Vendor>()` off the basis's own FK) rather than
+      the tracked navigation, and its correctness rests on the Vendor soft-delete GLOBAL FILTER still
+      applying. Adding `IgnoreQueryFilters()` there would read as idiomatic (this block blesses it inside
+      background workers) and would grade a document against a DELETED vendor's checklist — a persisted
+      false-affirmative. Pinned by `A_vendor_soft_deleted_mid_extraction_grades_as_no_checklist`.
     - Do NOT read it as a counter-example to `ExtractionWorker.SetTrust`, which DOES force its column.
       `SetTrust` makes the worker's OWN conclusion durable (ADR 0052 §2 says it owns it); #460 is about
       verdict INPUTS a REQUEST owns. Forcing those is Amendment 2 Option G, refuted. Blurring the
@@ -737,9 +764,19 @@ Both are defined in this repo's `.claude/agents/`.
       that LOWERS a limit gets graded against the value the row is about to lose. Pinned by
       `The_workers_own_extracted_value_still_decides_the_verdict_where_it_wrote_it`.
     - The basis read sits INSIDE `PersistSuccess`'s degrade-to-`Pending` `try` deliberately — it must
-      never become a new way for the persist to THROW — and a `null` basis (row deleted mid-run) falls
-      back to grading the tracked entity. Hoisting it out of the `try`, or making the null case throw,
-      IS a real finding. Pinned by `A_document_deleted_mid_extraction_persists_without_a_second_extraction`.
+      never become a new way for the persist to THROW — and a `null` basis falls back to grading the
+      tracked entity. Hoisting it out of the `try`, or making the null case throw, IS a real finding.
+      Pinned by `A_document_deleted_mid_extraction_persists_without_a_second_extraction` (which also
+      reassigns the vendor before deleting, so its verdict says WHICH branch ran).
+    - `null` means a HARD delete, not "deleted mid-run". `GetDatabaseValues` issues an
+      `AsNoTracking().IgnoreQueryFilters()` key lookup, so the SOFT delete every API path performs still
+      yields a basis and the document is still graded as the row the commit leaves; no production path
+      hard-deletes a `Document`, so the fallback is DEFENSIVE, not live. An earlier draft of ADR 0030
+      Amendment 2 and of this file said otherwise and cited a test that could not tell the branches
+      apart — both branches are now pinned on the helper itself by
+      `The_grading_basis_is_null_only_when_the_row_is_genuinely_gone`, with the composition pinned by
+      `The_grading_basis_overlays_only_the_properties_the_writer_modified`. A doc or comment that
+      re-describes the null case as the soft-delete path IS a finding.
     - The REQUEST-path callers keep the tracked-entity overload ON PURPOSE. `UpdateDocument` grades
       against a `VendorId` it assigned in memory and has not committed, so a fresh basis would grade the
       OLD checklist (pinned by
@@ -751,6 +788,18 @@ Both are defined in this repo's `.claude/agents/`.
       trip, which makes it the same shape and size as #461's. Closing it needs conflict DETECTION on the
       commit, and every detecting shape re-pays the extraction. Equally, do not let a diff or a doc
       describe #460 as fully closed.
+    - TWO more recorded residuals in the same section, also not new findings. (a) `unreadableFields` —
+      and therefore `distrusted`, `ExtractionStatus` and `ExtractionTrust` — is STILL asked of the
+      pre-run tracked entity twenty lines above the basis read, so a mid-run edit that fixes a typed
+      column can leave `ManualRequired` + `Distrusted` on a row whose read-time `unreadableFields` is
+      empty (vendor reads Action needed, `ManualReviewCard` names nothing). NOT swapped onto the basis
+      on purpose: that redefines trust from "what this read produced" to "what the row holds", an ADR
+      0052 §2 decision, [#467](https://github.com/neboxdev/complidrop/issues/467). (b) A concurrent
+      regrade that deletes the `ComplianceCheck` rows `ApplyEvaluationAsync` has STAGED for removal makes
+      the persist's DELETE affect 0 rows, so EF throws `DbUpdateConcurrencyException` out of
+      `PersistSuccess` — the re-paid-extraction landing, not the "cosmetic" display desync ADR 0030
+      § Consequences describes. Predates #460 (it arrived with #337),
+      [#468](https://github.com/neboxdev/complidrop/issues/468).
   - NO frontend change: the 409's message is already jargon-free copy that both call sites surface
     through their generic `err.message` toast. This is NOT the ADR 0050 Amendment 1 situation (there
     the client held a payload that actively CONTRADICTED the 409); here the user's edits survive in the
