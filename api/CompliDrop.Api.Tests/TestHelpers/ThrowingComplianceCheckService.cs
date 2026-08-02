@@ -17,6 +17,12 @@ public sealed class ThrowingComplianceCheckService : IComplianceCheckService
     public Task ApplyEvaluationAsync(Microsoft.EntityFrameworkCore.DbContext context, Document doc, CancellationToken ct) =>
         throw new InvalidOperationException("Simulated compliance-engine failure.");
 
+    // The #460 basis overload fails the same way, so the worker's degrade-to-Pending guarantee is pinned
+    // on the path it actually takes now (ExtractionWorker.PersistSuccess calls this one).
+    public Task ApplyEvaluationAsync(
+        Microsoft.EntityFrameworkCore.DbContext context, Document doc, Document gradingBasis, CancellationToken ct) =>
+        throw new InvalidOperationException("Simulated compliance-engine failure.");
+
     public Task<ComplianceStatus> EvaluateAsync(Guid documentId, CancellationToken ct) =>
         throw new InvalidOperationException("Simulated compliance-engine failure.");
 

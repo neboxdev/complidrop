@@ -401,6 +401,15 @@ public class ExtractionWorker(
     /// re-asserted here: the value is this read's OWN conclusion, computed from what the model just
     /// returned, and ADR 0052 §2 says these writers own it. "Last writer wins on the whole tuple" is the
     /// intended semantics — forcing the column is what makes this writer actually be one.
+    /// <para/>
+    /// #460 has since shipped on this very method (ADR 0030 Amendment 2, see <see cref="PersistSuccess"/>),
+    /// and the two sit side by side on purpose rather than by oversight — the axis between them is
+    /// OWNERSHIP, not mechanism. #460 reads a FRESH value and writes no verdict INPUT back, because a
+    /// vendor id or a document type is a fact a REQUEST owns and re-asserting it would be a lost update.
+    /// It DOES force the verdict it computes (<see cref="ForceVerdictWrite"/>), for exactly the reason this
+    /// forces trust: both are facts THIS read owns, and not writing them would leave someone else's answer
+    /// standing. Making the two agree along the wrong axis — unforcing either conclusion, or forcing a
+    /// verdict INPUT (ADR 0030 Amendment 2 Option G) — is a defect in whichever direction it goes.
     /// </summary>
     private static void SetTrust(SystemDbContext db, Document doc, ExtractionTrust trust)
     {
@@ -647,11 +656,23 @@ public class ExtractionWorker(
         // uses (DocumentEndpoints.ResolveManualReview) and the same one the detail DTO reports. This
         // used to be a second, independent mechanism — a per-field TypedColumnResult accumulated in
         // this loop — with nothing pinning the two equal, so "is this document in the #383 state?" had
-        // two answers that could drift apart (#383 review round 2, S5). Both inputs it needs are
-        // already final at this point: doc.ExtractionFields was assigned from fieldsDict above and the
-        // typed columns were just written. Last-value-wins now falls out structurally rather than
-        // being something this loop has to remember — the JSON mirror and the typed columns are both
-        // last-wins, and the predicate reads only those.
+        // two answers that could drift apart (#383 review round 2, S5). Both inputs it needs are final
+        // AS THIS READ SEES THEM at this point: doc.ExtractionFields was assigned from fieldsDict above
+        // and ApplyToTypedColumn has run for every field the response returned. Last-value-wins now
+        // falls out structurally rather than being something this loop has to remember — the JSON
+        // mirror and the typed columns are both last-wins, and the predicate reads only those.
+        //
+        // "Final as this read sees them" is NOT the same as "what the row will hold", and the
+        // difference is the #460 mechanism one screen below (ADR 0030 Amendment 2 § What stays open).
+        // ApplyToTypedColumn ASSIGNS; a value equal to the minutes-old tracked snapshot leaves the
+        // property unmodified, so EF omits the column and a request that committed inside the window
+        // keeps it. This walk therefore describes THIS READ's own output — which is what ADR 0052 §2
+        // says trust is — and not the row the commit leaves, so the two can disagree (documented case:
+        // a snapshot ExpirationDate of null, an unparseable expiration in the response, and a mid-run
+        // edit committing a valid date lands ManualRequired + Distrusted over a row whose typed column
+        // is fine). Deliberately NOT swapped onto the #460 basis: that would redefine trust from "what
+        // this extraction produced" to "what the row ends up holding", an ADR 0052 decision needing its
+        // own record, not a quiet edit here. Tracked separately; do not change it in passing.
         //
         // Field NAMES only in the log, never values: extracted field values are document PII and must
         // not reach logs/Sentry (CLAUDE.md § frontend error monitoring applies the same rule to the
@@ -751,9 +772,29 @@ public class ExtractionWorker(
         // itself fails, persist the inputs with ComplianceStatus = Pending (a safe "not yet graded" state
         // the sweep / "Check again" resolves) rather than fail the whole extraction into a costly re-OCR/LLM
         // retry — but never commit a confident verdict from stale inputs.
+        //
+        // ...and "stale inputs" is not only about the values this method just wrote (#460 / ADR 0030
+        // Amendment 2). `doc` is the snapshot ProcessDocumentAsync loaded BEFORE OCR + the LLM call, minutes
+        // ago, and EF emits only the properties this method MODIFIED — so every canonical verdict input it
+        // leaves unmodified (VendorId always; DocumentType whenever NormalizeExtracted returns the stored
+        // value; any typed column whose field the model omitted) would be graded from the pre-run value
+        // while the row keeps whatever a request committed in the window. Grade the row this commit will
+        // actually LEAVE instead: the current committed values, overlaid with exactly the properties EF is
+        // about to write. Read-only — nothing from the basis is assigned back onto `doc`, so this worker
+        // still writes exactly the columns it wrote before and cannot clobber a concurrent edit (the
+        // re-read-and-assign shape is a LOST UPDATE, refuted in ADR 0030 Amendment 1).
+        //
+        // The basis read sits INSIDE this try on purpose: it is one more way grading can fail, and a
+        // failure here must land on Pending exactly like any other, never as a throw out of PersistSuccess
+        // (which costs a re-paid Document AI + LLM run — see Clamp). A null basis means the row is
+        // GENUINELY gone — a hard delete; the basis read ignores query filters, so a document soft-deleted
+        // mid-run still yields a basis and is still graded as the row this commit leaves. The fallback is
+        // therefore defensive rather than a live path: grade the tracked entity, i.e. pre-#460 behaviour.
         try
         {
-            await compliance.ApplyEvaluationAsync(db, doc, ct);
+            var basis = await DocumentGradingBasis.AfterPendingCommitAsync(db, doc, ct);
+            if (basis is null) await compliance.ApplyEvaluationAsync(db, doc, ct);
+            else await compliance.ApplyEvaluationAsync(db, doc, basis, ct);
         }
         catch (Exception ex)
         {
@@ -761,6 +802,42 @@ public class ExtractionWorker(
             logger.LogError(ex, "Compliance evaluation failed for {DocumentId} during extraction persist; verdict left Pending", doc.Id);
         }
 
+        ForceVerdictWrite(db, doc);
+
         await db.SaveChangesAsync(ct);
     }
+
+    /// <summary>
+    /// Puts <see cref="Document.ComplianceStatus"/> into the persist's UPDATE unconditionally, covering BOTH
+    /// arms above — the graded verdict and the degrade-to-<c>Pending</c> (#460 review round 2, C1).
+    /// <para/>
+    /// Grading the right row is only half of ADR 0030 Amendment 2; the verdict also has to be WRITTEN. The
+    /// plain assignment is not enough, for exactly the reason spelled out on <see cref="SetTrust"/>: `doc`
+    /// is the snapshot <see cref="ProcessDocumentAsync"/> loaded before OCR + the LLM, and EF Core emits
+    /// only properties whose current value DIFFERS from it. So a freshly-computed verdict that happens to
+    /// EQUAL what the row held at claim time produces no SET clause at all — while the
+    /// <c>ComplianceCheck</c> rows are rewritten unconditionally and <c>UpdatedAt</c> guarantees the UPDATE
+    /// still runs. A request that moved the stored verdict inside the window then keeps ITS verdict beside
+    /// THIS read's inputs and THIS read's check rows: the torn pair ADR 0030 exists to prevent, in the
+    /// false-affirmative direction. The reachable shape is one PATCH: a document on a strict checklist
+    /// stored <c>NonCompliant</c>, reassigned mid-read to a lenient one (which re-grades it
+    /// <c>Compliant</c>), extracted at a limit that fails even the lenient floor — the recomputed verdict
+    /// is <c>NonCompliant</c>, equal to the pre-run snapshot, so the column is omitted and the row commits
+    /// <c>Compliant</c> over the lowered limit and a FAILING check row. Nothing re-grades it (the sweep
+    /// does date transitions only). The catch arm has the identical hole: a <c>Pending</c> snapshot
+    /// swallows the degrade and leaves a competitor's confident verdict standing over inputs this persist
+    /// just overwrote.
+    /// <para/>
+    /// This is NOT ADR 0030 Amendment 2 Option G, and the distinction is the whole reason the basis is
+    /// read-only. Option G forces verdict INPUTS — <c>VendorId</c>, <c>DocumentType</c>, a typed column —
+    /// which a REQUEST owns, so forcing them is the lost update Amendment 1 refutes. The verdict is this
+    /// read's OWN conclusion about the basis it just graded, the same thing <see cref="SetTrust"/> forces
+    /// one column over (ADR 0052 §2). Making the two agree in either direction is a defect.
+    /// <para/>
+    /// WORKER-ONLY on purpose. The request-path callers of <c>ApplyEvaluationAsync</c> run inside
+    /// <c>DocumentWriteConcurrency</c>'s <c>REPEATABLE READ</c> guard, whose entire point is that a
+    /// stale-basis UPDATE is REFUSED (40001 → re-run against a fresh read) rather than forced.
+    /// </summary>
+    private static void ForceVerdictWrite(SystemDbContext db, Document doc) =>
+        db.Entry(doc).Property(d => d.ComplianceStatus).IsModified = true;
 }

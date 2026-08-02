@@ -12,7 +12,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Serilog.Core;
-using Serilog.Events;
 using static CompliDrop.Api.Tests.TestHelpers.UploadFixtures;
 
 namespace CompliDrop.Api.Tests;
@@ -2737,11 +2736,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         (await client.PostAsync($"/api/documents/{docId}/reextract", content: null))
             .StatusCode.Should().Be(HttpStatusCode.OK);
 
-        // Serilog renders the command text as a quoted string, so the SQL's own quotes arrive escaped.
-        var update = sink.Events
-            .Select(e => e.RenderMessage().Replace("\\\"", "\"", StringComparison.Ordinal))
-            .LastOrDefault(m => m.Contains("UPDATE \"Documents\"", StringComparison.Ordinal)
-                && m.Contains("\"ProcessingStartedAt\"", StringComparison.Ordinal));
+        var update = sink.LastMessageContaining("UPDATE \"Documents\"", "\"ProcessingStartedAt\"");
         update.Should().NotBeNull(
             "the endpoint's re-arm UPDATE must appear in the host's EF command log — if it does not, this "
             + "test is a no-op and proves nothing about which clock the guard reads");
@@ -2764,7 +2759,9 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         // ExtractionWorker.PersistSuccess's whole-tuple commit (ManualRequired + Distrusted) inside this
         // request's load→save window and the row ends ManualRequired + TRUSTED — a distrusted basis
         // rolling up as Covered, the ADR 0042 hole. The mirror (Completed + Distrusted) comes from the
-        // other seed. This is the ADR 0030 last-writer-wins class, the same family as #460 / #461.
+        // other seed. This is the ADR 0030 last-writer-wins class, the same family as #460 / #461 — #460
+        // has since closed (ADR 0030 Amendment 2) and its grading basis does not reach here, because this
+        // is two columns a partial write left disagreeing, not a verdict computed from the wrong inputs.
         //
         // The interleave itself has no seam to construct through — one HTTP request, no injection point —
         // so what is pinned is the PROPERTY that makes it reachable rather than the race. If this writer
@@ -2817,11 +2814,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
                 "…and really did leave the status alone, which is the de-queue guard doing its job");
         }
 
-        // Serilog renders the command text as a quoted string, so the SQL's own quotes arrive escaped.
-        var update = sink.Events
-            .Select(e => e.RenderMessage().Replace("\\\"", "\"", StringComparison.Ordinal))
-            .LastOrDefault(m => m.Contains("UPDATE \"Documents\"", StringComparison.Ordinal)
-                && m.Contains("\"IsManuallyVerified\"", StringComparison.Ordinal));
+        var update = sink.LastMessageContaining("UPDATE \"Documents\"", "\"IsManuallyVerified\"");
         update.Should().NotBeNull(
             "the confirmation's UPDATE must appear in the host's EF command log — if it does not, this "
             + "test is a no-op and proves nothing about which columns the write carried");
@@ -2831,15 +2824,7 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             "the write is PARTIAL — trust without the status it was decided beside — so a worker commit "
             + "landing between this request's SELECT and this UPDATE leaves the two columns disagreeing. "
             + "Recorded as an accepted residue in ADR 0052 § Consequences (the ADR 0030 last-writer-wins "
-            + "class, family of #460/#461), NOT closed by widening DocumentWriteConcurrency's REPEATABLE "
-            + "READ guard to this writer");
-    }
-
-    /// <summary>Serilog sink that records every emitted event; thread-safe for the host's loggers.</summary>
-    private sealed class CapturingLogEventSink : ILogEventSink
-    {
-        private readonly System.Collections.Concurrent.ConcurrentQueue<LogEvent> _events = new();
-        public void Emit(LogEvent logEvent) => _events.Enqueue(logEvent);
-        public IReadOnlyCollection<LogEvent> Events => _events.ToArray();
+            + "class, family of #461 and of the now-closed #460), NOT closed by widening "
+            + "DocumentWriteConcurrency's REPEATABLE READ guard to this writer");
     }
 }

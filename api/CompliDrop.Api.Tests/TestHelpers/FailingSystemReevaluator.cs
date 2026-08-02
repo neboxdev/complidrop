@@ -28,6 +28,9 @@ public sealed class FailingSystemReevaluator : IComplianceCheckService
     public Task ApplyEvaluationAsync(DbContext context, Document doc, CancellationToken ct) =>
         throw new InvalidOperationException("The seed never calls ApplyEvaluationAsync.");
 
+    public Task ApplyEvaluationAsync(DbContext context, Document doc, Document gradingBasis, CancellationToken ct) =>
+        throw new InvalidOperationException("The seed never calls ApplyEvaluationAsync.");
+
     public Task<ComplianceStatus> EvaluateAsync(Guid documentId, CancellationToken ct) =>
         throw new InvalidOperationException("The seed never calls EvaluateAsync.");
 

@@ -82,7 +82,12 @@ deploy overlap alone — the request-side `MarkVerified` is an unforced partial 
 This is **not** the [ADR 0030](0030-compliance-verdict-combined-unit-of-work.md) stale-snapshot residual
 ([#460](https://github.com/neboxdev/complidrop/issues/460)) and must not be filed under it. That residual is
 about a writer *grading from* verdict INPUTS the row has moved on from and re-asserting them; nothing is
-re-asserted here. The value is this read's own conclusion, computed from what the model just returned, and
+re-asserted here. ADR 0030 Amendment 2 has since closed #460 on this very method, and the contrast is the
+clearest statement of the boundary, and it is a boundary of OWNERSHIP rather than of mechanism: Amendment 2
+grades a freshly-read basis and writes no verdict INPUT back, because those inputs belong to a request —
+while FORCING `ComplianceStatus` exactly as this forces `ExtractionTrust`, because the verdict, like trust,
+is this read's own conclusion. A change that makes the two consistent along the wrong axis — unforcing
+either conclusion, or forcing an input — is a defect in whichever direction it goes. The value is this read's own conclusion, computed from what the model just returned, and
 the table above says these writers own it — "last writer wins on the whole tuple" is the intended
 semantics, and forcing the column is what makes this writer actually be one.
 
@@ -206,7 +211,8 @@ throw on materialization.
   [ADR 0030](0030-compliance-verdict-combined-unit-of-work.md) last-writer-wins class — the same family as
   [#460](https://github.com/neboxdev/complidrop/issues/460) and
   [#461](https://github.com/neboxdev/complidrop/issues/461), and plausibly absorbed by whatever shape #461
-  lands. `UpdateFields` is NOT in it: ADR 0030 Amendment 1 puts that writer under `REPEATABLE READ` with a
+  lands. (#460 has since landed as ADR 0030 Amendment 2, and it does NOT reach this: its grading basis
+  fixes what a verdict is computed FROM, while this pair is two columns a partial write left disagreeing.) `UpdateFields` is NOT in it: ADR 0030 Amendment 1 puts that writer under `REPEATABLE READ` with a
   `40001` re-run.
 
   **Accepted here rather than closed**, and the two narrow closures are why. Widening

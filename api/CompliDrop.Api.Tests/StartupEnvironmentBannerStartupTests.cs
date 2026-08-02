@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.AspNetCore.TestHost;
@@ -56,13 +55,5 @@ public sealed class StartupEnvironmentBannerStartupTests : IAsyncLifetime
             e => e.Level == LogEventLevel.Information && e.RenderMessage().Contains("Startup environment"));
         // CustomWebApplicationFactory boots in Development, and the line names the DB target.
         banner.RenderMessage().Should().Contain("Development").And.Contain("Database:");
-    }
-
-    /// <summary>Serilog sink that records every emitted event; thread-safe for the host's loggers.</summary>
-    private sealed class CapturingLogEventSink : ILogEventSink
-    {
-        private readonly ConcurrentQueue<LogEvent> _events = new();
-        public void Emit(LogEvent logEvent) => _events.Enqueue(logEvent);
-        public IReadOnlyCollection<LogEvent> Events => _events.ToArray();
     }
 }

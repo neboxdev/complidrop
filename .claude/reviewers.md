@@ -191,8 +191,12 @@ Both are defined in this repo's `.claude/agents/`.
     `ProcessDocumentAsync` loads the doc BEFORE OCR+LLM and holds that snapshot for minutes; EF emits
     only changed properties, so assigning the snapshot's own value emits no `SET` at all while the row
     may have moved (a mid-read `PUT /verify` commits the opposite value). Do NOT file this as the ADR
-    0030 / #460 stale-snapshot residual: #460 is a writer RE-ASSERTING verdict INPUTS it graded from;
-    this is the writer's OWN conclusion, which ADR 0052 §2 says it owns. Pinned by
+    0030 / #460 stale-snapshot residual, and do NOT read #460's read-only grading basis (ADR 0030
+    Amendment 2, which ships on the same method) as a reason to unforce this: #460 is about verdict INPUTS
+    a REQUEST owns, which is why it grades from a fresh value and writes no input back — it FORCES
+    `ComplianceStatus` (`ForceVerdictWrite`) for the same reason this forces trust, because a verdict, like
+    trust, is the writer's OWN conclusion, which ADR 0052 §2 says it owns. The axis is ownership, not
+    mechanism. Pinned by
     `PersistSuccess_forces_its_trust_decision_over_a_write_that_landed_mid_extraction` and
     `A_terminal_failure_forces_its_distrust_over_a_confirmation_that_landed_mid_attempt`
     (`FakeExtractionClient.DuringExtract` constructs the interleaving; do not "simplify" it away).
@@ -270,7 +274,8 @@ Both are defined in this repo's `.claude/agents/`.
       only what differs from that snapshot), and on an unsettled row `ResolveManualReview` leaves the
       status alone — so the UPDATE carries trust WITHOUT it, and a `PersistSuccess` commit landing in that
       window leaves `ManualRequired` + `Trusted`. ADR 0030 last-writer-wins class, same family as
-      #460/#461 and plausibly absorbed by #461's shape; `UpdateFields` is exempt (REPEATABLE READ + 40001
+      #460 (closed by ADR 0030 Amendment 2, whose grading basis does not reach this — a status/trust pair
+      is not a verdict basis) and #461, plausibly absorbed by #461's shape; `UpdateFields` is exempt (REPEATABLE READ + 40001
       re-run). ACCEPTED, not overlooked: widening the RR guard to `MarkVerified` is itself a finding (see
       the ADR 0030 block), and the conditional-`ExecuteUpdateAsync` alternative drops the
       `AuditSaveChangesInterceptor` diff row on a human confirmation while still grading from the stale
@@ -706,23 +711,124 @@ Both are defined in this repo's `.claude/agents/`.
     it (the sweep does date transitions only). Recorded in ADR 0030 Amendment 1 residual 1 and
     ticketed as [#461](https://github.com/neboxdev/complidrop/issues/461) — not a NEW finding, but do
     not let a diff or a doc call this window benign or self-healing either.
-  - `ExtractionWorker.PersistSuccess` is a whole-tuple writer for every input it EXTRACTS — and that
-    qualifier is the whole point. It grades from a tracked snapshot read before an OCR + LLM run that
-    lasts minutes, and EF writes back only what it MODIFIED, so EVERY canonical verdict input it leaves
-    unmodified keeps a request's committed value beside a verdict computed from the pre-run one. Treat
-    that as the mechanism, NOT as a list to close: `VendorId` always (it grades off the TRACKED FK,
-    `ApplyEvaluationAsync`'s `context.Entry(doc).Reference(d => d.Vendor)`); `DocumentType` whenever
-    `CanonicalDocumentTypes.NormalizeExtracted` returns the STORED value (blank/absent answer, or a
-    canonical answer equal to what it read), which decides which rules apply; any typed column whose
-    field the model OMITTED, since `ApplyToTypedColumn` runs only for returned fields. #366 closed the
-    request-path half of scenario B only. Named in ADR 0030 Amendment 1 and ticketed as
-    [#460](https://github.com/neboxdev/complidrop/issues/460), so no instance of it is a NEW finding —
-    but two "obvious" fixes ARE, if one ever appears in a diff: widening the RR guard (or an `xmin`
-    token) to the worker costs a re-paid extraction, and re-reading an input and ASSIGNING it onto the
-    tracked entity makes the worker WRITE that column, clobbering a request that lands between the
-    re-read and the commit — a lost update the code does not have today. A fresh value used to DECIDE
-    THE GRADING ONLY (e.g. a vendor id passed to the grading path, tracked FK untouched) is the shape
-    that does not trade one bug for another.
+  - The worker's STALE-BASIS grading is ADR 0030 **Amendment 2** (#460), the closing half of Amendment
+    1's scenario B. `ExtractionWorker.PersistSuccess` holds a tracked snapshot across an OCR + LLM run
+    that lasts minutes and EF writes back only what it MODIFIED, so every canonical verdict input it
+    leaves unmodified used to keep a request's committed value beside a verdict computed from the
+    pre-run one — `VendorId` always, `DocumentType` whenever `NormalizeExtracted` returns the STORED
+    value, any typed column whose field the model OMITTED. It now grades
+    `Services/DocumentGradingBasis.AfterPendingCommitAsync`: the row's CURRENT committed values overlaid
+    with exactly the properties the CHANGE TRACKER reports modified — i.e. a detached prediction of the
+    row this commit will LEAVE. Facts that look like bugs and are not:
+    - It is derived from `IsModified`, NOT from a list of columns, and that is the decision. All three
+      named instances fall out of the one rule and so does the next column added to `Document`.
+      Re-writing it as an enumeration (a vendor-id parameter, a per-column patch) IS a real finding —
+      ADR 0030 Amendment 2 Option E.
+    - The basis is READ-ONLY with respect to the TRACKED entity — no basis VALUE is copied back onto it, so
+      the worker still emits exactly the verdict INPUTS it emitted before. (It DOES write the basis's own
+      `Vendor` navigation; "read-only" scopes to `doc`. And it is about inputs, not about the column count:
+      the worker DOES now force `ComplianceStatus` — see the forced-verdict bullet below.) Assigning a
+      re-read input onto the tracked entity (or
+      onto its `Vendor` navigation, which EF fixup turns into the same thing) makes the worker WRITE
+      that column and clobber a request that landed mid-run — a LOST UPDATE the code does not have.
+      Still a real finding. So is widening the RR guard or an `xmin` token to the worker (see the first
+      bullet of this block: a throw out of that `SaveChanges` re-pays Document AI + the LLM).
+      Pinned TWICE, because no value assertion can see it — every `DuringExtract` interleave commits
+      BEFORE the basis read, where an assign-back writes the value the row already holds and every
+      assertion still passes. `The_persist_emits_what_it_extracted_and_no_verdict_input_it_only_read`
+      reads the persist's `UPDATE "Documents"` SET clause off the host's EF command log (the
+      `Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read` shape) and requires
+      `"VendorId" =` / `"DocumentType" =` / `"GeneralLiabilityLimit" =` absent with `"ExtractionStatus" =`
+      present as the anti-no-op. The statement it reads is picked by `"ExtractionCompletedAt"`, a column
+      only the SUCCESS path writes — with `"ExtractionStatus"` as the picker, `RecordFailedAttempt` /
+      `MarkFailed`'s UPDATE satisfied all four assertions, so a THROWN persist passed. Weakening that
+      discriminator (or dropping the `ExtractionStatus == Completed` sanity assertion beside it) makes the
+      pin vacuous again. `A_write_that_lands_AFTER_the_basis_read_is_not_clobbered_by_the_persist`
+      drives a competing PATCH from inside the worker's own `SavingChanges` through the test harness's
+      `ConcurrentSystemWriteInterceptor` (the `SystemDbContext` twin of the #366 hook — a SEPARATE
+      singleton on purpose, since `IAuditLogger` saves on `SystemDbContext` during ordinary requests).
+      Neither is decoration: the mid-run request in the first must move all three columns or the
+      absences prove nothing, and the two vendors in the second must share ONE checklist that does NOT
+      govern the document's type (see #468 — a competing regrade that deletes the check rows this
+      persist has staged throws out of `SaveChanges`). "Simplify" either and the pin goes vacuous.
+    - The basis overload ENFORCES two preconditions with `ArgumentException` — same `Id` as the tracked
+      doc (check rows are stamped from the BASIS while the clear-existing predicate keys on the TRACKED
+      one) and DETACHED (its `Vendor` navigation is assigned from an `AsNoTracking` query, which on a
+      tracked principal EF turns into spurious inserts). Today's single caller satisfies both by
+      construction, so "dead guard, drop it" IS a real finding. Pinned by
+      `The_basis_overload_refuses_a_basis_that_is_not_this_document` and
+      `The_basis_overload_refuses_a_TRACKED_basis`.
+    - The basis vendor chain is a NEW query (`context.Set<Vendor>()` off the basis's own FK) rather than
+      the tracked navigation, and its correctness rests on the Vendor soft-delete GLOBAL FILTER still
+      applying. Adding `IgnoreQueryFilters()` there would read as idiomatic (this block blesses it inside
+      background workers) and would grade a document against a DELETED vendor's checklist — a persisted
+      false-affirmative. Pinned by `A_vendor_soft_deleted_mid_extraction_grades_as_no_checklist`.
+    - Do NOT read it as a counter-example to `ExtractionWorker.SetTrust`, which DOES force its column.
+      `SetTrust` makes the worker's OWN conclusion durable (ADR 0052 §2 says it owns it); #460 is about
+      verdict INPUTS a REQUEST owns. Forcing those is Amendment 2 Option G, refuted. Blurring the
+      distinction in either direction is a defect.
+    - The VERDICT itself is on the `SetTrust` side of that line, and `ExtractionWorker.ForceVerdictWrite`
+      writes it accordingly — `IsModified` on `ComplianceStatus` after the try/catch, so BOTH the graded
+      verdict and the degrade-to-`Pending` land. Removing it, or narrowing it to one arm, IS a real
+      finding: `ApplyEvaluationAsync` only ASSIGNS, and a verdict EQUAL to the minutes-old snapshot emits
+      no SET clause while the `ComplianceCheck` rows are rewritten unconditionally and `UpdatedAt` keeps
+      the UPDATE running — so a mid-read PATCH's verdict survives beside this read's inputs and this
+      read's checks (strict→lenient reassignment, recomputed `NonCompliant` == the pre-run value, row
+      commits `Compliant` over a lowered limit and a FAILING check row; the catch arm's twin is a
+      `Pending` snapshot swallowing the degrade). Equally a finding in the other direction: extending the
+      force to a verdict INPUT is Option G, and extending it to the REQUEST-path callers contradicts
+      Amendment 1, whose `REPEATABLE READ` exists so a stale-basis UPDATE is REFUSED rather than forced.
+      Pinned per arm by `A_verdict_equal_to_the_stale_snapshot_is_still_WRITTEN_over_a_competitors` (SET
+      clause AND terminal tuple) and `A_failing_basis_read_degrades_the_verdict_without_requeuing_the_extraction`.
+    - Grading the freshly-read row WHOLESALE is not a simplification of this, it is Option F and it is
+      wrong in the false-affirmative direction: it discards the worker's own extraction, so a re-read
+      that LOWERS a limit gets graded against the value the row is about to lose. Pinned by
+      `The_workers_own_extracted_value_still_decides_the_verdict_where_it_wrote_it`.
+    - The basis read sits INSIDE `PersistSuccess`'s degrade-to-`Pending` `try` deliberately — it must
+      never become a new way for the persist to THROW — and a `null` basis falls back to grading the
+      tracked entity. Hoisting it out of the `try`, or making the null case throw, IS a real finding.
+      Pinned by `A_failing_basis_read_degrades_the_verdict_without_requeuing_the_extraction`, which faults
+      the read's own `SELECT` through the test harness's `SystemCommandFaultInterceptor` (an
+      `IDbCommandInterceptor` on `SystemDbContext`, callback-armed like the two hooks above, self-disarming
+      after one fire) and requires the row to end `Completed` + `Pending` with `FailedAttempts` still 0
+      rather than back in the queue. That pin had to be BUILT: what
+      `A_document_deleted_mid_extraction_persists_without_a_second_extraction` pins is that a mid-run SOFT
+      delete lands as an ordinary completed persist through the NON-null branch (it also reassigns the
+      vendor first, so its verdict says which branch ran) — its basis read never fails and never returns
+      null, so hoisting the read left the whole suite green. A HARD delete is not an alternative pin: the
+      persist's own UPDATE would then throw for an unrelated reason.
+    - `null` means a HARD delete, not "deleted mid-run". `GetDatabaseValues` issues an
+      `AsNoTracking().IgnoreQueryFilters()` key lookup, so the SOFT delete every API path performs still
+      yields a basis and the document is still graded as the row the commit leaves; no production path
+      hard-deletes a `Document`, so the fallback is DEFENSIVE, not live. An earlier draft of ADR 0030
+      Amendment 2 and of this file said otherwise and cited a test that could not tell the branches
+      apart — both branches are now pinned on the helper itself by
+      `The_grading_basis_is_null_only_when_the_row_is_genuinely_gone`, with the composition pinned by
+      `The_grading_basis_overlays_only_the_properties_the_writer_modified`. A doc or comment that
+      re-describes the null case as the soft-delete path IS a finding.
+    - The REQUEST-path callers keep the tracked-entity overload ON PURPOSE. `UpdateDocument` grades
+      against a `VendorId` it assigned in memory and has not committed, so a fresh basis would grade the
+      OLD checklist (pinned by
+      `Assigning_a_vendor_commits_the_verdict_against_the_new_checklist_atomically`), and both partial
+      writers already have the strictly stronger RR + 40001 re-run. "Use the basis everywhere for
+      consistency" IS a real finding.
+    - KNOWN residual, ADR 0030 Amendment 2 § What stays open — do not re-report as new: the
+      re-read → commit window is NOT closed, only shrunk from the whole extraction run to one round
+      trip, which makes it the same shape and size as #461's. Closing it needs conflict DETECTION on the
+      commit, and every detecting shape re-pays the extraction. Equally, do not let a diff or a doc
+      describe #460 as fully closed.
+    - TWO more recorded residuals in the same section, also not new findings. (a) `unreadableFields` —
+      and therefore `distrusted`, `ExtractionStatus` and `ExtractionTrust` — is STILL asked of the
+      pre-run tracked entity twenty lines above the basis read, so a mid-run edit that fixes a typed
+      column can leave `ManualRequired` + `Distrusted` on a row whose read-time `unreadableFields` is
+      empty (vendor reads Action needed, `ManualReviewCard` names nothing). NOT swapped onto the basis
+      on purpose: that redefines trust from "what this read produced" to "what the row holds", an ADR
+      0052 §2 decision, [#467](https://github.com/neboxdev/complidrop/issues/467). (b) A concurrent
+      regrade that deletes the `ComplianceCheck` rows `ApplyEvaluationAsync` has STAGED for removal makes
+      the persist's DELETE affect 0 rows, so EF throws `DbUpdateConcurrencyException` out of
+      `PersistSuccess` — the re-paid-extraction landing, not the "cosmetic" display desync ADR 0030
+      § Consequences describes. Predates #460 (it arrived with #337),
+      [#468](https://github.com/neboxdev/complidrop/issues/468).
   - NO frontend change: the 409's message is already jargon-free copy that both call sites surface
     through their generic `err.message` toast. This is NOT the ADR 0050 Amendment 1 situation (there
     the client held a payload that actively CONTRADICTED the 409); here the user's edits survive in the
