@@ -353,6 +353,16 @@ public class ComplianceCheckService(
     public Task ApplyEvaluationAsync(DbContext context, Document doc, Document gradingBasis, CancellationToken ct) =>
         ApplyEvaluationCoreAsync(context, doc, gradingBasis, ct);
 
+    /// <summary>
+    /// The vendor graph <see cref="ComputeOutcome"/> reads — <c>Vendor → ComplianceTemplate → Rules</c> —
+    /// spelled ONCE so the two branches of <see cref="ApplyEvaluationCoreAsync"/> cannot drift (#460 review
+    /// round 2, S5). Their tracking/loading difference is deliberate and stays per-branch; the loaded GRAPH
+    /// is not, and a chain that lost <c>.ThenInclude(t =&gt; t!.Rules)</c> on one of them would silently read
+    /// no-governing-rules and store <see cref="ComplianceStatus.Pending"/> there while the other still graded.
+    /// </summary>
+    private static IQueryable<Vendor> WithChecklist(IQueryable<Vendor> vendors) =>
+        vendors.Include(v => v.ComplianceTemplate).ThenInclude(t => t!.Rules);
+
     private async Task ApplyEvaluationCoreAsync(DbContext context, Document doc, Document? gradingBasis, CancellationToken ct)
     {
         // WHAT gets graded vs WHERE the verdict lands are two different documents when a basis is supplied
@@ -396,10 +406,7 @@ public class ComplianceCheckService(
         {
             var vendorRef = context.Entry(doc).Reference(d => d.Vendor);
             if (doc.VendorId is not null)
-                await vendorRef.Query()
-                    .Include(v => v!.ComplianceTemplate)
-                        .ThenInclude(t => t!.Rules)
-                    .LoadAsync(ct);
+                await WithChecklist(vendorRef.Query()).LoadAsync(ct);
             else
             {
                 // No vendor assigned: force the in-memory navigation to match the FK so ComputeOutcome reads
@@ -418,10 +425,7 @@ public class ComplianceCheckService(
             // no-template (Pending).
             basis.Vendor = basis.VendorId is null
                 ? null
-                : await context.Set<Vendor>()
-                    .AsNoTracking()
-                    .Include(v => v.ComplianceTemplate)
-                        .ThenInclude(t => t!.Rules)
+                : await WithChecklist(context.Set<Vendor>().AsNoTracking())
                     .FirstOrDefaultAsync(v => v.Id == basis.VendorId.Value, ct);
         }
 

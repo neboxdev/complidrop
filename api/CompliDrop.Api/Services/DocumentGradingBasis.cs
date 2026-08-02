@@ -44,7 +44,15 @@ internal static class DocumentGradingBasis
     /// <summary>
     /// Reads <paramref name="tracked"/>'s CURRENT committed row and overlays the properties
     /// <paramref name="context"/> will actually write for it, yielding a detached <see cref="Document"/>
-    /// equal to the row this writer's pending commit will leave behind.
+    /// equal to the row this writer's pending commit will leave behind — for every property the WRITER
+    /// itself sets.
+    /// <para/>
+    /// One property is outside that scope, and the claim is bounded rather than absolute because of it:
+    /// <c>AuditSaveChangesInterceptor</c> re-stamps <c>UpdatedAt</c> from <c>SavingChanges</c>, i.e. strictly
+    /// AFTER this read has returned, so <c>basis.UpdatedAt</c> holds the caller's value and the row commits
+    /// the interceptor's later one. Immaterial to grading — no verdict input is interceptor-set — and
+    /// deliberately not chased: ADR 0030 Amendment 2's "the basis is READ-ONLY with respect to
+    /// <c>doc</c>" means this helper predicts what the writer writes, it does not model the pipeline.
     /// <para/>
     /// Returns <c>null</c> only when the row is GENUINELY GONE — a hard delete. A SOFT delete does NOT
     /// produce a null basis: <c>EntityEntry.GetDatabaseValuesAsync</c>
