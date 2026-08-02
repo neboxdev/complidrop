@@ -105,6 +105,18 @@ public class Adr0052EnforcementTests
         endpoints.Should().NotContain("SetProperty(d => d.ExtractionTrust",
             "Reextract's ExecuteUpdateAsync must leave trust alone — writing it there is precisely the "
             + "conflation #459 removes (the re-arm would destroy the ADR 0042 distrust signal again)");
+
+        // The request-side MIRROR of the worker's per-writer count (#459 review round 2). The assertion
+        // above only rejects the ExecuteUpdateAsync shape, and AllowedMentions whitelists this file WHOLE —
+        // so a plain tracked-entity write, `doc.ExtractionTrust = ExtractionTrust.Trusted;` dropped into
+        // UpdateDocument, DeleteDocument or a brand-new helper, used to pass every gate in this class while
+        // .claude/reviewers.md says "FOUR writers, and only four". Counted rather than located, exactly as
+        // the worker half is, so it also catches the write arriving somewhere nobody thought to look.
+        Regex.Matches(endpoints, @"\.ExtractionTrust\s*=[^=]").Count.Should().Be(1,
+            "ResolveManualReview is the ONE request-side trust writer (ADR 0052 §2). A second assignment "
+            + "in this file is a fifth writer overall — most dangerously one that grants Trusted without "
+            + "asking DocumentFieldReadability, which is how a document with an unreadable canonical value "
+            + "gets back into vendor coverage");
     }
 
     [Fact]
@@ -121,6 +133,10 @@ public class Adr0052EnforcementTests
 
         worker.Should().Contain("private static void SetTrust(",
             "anti-no-op: the file we read must still declare the one funnel the counts below assume");
+        worker.Should().Contain("private async Task RequeueInterruptedAsync(",
+            "anti-no-op, and the member this class's doc comment claims is pinned BY NAME (#459 review "
+            + "round 2 — it was not). A renamed or deleted requeue must fail here rather than silently "
+            + "make the assertions below describe a member that no longer exists");
 
         Regex.Matches(worker, @"\.ExtractionTrust\s*=[^=]").Count.Should().Be(1,
             "every trust write in the worker goes through SetTrust, whose single assignment this is. A "
@@ -134,6 +150,13 @@ public class Adr0052EnforcementTests
             + "retry arm, the shutdown requeue and the re-arm all leave trust alone, and that ABSENCE is "
             + "the #459 fix. A call going missing is the other direction: an extraction that no longer "
             + "re-decides trust");
+
+        worker.Should().NotContain("SetProperty(d => d.ExtractionTrust",
+            "the endpoints gate's twin, and the hole it closes is this file's (#459 review round 2): the "
+            + "two counts above only see `.ExtractionTrust =` and `SetTrust(db, doc,`, so an "
+            + "ExecuteUpdateAsync bolted onto RequeueInterruptedAsync — which already resets the rest of "
+            + "the queue tuple, and where resetting trust looks like tidy bookkeeping — matched neither "
+            + "and passed all three");
 
         ExtractionWorker.ClaimSql.Should().NotContain("ExtractionTrust",
             "the claim moves PIPELINE POSITION only. Adding trust to its SET list would re-arm the "
