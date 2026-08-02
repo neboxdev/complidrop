@@ -50,46 +50,6 @@ public class Adr0050EnforcementTests
     private const int MinBodyLines = 20;
 
     /// <summary>
-    /// Returns the source text between the braces of the method whose declaration contains
-    /// <paramref name="signature"/>, with whole-line comments stripped (the guard's own doc comment names
-    /// the shapes it rejects — "an <c>if</c> above a SaveChanges" — and prose about a forbidden call must
-    /// not read as the call itself). Throws when the signature is absent or its braces never balance, so a
-    /// renamed method or a botched read fails the gate instead of silently emptying it.
-    /// <para/>
-    /// Internal so the hermetic fixtures below can drive it against synthetic input.
-    /// </summary>
-    internal static string ExtractMethodBody(string source, string signature)
-    {
-        var start = source.IndexOf(signature, StringComparison.Ordinal);
-        if (start < 0)
-            throw new InvalidOperationException($"Method signature not found: {signature}");
-
-        var open = source.IndexOf('{', start);
-        if (open < 0)
-            throw new InvalidOperationException($"No opening brace after: {signature}");
-
-        var depth = 0;
-        for (var i = open; i < source.Length; i++)
-        {
-            if (source[i] == '{') depth++;
-            else if (source[i] == '}' && --depth == 0)
-                return SourceScan.StripLineComments(source[(open + 1)..i]);
-        }
-        throw new InvalidOperationException($"Unbalanced braces in the body of: {signature}");
-    }
-
-    private static int Count(string haystack, string needle)
-    {
-        var (count, at) = (0, 0);
-        while ((at = haystack.IndexOf(needle, at, StringComparison.Ordinal)) >= 0)
-        {
-            count++;
-            at += needle.Length;
-        }
-        return count;
-    }
-
-    /// <summary>
     /// The whole gate, so the hermetic fixtures below can drive the SAME assertions the production check
     /// runs. Call counts alone are not enough: ADR 0050 Option A can be re-spelled with
     /// <c>AnyAsync</c> as its pre-check, which keeps every count identical (one
@@ -106,14 +66,14 @@ public class Adr0050EnforcementTests
             $"the extracted Reextract body is implausibly short ({body.Length} chars) — the extractor "
             + "latched onto the wrong span and this gate would be a silent no-op");
 
-        Count(body, "ExecuteUpdateAsync(").Should().Be(1,
+        SourceScan.Count(body, "ExecuteUpdateAsync(").Should().Be(1,
             "ADR 0050 §1: the re-arm is ONE conditional bulk UPDATE whose WHERE carries the guard, so "
             + "Postgres re-evaluates the predicate under the row's own UPDATE lock");
 
         // The INTENDED shape, pinned precisely rather than forbidding all reads: zero rows is ambiguous
         // on its own ("no such document" vs "mine, but busy"), so the refusal path re-reads EXISTENCE —
         // one AnyAsync, deliberately AFTER the update, never a load feeding the write (ADR 0050 §4).
-        Count(body, "AnyAsync(").Should().Be(1,
+        SourceScan.Count(body, "AnyAsync(").Should().Be(1,
             "the refusal path answers 404-vs-409 with exactly one existence re-read");
 
         var updateAt = body.IndexOf("ExecuteUpdateAsync(", StringComparison.Ordinal);
@@ -145,7 +105,7 @@ public class Adr0050EnforcementTests
                      "FirstAsync(", "SingleAsync(", "FindAsync(", "ToListAsync(", "CountAsync(",
                  })
         {
-            Count(body, readThenWrite).Should().Be(0,
+            SourceScan.Count(body, readThenWrite).Should().Be(0,
                 $"'{readThenWrite}' in Reextract means the guard became a read-then-write: it would test a "
                 + "status the worker can flip between the SELECT and the UPDATE, i.e. exactly as racy as "
                 + "the double-OCR / duplicate-DocumentField bug #365 closed (ADR 0050 Option A). No "
@@ -156,7 +116,7 @@ public class Adr0050EnforcementTests
     [Fact]
     public void Reextract_re_arms_with_one_conditional_ExecuteUpdateAsync_and_one_existence_read()
     {
-        AssertAtomicReArmShape(ExtractMethodBody(
+        AssertAtomicReArmShape(SourceScan.ExtractMethodBody(
             File.ReadAllText(SourceScan.ProductionFile("Endpoints", "DocumentEndpoints.cs")),
             ReextractSignature));
     }
@@ -200,12 +160,12 @@ public class Adr0050EnforcementTests
             }
             """;
 
-        var body = ExtractMethodBody(readThenWrite, ReextractSignature);
+        var body = SourceScan.ExtractMethodBody(readThenWrite, ReextractSignature);
         // Proven, not assumed: the fixture clears the anti-no-op floor and every count the old gate
         // checked, so the rejection below can only come from the new location assertions.
         body.Split('\n').Length.Should().BeGreaterOrEqualTo(MinBodyLines);
-        Count(body, "ExecuteUpdateAsync(").Should().Be(1);
-        Count(body, "AnyAsync(").Should().Be(1);
+        SourceScan.Count(body, "ExecuteUpdateAsync(").Should().Be(1);
+        SourceScan.Count(body, "AnyAsync(").Should().Be(1);
 
         var act = () => AssertAtomicReArmShape(body);
         act.Should().Throw<Exception>("this shape re-opens the race the gate exists to prevent")
@@ -247,7 +207,7 @@ public class Adr0050EnforcementTests
             }
             """;
 
-        var body = ExtractMethodBody(unguarded, ReextractSignature);
+        var body = SourceScan.ExtractMethodBody(unguarded, ReextractSignature);
         body.Split('\n').Length.Should().BeGreaterOrEqualTo(MinBodyLines);
         body.IndexOf("AnyAsync(", StringComparison.Ordinal).Should()
             .BeGreaterThan(body.IndexOf("ExecuteUpdateAsync(", StringComparison.Ordinal),
@@ -258,47 +218,9 @@ public class Adr0050EnforcementTests
             .WithMessage("*staleness guard lives INSIDE*");
     }
 
-    [Fact]
-    public void The_body_extractor_finds_the_right_span_and_ignores_commented_out_calls()
-    {
-        const string fixture = """
-            class C
-            {
-                private static void Other() { SaveChangesAsync(); }
-
-                private static async Task<IResult> Reextract(Guid id)
-                {
-                    // A comment naming SaveChangesAsync( must not count as the call.
-                    var n = await db.Documents.Where(d => d.Id == id).ExecuteUpdateAsync(s => s);
-                    if (n == 0) { return await db.Documents.AnyAsync(d => d.Id == id) ? Busy() : NotFound(); }
-                    return Ok();
-                }
-
-                private static void After() { FirstOrDefaultAsync(); }
-            }
-            """;
-
-        var body = ExtractMethodBody(fixture, ReextractSignature);
-
-        Count(body, "ExecuteUpdateAsync(").Should().Be(1);
-        Count(body, "AnyAsync(").Should().Be(1);
-        Count(body, "SaveChangesAsync(").Should().Be(0, "the only occurrence inside the body is a comment");
-        Count(body, "FirstOrDefaultAsync(").Should().Be(0,
-            "the sibling methods around the target must be outside the extracted span");
-    }
-
-    [Fact]
-    public void The_body_extractor_fails_closed_when_the_method_is_missing_or_unbalanced()
-    {
-        // Both failure modes THROW rather than returning "" — the difference between a gate that is
-        // enforcing and one that has quietly stopped.
-        var act = () => ExtractMethodBody("class C { }", ReextractSignature);
-        act.Should().Throw<InvalidOperationException>().WithMessage("*not found*");
-
-        var unbalanced = () => ExtractMethodBody(
-            ReextractSignature + "Guid id)\n{\n    var x = 1;\n", ReextractSignature);
-        unbalanced.Should().Throw<InvalidOperationException>().WithMessage("*Unbalanced*");
-    }
+    // The extractor's and the counter's own hermetic fixtures live with the plumbing they cover, in
+    // SourceScanTests — they are properties of SourceScan, not of ADR 0050, and this gate stopped owning
+    // them the moment a second gate started calling the same helpers (#461 review).
 
     [Fact]
     public void The_pinned_signature_is_the_one_the_endpoint_actually_declares()

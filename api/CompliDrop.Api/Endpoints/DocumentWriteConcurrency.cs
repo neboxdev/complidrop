@@ -30,14 +30,24 @@ namespace CompliDrop.Api.Endpoints;
 /// writer B's (older) value, and whose <c>ComplianceStatus</c> matched neither — or a verdict graded
 /// against the OLD vendor's checklist on a row that kept the NEW vendor.
 /// <para/>
-/// The fix is scoped to those two writers, on purpose. <c>REPEATABLE READ</c> makes Postgres refuse an
-/// UPDATE that would land on a row version committed after this transaction's snapshot (<c>40001</c>),
-/// which is precisely "someone else wrote this document while I was deciding what to write". Every
-/// OTHER document writer — the extraction worker, <c>MarkVerified</c>, the delete, the re-grade
-/// fan-outs, the nightly sweep — keeps its <c>READ COMMITTED</c> last-writer-wins semantics untouched,
-/// which is what keeps this clear of ADR 0030 § Option A: an entity-level <c>xmin</c> token would have
-/// made EVERY document write path optimistic, and the worker's persist path treats an exception out of
-/// its <c>SaveChanges</c> as a re-payable extraction (see <c>ExtractionWorker.Clamp</c>'s remarks).
+/// The THIRD caller writes no inputs at all and needs the same signal for a different reason (#461, ADR
+/// 0030 Amendment 3). <c>ComplianceEndpoints.RunCheck</c> — the "Check again" button — is a pure
+/// RE-GRADE: read the document, compute the verdict, write only <c>ComplianceStatus</c> and the
+/// <c>ComplianceCheck</c> rows. It cannot LOSE an update, and that was the only comfort: an
+/// <c>UpdateFields</c> that LOWERS a limit inside its window commits its own consistent tuple and the
+/// re-grade's UPDATE then lands on top, leaving the lowered limit beside a stored <c>Compliant</c> and
+/// passing check rows citing a value the row no longer holds. Nothing heals it — the nightly sweep only
+/// does date transitions.
+/// <para/>
+/// The fix is scoped to those three CALL SITES, on purpose. <c>REPEATABLE READ</c> makes Postgres refuse
+/// an UPDATE that would land on a row version committed after this transaction's snapshot
+/// (<c>40001</c>), which is precisely "someone else wrote this document while I was deciding what to
+/// write". Every OTHER document writer — the extraction worker, <c>MarkVerified</c>, the delete, the
+/// BATCHED re-grade fan-outs (<c>ComplianceCheckService.ReevaluateWhereAsync</c>), the nightly sweep —
+/// keeps its <c>READ COMMITTED</c> last-writer-wins semantics untouched, which is what keeps this clear
+/// of ADR 0030 § Option A: an entity-level <c>xmin</c> token would have made EVERY document write path
+/// optimistic, and the worker's persist path treats an exception out of its <c>SaveChanges</c> as a
+/// re-payable extraction (see <c>ExtractionWorker.Clamp</c>'s remarks).
 /// <para/>
 /// A retry RELOADS and RECOMPUTES: the caller's callback re-reads the document inside the new
 /// transaction and re-applies the request to it, so the winner's committed change is an INPUT to the
@@ -53,6 +63,17 @@ internal static class DocumentWriteConcurrency
 
     internal const string ConflictMessage =
         "Someone else changed this document while you were editing it. Reload the page and make your change again.";
+
+    /// <summary>
+    /// The exhausted-retry copy for a pure RE-GRADE (<c>ComplianceEndpoints.RunCheck</c>). Same
+    /// <see cref="ConflictCode"/> and same envelope — a client cannot act differently on the two, and the
+    /// frontend surfaces whichever message arrives, as written. Separate WORDING because the edit copy
+    /// names a change this caller never submitted: "Check again" asks for a fresh verdict, so there is
+    /// nothing of the user's to lose and nothing for them to re-make. Telling them to anyway would be the
+    /// kind of inaccurate copy the frontend error-copy policy exists to keep out.
+    /// </summary>
+    internal const string RegradeConflictMessage =
+        "Someone else changed this document while we were re-checking it. Reload the page and try again.";
 
     /// <summary>
     /// Executes <paramref name="write"/> inside a <c>REPEATABLE READ</c> transaction, retrying the WHOLE
@@ -72,6 +93,14 @@ internal static class DocumentWriteConcurrency
     /// successful writer's consistent <c>(inputs, verdict)</c> tuple exactly as it was, so no verdict is
     /// persisted that contradicts anything. Committing the edit with <c>Pending</c> instead would BE a
     /// half-applied write of the shape this ticket exists to remove.
+    /// <para/>
+    /// The re-grade caller lands on the same answer by a shorter route (#461): it writes no inputs, so
+    /// rolling back leaves the row exactly as the winning writer left it — and every writer that can win
+    /// a conflict here commits its OWN <c>(inputs, verdict)</c> pair, so "leave the previous verdict
+    /// alone" IS the consistent state. Degrading it to <c>Pending</c> would be strictly worse: it would
+    /// overwrite a correct verdict with a non-committal one, through a write that is itself what kept
+    /// conflicting. Answering <c>200</c> would be worse still — the product would claim it re-checked a
+    /// document it did not.
     /// </summary>
     /// <param name="onAttemptAbandoned">
     /// Invoked once per attempt that is rolled back, alongside the change-tracker clear that discards
@@ -82,10 +111,17 @@ internal static class DocumentWriteConcurrency
     /// it. A caller that instead re-set such state at the START of each attempt would leave the last
     /// one's behind, and would be relying on WHERE Postgres happens to report the conflict.
     /// </param>
+    /// <param name="conflictMessage">
+    /// The copy the exhausted <c>409</c> carries — <see cref="ConflictMessage"/> for a writer submitting
+    /// the user's change, <see cref="RegradeConflictMessage"/> for a pure re-grade. Required rather than
+    /// defaulted for the same reason <paramref name="onAttemptAbandoned"/> is: the two say different
+    /// things about what the user lost, and a default would silently give a new caller the wrong one.
+    /// </param>
     internal static async Task<IResult> RunAsync(
         AppDbContext db,
         ILoggerFactory loggerFactory,
         Guid documentId,
+        string conflictMessage,
         Func<CancellationToken, Task<IResult>> write,
         Action? onAttemptAbandoned,
         CancellationToken ct)
@@ -125,12 +161,12 @@ internal static class DocumentWriteConcurrency
         logger.LogWarning(
             "Gave up on document {DocumentId} after {MaxAttempts} concurrent write conflicts; nothing was committed",
             documentId, DocumentConcurrency.MaxAttempts);
-        return Conflict();
+        return Conflict(conflictMessage);
     }
 
     /// <summary>The one 409 envelope for an exhausted retry, in the <c>IdempotencyResults</c> shape.</summary>
-    internal static IResult Conflict() =>
+    internal static IResult Conflict(string message) =>
         Results.Json(
-            new { data = (object?)null, error = new { code = ConflictCode, message = ConflictMessage } },
+            new { data = (object?)null, error = new { code = ConflictCode, message } },
             statusCode: StatusCodes.Status409Conflict);
 }

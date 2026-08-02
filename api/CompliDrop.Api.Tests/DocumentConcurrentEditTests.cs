@@ -12,17 +12,25 @@ using Microsoft.Extensions.DependencyInjection;
 namespace CompliDrop.Api.Tests;
 
 /// <summary>
-/// Regression tests for #366 (ADR 0030 Amendment 1): the two PARTIAL document writers —
-/// <c>DocumentEndpoints.UpdateFields</c> and <c>UpdateDocument</c> — must never commit a row whose
-/// canonical inputs contradict each other or whose verdict was graded against inputs the row no longer
-/// holds.
+/// Regression tests for the REQUEST-path document writers that co-write a compliance verdict: they must
+/// never commit a row whose canonical inputs contradict each other or whose verdict was graded against
+/// inputs the row no longer holds.
 /// <para/>
-/// ADR 0030 already made each writer commit its inputs and the verdict they imply in ONE transaction.
-/// That is not enough for these two, because each rebuilds the WHOLE <c>ExtractionFields</c> JSON mirror
-/// from its own read snapshot while EF writes back only the columns IT modified. Two overlapping edits
-/// could therefore leave the typed <c>GeneralLiabilityLimit</c> holding writer A's value, the JSON
-/// mirror holding the pre-A value, and <c>ComplianceStatus</c> matching neither — or leave the row on
-/// the NEW vendor with a verdict graded against the OLD vendor's checklist.
+/// #366 (ADR 0030 Amendment 1) covers the two PARTIAL writers, <c>DocumentEndpoints.UpdateFields</c> and
+/// <c>UpdateDocument</c>. ADR 0030 already made each writer commit its inputs and the verdict they imply
+/// in ONE transaction. That is not enough for these two, because each rebuilds the WHOLE
+/// <c>ExtractionFields</c> JSON mirror from its own read snapshot while EF writes back only the columns
+/// IT modified. Two overlapping edits could therefore leave the typed <c>GeneralLiabilityLimit</c>
+/// holding writer A's value, the JSON mirror holding the pre-A value, and <c>ComplianceStatus</c>
+/// matching neither — or leave the row on the NEW vendor with a verdict graded against the OLD vendor's
+/// checklist.
+/// <para/>
+/// #461 (ADR 0030 Amendment 3) adds the third: <c>ComplianceEndpoints.RunCheck</c>, the "Check again"
+/// PURE re-grade. It writes no inputs at all, so it cannot lose an update — and that was the only
+/// comfort. Its unguarded read → compute → write let a field edit that LOWERED a limit commit inside the
+/// window, after which the re-grade's UPDATE (only <c>ComplianceStatus</c> / <c>UpdatedAt</c>) landed on
+/// top: the lowered limit beside a stored <c>Compliant</c> and check rows citing the value the row had
+/// just lost. Same terminal shape as scenario A, reached without writing a single input.
 /// <para/>
 /// Every interleave here is CONSTRUCTED, not raced: the competing writer is driven to completion from
 /// inside the request-under-test's <c>SaveChanges</c> hook (see
@@ -166,6 +174,48 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         {
             fields = new[] { new { fieldName = name, fieldValue = value } }
         });
+
+    /// <summary>The "Check again" pure re-grade (#257): no re-extraction, verdict only.</summary>
+    private static Task<HttpResponseMessage> RecheckAsync(HttpClient client, Guid docId) =>
+        SendAsync(client, HttpMethod.Post, $"/api/compliance/check/{docId}");
+
+    /// <summary>
+    /// Why every EDIT-path exhaustion asserts the copy and not just the code. Since #461 the 409 message is
+    /// a per-call-site ARGUMENT (<c>RunAsync</c>'s required <c>conflictMessage</c>) rather than a constant
+    /// baked into the envelope, so the three call sites can now silently swap it. Handing an edit path
+    /// <c>RegradeConflictMessage</c> would tell a user whose typed change was just thrown away that "we
+    /// were re-checking it" — no mention that their edit is gone or that they must re-make it — and the
+    /// code assertion cannot see the difference. Unifying the two messages is a recorded finding, not a
+    /// cleanup (ADR 0030 Amendment 3; .claude/reviewers.md).
+    /// </summary>
+    private const string EditCopyReason =
+        "an edit path must carry the EDIT copy: the user submitted a change that was thrown away, so the "
+        + "message has to say so and ask them to make it again — the re-grade copy names no change at all";
+
+    /// <summary>
+    /// The document's persisted explainer rows, as <c>(the GL limit they CITE, IsPassed)</c>. The verdict
+    /// column is only half of what #461 leaves behind: the check rows are rewritten unconditionally, so a
+    /// re-grade that lost still gets to cite the value the row no longer holds in the "What we checked"
+    /// panel.
+    /// <para/>
+    /// The cited amount is parsed rather than string-compared, because its RENDERING is not stable across
+    /// writers and carries no meaning: <c>EvaluateRule</c> cites the typed column via
+    /// <c>DocumentFieldReadability.TypedColumnValue</c> (<c>decimal.ToString</c>), so a row written by a
+    /// re-grade that re-read from Postgres reads <c>"100000.00"</c> (the <c>numeric(_,2)</c> scale) while
+    /// one written by the edit that parsed <c>"100000"</c> in memory reads <c>"100000"</c>. The fact under
+    /// test is which AMOUNT the row cites.
+    /// </summary>
+    private async Task<IReadOnlyList<(decimal CitedLimit, bool IsPassed)>> ReadCitedLimitsAsync(Guid docId)
+    {
+        await using var db = CreateSystemDb();
+        var rows = await db.ComplianceChecks
+            .Where(c => c.DocumentId == docId)
+            .OrderBy(c => c.ActualValue)
+            .Select(c => new { c.ActualValue, c.IsPassed })
+            .ToListAsync();
+        return [.. rows.Select(r => (
+            decimal.Parse(r.ActualValue!, System.Globalization.CultureInfo.InvariantCulture), r.IsPassed))];
+    }
 
     [Fact]
     public async Task Two_overlapping_field_edits_leave_one_consistent_inputs_and_verdict_tuple()
@@ -320,6 +370,55 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
     }
 
     [Fact]
+    public async Task A_vendor_reassignment_that_keeps_losing_commits_nothing_and_says_so()
+    {
+        // UpdateDocument's exhaustion arm, which had NO test at all until the #461 review — so the 409 it
+        // answers with was unpinned on both halves. The copy is the half that can now regress silently:
+        // #461 turned the message into a per-call-site argument, and this call site is the one an
+        // "unify the two messages" cleanup would reach without any suite noticing (see EditCopyReason).
+        //
+        // Same construction as the field-edit exhaustion below: a competing edit commits inside EVERY
+        // attempt, so no attempt can win, and the terminal row must be that competitor's own consistent
+        // tuple with nothing of the reassignment in it.
+        var auth = await RegisterAndLoginAsync();
+        var (strictVendor, _) = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "2000000", vendorName: "Strict");
+        var (lenientVendor, _) = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "500000", vendorName: "Lenient");
+        var docId = await SeedCoiAsync(auth.OrgId, strictVendor, gl: 1_000_000m, holder: "Old Hall");
+        var second = await LoginAsync(auth.Email);
+
+        var competingWrites = 0;
+        Interleave.OnSavingChanges = async () =>
+        {
+            // A DIFFERENT value each time, so every attempt genuinely finds a newer row version than the
+            // one it read — and all of them fail BOTH floors, so no assertion below can be satisfied by
+            // the reassignment having quietly landed.
+            var attempt = Interlocked.Increment(ref competingWrites);
+            var resp = await EditFieldAsync(second.Client, docId, "general_liability_limit", $"{100_000 + attempt}");
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        };
+
+        var response = await SendAsync(auth.Client, HttpMethod.Patch, $"/api/documents/{docId}",
+            new { vendorId = lenientVendor });
+        Interleave.Reset();
+
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be(DocumentWriteConcurrency.ConflictCode);
+        body.GetProperty("error").GetProperty("message").GetString()
+            .Should().Be(DocumentWriteConcurrency.ConflictMessage, EditCopyReason);
+        body.GetProperty("data").ValueKind.Should().Be(JsonValueKind.Null);
+        competingWrites.Should().Be(DocumentConcurrency.MaxAttempts,
+            "the reassignment is retried a BOUNDED number of times — an unbounded loop would spin here forever");
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.VendorId.Should().Be(strictVendor, "nothing of the abandoned reassignment may be committed");
+        terminal.Doc.GeneralLiabilityLimit.Should().Be(100_000m + DocumentConcurrency.MaxAttempts,
+            "the row is the last competing writer's own consistent tuple");
+        terminal.Doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant,
+            "…graded against the vendor the row still has");
+    }
+
+    [Fact]
     public async Task A_write_that_keeps_losing_commits_nothing_and_says_so()
     {
         // Retry exhaustion. A competing write commits inside EVERY attempt, so no attempt can ever win.
@@ -347,6 +446,8 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         response.StatusCode.Should().Be(HttpStatusCode.Conflict);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         body.GetProperty("error").GetProperty("code").GetString().Should().Be(DocumentWriteConcurrency.ConflictCode);
+        body.GetProperty("error").GetProperty("message").GetString()
+            .Should().Be(DocumentWriteConcurrency.ConflictMessage, EditCopyReason);
         body.GetProperty("data").ValueKind.Should().Be(JsonValueKind.Null);
         competingWrites.Should().Be(DocumentConcurrency.MaxAttempts,
             "the write is retried a BOUNDED number of times — an unbounded loop would spin here forever");
@@ -590,6 +691,8 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         response.StatusCode.Should().Be(HttpStatusCode.Conflict);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         body.GetProperty("error").GetProperty("code").GetString().Should().Be(DocumentWriteConcurrency.ConflictCode);
+        body.GetProperty("error").GetProperty("message").GetString()
+            .Should().Be(DocumentWriteConcurrency.ConflictMessage, EditCopyReason);
 
         await using var db = CreateSystemDb();
         var rows = await db.AuditLogs.Where(a => a.EntityId == docId).ToListAsync();
@@ -601,5 +704,138 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
             .Should().Be("Old Hall", "and no abandoned attempt left anything of itself in the row");
         doc.ComplianceStatus.Should().Be(ComplianceStatus.Pending,
             "no attempt's recomputed verdict was committed either");
+    }
+
+    [Fact]
+    public async Task A_re_grade_with_no_competing_writer_commits_the_verdict_it_computed()
+    {
+        // The baseline the two interleaves below are departures FROM. "Check again" now runs inside a
+        // transaction it owns (#461), so the first thing to pin is that the ordinary path still COMMITS:
+        // a guard that rolled back its own happy path would leave every one of the assertions below
+        // about conflicts trivially satisfiable by writing nothing at all.
+        var auth = await RegisterAndLoginAsync();
+        var (vendorId, _) = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "2000000");
+        var docId = await SeedCoiAsync(auth.OrgId, vendorId, gl: 3_000_000m, holder: "Old Hall");
+
+        (await RecheckAsync(auth.Client, docId)).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant,
+            "3M clears the 2M floor and the seeded row was Pending — so the re-grade's write really landed");
+        (await ReadCitedLimitsAsync(docId)).Should().Equal([(3_000_000m, true)]);
+    }
+
+    [Fact]
+    public async Task A_re_grade_that_loses_to_a_field_edit_is_recomputed_against_the_inputs_the_row_keeps()
+    {
+        // #461. The re-grade writes NO inputs, so it cannot lose an update — and that is the only
+        // comfort it ever had. It loads a document at 3M against a 2M floor (Compliant), a
+        // PUT /fields corrects the limit DOWN to 100k and commits its own consistent tuple
+        // (100k + NonCompliant + a failing check row), and then the re-grade's SaveChanges lands. EF
+        // marks only ComplianceStatus / UpdatedAt, so pre-#461 the terminal row held 100,000 with a
+        // stored Compliant and a PASSING check row citing 3,000,000 — an affirmative verdict over a
+        // deficient limit, in the direction that matters on a compliance product, with nothing to heal
+        // it (the nightly sweep only does date transitions, and nothing schedules another evaluation).
+        var auth = await RegisterAndLoginAsync();
+        var (vendorId, _) = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "2000000");
+        var docId = await SeedCoiAsync(auth.OrgId, vendorId, gl: 3_000_000m, holder: "Old Hall");
+        var second = await LoginAsync(auth.Email);
+
+        var competingWrites = 0;
+        Interleave.OnSavingChanges = async () =>
+        {
+            // Fire ONCE: the retry must be allowed to succeed, and one conflict is what this scenario is.
+            if (Interlocked.Increment(ref competingWrites) > 1) return;
+            var resp = await EditFieldAsync(second.Client, docId, "general_liability_limit", "100000");
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        };
+
+        var response = await RecheckAsync(auth.Client, docId);
+        Interleave.Reset();
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK,
+            "the conflicted attempt is reloaded and recomputed, not surfaced to the user");
+        competingWrites.Should().Be(2, "the retry re-entered the save hook, proving the re-grade really was re-run");
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.GeneralLiabilityLimit.Should().Be(100_000m, "the competing correction must not be rolled back");
+        terminal.Doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant,
+            "100k fails the 2M floor — pre-#461 this row read Compliant beside a limit somebody had just lowered");
+
+        // The other half of what a losing re-grade leaves behind, and the half a status assertion cannot
+        // see: the explainer rows are rewritten unconditionally, so the retried attempt must also have
+        // re-cited the value the row actually holds. Pre-#461 this was the competitor's failing 100k row
+        // PLUS this request's passing 3M row — two rows, disagreeing, under a Compliant badge.
+        (await ReadCitedLimitsAsync(docId)).Should().Equal([(100_000m, false)],
+            "the committed check rows must cite the inputs the row ends up holding, not the ones this attempt read");
+    }
+
+    [Fact]
+    public async Task A_re_grade_that_keeps_losing_commits_nothing_and_leaves_the_previous_verdict_alone()
+    {
+        // Retry exhaustion on the re-grade. A competing edit commits inside EVERY attempt, so no attempt
+        // can win. The bounded loop answers 409 having written NOTHING — and here "nothing" is the whole
+        // point rather than a rollback of half an edit: the re-grade owns no inputs, so the row it leaves
+        // is the last competing writer's own atomic (inputs, verdict) pair, which is already consistent.
+        //
+        // Two answers were rejected for this arm and both are visible here. Committing a degrade to
+        // Pending would overwrite that CORRECT verdict with a non-committal one, through the very write
+        // that kept conflicting. Answering 200 would tell the user the document was re-checked when it
+        // was not — on the one button whose entire promise is a fresh verdict.
+        var auth = await RegisterAndLoginAsync();
+        var (vendorId, _) = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "2000000");
+        var docId = await SeedCoiAsync(auth.OrgId, vendorId, gl: 3_000_000m, holder: "Old Hall");
+        var second = await LoginAsync(auth.Email);
+
+        var competingWrites = 0;
+        Interleave.OnSavingChanges = async () =>
+        {
+            // A DIFFERENT value each time, so the last one is identifiable and every attempt genuinely
+            // finds a newer row version than the one it read. All of them fail the 2M floor, so the
+            // verdict the re-grade wanted to write (Compliant, from the seeded 3M) is the wrong one
+            // throughout — an exhausted arm that committed it anyway would be the #461 bug, not a fix.
+            var attempt = Interlocked.Increment(ref competingWrites);
+            var resp = await EditFieldAsync(second.Client, docId, "general_liability_limit", $"{100_000 + attempt}");
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        };
+
+        var response = await RecheckAsync(auth.Client, docId);
+        Interleave.Reset();
+
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be(DocumentWriteConcurrency.ConflictCode);
+        body.GetProperty("error").GetProperty("message").GetString()
+            .Should().Be(DocumentWriteConcurrency.RegradeConflictMessage,
+                "a re-grade submits no change of the user's, so the edit copy's \"make your change again\" "
+                + "would name something that never happened");
+        body.GetProperty("data").ValueKind.Should().Be(JsonValueKind.Null);
+        competingWrites.Should().Be(DocumentConcurrency.MaxAttempts,
+            "the re-grade is retried a BOUNDED number of times — an unbounded loop would spin here forever");
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.GeneralLiabilityLimit.Should().Be(100_000m + DocumentConcurrency.MaxAttempts,
+            "the row is the last competing writer's own consistent tuple");
+        terminal.Doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant,
+            "…and its verdict is left ALONE — never overwritten with the Compliant this re-grade computed "
+            + "from the pre-edit limit, and never degraded to Pending over a verdict that is already right");
+        (await ReadCitedLimitsAsync(docId)).Should().Equal(
+            [(100_000m + DocumentConcurrency.MaxAttempts, false)],
+            "no abandoned attempt's check row survives either");
+
+        // And no audit row claims a re-check that never committed: the interceptor's "document.updated"
+        // row is staged INSIDE the failing SaveChanges on the same AppDbContext, so it rolls back with
+        // the attempt. Exactly one of each per competing edit, and nothing from the three abandoned ones.
+        await using var db = CreateSystemDb();
+        var rows = await db.AuditLogs
+            .Where(a => a.EntityId == docId)
+            .GroupBy(a => a.Action)
+            .Select(g => new { Action = g.Key, Count = g.Count() })
+            .ToListAsync();
+        rows.Should().BeEquivalentTo(new[]
+        {
+            new { Action = "document.fields_edited", Count = DocumentConcurrency.MaxAttempts },
+            new { Action = "document.updated", Count = DocumentConcurrency.MaxAttempts },
+        }, "only the competing edits are audited — an abandoned re-grade's staged row rolls back with it");
     }
 }

@@ -431,13 +431,56 @@ public static class ComplianceEndpoints
         return Results.Ok(new { data = new { id = ruleId }, error = (object?)null });
     }
 
-    private static async Task<IResult> RunCheck(
+    /// <summary>
+    /// The "Check again" button — a PURE re-grade: it reads the document, computes the verdict its
+    /// CURRENT canonical inputs imply, and writes back only <c>ComplianceStatus</c> + the
+    /// <c>ComplianceCheck</c> rows. No re-extraction, no LLM cost.
+    /// <para/>
+    /// #461 / ADR 0030 Amendment 3: it runs under <see cref="DocumentWriteConcurrency"/>'s
+    /// <c>REPEATABLE READ</c> + bounded re-run, exactly like the two partial writers of Amendment 1 and
+    /// for the mirror-image reason. Writing no inputs means it cannot LOSE an update — and that was the
+    /// only comfort. Its read → compute → write window carried no lock and no token, so a
+    /// <c>PUT /documents/{id}/fields</c> that LOWERED a limit inside it committed its own consistent
+    /// tuple and then this write landed on top: EF marks only <c>ComplianceStatus</c> / <c>UpdatedAt</c>,
+    /// so the row kept the lowered limit beside a stored <c>Compliant</c> and passing check rows citing a
+    /// value it no longer held — an affirmative verdict contradicting the stored inputs, in the direction
+    /// that matters on a compliance product, with nothing to heal it (the nightly sweep only does date
+    /// transitions). Under <c>REPEATABLE READ</c> that overlap raises <c>40001</c> instead, and the
+    /// callback re-runs against a FRESH read.
+    /// <para/>
+    /// The callback is re-runnable by construction: <see cref="IComplianceCheckService.EvaluateAsync"/>
+    /// re-reads the document by id on every attempt (the retry clears the change tracker first), and the
+    /// response is built from THAT attempt's status — nothing is derived from state captured outside.
+    /// <para/>
+    /// Scope is this SINGLE-document re-grade. The batched fan-outs
+    /// (<c>ComplianceCheckService.ReevaluateWhereAsync</c>) keep <c>READ COMMITTED</c> and keep the
+    /// residual — see ADR 0030 Amendment 3 § What stays open.
+    /// </summary>
+    private static Task<IResult> RunCheck(
         Guid documentId,
         IComplianceCheckService checker,
+        // The SAME scoped AppDbContext the service evaluates on, which is what lets this own the
+        // transaction the service's SaveChanges enlists in.
+        AppDbContext db,
+        ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
-        var status = await checker.EvaluateAsync(documentId, ct);
-        return Results.Ok(new { data = new { status = status.ToString() }, error = (object?)null });
+        // Block-bodied, not an expression body, so Adr0030EnforcementTests' brace-matching extractor sees
+        // the WHOLE method rather than just the lambda inside it.
+        return DocumentWriteConcurrency.RunAsync(db, loggerFactory, documentId,
+            // A re-grade submits no change of the user's, so the edit copy's "make your change again"
+            // would name something that never happened.
+            DocumentWriteConcurrency.RegradeConflictMessage,
+            async innerCt =>
+            {
+                var status = await checker.EvaluateAsync(documentId, innerCt);
+                return Results.Ok(new { data = new { status = status.ToString() }, error = (object?)null });
+            },
+            // Nothing kept outside the callback: no IAuditLogger call, and the interceptor's
+            // "document.updated" row is staged on this same AppDbContext inside the transaction, so an
+            // abandoned attempt's row rolls back with it.
+            onAttemptAbandoned: null,
+            ct);
     }
 
     private static async Task<IResult> ListChecks(

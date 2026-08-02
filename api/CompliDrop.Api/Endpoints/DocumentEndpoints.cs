@@ -360,7 +360,8 @@ public static class DocumentEndpoints
         // body below re-runs against a fresh read. Everything inside must therefore be re-runnable: it
         // re-loads the document itself and derives every decision from THAT load, never from state
         // captured outside.
-        DocumentWriteConcurrency.RunAsync(db, loggerFactory, id, async innerCt =>
+        DocumentWriteConcurrency.RunAsync(db, loggerFactory, id,
+            DocumentWriteConcurrency.ConflictMessage, async innerCt =>
         {
             var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, innerCt);
             if (doc is null) return NotFound();
@@ -676,7 +677,8 @@ public static class DocumentEndpoints
         List<AuditFieldSnapshot>? before = null;
         Document? saved = null;
 
-        var result = await DocumentWriteConcurrency.RunAsync(db, loggerFactory, id, async innerCt =>
+        var result = await DocumentWriteConcurrency.RunAsync(db, loggerFactory, id,
+            DocumentWriteConcurrency.ConflictMessage, async innerCt =>
         {
             var doc = await db.Documents
                 .Include(d => d.Fields)
