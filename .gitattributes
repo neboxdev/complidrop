@@ -4,3 +4,39 @@
 # All tracked .mjs files were already LF in the index; this pins the working
 # tree to match. Node, editors, and CI are all LF-safe.
 *.mjs text eol=lf
+
+# Source and config files are TEXT, and git must DIFF them as text even if one
+# ever acquires a stray control byte.
+#
+# `text` alone is not enough, and that is the whole point of these lines: it
+# governs EOL normalization only, so git still auto-detects "binary" from a NUL
+# in the first 8000 bytes and prints `Binary files ... differ`. Setting the
+# `diff` attribute to true is what forces a textual diff. Verified empirically:
+# on a .cs file carrying one NUL, `*.cs text` and `*.cs text diff=csharp` BOTH
+# still rendered as `Bin N -> N bytes`; only `*.cs text diff` rendered real
+# +/- lines. (A named driver like diff=csharp selects funcname patterns but
+# leaves binary detection to the auto-heuristic, so it does not help here.)
+#
+# Why it matters: a NUL typed into ExtractionPromptVersionTests.cs made git
+# classify that file as binary, so the whole-wire-prompt SHA tripwire landed
+# INVISIBLE in `git diff`, in `gh pr diff`, and in GitHub's PR view — on a
+# branch whose merge depends on two reviewers reading exactly that diff. It
+# also broke text 3-way merges of the one file that must be re-pinned on every
+# prompt edit, and made `rg`/`grep` answer "Binary file matches" (#384).
+#
+# No `eol=` here on purpose: the index is already LF for every one of these and
+# the working tree keeps following core.autocrlf, so this adds no checkout churn.
+*.cs      text diff
+*.csproj  text diff
+*.slnx    text diff
+*.ts      text diff
+*.tsx     text diff
+*.js      text diff
+*.jsx     text diff
+*.json    text diff
+*.md      text diff
+*.yml     text diff
+*.yaml    text diff
+*.sql     text diff
+*.css     text diff
+*.html    text diff
