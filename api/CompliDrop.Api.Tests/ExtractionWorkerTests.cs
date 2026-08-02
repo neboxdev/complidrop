@@ -764,6 +764,32 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         (await GetDocAsync(docId)).DocumentType.Should().Be("license");
     }
 
+    [Theory]
+    [InlineData("other")]      // the value the worker used to pre-filter to null with a raw literal
+    [InlineData("OTHER")]      // …which that ordinal literal missed anyway
+    [InlineData("coi")]
+    [InlineData("Certificate of Insurance")]  // an ADR 0045 un-laundered legacy row
+    public async Task The_worker_hands_the_stored_type_to_the_one_hint_owner_verbatim(string storedType)
+    {
+        // "Emit the hint line only for a real vocabulary member" has ONE owner: BuildUserPrompt, which
+        // normalizes through CanonicalDocumentTypes and prints the VOCABULARY's spelling (#384, ADR 0051).
+        // The worker used to pre-filter with its own `doc.DocumentType == "other" ? null : …` — a third
+        // copy of that rule, spelled as a raw ordinal literal. Redundant rather than wrong, but a rule
+        // with two owners is one drift away from a hint line nobody meant to emit.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m, documentType: storedType);
+        var worker = BuildWorker();
+
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        Extraction.LastDocumentTypeHint.Should().Be(storedType,
+            "the stored type reaches the builder verbatim — the call site decides nothing");
+
+        // …and the ONE owner still suppresses what must be suppressed, on the value it actually received.
+        var prompt = ExtractionPrompts.BuildUserPrompt("POLICY TEXT", Extraction.LastDocumentTypeHint);
+        var expected = CanonicalDocumentTypes.Normalize(storedType) != CanonicalDocumentTypes.Fallback;
+        prompt.Contains("Document type hint:", StringComparison.Ordinal).Should().Be(expected);
+    }
+
     [Fact]
     public async Task A_blank_extracted_type_still_launders_a_non_canonical_stored_type()
     {

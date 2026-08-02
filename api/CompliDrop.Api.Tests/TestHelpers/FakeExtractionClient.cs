@@ -57,6 +57,14 @@ public sealed class FakeExtractionClient : IExtractionClient
     /// <summary>Result returned on a successful (non-throwing) call.</summary>
     public ExtractionResult Result { get; set; } = DefaultResult;
 
+    /// <summary>
+    /// The <c>documentTypeHint</c> of the most recent call, VERBATIM. The worker hands the stored
+    /// <c>Document.DocumentType</c> straight through — suppressing the hint for <c>other</c> / unknown
+    /// values is <c>ExtractionPrompts.BuildUserPrompt</c>'s job and only its job (#384, ADR 0051), so a
+    /// re-introduced pre-filter at the call site is visible here.
+    /// </summary>
+    public string? LastDocumentTypeHint { get; private set; }
+
     public async Task<ExtractionResult> ExtractAsync(
         OcrResult ocr,
         Stream? imageStream,
@@ -65,6 +73,7 @@ public sealed class FakeExtractionClient : IExtractionClient
         CancellationToken ct)
     {
         ExtractCallCount++;
+        LastDocumentTypeHint = documentTypeHint;
         if (ThrowNonRetryable)
             throw new NonRetryableExtractionException("extraction.token_limit", "Simulated deterministic failure.");
         if (ExtractDelay > TimeSpan.Zero)
@@ -82,5 +91,6 @@ public sealed class FakeExtractionClient : IExtractionClient
         ThrowNonRetryable = false;
         ExtractDelay = TimeSpan.Zero;
         Result = DefaultResult;
+        LastDocumentTypeHint = null;
     }
 }
