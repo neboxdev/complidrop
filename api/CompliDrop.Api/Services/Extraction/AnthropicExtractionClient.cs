@@ -28,7 +28,7 @@ public class AnthropicExtractionClient(
             new JsonObject
             {
                 ["type"] = "text",
-                ["text"] = BuildPrompt(ocr.Text, documentTypeHint)
+                ["text"] = ExtractionPrompts.BuildUserPrompt(ocr.Text, documentTypeHint)
             }
         };
 
@@ -119,17 +119,6 @@ public class AnthropicExtractionClient(
             outputTokens = usage.TryGetProperty("output_tokens", out var ot) ? ot.GetInt32() : 0;
         }
         return result with { Usage = new ExtractionUsage(inputTokens, outputTokens, EstimateCost(inputTokens, outputTokens)) };
-    }
-
-    private static string BuildPrompt(string ocrText, string? documentTypeHint)
-    {
-        var hint = string.IsNullOrWhiteSpace(documentTypeHint) || documentTypeHint == "other"
-            ? ""
-            : $"Document type hint: {documentTypeHint}\n\n";
-        var safeText = string.IsNullOrWhiteSpace(ocrText)
-            ? "(No OCR text was extracted — inspect the attached image if available.)"
-            : ocrText.Length > 20000 ? ocrText[..20000] : ocrText;
-        return $"{hint}OCR text:\n---\n{safeText}\n---";
     }
 
     private static JsonObject BuildTool() => new()
