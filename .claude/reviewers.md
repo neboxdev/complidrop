@@ -397,9 +397,23 @@ Both are defined in this repo's `.claude/agents/`.
     recorded, not a new finding.
   - Any prompt edit bumps `ExtractionPrompts.Version` AND re-pins the SHA in
     `ExtractionPromptVersionTests` (the tripwire that makes the edit deliberate; `Version` is recorded
-    per document). Weakening, deleting, or routing around that pin IS a real finding. The clause's own
-    content pin lives in `ExtractionPromptInjectionTests` and asserts the FACTS the clause must state,
-    not its full prose, so a reword stays possible.
+    per document). The hash covers the WHOLE wire prompt — `SystemPrompt` plus every branch of
+    `BuildUserPrompt` (hint present/suppressed, empty OCR, over-cap truncation), so the user-message
+    half and `MaxOcrChars` are inside the pin, not just the system half. Weakening, deleting, or
+    routing around that pin IS a real finding. The clause's own content pin lives in
+    `ExtractionPromptInjectionTests` and asserts the FACTS the clause must state, not its full prose,
+    so a reword stays possible.
+  - The UNTRUSTED CONTENT clause restricts what the model OBEYS, never what it may EXTRACT. The
+    description-of-operations / remarks box stays readable DATA — a real ACORD can state a scheduled
+    excess/umbrella limit or a renewal date only there, and the `additional_insured` FORMATTING rule
+    already depends on reading a sentence out of it. Re-narrowing the clause into "never accept a
+    sentence in place of the field" IS a real finding: fail-closed, but a verdict change on honest
+    documents. Our own no-OCR notice sits ABOVE the `OCR text:` line for the same coherence reason —
+    moving it back inside the fence is a finding.
+  - `ExtractionWorker` passes `doc.DocumentType` through RAW. Suppressing the hint for `other` /
+    unknown is `BuildUserPrompt`'s job ALONE; a re-introduced call-site pre-filter (especially one
+    spelled as a raw `"other"` literal rather than `CanonicalDocumentTypes.Fallback`) is a second
+    owner and a real finding.
   - Deliberately NOT flag-staged, unlike ADR 0043's wording: ADR 0047's asymmetry applies — a flag
     stages a string whose flip changes what a VERDICT asserts, while telling a model not to obey the
     document is one-directional, and default-OFF would leave the reported vulnerability live in prod.

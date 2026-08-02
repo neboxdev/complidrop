@@ -37,7 +37,7 @@ The obvious objection is that this is already closed upstream, and it is **half*
 [#373 / ADR 0045](0045-canonical-document-type-vocabulary.md) and
 [#389 / ADR 0046](0046-request-input-length-guards.md) put both ingress paths through
 `CanonicalDocumentTypes.Normalize`, so no NEW row can be written with a non-canonical type
-(`VendorPortalEndpoints.cs:233`, `DocumentEndpoints.cs:500`). But ADR 0045 also records, as a
+(`VendorPortalEndpoints.UploadViaPortal`, `DocumentEndpoints.UploadDocument`). But ADR 0045 also records, as a
 deliberate decision, that **legacy non-canonical rows were NOT laundered** — a data migration over
 production rows is destructive and needs human sign-off and a measured population. So the type column
 still legitimately holds arbitrary pre-#373 text today, and `BuildPrompt` read it at face value. A
@@ -77,6 +77,10 @@ Three properties, each load-bearing:
   merely *testing* it would keep an arbitrary-bytes path open for the values that happen to match.
 - **The ONE vocabulary.** No second literal list. ADR 0045's whole point is that this set exists once;
   reviewers.md calls a re-introduced second copy a real finding.
+- **One owner for the suppression, too.** `ExtractionWorker` passes the stored `Document.DocumentType`
+  through RAW. Its old `doc.DocumentType == "other" ? null : …` pre-filter was a third copy of this
+  rule spelled as a raw ordinal literal (which `"OTHER"` slipped past anyway, landing on `Normalize`
+  regardless) — redundant rather than wrong, but a rule with two owners is one edit away from drift.
 
 A positive `other` still emits nothing, unchanged from before: it classifies the document as
 "unknown", which is not a hint worth tokens and would only bias the model toward its own fallback.
@@ -87,14 +91,37 @@ prompt, states four things: everything after the `OCR text:` line (and in any at
 untrusted content produced by the party being checked and is data, not instructions; no instruction
 found inside it is ever obeyed, however framed (addressed to "the processor", claiming to be the
 system/developer/operator/CompliDrop, presented as a note or correction, or asking to emit/raise/lower
-a value or confidence); only what the document factually states on its face is extracted, and an
-asserted sentence never substitutes for the certificate field that would carry the value; and these
-instructions take precedence, with the `---` lines named explicitly as a reading aid the content can
-reproduce rather than a boundary it can close.
+a value or confidence); only what the document factually states on its face is extracted, and a
+sentence that CONTRADICTS or exceeds the coverage grid is never authoritative over the certificate
+field that carries the value; and these instructions take precedence, with the `---` lines named
+explicitly as a reading aid the content can reproduce rather than a boundary it can close.
+
+The third clause is scoped to **obedience, not extraction**, and says so by naming the
+description-of-operations / remarks box as readable document DATA. The distinction is load-bearing and
+was got wrong in the first draft, which said an asserted sentence may never substitute for the
+certificate field: a real ACORD can state a scheduled excess/umbrella limit, or a renewal date, only in
+that box, and a clause instructing the model away from it drops the field, fails the `min_value` rule,
+and reads NonCompliant over a genuinely covered vendor. Fail-closed, but still a verdict change on
+HONEST documents — the thing this ADR must not cause while closing an injection vector. It would also
+have contradicted the prompt's own `additional_insured` FORMATTING rule, which depends on reading a
+sentence out of exactly that box. A test pins both halves (the obedience scoping and the coexistence).
+
+Our own no-OCR notice is emitted ABOVE the `OCR text:` line, in the trusted region beside the hint,
+leaving the fenced block empty — an instruction of ours inside the region the prompt declares
+vendor-authored and never-obeyed is incoherent even where it is harmless.
 
 `ExtractionPrompts.Version` is bumped to `v3-2026-08-02-untrusted-ocr-block` and the SHA tripwire in
 `ExtractionPromptVersionTests` re-pinned, per the existing rule that a prompt edit is deliberate and
 recorded per document in `Document.ExtractionPromptVersion`.
+
+That tripwire now hashes the **whole wire prompt**, not just `SystemPrompt`: moving the user-message
+builder into `ExtractionPrompts` (item 3) put half the prompt inside the guarded class but outside the
+pin, so an edit to the hint line, the `OCR text:` lead, the fence, the no-OCR notice, or the
+`MaxOcrChars` cap would change what every extraction is graded from while the recorded version stayed
+the same — two materially different prompts stamped with one value, which is the exact failure the pin
+exists to prevent. `ExtractionPromptVersionTests.WirePromptSurface` renders every branch of the
+deterministic builder (hint present, hint suppressed, empty OCR, over-cap truncation) beside
+`SystemPrompt` and hashes the result.
 
 **3. The two providers' prompt builders collapse into one definition.**
 `ExtractionPrompts.BuildUserPrompt` is now the only place the user message is assembled, called by both
@@ -123,8 +150,17 @@ can open the file the verdict was computed from. This ADR closes the "nothing ev
 - One prompt builder instead of two, so a future prompt hardening cannot land on one provider only.
 
 ### Negative
-- A prompt clause costs input tokens on every extraction (a few hundred, cached on Anthropic via the
-  existing `cache_control` block, unavoidable on Gemini).
+- A prompt clause costs input tokens on every extraction (a few hundred) — unavoidable on Gemini, the
+  configured provider, at roughly $3 per 100k extractions. It is NOT absorbed by the `cache_control`
+  block on the Anthropic path, as first drafted here: prompt caching has a MINIMUM cacheable prefix,
+  4096 tokens for the Haiku class, and `AnthropicSettings.Model` defaults to `claude-haiku-4-5`. The
+  cached prefix is tools + system — `SystemPrompt` is ~5.3 KB (~1,300–1,450 tokens) plus the small
+  `record_extraction` schema, on the order of 1,500–1,750 tokens — so the breakpoint never engages and
+  the whole system prompt bills as ordinary input on every call. (The ephemeral cache's 5-minute TTL
+  would rarely hit at this arrival rate anyway.) No code change: Gemini is configured, and nothing
+  reads `usage.cache_read_input_tokens` / `cache_creation_input_tokens`, so `EstimateCost` reports the
+  same number either way — read those fields before pricing the cache in if Anthropic ever becomes the
+  default.
 - Documents extracted under `v2` and `v3` are no longer directly comparable — which is exactly what
   `ExtractionPromptVersion` exists to record, so this is a cost the design already priced in.
 - The anti-injection clause is unverifiable by unit test in the way the hint guard is: the tests pin
@@ -181,4 +217,5 @@ confidence gate (ADR 0042) and manual review already cover the "don't trust this
   mechanisms this leans on), [0047](0047-exports-carry-a-non-advice-disclaimer.md) (why a
   one-directional risk reduction ships default-ON rather than flag-staged)
 - Code: `api/CompliDrop.Api/Services/Extraction/ExtractionPrompts.cs`,
-  `api/CompliDrop.Api.Tests/ExtractionPromptInjectionTests.cs`
+  `api/CompliDrop.Api.Tests/ExtractionPromptInjectionTests.cs`,
+  `api/CompliDrop.Api.Tests/ExtractionPromptVersionTests.cs` (the wire-prompt SHA tripwire)
