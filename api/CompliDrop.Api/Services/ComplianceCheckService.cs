@@ -280,8 +280,10 @@ public class ComplianceCheckService(
     //     0036 Amendment 2). That watermark — not the sweep — is what stops a stale verdict surviving an
     //     interrupted boot.
     //
-    // CONCURRENCY, and this is a recorded residual rather than an oversight (#461 / ADR 0030 Amendment 3
-    // § What stays open). This fan-out keeps READ COMMITTED and keeps the read → compute → write window
+    // CONCURRENCY, and this is a recorded, TICKETED residual rather than an oversight — #470, recorded in
+    // ADR 0030 Amendment 3 § What stays open when #461 closed the single-document half of it. Its first
+    // obligation is to measure the population; "accepted, keep the record" is a legitimate outcome.
+    // This fan-out keeps READ COMMITTED and keeps the read → compute → write window
     // that Amendment 3 closed on the single-document re-grade: a page's documents are loaded, graded and
     // saved as one unit, so an edit committing inside that span leaves its document holding the edited
     // inputs beside a verdict graded from the pre-edit ones. It was NOT put under

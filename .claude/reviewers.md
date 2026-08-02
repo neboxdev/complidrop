@@ -746,7 +746,10 @@ Both are defined in this repo's `.claude/agents/`.
       code — would be an inconsistency, not a fix.
     - KNOWN residuals, ADR 0030 Amendment 3 § What stays open — do not re-report as new. (a) The
       BATCHED fan-outs (`ReevaluateWhereAsync`, behind the template/vendor/seed re-grades) keep the
-      window. Deliberate on cost profile: a page is up to 200 documents committed as ONE unit, so one
+      window, ticketed as [#470](https://github.com/neboxdev/complidrop/issues/470) (`bug`, so it indexes
+      into epic #48) — which is also the live successor Amendment 2 § What stays open now points at for
+      the worker's basis-read→commit window, #461 having closed. Deliberate on cost profile: a page is up
+      to 200 documents committed as ONE unit, so one
       conflicting edit would abandon and re-run the whole page and then skip it — forfeiting hundreds of
       unrelated re-grades where today exactly one goes stale — and these run post-commit on a background
       token with no user to 409. "Wrap the fan-out too for consistency" is Option K, refuted. (b)
