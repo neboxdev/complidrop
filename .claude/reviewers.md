@@ -391,6 +391,11 @@ Both are defined in this repo's `.claude/agents/`.
     "Escape the fence in the OCR text" is the bug. A per-request NONCE delimiter is DEFERRED, not
     refuted (ADR 0051 Option D — it breaks Anthropic prompt caching and the byte-exact cross-provider
     agreement pin); do not re-report it as a gap.
+  - The region ANCHOR is the FIRST `"OCR text:"` line, and the reproduction-immunity clause names BOTH
+    the `---` lines and that anchor line (round-2 copy fix): the content can print its own `OCR text:`
+    line too, so a LAST-occurrence reading would leave an attacker's preamble in the trusted half.
+    Both halves are pinned in `ExtractionPromptInjectionTests`. Re-narrowing the immunity clause back
+    to the fence alone, or dropping `FIRST`, IS a real finding — and neither is the nonce fence.
   - The clause is a MITIGATION, and the ADR says so: the hint guard is structural/absolute, the prompt
     clause is probabilistic. The durable answers to a steered extraction are ADR 0042's confidence gate
     and ADR 0040's fail-closed reads, which already exist. "A prompt clause isn't a real defence" is
@@ -398,11 +403,30 @@ Both are defined in this repo's `.claude/agents/`.
   - Any prompt edit bumps `ExtractionPrompts.Version` AND re-pins the SHA in
     `ExtractionPromptVersionTests` (the tripwire that makes the edit deliberate; `Version` is recorded
     per document). The hash covers the WHOLE wire prompt — `SystemPrompt` plus every branch of
-    `BuildUserPrompt` (hint present/suppressed, empty OCR, over-cap truncation), so the user-message
-    half and `MaxOcrChars` are inside the pin, not just the system half. Weakening, deleting, or
-    routing around that pin IS a real finding. The clause's own content pin lives in
-    `ExtractionPromptInjectionTests` and asserts the FACTS the clause must state, not its full prose,
-    so a reword stays possible.
+    `BuildUserPrompt` (hint present/suppressed, empty OCR with AND without a hint, over-cap
+    truncation), so the user-message half and `MaxOcrChars` are inside the pin, not just the system
+    half. Weakening, deleting, or routing around that pin IS a real finding. The clause's own content
+    pin lives in `ExtractionPromptInjectionTests` and asserts the FACTS the clause must state, not its
+    full prose, so a reword stays possible.
+  - Three properties of `WirePromptSurface` are load-bearing, not incidental (round-2 findings), and
+    "simplify the surface" in any of these directions IS a real finding:
+    - The rendered HINT inputs DISCRIMINATE the guard. `"coi"` and `null` alone did not — every
+      candidate guard agrees on them, so a revert to the raw-interpolation or `IsAllowed(x) ? x : ""`
+      echo-back shape stayed byte-identical and the pin never fired. A mis-cased canonical (`"COI"`), a
+      non-canonical (`"Certificate of Insurance"`) and a padded fallback (`"  other  "`) must stay.
+    - The over-cap rendering carries DISTINCT head/tail markers, so head- vs tail-truncation hash
+      differently. A uniform `new string('A', N)` cannot see a flipped slice.
+    - Named branch-marker assertions sit BESIDE the hash (`The_hashed_surface_still_covers_every_
+      branch_of_the_wire_prompt`), because the hash pins the surface's VALUE and nothing pinned its
+      SCOPE: dropping a branch reddened only the hash, and a one-line re-pin made it green while
+      `Version` never moved (both are constants compared to each other). Deleting those markers, or
+      the hint-line census inside them, re-opens the one-change hole.
+  - `.gitattributes` sets `text diff` (NOT bare `text`) on `*.cs` and the other source/config types.
+    That is deliberate and verified: `text` governs EOL conversion only, so git still auto-detects
+    binary from a NUL and prints `Binary files ... differ` — and `diff=csharp` does not help either (a
+    named driver leaves binary detection to the auto-heuristic). Only `diff` set to true forces a
+    textual diff. A NUL typed into `ExtractionPromptVersionTests.cs` is what made the whole tripwire
+    change invisible in the PR diff. "Drop the redundant `diff`" IS a real finding.
   - The UNTRUSTED CONTENT clause restricts what the model OBEYS, never what it may EXTRACT. The
     description-of-operations / remarks box stays readable DATA — a real ACORD can state a scheduled
     excess/umbrella limit or a renewal date only there, and the `additional_insured` FORMATTING rule
