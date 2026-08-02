@@ -27,8 +27,23 @@ public interface IComplianceCheckService
     /// As <see cref="ApplyEvaluationAsync(DbContext, Document, CancellationToken)"/>, but grades
     /// <paramref name="gradingBasis"/> instead of <paramref name="doc"/> while still applying the verdict
     /// (and the <see cref="ComplianceCheck"/> rows) onto <paramref name="doc"/> and its
-    /// <paramref name="context"/>. The basis is READ-ONLY here: nothing is copied back onto the tracked
-    /// entity, so the caller keeps writing exactly the columns it wrote before.
+    /// <paramref name="context"/>. Nothing is copied back onto <paramref name="doc"/>, so the caller keeps
+    /// writing exactly the columns it wrote before — that restraint is the decision, not an implementation
+    /// detail (ADR 0030 Amendment 2).
+    /// <para/>
+    /// TWO PRECONDITIONS, both ENFORCED (an <see cref="ArgumentException"/>, not a comment) because a
+    /// caller that broke either would corrupt data rather than fail:
+    /// <list type="bullet">
+    /// <item><paramref name="gradingBasis"/> MUST carry the same <see cref="Document.Id"/> as
+    /// <paramref name="doc"/>. The new <see cref="ComplianceCheck"/> rows are stamped from the BASIS while
+    /// the clear-existing predicate keys on the TRACKED document, so a mismatched pair would insert check
+    /// rows against one document while deleting another's.</item>
+    /// <item><paramref name="gradingBasis"/> MUST be DETACHED (see
+    /// <c>Services/DocumentGradingBasis.AfterPendingCommitAsync</c>, which materializes exactly that). This
+    /// method ASSIGNS the basis's <see cref="Document.Vendor"/> navigation from an <c>AsNoTracking</c>
+    /// query; hanging an untracked graph off a TRACKED principal is the shape EF turns into spurious
+    /// inserts at the next <c>DetectChanges</c>.</item>
+    /// </list>
     /// <para/>
     /// For the ONE caller whose grading inputs may have moved under it: <c>ExtractionWorker.PersistSuccess</c>
     /// grades a snapshot taken before an OCR + LLM run that lasts minutes, and EF writes back only what it
@@ -341,10 +356,32 @@ public class ComplianceCheckService(
     private async Task ApplyEvaluationCoreAsync(DbContext context, Document doc, Document? gradingBasis, CancellationToken ct)
     {
         // WHAT gets graded vs WHERE the verdict lands are two different documents when a basis is supplied
-        // (#460 / ADR 0030 Amendment 2). The basis is read-only: the tracked `doc` still receives the status
-        // and the check rows, and no basis value is ever copied onto it — that restraint is what keeps the
-        // caller writing exactly the columns it wrote before. Both carry the same Id, so the check rows and
-        // the clear-existing predicate are identical either way.
+        // (#460 / ADR 0030 Amendment 2). The basis is read-only with respect to `doc`: the tracked entity
+        // still receives the status and the check rows, and no basis value is ever copied onto it — that
+        // restraint is what keeps the caller writing exactly the columns it wrote before.
+        if (gradingBasis is not null)
+        {
+            // ComputeOutcome stamps every new ComplianceCheck.DocumentId from the BASIS while the
+            // clear-existing predicate below keys on the TRACKED doc.Id. Today's one caller derives the
+            // basis from the same tracked entity by primary key so the two always agree — but the coupling
+            // is load-bearing on a PUBLIC interface member in the compliance-verdict core, so enforce it
+            // rather than leave a future caller free to insert check rows against one document while
+            // deleting another's (#460 review, S1).
+            if (gradingBasis.Id != doc.Id)
+                throw new ArgumentException(
+                    "The grading basis must be the same document as the entity receiving the verdict.",
+                    nameof(gradingBasis));
+
+            // The basis's Vendor navigation is ASSIGNED below from an AsNoTracking query. That is safe only
+            // while the basis is DETACHED (what DocumentGradingBasis.AfterPendingCommitAsync produces):
+            // grafting an untracked graph onto a TRACKED principal is exactly the shape EF turns into
+            // spurious inserts at the next DetectChanges (#460 review, S6).
+            if (context.Entry(gradingBasis).State != EntityState.Detached)
+                throw new ArgumentException(
+                    "The grading basis must be a DETACHED document — see DocumentGradingBasis.AfterPendingCommitAsync.",
+                    nameof(gradingBasis));
+        }
+
         var basis = gradingBasis ?? doc;
 
         // Load Vendor → ComplianceTemplate → Rules for the verdict computation, against the basis's CURRENT

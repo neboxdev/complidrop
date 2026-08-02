@@ -654,11 +654,23 @@ public class ExtractionWorker(
         // uses (DocumentEndpoints.ResolveManualReview) and the same one the detail DTO reports. This
         // used to be a second, independent mechanism — a per-field TypedColumnResult accumulated in
         // this loop — with nothing pinning the two equal, so "is this document in the #383 state?" had
-        // two answers that could drift apart (#383 review round 2, S5). Both inputs it needs are
-        // already final at this point: doc.ExtractionFields was assigned from fieldsDict above and the
-        // typed columns were just written. Last-value-wins now falls out structurally rather than
-        // being something this loop has to remember — the JSON mirror and the typed columns are both
-        // last-wins, and the predicate reads only those.
+        // two answers that could drift apart (#383 review round 2, S5). Both inputs it needs are final
+        // AS THIS READ SEES THEM at this point: doc.ExtractionFields was assigned from fieldsDict above
+        // and ApplyToTypedColumn has run for every field the response returned. Last-value-wins now
+        // falls out structurally rather than being something this loop has to remember — the JSON
+        // mirror and the typed columns are both last-wins, and the predicate reads only those.
+        //
+        // "Final as this read sees them" is NOT the same as "what the row will hold", and the
+        // difference is the #460 mechanism one screen below (ADR 0030 Amendment 2 § What stays open).
+        // ApplyToTypedColumn ASSIGNS; a value equal to the minutes-old tracked snapshot leaves the
+        // property unmodified, so EF omits the column and a request that committed inside the window
+        // keeps it. This walk therefore describes THIS READ's own output — which is what ADR 0052 §2
+        // says trust is — and not the row the commit leaves, so the two can disagree (documented case:
+        // a snapshot ExpirationDate of null, an unparseable expiration in the response, and a mid-run
+        // edit committing a valid date lands ManualRequired + Distrusted over a row whose typed column
+        // is fine). Deliberately NOT swapped onto the #460 basis: that would redefine trust from "what
+        // this extraction produced" to "what the row ends up holding", an ADR 0052 decision needing its
+        // own record, not a quiet edit here. Tracked separately; do not change it in passing.
         //
         // Field NAMES only in the log, never values: extracted field values are document PII and must
         // not reach logs/Sentry (CLAUDE.md § frontend error monitoring applies the same rule to the
@@ -772,8 +784,10 @@ public class ExtractionWorker(
         //
         // The basis read sits INSIDE this try on purpose: it is one more way grading can fail, and a
         // failure here must land on Pending exactly like any other, never as a throw out of PersistSuccess
-        // (which costs a re-paid Document AI + LLM run — see Clamp). A null basis means the row is no
-        // longer readable (deleted mid-run); fall back to grading the tracked entity.
+        // (which costs a re-paid Document AI + LLM run — see Clamp). A null basis means the row is
+        // GENUINELY gone — a hard delete; the basis read ignores query filters, so a document soft-deleted
+        // mid-run still yields a basis and is still graded as the row this commit leaves. The fallback is
+        // therefore defensive rather than a live path: grade the tracked entity, i.e. pre-#460 behaviour.
         try
         {
             var basis = await DocumentGradingBasis.AfterPendingCommitAsync(db, doc, ct);

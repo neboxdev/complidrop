@@ -46,9 +46,16 @@ internal static class DocumentGradingBasis
     /// <paramref name="context"/> will actually write for it, yielding a detached <see cref="Document"/>
     /// equal to the row this writer's pending commit will leave behind.
     /// <para/>
-    /// Returns <c>null</c> when the row can no longer be read (it was hard-deleted, or soft-deleted past
-    /// the context's query filter, mid-run). Callers fall back to grading the tracked entity — i.e. to the
-    /// pre-#460 behaviour — because a document that is going away is not a document to invent a basis for.
+    /// Returns <c>null</c> only when the row is GENUINELY GONE — a hard delete. A SOFT delete does NOT
+    /// produce a null basis: <c>EntityEntry.GetDatabaseValuesAsync</c>
+    /// issues an <c>AsNoTracking().IgnoreQueryFilters()</c> key lookup, so the row a mid-run
+    /// <c>DELETE /api/documents/{id}</c> soft-deletes is still read and still graded as the row this commit
+    /// will leave. Since every API delete path goes through the audit interceptor's soft delete, nothing in
+    /// production is expected to reach the null case — it is DEFENSIVE, and callers fall back to grading the
+    /// tracked entity (the pre-#460 behaviour) because a document that is going away is not a document to
+    /// invent a basis for. Pinned directly, both branches, by
+    /// <c>ExtractionWorkerStaleBasisTests.The_grading_basis_*</c>; the mid-run-delete INTEGRATION test pins
+    /// something else (that this read never becomes a new way for the persist to throw).
     /// <para/>
     /// One extra key-lookup round trip per call. It sits on a path that has just paid for OCR + an LLM
     /// call, so it is not a cost worth optimising, and the caller MUST keep it inside whatever guard makes
