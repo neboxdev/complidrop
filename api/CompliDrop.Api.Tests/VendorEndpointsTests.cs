@@ -440,6 +440,62 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     }
 
     [Fact]
+    public async Task A_field_save_that_leaves_an_unreadable_value_demotes_a_cert_that_is_already_in_flight()
+    {
+        // The SECOND source of an in-flight `Distrusted`, and the counterexample to the claim four records
+        // used to make (#459 review round 2, C3): "an in-flight document is excluded only if it was ALREADY
+        // distrusted, which by construction means it was already excluded the instant before the re-arm."
+        // That held while trust was gated on `wasSettled` — every writer of Distrusted wrote it onto a
+        // settled row. Round 1's own C2 fix removed that gate (trust follows READABILITY on EVERY status;
+        // only the escalation back to ManualRequired stays de-queue-gated), so a document can now be
+        // demoted WHILE in flight by a save that leaves a canonical value nothing can parse.
+        //
+        // The demotion is correct and stays: it is fail-CLOSED (ADR 0040 — an unreadable expiration must
+        // not roll up as Covered) and USER-INITIATED (the user typed the value one request ago, and the
+        // detail page names the field they must correct — the ManualReviewCard is rendered off
+        // `unreadableFields`, not off the status). It clears the moment the read the user is watching
+        // lands cleanly (PersistSuccess re-decides trust) or a later save leaves nothing unreadable. What
+        // changed is the RECORD, which no longer says the in-flight exclusion is continuous.
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Mid-Flight Edit LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        var docId = await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            expirationDate: DateTime.UtcNow.AddYears(1), glLimit: 1_000_000m,
+            extractionStatus: ExtractionStatus.Completed);
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered", "precondition");
+
+        (await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered",
+            "…and an ordinary re-extract of a TRUSTED cert stays covered in flight (the sibling above)");
+
+        // The realistic entry point: a tab whose last payload said Completed still shows the field editor,
+        // so the user saves an expiration the parser cannot read while the re-read is queued.
+        (await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "expiration_date", fieldValue = "12/31/2027 (per endorsement)" } }
+        })).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using (var verify = CreateSystemDb())
+        {
+            var doc = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+            doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending,
+                "the escalation is de-queue-gated, so the STATUS cannot move on an in-flight row — which "
+                + "is also why no extraction badge discloses this demotion (ADR 0052 § Consequences)");
+            doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+                "…while trust follows readability on every status, so THIS save is what withdraws it: the "
+                + "row was Trusted the instant before, not already excluded");
+        }
+
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("ActionNeeded",
+            "a NEW mid-flight demotion, not a continuation of one — the record must not claim the "
+            + "in-flight exclusion is limited to documents that were already distrusted");
+    }
+
+    [Fact]
     public async Task A_confirmed_cert_re_extracted_cleanly_and_then_failed_again_reads_ActionNeeded()
     {
         // THE residue #459 owes: ADR 0042 Amendment 2 gated the Failed exclusion on IsManuallyVerified,
@@ -618,6 +674,58 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             .GetProperty("data").EnumerateArray().ToArray();
         CoverageFor(list, vendorId).GetProperty("status").GetString().Should().Be("Covered",
             "the LIST projection carries ExtractionTrust too — both projections or the two rollups split");
+    }
+
+    [Fact]
+    public async Task Manual_entry_through_PUT_fields_restores_coverage_on_a_FAILED_cert()
+    {
+        // The SAME exit as the sibling above, through the route the detail page actually OFFERS for a
+        // Failed document (#459 review round 2, S4). Every other end-to-end pin of the restore drives
+        // PUT /verify; the affordance a user meets on a failed extraction is manual entry ("We couldn't
+        // pull the details from this file automatically. Enter the key details below"), whose Save goes to
+        // PUT /fields — and on the /fields side only the WITHDRAW direction was pinned
+        // (An_empty_field_save_does_not_clear_an_unresolved_unreadable_review).
+        //
+        // The chain this covers is longer than /verify's, and every link is load-bearing: the typed value
+        // reaches the canonical column via CanonicalDocumentFields.ApplyToTypedColumn, ResolveManualReview
+        // then reads the RESULTING state and writes Trusted, and UpdateFields folds ApplyEvaluationAsync
+        // into its own unit of work so the verdict the rollup reads is a REAL grade of the typed value —
+        // not the stale one the failed extraction left. A change that made the trust write conditional on
+        // the caller ("only an explicit verify vouches") would leave all four /verify pins green while the
+        // remedy the page offers for an unreadable cert silently stopped restoring coverage.
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Hand-Typed LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        // A failed extraction leaves NO limit on the row, so the required rule cannot pass either — the
+        // document is excluded twice over, and only fixing both restores coverage.
+        var docId = await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.NonCompliant,
+            expirationDate: DateTime.UtcNow.AddYears(1), extractionStatus: ExtractionStatus.Failed);
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("ActionNeeded", "precondition");
+
+        (await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+        {
+            fields = new[] { new { fieldName = "general_liability_limit", fieldValue = "1000000" } }
+        })).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using (var verify = CreateSystemDb())
+        {
+            var doc = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+            doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed,
+                "ResolveManualReview refuses to move a Failed row, so the status is not the exit here either");
+            doc.GeneralLiabilityLimit.Should().Be(1_000_000m,
+                "the typed column IS the canonical verdict input — a DocumentField row alone grades nothing");
+            doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant,
+                "…and the save is a REAL grade, folded into the same unit of work (ADR 0030)");
+            doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+                "the human typed the values the verdict was computed from — the same exit /verify takes");
+        }
+
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered",
+            "manual entry is the remedy the detail page offers for a failed extraction, so it must restore "
+            + "the coverage the ADR 0042 exclusion withheld (#459 / ADR 0052)");
     }
 
     /// <summary>The vendor DETAIL rollup's coverage status — the projection the two list-based helpers
