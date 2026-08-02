@@ -332,11 +332,15 @@ public class ExtractionWorker(
             var imageStream = doc.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
                 ? buffer
                 : null;
+            // The stored type is passed through RAW: "emit the hint only for a real vocabulary member"
+            // has exactly ONE owner, ExtractionPrompts.BuildUserPrompt, which normalizes through
+            // CanonicalDocumentTypes and drops the line for `other` / unknown / blank (#384, ADR 0051).
+            // A pre-filter here was a third copy of that rule spelled as a raw "other" literal.
             var extraction = await extractor.ExtractAsync(
                 ocr,
                 imageStream,
                 doc.ContentType,
-                doc.DocumentType == "other" ? null : doc.DocumentType,
+                doc.DocumentType,
                 ct);
 
             // The compliance verdict is now computed and committed INSIDE PersistSuccess, in the same

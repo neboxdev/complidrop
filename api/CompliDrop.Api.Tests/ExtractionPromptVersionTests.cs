@@ -14,27 +14,148 @@ namespace CompliDrop.Api.Tests;
 /// </summary>
 public sealed class ExtractionPromptVersionTests
 {
-    // ON ANY PROMPT EDIT: update BOTH constants together —
+    // ON ANY PROMPT EDIT — system half OR user-message half, see WirePromptSurface below:
     //   1. bump ExtractionPrompts.Version (new date + slug),
     //   2. re-pin this hash (the test failure message prints the new value).
     // Updating the hash without bumping the version defeats the audit trail this
     // tripwire exists to protect.
-    private const string PinnedVersion = "v2-2026-07-13-gl-each-occurrence";
-    private const string PinnedPromptSha256 = "311C6D71FE3DC8179B06ECF50768894127E0D845A72C9DE7660F847079F0AC1A";
+    private const string PinnedVersion = "v3-2026-08-02-untrusted-ocr-block";
+    private const string PinnedPromptSha256 = "D3D91E3639FAE7FF730FB2D7B5EED6A885EB04F607EB9FDFCCEE457824DD5E44";
+
+    /// <summary>
+    /// A fixed stand-in for the OCR text, so the rendering is a function of the BUILDER, not of a sample.
+    /// </summary>
+    private const string HashSentinel = "<ocr-sentinel>";
+
+    /// <summary>
+    /// The hint line's rendering must be a function of the GUARD, not of inputs the guard treats
+    /// identically. Each of these is a class the guard decides differently, and every one is a shape
+    /// <c>Document.DocumentType</c> can legitimately hold (ADR 0045 deliberately did NOT launder legacy
+    /// non-canonical rows). Rendering only <c>"coi"</c> and <c>null</c> left the pin unable to see the very
+    /// change this PR made: reverting the guard to main's shape, or to the echo-back shape reviewers.md
+    /// names as a regression, produced byte-identical output and the hash stayed green (#384 round-2).
+    /// </summary>
+    private const string CanonicalHint = "coi";                                  // exact vocabulary member
+    private const string MisCasedHint = "COI";                                   // recognised, wrong spelling
+    private const string NonCanonicalHint = "Certificate of Insurance";          // unrecognised entirely
+    private const string PaddedFallbackHint = "  other  ";                       // padded positive "unknown"
+
+    /// <summary>
+    /// The over-cap OCR rendering carries DISTINCT head and tail markers so which 20,000 characters
+    /// survive is inside the hash. A uniform <c>new string('A', 20_001)</c> hashed the same under
+    /// head-truncation and tail-truncation, so a flipped slice was invisible to the pin (#384 round-2).
+    /// The tail marker begins past the cap, so it must be ABSENT from the surface; the head marker
+    /// begins at index 0 and must be PRESENT.
+    /// </summary>
+    private const string TruncationHeadMarker = "<truncation-head>";
+    private const string TruncationTailMarker = "<truncation-tail>";
+    private const int OverCapLength = 20_100;
+
+    private static string OverCapOcrText() =>
+        TruncationHeadMarker
+        + new string('A', OverCapLength - TruncationHeadMarker.Length - TruncationTailMarker.Length)
+        + TruncationTailMarker;
+
+    /// <summary>
+    /// A canonical rendering of the WHOLE wire prompt — both halves the model actually receives.
+    /// <para/>
+    /// #384 moved the user-message builder into <see cref="ExtractionPrompts"/>, and hashing
+    /// <see cref="ExtractionPrompts.SystemPrompt"/> alone left that half outside the tripwire: an edit to
+    /// the hint line, the <c>OCR text:</c> lead, the fence, the no-OCR notice, or the truncation cap
+    /// changes what every extraction is graded from while <c>Document.ExtractionPromptVersion</c> keeps
+    /// stamping the same value — exactly the "two materially different prompts, one version" the pin
+    /// exists to prevent. (This PR's own hint-guard change altered the wire prompt for every legacy
+    /// non-canonical and mis-cased row, and the pin never fired.)
+    /// <para/>
+    /// Every branch of the builder is rendered so none can be edited unnoticed, and every branch is fed
+    /// inputs that DISCRIMINATE the guard rather than merely exercise the code path: the hint present in
+    /// the vocabulary's own spelling, the hint suppressed for each of the three reasons it can be
+    /// suppressed, the empty-OCR notice BOTH with and without a hint (that branch has its own
+    /// <c>{hint}</c> interpolation, and <c>ExtractionWorker</c> takes it for every document when Document
+    /// AI is disabled), and the over-cap truncation with head/tail markers (which is how
+    /// <c>MaxOcrChars</c> — private, and a real change to what long documents put on the wire — reaches
+    /// the hash, in a form that also pins WHICH end survives). The builder is deterministic: no clock, no
+    /// randomness, so this is stable across runs and machines.
+    /// <para/>
+    /// The separator is an explicit <c>"\n\n"</c>. It is part of the hashed surface, so it is spelled as a
+    /// real, legible string — a control character here once made git classify this whole file as BINARY,
+    /// hiding the tripwire's own diff from review (#384 round-2; see <c>.gitattributes</c>).
+    /// </summary>
+    private static string WirePromptSurface() => string.Join("\n\n",
+        ExtractionPrompts.SystemPrompt,
+        ExtractionPrompts.BuildUserPrompt(HashSentinel, CanonicalHint),
+        ExtractionPrompts.BuildUserPrompt(HashSentinel, MisCasedHint),
+        ExtractionPrompts.BuildUserPrompt(HashSentinel, NonCanonicalHint),
+        ExtractionPrompts.BuildUserPrompt(HashSentinel, PaddedFallbackHint),
+        ExtractionPrompts.BuildUserPrompt(HashSentinel, null),
+        ExtractionPrompts.BuildUserPrompt("", CanonicalHint),
+        ExtractionPrompts.BuildUserPrompt("", null),
+        ExtractionPrompts.BuildUserPrompt(OverCapOcrText(), null));
+
+    /// <summary>
+    /// Line endings are normalized before hashing AND before the marker assertions: C# raw string
+    /// literals preserve the SOURCE file's endings, which differ between a Windows checkout (CRLF) and CI
+    /// (LF) — the surface must be platform-stable.
+    /// </summary>
+    private static string NormalizedSurface() => WirePromptSurface().ReplaceLineEndings("\n");
 
     [Fact]
     public void Prompt_content_and_version_are_pinned_together()
     {
-        // Line endings are normalized before hashing: C# raw string literals preserve the
-        // SOURCE file's endings, which differ between a Windows checkout (CRLF) and CI
-        // (LF) — the hash must be platform-stable.
-        var normalized = ExtractionPrompts.SystemPrompt.ReplaceLineEndings("\n");
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)));
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(NormalizedSurface())));
 
         ExtractionPrompts.Version.Should().Be(PinnedVersion,
             "a prompt edit must consciously bump the version (see the comment on the pinned constants)");
         hash.Should().Be(PinnedPromptSha256,
             $"the prompt content changed — bump ExtractionPrompts.Version AND re-pin this hash to {hash}");
+    }
+
+    [Fact]
+    public void The_hashed_surface_still_covers_every_branch_of_the_wire_prompt()
+    {
+        // The hash pins the surface's VALUE; nothing pinned its SCOPE. Dropping a branch from
+        // WirePromptSurface — or reverting it to SystemPrompt alone, which IS the round-1 defect —
+        // reddens only the hash, and a one-line re-pin makes that green again while Version never moves
+        // (both are constants compared to each other). A real prompt edit costs two deliberate changes;
+        // silently narrowing the pin's coverage cost one. These markers are NAMED assertions a re-pin
+        // cannot satisfy: each one fails if its branch leaves the surface (#384 round-2).
+        var surface = NormalizedSurface();
+
+        surface.Should().StartWith(ExtractionPrompts.SystemPrompt.ReplaceLineEndings("\n"),
+            "the SYSTEM half must stay in the surface — hashing the user half alone is the same defect "
+            + "as the round-1 hashing of SystemPrompt alone, mirrored");
+
+        surface.Should().Contain(HashSentinel,
+            "the ordinary fenced-OCR branch must be rendered");
+        surface.Should().Contain("OCR text:\n---\n",
+            "the OCR lead and the opening fence are part of the hashed wire prompt");
+
+        surface.Should().Contain("Document type hint: coi\n\n",
+            "the hint-PRESENT branch must be rendered, in the vocabulary's own spelling");
+        surface.Should().Contain("Document type hint: coi\n\nNo OCR text was extracted",
+            "the empty-OCR branch carries its OWN {hint} interpolation, so the hint-carrying empty-OCR "
+            + "COMPOSITION must be hashed too — ExtractionWorker takes that branch for every document "
+            + "when Document AI is disabled");
+
+        // The guard, not just the branch. Each of these is a rendered input whose hint the guard
+        // suppresses or re-spells; a revert to main's raw-interpolation shape, or to the
+        // `IsAllowed(x) ? x : ""` echo-back shape, puts caller bytes on one of these lines.
+        var hintLines = surface.Split('\n')
+            .Where(line => line.StartsWith("Document type hint:", StringComparison.Ordinal))
+            .ToList();
+        hintLines.Should().OnlyContain(line => line == "Document type hint: coi",
+            "every hint line in the surface must carry the VOCABULARY's spelling and nothing else — a "
+            + "mis-cased, non-canonical, or whitespace-padded stored type contributes zero caller bytes");
+        hintLines.Should().HaveCount(3,
+            "exactly the three canonical-hint renderings emit a hint line; the mis-cased input folds onto "
+            + "the same spelling, and the non-canonical and padded-fallback inputs emit none. A different "
+            + "count means a rendering left the surface or the guard stopped suppressing");
+
+        surface.Should().Contain(TruncationHeadMarker,
+            "the over-cap TRUNCATION branch must be rendered, and the surviving slice must be the HEAD");
+        surface.Should().NotContain(TruncationTailMarker,
+            "the bytes past MaxOcrChars must NOT reach the wire — a missing cap, or a flip to "
+            + "tail-truncation, puts this marker in the surface");
     }
 
     [Fact]

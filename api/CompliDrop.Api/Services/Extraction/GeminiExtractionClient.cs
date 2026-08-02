@@ -47,7 +47,7 @@ public class GeminiExtractionClient(
         {
             new JsonObject
             {
-                ["text"] = BuildPrompt(ocr.Text, documentTypeHint)
+                ["text"] = ExtractionPrompts.BuildUserPrompt(ocr.Text, documentTypeHint)
             }
         };
 
@@ -148,17 +148,6 @@ public class GeminiExtractionClient(
             : null;
 
         return result with { Usage = usage };
-    }
-
-    private static string BuildPrompt(string ocrText, string? documentTypeHint)
-    {
-        var hint = string.IsNullOrWhiteSpace(documentTypeHint) || documentTypeHint == "other"
-            ? ""
-            : $"Document type hint: {documentTypeHint}\n\n";
-        var safeText = string.IsNullOrWhiteSpace(ocrText)
-            ? "(No OCR text was extracted — inspect the attached image if available.)"
-            : ocrText.Length > 20000 ? ocrText[..20000] : ocrText;
-        return $"{hint}OCR text:\n---\n{safeText}\n---";
     }
 
     private static JsonObject BuildResponseSchema() => new()

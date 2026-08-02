@@ -151,8 +151,15 @@ public sealed class GeminiExtractionClientTests
         var handler = new StubHttpMessageHandler(HttpStatusCode.OK, Json(ExtractionFixtureHarness.GeminiResponse(ExtractionFixtureHarness.Minimal())));
         await ExtractionClientBuilder.Gemini(handler).ExtractAsync(ExtractionClientBuilder.Ocr(""), null, "application/pdf", null, default);
 
-        JsonNode.Parse(handler.LastRequestBody)!["contents"]![0]!["parts"]![0]!["text"]!.GetValue<string>()
-            .Should().Contain("No OCR text was extracted");
+        var prompt = JsonNode.Parse(handler.LastRequestBody)!["contents"]![0]!["parts"]![0]!["text"]!.GetValue<string>();
+
+        prompt.Should().Contain("No OCR text was extracted");
+
+        // …and it lands ABOVE the fence. The notice is OURS; the region after the "OCR text:" line is
+        // what SystemPrompt declares to be vendor-authored content whose instructions are never obeyed,
+        // so our own fallback instruction must not sit inside it (#384 review).
+        prompt.Should().StartWith("No OCR text was extracted")
+            .And.EndWith("OCR text:\n---\n---");
     }
 
     [Fact]
