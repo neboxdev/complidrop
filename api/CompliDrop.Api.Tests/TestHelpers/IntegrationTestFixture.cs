@@ -114,6 +114,7 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
         Factory.Services.GetService<ConcurrentDocumentWriteInterceptor>()?.Reset();
         Factory.Services.GetService<ConcurrentSystemWriteInterceptor>()?.Reset();
         Factory.Services.GetService<CommitFaultInterceptor>()?.Reset();
+        Factory.Services.GetService<SystemCommandFaultInterceptor>()?.Reset();
     }
 
     public async Task DisposeAsync()

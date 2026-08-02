@@ -107,9 +107,13 @@ public sealed class ConcurrentDocumentWriteOptionsConfiguration(ConcurrentDocume
 /// This one fires from inside the worker's own <c>SavingChanges</c>, i.e. after the basis read and before
 /// the UPDATE, which is where a lost update becomes visible.
 /// <para/>
-/// A successful <c>ProcessDocumentAsync</c> saves through this context exactly once (the persist), but the
-/// cost tracker may save again afterwards, so a test that wants a single competing write disarms its own
-/// callback on first fire — the same rule as the AppDbContext hook.
+/// A successful <c>ProcessDocumentAsync</c> raises <c>SavingChangesAsync</c> on this context exactly ONCE —
+/// the persist. <c>CostTrackingService.RecordSpendAsync</c>, which runs right after it, does NOT: it is an
+/// <c>ExecuteUpdateAsync</c>, which goes through <see cref="IDbCommandInterceptor"/> and never through the
+/// change tracker. So a test's self-disarm on first fire is belt-and-braces beside the base class's
+/// <c>_insideCompetingWrite</c> re-entrancy flag rather than a guard against an expected second save — the
+/// same rule as the AppDbContext hook, kept for the same reason (a callback that drives a real request can
+/// reach this context again through <c>IAuditLogger</c>).
 /// </summary>
 public sealed class ConcurrentSystemWriteInterceptor : ConcurrentDocumentWriteInterceptor;
 

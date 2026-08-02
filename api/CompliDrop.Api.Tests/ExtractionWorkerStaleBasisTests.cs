@@ -15,7 +15,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Serilog.Core;
-using Serilog.Events;
 
 namespace CompliDrop.Api.Tests;
 
@@ -56,6 +55,15 @@ namespace CompliDrop.Api.Tests;
 /// (<see cref="The_grading_basis_overlays_only_the_properties_the_writer_modified"/>,
 /// <see cref="The_grading_basis_is_null_only_when_the_row_is_genuinely_gone"/>): an integration test
 /// cannot discriminate which branch of the helper ran, and the ADR records both.
+/// <para/>
+/// Grading the right row is only half of the fix — the verdict also has to be WRITTEN, and a plain
+/// assignment onto the minutes-old snapshot silently drops it whenever the recomputed value EQUALS what
+/// the row held at claim time (#460 review round 2). That is forced by
+/// <c>ExtractionWorker.ForceVerdictWrite</c> and pinned once per arm:
+/// <see cref="A_verdict_equal_to_the_stale_snapshot_is_still_WRITTEN_over_a_competitors"/> for the graded
+/// verdict, <see cref="A_failing_basis_read_degrades_the_verdict_without_requeuing_the_extraction"/> for
+/// the degrade-to-<c>Pending</c> — which doubles as the pin that the basis read lives INSIDE the
+/// best-effort <c>try</c>, since no existing test made that read fail.
 /// </summary>
 public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
@@ -134,9 +142,15 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
     /// A queued (<c>Pending</c>) document with its blob actually stored, so the worker can claim and
     /// process it for real. <paramref name="gl"/> seeds BOTH copies of the canonical limit (typed column
     /// + JSON mirror) — the state the row is in before the interleave moves one of them.
+    /// <para/>
+    /// <paramref name="complianceStatus"/> is the STORED verdict the worker's tracked snapshot will carry.
+    /// It matters whenever the point of a test is that the freshly-computed verdict EQUALS it — EF emits
+    /// only properties that DIFFER from the snapshot, so that is exactly when a plain assignment writes
+    /// nothing (#460 review round 2, C1).
     /// </summary>
     private async Task<Guid> SeedQueuedDocAsync(
         Guid orgId, Guid? vendorId, string documentType = "coi", decimal? gl = null,
+        ComplianceStatus complianceStatus = ComplianceStatus.Pending,
         IServiceProvider? host = null)
     {
         var now = DateTime.UtcNow;
@@ -156,7 +170,7 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
                 ContentType = "application/pdf",
                 DocumentType = documentType,
                 ExtractionStatus = ExtractionStatus.Pending,
-                ComplianceStatus = ComplianceStatus.Pending,
+                ComplianceStatus = complianceStatus,
                 GeneralLiabilityLimit = gl,
                 ExtractionFields = JsonDocument.Parse(
                     gl is null ? "{}" : $$"""{"general_liability_limit":"{{gl:0}}"}"""),
@@ -417,7 +431,21 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
             + "assertion, and not the three above it, the one that says which branch ran");
         var checks = await db.ComplianceChecks.AsNoTracking().Where(c => c.DocumentId == docId).ToListAsync();
         checks.Should().ContainSingle("Lenient's checklist carries exactly one COI rule");
-        Extraction.ExtractCallCount.Should().Be(1, "no failure path may cost a second OCR + LLM run");
+
+        // "No second paid run" is what this test is about, and the call counter alone cannot say it
+        // (#460 review round 2, S2): ProcessDocumentAsync calls the extractor at most once and this test
+        // drives one cycle, so the assertion below cannot fail. A second ClaimNextAsync cannot say it here
+        // either — ClaimSql filters "DeletedAt" IS NULL, so a soft-deleted row is unclaimable whatever its
+        // status (A_failing_basis_read_degrades_the_verdict_without_requeuing_the_extraction pins the
+        // second cycle on a row that is still alive). What DOES discriminate is the failure bookkeeping:
+        // a throw out of PersistSuccess reaches RecordFailedAttempt, which charges the retry budget and
+        // stamps the error before requeuing.
+        doc.FailedAttempts.Should().Be(0,
+            "nothing was charged against the retry budget, so no failure path ran");
+        doc.ProcessingError.Should().BeNull(
+            "a counted failure would have stamped the error that caused it");
+        Extraction.ExtractCallCount.Should().Be(1,
+            "precondition: the run under test really did reach the extraction boundary");
     }
 
     [Fact]
@@ -597,13 +625,19 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         await ClaimAndProcessAsync(docId, host.Services);
 
         // Sanity first: the row really did move on all three columns, so "not in the UPDATE" below is a
-        // statement about the worker rather than about a value that happened not to change.
+        // statement about the worker rather than about a value that happened not to change. Every one of
+        // those three values was written by the MID-RUN requests, though, so they say nothing about the
+        // persist having run at all — ExtractionStatus does, and it is the one column here only the worker
+        // can have moved (#460 review round 2, S1).
         var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "precondition: the persist ran and SETTLED the document — a throw out of PersistSuccess would "
+            + "leave it back at Pending, and the SET clause read below would be the failure bookkeeping's");
         terminal.Doc.VendorId.Should().Be(after);
         terminal.Doc.DocumentType.Should().Be("permit");
         terminal.Doc.GeneralLiabilityLimit.Should().Be(3_000_000m);
 
-        var setClause = DocumentsUpdateSetClause(sink);
+        var setClause = PersistSetClause(sink);
         setClause.Should().NotBeNull(
             "the persist's UPDATE must appear in this host's EF command log — if it does not, this test is "
             + "a no-op and proves nothing about which columns the write carried");
@@ -619,6 +653,168 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         setClause.Should().NotContain("\"GeneralLiabilityLimit\" =",
             "the model omitted this field, so ApplyToTypedColumn never ran for it and the worker has no "
             + "value of its own to assert over the human's correction");
+    }
+
+    [Fact]
+    public async Task A_verdict_equal_to_the_stale_snapshot_is_still_WRITTEN_over_a_competitors()
+    {
+        // #460 review round 2, C1 — grading the right row is only half of it; the verdict has to be
+        // WRITTEN. `doc` is the minutes-old snapshot and EF emits only properties that DIFFER from it, so
+        // a freshly-computed verdict EQUAL to the value the row held at claim time produces no SET clause
+        // at all — while the ComplianceCheck rows are rewritten unconditionally and UpdatedAt keeps the
+        // UPDATE running. The result is the torn pair ADR 0030 exists to prevent, in the false-affirmative
+        // direction: the row keeps a REQUEST's verdict beside THIS read's inputs and THIS read's checks.
+        //
+        // The interleave: strict V1 (5M floor), stored NonCompliant. A mid-run PATCH moves the document to
+        // lenient V2 (1M floor), whose re-grade commits Compliant against the 2M the row still holds. The
+        // model then returns 800k, which fails V2 too — so the basis grades NonCompliant, EQUAL to the
+        // snapshot. Unforced, the row commits Compliant over an 800k limit and a FAILING check row, and
+        // nothing re-grades it (the sweep does date transitions only).
+        //
+        // Pinned twice on purpose: by VALUE (ReadTerminalStateAsync's "the persisted verdict must be what
+        // the persisted inputs grade to") and on the emitted COLUMN SET, because the value assertion alone
+        // could be satisfied by a future change that grades differently rather than by the column being
+        // written.
+        var sink = new CapturingLogEventSink();
+        await using var host = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        _ = host.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+
+        var auth = await RegisterAndLoginAsync();
+        var strict = await SeedVendorAsync(auth.OrgId, "Strict", ("coi", "5000000"));
+        var lenient = await SeedVendorAsync(auth.OrgId, "Lenient", ("coi", "1000000"));
+        var docId = await SeedQueuedDocAsync(
+            auth.OrgId, strict, gl: 2_000_000m,
+            complianceStatus: ComplianceStatus.NonCompliant, host: host.Services);
+
+        ExtractionOf(host.Services).Result = Extracted("coi", ("general_liability_limit", "800000"));
+        ExtractionOf(host.Services).DuringExtract = async () =>
+        {
+            var resp = await auth.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { vendorId = lenient });
+            resp.StatusCode.Should().Be(HttpStatusCode.OK, "the reassignment is an ordinary request");
+
+            await using var probe = CreateSystemDb();
+            (await probe.Documents.AsNoTracking().FirstAsync(d => d.Id == docId)).ComplianceStatus
+                .Should().Be(ComplianceStatus.Compliant,
+                    "precondition: the reassignment's own re-grade really did move the STORED verdict away "
+                    + "from the worker's snapshot — otherwise there is nothing for the persist to correct");
+        };
+
+        await ClaimAndProcessAsync(docId, host.Services);
+
+        // The STATEMENT first, because that is the mechanism: the row's value is merely what the absent
+        // SET clause leaves behind.
+        var setClause = PersistSetClause(sink);
+        setClause.Should().NotBeNull(
+            "the persist's UPDATE must appear in this host's EF command log — if it does not, this test is "
+            + "a no-op and proves nothing about which columns the write carried");
+        setClause.Should().Contain("\"ComplianceStatus\" =",
+            "the verdict is the worker's OWN conclusion about the basis it just graded, so it must be "
+            + "FORCED into the UPDATE (ExtractionWorker.ForceVerdictWrite — the SetTrust / ADR 0052 §2 "
+            + "shape one column over) rather than left to a snapshot comparison that can silently drop it. "
+            + "This is NOT ADR 0030 Amendment 2 Option G, which forces verdict INPUTS a request owns");
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.GeneralLiabilityLimit.Should().Be(800_000m,
+            "precondition: the persist did overwrite the input the competitor's verdict was computed from");
+        terminal.Doc.VendorId.Should().Be(lenient, "the worker writes no VendorId, so the PATCH stands");
+        terminal.Doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant,
+            "800k fails Lenient's 1M floor. The recomputed verdict EQUALS the pre-run snapshot, so an "
+            + "unforced assignment emits nothing and the row keeps the PATCH's Compliant — a certificate "
+            + "certified against a limit it does not carry, beside this persist's own failing check row");
+        terminal.Checks.Should().ContainSingle().Which.IsPassed.Should().BeFalse(
+            "the check rows the persist wrote must agree with the verdict beside them");
+    }
+
+    [Fact]
+    public async Task A_failing_basis_read_degrades_the_verdict_without_requeuing_the_extraction()
+    {
+        // Two things at once, both previously unpinned.
+        //
+        // (1) PLACEMENT (#460 review round 2, C2). The basis read sits INSIDE PersistSuccess's
+        // degrade-to-Pending try because a throw out of that method is the most expensive failure in this
+        // codebase: ProcessDocumentAsync catches it as a counted failure and requeues the document, so the
+        // next claim RE-PAYS Document AI + the LLM (ExtractionWorker.Clamp's remarks). Nothing pinned that
+        // — A_document_deleted_mid_extraction_persists_without_a_second_extraction soft-deletes, which
+        // yields a NON-null basis and never makes the read FAIL, so hoisting it above the try left the
+        // suite green. A hard delete is not a substitute either: the persist's own UPDATE would then throw
+        // for an unrelated reason. So fail the read itself, before it reaches Postgres.
+        //
+        // (2) The degrade-to-Pending arm of the FORCED verdict write (#460 review round 2, C1). The catch
+        // assigns Pending onto the same minutes-old snapshot, so when that snapshot already SAID Pending
+        // the degrade is dropped too — and a competitor's confident verdict is left standing over inputs
+        // this persist just overwrote. Here the document starts unassigned (Pending, correctly), a mid-run
+        // PATCH puts it on a 1M-floor checklist and commits Compliant against the 2M it still holds, and
+        // the persist then writes 800k with no verdict to replace it.
+        var auth = await RegisterAndLoginAsync();
+        var lenient = await SeedVendorAsync(auth.OrgId, "Lenient", ("coi", "1000000"));
+        var docId = await SeedQueuedDocAsync(auth.OrgId, vendorId: null, gl: 2_000_000m);
+
+        var fault = Fixture.Factory.Services.GetRequiredService<SystemCommandFaultInterceptor>();
+        Extraction.Result = Extracted("coi", ("general_liability_limit", "800000"));
+        Extraction.DuringExtract = async () =>
+        {
+            var resp = await auth.Client.PatchAsJsonAsync($"/api/documents/{docId}", new { vendorId = lenient });
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+            await using (var probe = CreateSystemDb())
+                (await probe.Documents.AsNoTracking().FirstAsync(d => d.Id == docId)).ComplianceStatus
+                    .Should().Be(ComplianceStatus.Compliant,
+                        "precondition: the assignment's re-grade moved the STORED verdict off the worker's "
+                        + "snapshot, so the degrade below has something to overwrite");
+
+            // Armed only now: ProcessDocumentAsync's own load of the document already happened (before the
+            // extraction call), so the next SELECT of "Documents" on the worker's SystemDbContext is the
+            // grading-basis read. The hook self-disarms on that one fire.
+            fault.ShouldFault = sql => sql.Contains("FROM \"Documents\"", StringComparison.Ordinal);
+        };
+
+        int faults;
+        try
+        {
+            await ClaimAndProcessAsync(docId);
+        }
+        finally
+        {
+            // Read BEFORE the reset — Reset() zeroes the counter, so a disarm-then-assert order would
+            // make the non-vacuity check below read 0 no matter what happened.
+            faults = fault.FaultCount;
+            fault.Reset();
+        }
+
+        faults.Should().Be(1,
+            "the basis read really did fail — a predicate that matched nothing would make every assertion "
+            + "below a statement about the ordinary success path");
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "a failing basis read must land on Pending like any other recompute failure, never as a throw "
+            + "out of PersistSuccess — that throw is caught as a COUNTED FAILURE and the document goes back "
+            + "in the queue, re-paying Document AI + the LLM on the next claim");
+        doc.FailedAttempts.Should().Be(0, "…so nothing was charged against the retry budget");
+        doc.ProcessingError.Should().BeNull("…and no failure was recorded against the document");
+        doc.GeneralLiabilityLimit.Should().Be(800_000m,
+            "precondition: the inputs still commit — a degraded verdict never costs the extraction");
+        doc.VendorId.Should().Be(lenient, "precondition: the assignment committed inside the window");
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.Pending,
+            "the degrade must be WRITTEN. Assigning Pending onto a snapshot that already said Pending "
+            + "emits no SET clause, so the row would keep the PATCH's Compliant over the 800k this persist "
+            + "just wrote — a confident verdict from inputs nobody graded (ExtractionWorker.ForceVerdictWrite)");
+        (await db.ComplianceChecks.AsNoTracking().Where(c => c.DocumentId == docId).ToListAsync())
+            .Should().ContainSingle(
+                "ApplyEvaluationAsync never ran, so it never cleared the PATCH's check row — the display "
+                + "desync ADR 0030 § Consequences records, which is exactly why the HEADLINE verdict has "
+                + "to read Pending rather than inherit the affirmative one those rows were written for");
+
+        // The real form of "no failure path may cost a second OCR + LLM run" (#460 review round 2, S2):
+        // drive a SECOND poll cycle and require the queue to have nothing for it. The row is alive here, so
+        // unlike the mid-run-delete test this is a statement about its STATUS rather than about its
+        // DeletedAt.
+        (await BuildWorker().ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+            "the document is settled at Completed — neither Pending nor a stale Processing claim — so the "
+            + "next poll has nothing to pick up");
+        Extraction.ExtractCallCount.Should().Be(1, "…and the extraction was therefore paid for exactly once");
     }
 
     [Fact]
@@ -745,32 +941,16 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
     }
 
     /// <summary>
-    /// The SET clause of the most recent <c>UPDATE "Documents"</c> in the host's EF command log, or null
-    /// when there is none. Scoped to the SET clause because EF batches several statements into one logged
-    /// command, and "does this write carry column X" is a question about one of them.
+    /// The SET clause of the persist's <c>UPDATE "Documents"</c> in <paramref name="sink"/>'s EF command
+    /// log, or null when there is none.
+    /// <para/>
+    /// <c>ExtractionCompletedAt</c> is the discriminator, and it is not decoration (#460 review round 2,
+    /// S1): the worker's FAILURE bookkeeping (<c>RecordFailedAttempt</c> / <c>MarkFailed</c>) also emits an
+    /// <c>UPDATE "Documents"</c> carrying <c>ExtractionStatus</c> and none of the columns these tests assert
+    /// absent, so a persist that THREW would otherwise hand this reader the failure statement and every
+    /// assertion would pass against a write that is not the one under test. Only
+    /// <see cref="ExtractionWorker"/>'s success path stamps a completion time.
     /// </summary>
-    private static string? DocumentsUpdateSetClause(CapturingLogEventSink sink)
-    {
-        const string marker = "UPDATE \"Documents\" SET ";
-        foreach (var message in sink.Events
-            .Select(e => e.RenderMessage().Replace("\\\"", "\"", StringComparison.Ordinal))
-            .Reverse())
-        {
-            // Serilog renders the command text as a quoted string, so the SQL's own quotes arrive escaped.
-            var start = message.IndexOf(marker, StringComparison.Ordinal);
-            if (start < 0) continue;
-            start += marker.Length;
-            var end = message.IndexOf("WHERE", start, StringComparison.Ordinal);
-            return end < 0 ? message[start..] : message[start..end];
-        }
-        return null;
-    }
-
-    /// <summary>Serilog sink that records every emitted event; thread-safe for the host's loggers.</summary>
-    private sealed class CapturingLogEventSink : ILogEventSink
-    {
-        private readonly System.Collections.Concurrent.ConcurrentQueue<LogEvent> _events = new();
-        public void Emit(LogEvent logEvent) => _events.Enqueue(logEvent);
-        public IReadOnlyCollection<LogEvent> Events => _events.ToArray();
-    }
+    private static string? PersistSetClause(CapturingLogEventSink sink) =>
+        sink.LastUpdateSetClause("Documents", "\"ExtractionCompletedAt\"");
 }
