@@ -25,7 +25,10 @@ namespace CompliDrop.Api.Tests;
 /// <see cref="Adr0052EnforcementTests"/>, <see cref="Adr0009EnforcementTests"/>): comments stripped so
 /// prose ABOUT a shape cannot read as the shape, an anti-no-op floor so a renamed method or a botched read
 /// fails the gate rather than emptying it, and hermetic fixtures proving the gate REJECTS the shapes it
-/// exists to reject.
+/// exists to reject. The plumbing underneath all of that — the tree walk, the comment stripper, the
+/// brace-matching body extractor and the occurrence counter — belongs to
+/// <see cref="TestHelpers.SourceScan"/> and is self-tested in <c>SourceScanTests</c>; this class holds
+/// only the invariant it enforces.
 /// </para>
 /// </summary>
 public class Adr0030EnforcementTests
@@ -53,17 +56,6 @@ public class Adr0030EnforcementTests
     /// <summary>Below this the production walk found the wrong tree and the call-count pin is vacuous.</summary>
     private const int MinScannedFiles = 50;
 
-    private static int Count(string haystack, string needle)
-    {
-        var (count, at) = (0, 0);
-        while ((at = haystack.IndexOf(needle, at, StringComparison.Ordinal)) >= 0)
-        {
-            count++;
-            at += needle.Length;
-        }
-        return count;
-    }
-
     /// <summary>
     /// The shape assertions, so the hermetic fixtures below drive the SAME ones the production check runs.
     /// Counts alone are not enough — the pre-#461 shape has one <c>EvaluateAsync</c> and zero guards, but a
@@ -78,14 +70,14 @@ public class Adr0030EnforcementTests
     /// </summary>
     internal static void AssertGuardedRegradeShape(string body)
     {
-        Count(body, GuardCall).Should().Be(1,
+        SourceScan.Count(body, GuardCall).Should().Be(1,
             "ADR 0030 Amendment 3: the pure re-grade runs inside DocumentWriteConcurrency's REPEATABLE "
             + "READ + bounded re-run. Without it a PUT /fields committing in the read→compute→write window "
             + "leaves the row holding the EDITED limit beside THIS verdict — a stored Compliant over a "
             + "value somebody just lowered, with check rows citing what the row no longer holds, and "
             + "nothing to heal it (#461)");
 
-        Count(body, EvaluateCall).Should().Be(1,
+        SourceScan.Count(body, EvaluateCall).Should().Be(1,
             "exactly one re-grade per request — a second call would grade twice, once outside whatever "
             + "attempt committed");
 
@@ -99,7 +91,7 @@ public class Adr0030EnforcementTests
     [Fact]
     public void The_pure_re_grade_runs_inside_the_concurrency_guard()
     {
-        var body = Adr0050EnforcementTests.ExtractMethodBody(
+        var body = SourceScan.ExtractMethodBody(
             File.ReadAllText(SourceScan.ProductionFile("Endpoints", "ComplianceEndpoints.cs")),
             RunCheckSignature);
 
@@ -133,7 +125,7 @@ public class Adr0030EnforcementTests
             "the scan must have found the real production tree, or the count below is vacuous");
 
         var callSites = sources
-            .SelectMany(s => Enumerable.Repeat(s.Relative, Count(s.Text, EvaluateCall)))
+            .SelectMany(s => Enumerable.Repeat(s.Relative, SourceScan.Count(s.Text, EvaluateCall)))
             .ToList();
 
         callSites.Should().Equal(["Endpoints/ComplianceEndpoints.cs"],
@@ -162,10 +154,10 @@ public class Adr0030EnforcementTests
             }
             """;
 
-        var body = Adr0050EnforcementTests.ExtractMethodBody(unguarded, RunCheckSignature);
+        var body = SourceScan.ExtractMethodBody(unguarded, RunCheckSignature);
         // Proven, not assumed: the fixture's one call IS present, so the rejection below comes from the
         // MISSING guard rather than from an empty read.
-        Count(body, EvaluateCall).Should().Be(1);
+        SourceScan.Count(body, EvaluateCall).Should().Be(1);
 
         var act = () => AssertGuardedRegradeShape(body);
         act.Should().Throw<Exception>("this shape is the #461 bug itself")
@@ -198,9 +190,9 @@ public class Adr0030EnforcementTests
             }
             """;
 
-        var body = Adr0050EnforcementTests.ExtractMethodBody(hoisted, RunCheckSignature);
-        Count(body, GuardCall).Should().Be(1, "the guard-presence assertion must PASS here…");
-        Count(body, EvaluateCall).Should().Be(1, "…and so must the call-count one, so only ORDER rejects it");
+        var body = SourceScan.ExtractMethodBody(hoisted, RunCheckSignature);
+        SourceScan.Count(body, GuardCall).Should().Be(1, "the guard-presence assertion must PASS here…");
+        SourceScan.Count(body, EvaluateCall).Should().Be(1, "…and so must the call-count one, so only ORDER rejects it");
 
         var act = () => AssertGuardedRegradeShape(body);
         act.Should().Throw<Exception>("a re-grade computed outside the retry is re-served, never re-run")
