@@ -180,6 +180,19 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         SendAsync(client, HttpMethod.Post, $"/api/compliance/check/{docId}");
 
     /// <summary>
+    /// Why every EDIT-path exhaustion asserts the copy and not just the code. Since #461 the 409 message is
+    /// a per-call-site ARGUMENT (<c>RunAsync</c>'s required <c>conflictMessage</c>) rather than a constant
+    /// baked into the envelope, so the three call sites can now silently swap it. Handing an edit path
+    /// <c>RegradeConflictMessage</c> would tell a user whose typed change was just thrown away that "we
+    /// were re-checking it" — no mention that their edit is gone or that they must re-make it — and the
+    /// code assertion cannot see the difference. Unifying the two messages is a recorded finding, not a
+    /// cleanup (ADR 0030 Amendment 3; .claude/reviewers.md).
+    /// </summary>
+    private const string EditCopyReason =
+        "an edit path must carry the EDIT copy: the user submitted a change that was thrown away, so the "
+        + "message has to say so and ask them to make it again — the re-grade copy names no change at all";
+
+    /// <summary>
     /// The document's persisted explainer rows, as <c>(the GL limit they CITE, IsPassed)</c>. The verdict
     /// column is only half of what #461 leaves behind: the check rows are rewritten unconditionally, so a
     /// re-grade that lost still gets to cite the value the row no longer holds in the "What we checked"
@@ -357,6 +370,55 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
     }
 
     [Fact]
+    public async Task A_vendor_reassignment_that_keeps_losing_commits_nothing_and_says_so()
+    {
+        // UpdateDocument's exhaustion arm, which had NO test at all until the #461 review — so the 409 it
+        // answers with was unpinned on both halves. The copy is the half that can now regress silently:
+        // #461 turned the message into a per-call-site argument, and this call site is the one an
+        // "unify the two messages" cleanup would reach without any suite noticing (see EditCopyReason).
+        //
+        // Same construction as the field-edit exhaustion below: a competing edit commits inside EVERY
+        // attempt, so no attempt can win, and the terminal row must be that competitor's own consistent
+        // tuple with nothing of the reassignment in it.
+        var auth = await RegisterAndLoginAsync();
+        var (strictVendor, _) = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "2000000", vendorName: "Strict");
+        var (lenientVendor, _) = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "500000", vendorName: "Lenient");
+        var docId = await SeedCoiAsync(auth.OrgId, strictVendor, gl: 1_000_000m, holder: "Old Hall");
+        var second = await LoginAsync(auth.Email);
+
+        var competingWrites = 0;
+        Interleave.OnSavingChanges = async () =>
+        {
+            // A DIFFERENT value each time, so every attempt genuinely finds a newer row version than the
+            // one it read — and all of them fail BOTH floors, so no assertion below can be satisfied by
+            // the reassignment having quietly landed.
+            var attempt = Interlocked.Increment(ref competingWrites);
+            var resp = await EditFieldAsync(second.Client, docId, "general_liability_limit", $"{100_000 + attempt}");
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        };
+
+        var response = await SendAsync(auth.Client, HttpMethod.Patch, $"/api/documents/{docId}",
+            new { vendorId = lenientVendor });
+        Interleave.Reset();
+
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString().Should().Be(DocumentWriteConcurrency.ConflictCode);
+        body.GetProperty("error").GetProperty("message").GetString()
+            .Should().Be(DocumentWriteConcurrency.ConflictMessage, EditCopyReason);
+        body.GetProperty("data").ValueKind.Should().Be(JsonValueKind.Null);
+        competingWrites.Should().Be(DocumentConcurrency.MaxAttempts,
+            "the reassignment is retried a BOUNDED number of times — an unbounded loop would spin here forever");
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.VendorId.Should().Be(strictVendor, "nothing of the abandoned reassignment may be committed");
+        terminal.Doc.GeneralLiabilityLimit.Should().Be(100_000m + DocumentConcurrency.MaxAttempts,
+            "the row is the last competing writer's own consistent tuple");
+        terminal.Doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant,
+            "…graded against the vendor the row still has");
+    }
+
+    [Fact]
     public async Task A_write_that_keeps_losing_commits_nothing_and_says_so()
     {
         // Retry exhaustion. A competing write commits inside EVERY attempt, so no attempt can ever win.
@@ -384,6 +446,8 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         response.StatusCode.Should().Be(HttpStatusCode.Conflict);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         body.GetProperty("error").GetProperty("code").GetString().Should().Be(DocumentWriteConcurrency.ConflictCode);
+        body.GetProperty("error").GetProperty("message").GetString()
+            .Should().Be(DocumentWriteConcurrency.ConflictMessage, EditCopyReason);
         body.GetProperty("data").ValueKind.Should().Be(JsonValueKind.Null);
         competingWrites.Should().Be(DocumentConcurrency.MaxAttempts,
             "the write is retried a BOUNDED number of times — an unbounded loop would spin here forever");
@@ -627,6 +691,8 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         response.StatusCode.Should().Be(HttpStatusCode.Conflict);
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         body.GetProperty("error").GetProperty("code").GetString().Should().Be(DocumentWriteConcurrency.ConflictCode);
+        body.GetProperty("error").GetProperty("message").GetString()
+            .Should().Be(DocumentWriteConcurrency.ConflictMessage, EditCopyReason);
 
         await using var db = CreateSystemDb();
         var rows = await db.AuditLogs.Where(a => a.EntityId == docId).ToListAsync();
