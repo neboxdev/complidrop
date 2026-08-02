@@ -1,3 +1,4 @@
+using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 
 namespace CompliDrop.Api.Tests;
@@ -48,18 +49,6 @@ public class Adr0050EnforcementTests
     /// </summary>
     private const int MinBodyLines = 20;
 
-    private static string ProductionFile(params string[] relativeSegments)
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        for (var i = 0; i < 8 && dir != null; i++, dir = dir.Parent)
-        {
-            var candidate = Path.Combine([dir.FullName, "api", "CompliDrop.Api", .. relativeSegments]);
-            if (File.Exists(candidate)) return candidate;
-        }
-        throw new FileNotFoundException(
-            $"Could not locate api/CompliDrop.Api/{string.Join('/', relativeSegments)} from {AppContext.BaseDirectory}");
-    }
-
     /// <summary>
     /// Returns the source text between the braces of the method whose declaration contains
     /// <paramref name="signature"/>, with whole-line comments stripped (the guard's own doc comment names
@@ -84,15 +73,10 @@ public class Adr0050EnforcementTests
         {
             if (source[i] == '{') depth++;
             else if (source[i] == '}' && --depth == 0)
-                return StripCommentLines(source[(open + 1)..i]);
+                return SourceScan.StripLineComments(source[(open + 1)..i]);
         }
         throw new InvalidOperationException($"Unbalanced braces in the body of: {signature}");
     }
-
-    private static string StripCommentLines(string body) =>
-        string.Join('\n', body
-            .Split('\n')
-            .Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal)));
 
     private static int Count(string haystack, string needle)
     {
@@ -173,7 +157,7 @@ public class Adr0050EnforcementTests
     public void Reextract_re_arms_with_one_conditional_ExecuteUpdateAsync_and_one_existence_read()
     {
         AssertAtomicReArmShape(ExtractMethodBody(
-            File.ReadAllText(ProductionFile("Endpoints", "DocumentEndpoints.cs")),
+            File.ReadAllText(SourceScan.ProductionFile("Endpoints", "DocumentEndpoints.cs")),
             ReextractSignature));
     }
 
@@ -321,7 +305,7 @@ public class Adr0050EnforcementTests
     {
         // If Reextract is ever renamed or its signature reshaped, this fails LOUDLY here rather than
         // leaving the gate above throwing an opaque "signature not found" from a helper.
-        File.ReadAllText(ProductionFile("Endpoints", "DocumentEndpoints.cs"))
+        File.ReadAllText(SourceScan.ProductionFile("Endpoints", "DocumentEndpoints.cs"))
             .Should().Contain(ReextractSignature,
                 "the ADR 0050 gate anchors on this exact declaration; update the constant with the rename");
     }

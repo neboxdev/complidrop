@@ -1,3 +1,6 @@
+using System.Text.RegularExpressions;
+using CompliDrop.Api.BackgroundServices;
+using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 
 namespace CompliDrop.Api.Tests;
@@ -5,7 +8,8 @@ namespace CompliDrop.Api.Tests;
 /// <summary>
 /// Mechanical CI gate for <see href="https://github.com/neboxdev/complidrop/blob/main/docs/adr/0052-extraction-trust-is-its-own-column.md">ADR 0052</see>
 /// — <c>Document.ExtractionTrust</c> has exactly one READ surface (the vendor coverage rollup) and exactly
-/// three WRITE surfaces (the worker's two, plus the request-side confirmation).
+/// FOUR WRITE surfaces across two files: the worker's three (<c>PersistSuccess</c> plus the two
+/// terminal-failure writers, all funnelled through <c>SetTrust</c>) and the request-side confirmation.
 ///
 /// <para>
 /// Why mechanically. ADR 0052 inherits ADR 0042's document-level CARVE-OUT: the dashboard counts, the
@@ -20,8 +24,10 @@ namespace CompliDrop.Api.Tests;
 /// <para>
 /// The write side matters for the same reason in reverse: trust is only durable across a re-arm because
 /// the QUEUE writers leave it alone. A <c>.SetProperty(d =&gt; d.ExtractionTrust, …)</c> appearing in a
-/// fourth place — most obviously in <c>Reextract</c>, where it looks like tidy bookkeeping — restores the
-/// exact conflation this ADR removes.
+/// fifth place — most obviously in <c>Reextract</c> or <c>RequeueInterruptedAsync</c>, where it looks like
+/// tidy bookkeeping — restores the exact conflation this ADR removes. Both are pinned by name below, and
+/// the worker's own writers are counted rather than merely allow-listed by file: a whole-file allow-list
+/// would have let a fifth worker writer in silently.
 /// </para>
 ///
 /// <para>
@@ -41,28 +47,18 @@ public class Adr0052EnforcementTests
         ["BackgroundServices/ExtractionWorker.cs"] = "PersistSuccess + the two terminal-failure writers",
         ["Endpoints/DocumentEndpoints.cs"] = "ResolveManualReview — the human confirmation",
         ["Endpoints/VendorEndpoints.cs"] = "ComputeCoverage — the ONE read surface (ADR 0042 carve-out)",
+        ["DTOs/Vendors/VendorDtos.cs"] = "PROSE ONLY — VendorCoverage's contract comment names the "
+            + "operand its Status is computed from; it reads and writes nothing",
     };
 
     /// <summary>Below this the walk found the wrong tree and every assertion would be vacuous.</summary>
     private const int MinScannedFiles = 50;
 
-    private static DirectoryInfo ProductionRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        for (var i = 0; i < 8 && dir != null; i++, dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, "api", "CompliDrop.Api");
-            if (Directory.Exists(Path.Combine(candidate, "Endpoints"))) return new DirectoryInfo(candidate);
-        }
-        throw new DirectoryNotFoundException(
-            $"Could not locate api/CompliDrop.Api from {AppContext.BaseDirectory}");
-    }
-
     /// <summary>Production sources, excluding build output and the EF <c>Migrations</c> tree — a migration
     /// and its designer/snapshot name every column by construction, so they carry no decision.</summary>
     private static List<(string Relative, string Text)> ProductionSources()
     {
-        var root = ProductionRoot();
+        var root = SourceScan.ProductionRoot();
         return [.. root.EnumerateFiles("*.cs", SearchOption.AllDirectories)
             .Select(f => (Relative: Path.GetRelativePath(root.FullName, f.FullName).Replace('\\', '/'), File: f))
             .Where(x => !x.Relative.StartsWith("bin/", StringComparison.Ordinal)
@@ -98,8 +94,8 @@ public class Adr0052EnforcementTests
         // rather than a set difference. Reextract is allowed to MENTION ExtractionTrust — its comment
         // explains the deliberate absence, and naming the forbidden shape there is the whole point of the
         // comment — so whole-line comments are stripped first, exactly as Adr0050EnforcementTests does for
-        // the same reason: prose about a forbidden call must not read as the call itself.
-        var endpoints = StripLineComments(ProductionSources()
+        // the same reason (one shared stripper since #459's review; SourceScanTests pins its behaviour).
+        var endpoints = SourceScan.StripLineComments(ProductionSources()
             .Single(s => s.Relative == "Endpoints/DocumentEndpoints.cs").Text);
 
         endpoints.Should().Contain("ResolveManualReview",
@@ -111,22 +107,36 @@ public class Adr0052EnforcementTests
             + "conflation #459 removes (the re-arm would destroy the ADR 0042 distrust signal again)");
     }
 
-    /// <summary>Drops whole-line <c>//</c> comments (and the <c>///</c> doc-comment lines that are a
-    /// special case of them). Deliberately not a real parser: the only false negative it can produce is a
-    /// trailing comment on a code line, which cannot hide a statement.</summary>
-    internal static string StripLineComments(string source) =>
-        string.Join('\n', source.Split('\n')
-            .Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal)));
-
     [Fact]
-    public void The_comment_stripper_removes_prose_without_touching_code()
+    public void The_worker_writes_trust_in_exactly_three_places_and_forces_every_one_of_them()
     {
-        // The gate above is only as good as its stripper — a stripper that dropped everything would make
-        // the NotContain assertion pass on any source at all. Hermetic fixtures, the Adr0050 discipline.
-        StripLineComments("    // SetProperty(d => d.ExtractionTrust, x)\n    var a = 1;")
-            .Should().NotContain("ExtractionTrust").And.Contain("var a = 1;");
-        StripLineComments("    .SetProperty(d => d.ExtractionTrust, x) // why\n")
-            .Should().Contain("SetProperty(d => d.ExtractionTrust",
-                "a trailing comment must not smuggle the statement past the gate");
+        // Per-WRITER, not per-file (#459 review). The allow-list above whitelists the whole worker, so a
+        // fourth `doc.ExtractionTrust = …` inside it — RequeueInterruptedAsync being the most plausible
+        // one, since it already resets the rest of the queue tuple and would look like tidy bookkeeping —
+        // used to pass silently while every deploy that interrupted a distrusted document's re-extract
+        // restored its vendor to Covered. Counted rather than located, so it also catches the write
+        // arriving in a brand-new helper.
+        var worker = SourceScan.StripLineComments(ProductionSources()
+            .Single(s => s.Relative == "BackgroundServices/ExtractionWorker.cs").Text);
+
+        worker.Should().Contain("private static void SetTrust(",
+            "anti-no-op: the file we read must still declare the one funnel the counts below assume");
+
+        Regex.Matches(worker, @"\.ExtractionTrust\s*=[^=]").Count.Should().Be(1,
+            "every trust write in the worker goes through SetTrust, whose single assignment this is. A "
+            + "second assignment means a writer bypassed the funnel — and therefore skipped the IsModified "
+            + "force, so its decision silently no-ops whenever it matches the minutes-old snapshot "
+            + "ProcessDocumentAsync is still holding (ADR 0052 §2)");
+
+        Regex.Matches(worker, @"SetTrust\(db, doc,").Count.Should().Be(3,
+            "exactly three worker writers own trust: PersistSuccess, MarkFailed and RecordFailedAttempt's "
+            + "TERMINAL arm. A FOURTH call is a queue writer taking a decision it has no basis for — the "
+            + "retry arm, the shutdown requeue and the re-arm all leave trust alone, and that ABSENCE is "
+            + "the #459 fix. A call going missing is the other direction: an extraction that no longer "
+            + "re-decides trust");
+
+        ExtractionWorker.ClaimSql.Should().NotContain("ExtractionTrust",
+            "the claim moves PIPELINE POSITION only. Adding trust to its SET list would re-arm the "
+            + "distrust away on every claim — the original bug, one layer lower than Reextract");
     }
 }

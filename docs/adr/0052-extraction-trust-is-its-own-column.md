@@ -154,8 +154,11 @@ throw on materialization.
   the instant before the click. The carve-out's actual protection — an ordinary re-extract of a **trusted**
   document must not sink its vendor — is untouched and separately pinned, because the queue writers never
   touch trust.
-- **One more column to keep in lockstep at four writers.** Mitigated by tests at each writer plus a
-  source-scanning gate (`Adr0052EnforcementTests`) that pins the read surface and the writer set.
+- **One more column to keep in lockstep at four writers.** Mitigated by a behavioural test at each writer
+  AND at each deliberate non-writer (`Reextract`, `RecordFailedAttempt`'s retry arm,
+  `RequeueInterruptedAsync`), plus a source-scanning gate (`Adr0052EnforcementTests`) that pins the read
+  surface, the file-level mention set, and — per WRITER rather than per file — that the worker holds
+  exactly three trust writes, all funnelled through `SetTrust`, with `ClaimSql` mentioning none.
 - **A deploy-overlap window that the design cannot close, in BOTH directions.** Between the new container's
   boot migration and the old container's last request, the OLD code writes `ExtractionStatus` without ever
   writing trust — it does not know the column exists. Not fixable by the column default: the exposed
@@ -268,4 +271,4 @@ door open without forcing it, and it reads the same way `ExtractionStatus` and `
 
 - Tickets: [#459](https://github.com/neboxdev/complidrop/issues/459), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic); the read-time predecessors [#401](https://github.com/neboxdev/complidrop/issues/401) and [#365](https://github.com/neboxdev/complidrop/issues/365)
 - ADRs: [0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) (the distrust signal and the coverage exclusion this makes durable — Amendment 3 records the reversal of its in-flight carve-out), [0040](0040-unreadable-canonical-value-fails-closed.md) (the unreadable-value escalation `ResolveManualReview` re-raises), [0048](0048-never-graded-document-asserts-no-affirmative-verdict.md) (the OTHER axis that withholds an unread document from coverage), [0050](0050-reextract-refuses-a-live-extraction-claim.md) (the re-arm this must survive), [0016](0016-apply-ef-migrations-on-startup.md) (auto-migrate on boot — why the migration is additive and cheap), [0030](0030-compliance-verdict-combined-unit-of-work.md) (the unit of work `PersistSuccess` writes both columns inside)
-- Code: `Entities/Document.cs` (`ExtractionTrust`), `Data/ModelConfiguration.cs` (mapping + store default), `Migrations/20260802080136_AddDocumentExtractionTrust.cs` (the additive migration + seed), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `MarkFailed`, `RecordFailedAttempt`), `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview`, `Reextract`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo`), `CompliDrop.Api.Tests/Adr0052EnforcementTests.cs` (the read-surface / writer-set gate)
+- Code: `Entities/Document.cs` (`ExtractionTrust`), `Data/ModelConfiguration.cs` (mapping + store default), `Migrations/20260802080136_AddDocumentExtractionTrust.cs` (the additive migration + seed), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `MarkFailed`, `RecordFailedAttempt`), `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview`, `Reextract`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo`), `DTOs/Vendors/VendorDtos.cs` (`VendorCoverage`'s contract comment), `CompliDrop.Api.Tests/Adr0052EnforcementTests.cs` (the read-surface / writer-set gate), `CompliDrop.Api.Tests/TestHelpers/SourceScan.cs` (the shared scanner the gates use)

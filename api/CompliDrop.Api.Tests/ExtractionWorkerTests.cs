@@ -2358,12 +2358,20 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         // cancelled when processing begins. The worker must return the doc to Pending, UNDO the
         // claim's increment (so repeated deploys can't climb the claim count), and leave the retry
         // budget untouched — a restart is an interruption, not an extraction failure.
+        //
+        // Seeded DISTRUSTED on purpose (#459 review). RequeueInterruptedAsync is the third queue writer
+        // ADR 0052 names as a deliberate NON-writer of trust, and it was the one with no pin: it already
+        // resets the whole queue tuple, so adding `doc.ExtractionTrust = Trusted` there looks like tidy
+        // bookkeeping — and every deploy that interrupted a distrusted document's re-extract would then
+        // silently restore its vendor to Covered, the exact hole #459 exists to close. The seed must be
+        // Distrusted for the assertion to discriminate at all; the helper's default is Trusted.
         var (_, docId) = await SeedDocAsync(
             status: ExtractionStatus.Processing,
             attempts: 1,
             failedAttempts: 0,
             processingStartedAt: DateTime.UtcNow,
-            subscriptionSpendUsd: 0m);
+            subscriptionSpendUsd: 0m,
+            extractionTrust: ExtractionTrust.Distrusted);
         var worker = BuildWorker();
 
         using var stopping = new CancellationTokenSource();
@@ -2378,6 +2386,9 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         doc.ProcessingStartedAt.Should().BeNull();
         doc.ProcessingAttempts.Should().Be(0, "the interrupted claim's increment is undone");
         doc.FailedAttempts.Should().Be(0, "an interruption is not a counted failure");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "a shutdown requeue moves PIPELINE POSITION only — the distrust must survive a deploy, exactly "
+            + "as it survives Reextract's re-arm (#459 / ADR 0052)");
         Extraction.ExtractCallCount.Should().Be(0, "extraction never ran — it was interrupted at the start");
     }
 

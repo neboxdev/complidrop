@@ -308,10 +308,12 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     {
         // #365 / ADR 0042 Amendment 2: an extraction the system could not COMPLETE is at least as
         // untrustworthy as one it distrusted, and nothing about a terminal Failed touches the stored
-        // verdict (ExtractionWorker.MarkFailed / RecordFailedAttempt write ExtractionStatus only — the
-        // ComplianceStatus, the ComplianceCheck rows and the DocumentFields all survive from whatever
-        // read them last). So a stored Compliant sitting on a Failed extraction is a verdict with no
-        // trustworthy basis, and it must not roll up to Covered.
+        // verdict (ExtractionWorker.MarkFailed / RecordFailedAttempt write ExtractionStatus +
+        // ExtractionTrust only — the ComplianceStatus, the ComplianceCheck rows and the DocumentFields
+        // all survive from whatever read them last). So a stored Compliant sitting on a Failed extraction
+        // is a verdict with no trustworthy basis, and it must not roll up to Covered. Since #459 / ADR
+        // 0052 the exclusion reads the TRUST those two writers now pair with the Failed status, rather
+        // than inferring it from the status the document happened to land on.
         var auth = await RegisterAndLoginAsync();
         var template = await CreateTemplateAsync(auth.Client, "Caterer");
         (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
@@ -329,7 +331,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         var detail = (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/vendors/{vendorId}"))
             .GetProperty("data").GetProperty("coverage");
         detail.GetProperty("status").GetString().Should().Be("ActionNeeded",
-            "the detail rollup must exclude a failed extraction too — both projections carry ExtractionStatus");
+            "the detail rollup must exclude a failed extraction too — both projections carry ExtractionTrust");
     }
 
     [Fact]
@@ -572,14 +574,15 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         // detail page", and the detail page offers manual entry for precisely the failed case ("We couldn't
         // pull the details from this file automatically. Enter the key details below…"). But that
         // confirmation CANNOT show up as a status change: DocumentEndpoints.ResolveManualReview refuses to
-        // move a Failed row ("Failed is its own louder error state"). The signal it DOES leave is
-        // IsManuallyVerified, which it sets unconditionally on every caller — so that is what the exclusion
-        // gates on. Without this, a cert a human typed in and verified would read ActionNeeded PERMANENTLY,
-        // with no endpoint able to move it back and no reason shown on the vendor page — a regression on
-        // the pre-Amendment reading rather than the safety fix Amendment 2 is.
+        // move a Failed row ("Failed is its own louder error state"). The signal it DOES leave is the
+        // TRUST the same helper writes on every caller (#459 / ADR 0052; Amendment 2 used
+        // IsManuallyVerified, retired here because nothing ever cleared it) — so that is what the
+        // exclusion gates on. Without this, a cert a human typed in and verified would read ActionNeeded
+        // PERMANENTLY, with no endpoint able to move it back and no reason shown on the vendor page — a
+        // regression on the pre-Amendment reading rather than the safety fix Amendment 2 is.
         //
-        // Driven through the REAL endpoint (PUT /verify), not a seeded column: the whole fix rests on
-        // IsManuallyVerified being REACHABLE from a Failed row, and a seeded bool would assert that away.
+        // Driven through the REAL endpoint (PUT /verify), not a seeded column: the whole fix rests on the
+        // exit being REACHABLE from a Failed row, and a seeded column would assert that away.
         var auth = await RegisterAndLoginAsync();
         var template = await CreateTemplateAsync(auth.Client, "Caterer");
         (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
@@ -614,7 +617,7 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         var list = (await auth.Client.GetFromJsonAsync<JsonElement>("/api/vendors"))
             .GetProperty("data").EnumerateArray().ToArray();
         CoverageFor(list, vendorId).GetProperty("status").GetString().Should().Be("Covered",
-            "the LIST projection carries IsManuallyVerified too — both projections or the two rollups split");
+            "the LIST projection carries ExtractionTrust too — both projections or the two rollups split");
     }
 
     /// <summary>The vendor DETAIL rollup's coverage status — the projection the two list-based helpers
