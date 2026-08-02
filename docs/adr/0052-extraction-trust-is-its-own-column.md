@@ -59,11 +59,29 @@ started it back down the road to carrying everything.
 | `ExtractionWorker.PersistSuccess` | `Distrusted` when it routes to `ManualRequired`, `Trusted` otherwise | ONE boolean, TWO columns. This read *is* the document's new basis, so it decides both. |
 | `ExtractionWorker.MarkFailed` | `Distrusted` | ADR 0042 Amendment 2's premise, made durable: an extraction the system could not COMPLETE is at least as untrustworthy as one it distrusted. |
 | `ExtractionWorker.RecordFailedAttempt` | `Distrusted` on its **terminal** arm only | While retries remain the document is merely back in the queue and its basis is unchanged; distrusting it over one transient hiccup would sink a covered vendor for the length of the retry cycle. |
-| `DocumentEndpoints.ResolveManualReview` | `Trusted` — then `Distrusted` again if ADR 0040's unreadable-value escalation re-raises the review | The human exit, from the RESULTING state. The one helper behind `PUT /fields` and `PUT /verify`. |
+| `DocumentEndpoints.ResolveManualReview` | `Distrusted` when the document STILL carries an unreadable canonical value, `Trusted` otherwise | The human exit, from the RESULTING state. The one helper behind `PUT /fields` and `PUT /verify`. |
 
 **Everything in the queue path deliberately leaves it alone**: `Reextract`'s `ExecuteUpdateAsync`,
 `RecordFailedAttempt`'s retry arm, `RequeueInterruptedAsync`. That absence is the fix. A
 `.SetProperty(d => d.ExtractionTrust, …)` added to the re-arm restores the original bug exactly.
+
+**The three worker writers must FORCE the column into the `UPDATE`** — they go through
+`ExtractionWorker.SetTrust`, which sets `IsModified` (#459 review). `ProcessDocumentAsync` loads the
+document *before* OCR + the LLM call and holds that tracked snapshot for the minutes the read takes, and EF
+Core emits only properties whose current value differs from the snapshot. So assigning the snapshot's own
+value produces no `SET` clause — while the row itself may have moved, because a human clicking "Mark
+verified" mid-read commits the opposite value on another connection. Without the force, the extraction that
+was supposed to *re-decide* trust silently leaves the other writer's value standing: `ManualRequired`/
+`Failed` + `Trusted` (a distrusted basis rolling up as Covered — the ADR 0042 hole, in a shape this ADR
+otherwise records as reachable only through a deploy overlap), or the mirror image, a clean re-read that
+no-ops and strands the document at ActionNeeded.
+
+This is **not** the [ADR 0030](0030-compliance-verdict-combined-unit-of-work.md) stale-snapshot residual
+([#460](https://github.com/neboxdev/complidrop/issues/460)) and must not be filed under it. That residual is
+about a writer *grading from* verdict INPUTS the row has moved on from and re-asserting them; nothing is
+re-asserted here. The value is this read's own conclusion, computed from what the model just returned, and
+the table above says these writers own it — "last writer wins on the whole tuple" is the intended
+semantics, and forcing the column is what makes this writer actually be one.
 
 ### 3. `ComputeCoverage` consults trust directly, and the `IsManuallyVerified` clause is RETIRED
 
@@ -76,6 +94,16 @@ d.ExtractionTrust is not ExtractionTrust.Distrusted && ComplianceStatusDeriver.E
 `DocCoverageInfo` **drops `ExtractionStatus` and `IsManuallyVerified` entirely** and carries
 `ExtractionTrust` instead, in both projections. That is deliberate over-correction: with the status not even
 on the record, "a re-arm cannot move coverage" is structural rather than a rule someone has to remember.
+
+**Trust and status take the same question but not the same gate** (#459 review). Both ask ADR 0040's
+"is a canonical value still unreadable?" — one predicate, `DocumentFieldReadability`, asked once, of the
+document's RESULTING state. But the escalation's `wasSettled` guard belongs to the STATUS write alone: its
+only job is not to DE-QUEUE (overwriting `Pending` strands the document, since the worker claims on it, and
+`Failed` is its own louder error state). **Withdrawing trust de-queues nothing** — no worker, sweep or
+endpoint dispatches on this column; the vendor rollup merely reads it. Gating trust on the status too was a
+hole: on a re-armed row at `Pending`, or on a `Failed` row where a human typed an expiration the parser
+rejects, one click bought `Trusted` over a value nothing can read — exactly the clean bill of health this
+decision says the click can no longer buy, and on the `Failed` path nothing would ever have taken it back.
 
 Retiring the `IsManuallyVerified` clause is what closes Amendment 2's sticky-flag residue. The flag itself
 stays on the entity and on the detail DTO — it is a real fact about the document, surfaced in the UI; it
@@ -128,13 +156,48 @@ throw on materialization.
   touch trust.
 - **One more column to keep in lockstep at four writers.** Mitigated by tests at each writer plus a
   source-scanning gate (`Adr0052EnforcementTests`) that pins the read surface and the writer set.
-- **A deploy-overlap window that the design cannot close.** Between the new container's boot migration and
-  the old container's last request, the OLD code can write `ManualRequired` or `Failed` onto a row **without**
-  writing trust, leaving a distrusted document reading `Trusted` — covered until it is re-read or confirmed.
-  This is not fixable by the column default: the exposed transition is an `UPDATE` by the old code, not an
-  `INSERT`, so no default applies to it. Accepted as bounded (the health-check overlap, during which an
-  extraction must actually complete) and as the pre-#401 behaviour rather than a new class of harm; pinned by
-  a test so the shape is known rather than surprising.
+- **A deploy-overlap window that the design cannot close, in BOTH directions.** Between the new container's
+  boot migration and the old container's last request, the OLD code writes `ExtractionStatus` without ever
+  writing trust — it does not know the column exists. Not fixable by the column default: the exposed
+  transition is an `UPDATE` by the old code, not an `INSERT`, so no default applies. Bounded by the
+  health-check overlap, during which an extraction must also complete or a user must confirm. Both halves
+  are pinned by a test so the shapes are known rather than surprising.
+
+  - **Fail-OPEN** — the old container writes `ManualRequired` or `Failed`, leaving a distrusted document
+    reading `Trusted`: covered until it is re-read or confirmed. This is the pre-#401 behaviour rather than
+    a new class of harm, and it SELF-HEALS — the next extraction re-decides trust, and the document
+    meanwhile keeps its own `Needs your review` / `Couldn't read` extraction badge, so the ADR 0042
+    carve-out's disclosure premise holds. Pinned by
+    `A_ManualRequired_row_the_backfill_never_reached_reads_Covered_by_design`.
+  - **Fail-CLOSED** — the old container's `PersistSuccess` (a clean re-read) or `ResolveManualReview` (a
+    confirmation) writes `Completed` onto a row the boot backfill just marked `Distrusted`. The row lands
+    `Completed` + `Distrusted`: excluded from vendor coverage while the extraction badge reads `Read` and
+    the compliance badge reads `Compliant`. **State it plainly: this half has NO badge and NO self-heal.**
+    Nothing in the read ever forgives a `Distrusted` row, so the vendor sits at Action needed with no
+    reason shown on any document surface — the one place ADR 0042's carve-out premise ("the documents list
+    already renders a distinct extraction badge beside the compliance badge") is false. **The remedy IS
+    user-reachable, and it is the same exit the exclusion always had:** any NEW-container writer rewrites
+    trust, so either "Read again" landing a clean read or one "Mark verified" clears the row permanently.
+    Pinned, remedy included, by
+    `A_Completed_row_the_boot_backfill_distrusted_reads_ActionNeeded_with_nothing_disclosing_why`.
+    Recorded rather than closed (#459 review): the alternative is Option E's permanent status→trust
+    inference, or splitting the release so the read switch ships a deploy after the writers — real, but it
+    trades a bounded one-overlap residue for a second release whose intermediate state (a column four
+    writers maintain and nothing reads) has its own drift risk, and the read switch is this ticket's
+    deliverable. Both halves are UNREACHABLE through the new writers, which is what keeps them a
+    deploy artifact rather than a live state machine: `PersistSuccess` pairs `Completed` with `Trusted`,
+    and `ResolveManualReview` only withdraws trust on a row whose status it simultaneously raises to
+    `ManualRequired` — or cannot move at all.
+
+- **A bounded in-flight window where the rollup demotes and no document surface says why.** Distinct from
+  the deploy residue above and a consequence of Amendment 3 itself: a re-armed DISTRUSTED document sits at
+  `Pending`/`Processing` + `Distrusted`, so the vendor reads Action needed while the extraction badge reads
+  `Reading…` rather than `Needs your review`. Same disclosure premise, same gap — but unlike the fail-closed
+  twin it is bounded by one poll and self-heals the moment the read lands, and the direction is the safe
+  one (the document read Action needed the instant before the click, and the user is watching the read they
+  just started). Accepted for those reasons rather than by surfacing trust on the wire, which is the
+  frontend change this decision declines. Reachable from the sequence pinned by
+  `A_distrusted_cert_that_is_re_extracted_and_then_fails_terminally_still_reads_ActionNeeded`.
 
 ### Neutral
 
