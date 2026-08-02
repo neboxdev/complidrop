@@ -751,9 +751,27 @@ public class ExtractionWorker(
         // itself fails, persist the inputs with ComplianceStatus = Pending (a safe "not yet graded" state
         // the sweep / "Check again" resolves) rather than fail the whole extraction into a costly re-OCR/LLM
         // retry — but never commit a confident verdict from stale inputs.
+        //
+        // ...and "stale inputs" is not only about the values this method just wrote (#460 / ADR 0030
+        // Amendment 2). `doc` is the snapshot ProcessDocumentAsync loaded BEFORE OCR + the LLM call, minutes
+        // ago, and EF emits only the properties this method MODIFIED — so every canonical verdict input it
+        // leaves unmodified (VendorId always; DocumentType whenever NormalizeExtracted returns the stored
+        // value; any typed column whose field the model omitted) would be graded from the pre-run value
+        // while the row keeps whatever a request committed in the window. Grade the row this commit will
+        // actually LEAVE instead: the current committed values, overlaid with exactly the properties EF is
+        // about to write. Read-only — nothing from the basis is assigned back onto `doc`, so this worker
+        // still writes exactly the columns it wrote before and cannot clobber a concurrent edit (the
+        // re-read-and-assign shape is a LOST UPDATE, refuted in ADR 0030 Amendment 1).
+        //
+        // The basis read sits INSIDE this try on purpose: it is one more way grading can fail, and a
+        // failure here must land on Pending exactly like any other, never as a throw out of PersistSuccess
+        // (which costs a re-paid Document AI + LLM run — see Clamp). A null basis means the row is no
+        // longer readable (deleted mid-run); fall back to grading the tracked entity.
         try
         {
-            await compliance.ApplyEvaluationAsync(db, doc, ct);
+            var basis = await DocumentGradingBasis.AfterPendingCommitAsync(db, doc, ct);
+            if (basis is null) await compliance.ApplyEvaluationAsync(db, doc, ct);
+            else await compliance.ApplyEvaluationAsync(db, doc, basis, ct);
         }
         catch (Exception ex)
         {

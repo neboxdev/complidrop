@@ -24,6 +24,29 @@ public interface IComplianceCheckService
     Task ApplyEvaluationAsync(DbContext context, Document doc, CancellationToken ct);
 
     /// <summary>
+    /// As <see cref="ApplyEvaluationAsync(DbContext, Document, CancellationToken)"/>, but grades
+    /// <paramref name="gradingBasis"/> instead of <paramref name="doc"/> while still applying the verdict
+    /// (and the <see cref="ComplianceCheck"/> rows) onto <paramref name="doc"/> and its
+    /// <paramref name="context"/>. The basis is READ-ONLY here: nothing is copied back onto the tracked
+    /// entity, so the caller keeps writing exactly the columns it wrote before.
+    /// <para/>
+    /// For the ONE caller whose grading inputs may have moved under it: <c>ExtractionWorker.PersistSuccess</c>
+    /// grades a snapshot taken before an OCR + LLM run that lasts minutes, and EF writes back only what it
+    /// MODIFIED — so a verdict input it left unmodified is a request's committed value beside a verdict
+    /// computed from the pre-run one (<see href="https://github.com/neboxdev/complidrop/issues/460">#460</see>,
+    /// ADR 0030 Amendment 2). It hands in <c>DocumentGradingBasis.AfterPendingCommitAsync</c>'s prediction of
+    /// the row its own commit will leave.
+    /// <para/>
+    /// The REQUEST-path callers deliberately do NOT use this overload, and switching them to it would be a
+    /// bug rather than consistency: <c>UpdateDocument</c> grades against a <c>VendorId</c> it has assigned in
+    /// memory and not yet committed, so a freshly-read basis would grade the OLD vendor's checklist; and both
+    /// partial writers already detect a conflicting concurrent commit through <c>DocumentWriteConcurrency</c>'s
+    /// <c>REPEATABLE READ</c> + <c>40001</c> re-run (ADR 0030 Amendment 1), which re-runs the whole callback
+    /// against a fresh read rather than patching one basis.
+    /// </summary>
+    Task ApplyEvaluationAsync(DbContext context, Document doc, Document gradingBasis, CancellationToken ct);
+
+    /// <summary>
     /// Re-evaluates every document whose vendor is assigned the given template. The fan-out that
     /// keeps verdicts fresh after a rule/template MUTATION — pure DB work, no LLM cost (#257).
     /// Batched a page at a time so a template shared by a large vendor base no longer turns a single
@@ -308,33 +331,67 @@ public class ComplianceCheckService(
         await context.SaveChangesAsync(ct);
     }
 
-    public async Task ApplyEvaluationAsync(DbContext context, Document doc, CancellationToken ct)
+    public Task ApplyEvaluationAsync(DbContext context, Document doc, CancellationToken ct) =>
+        // No separate basis: the tracked entity IS what this caller is committing, so it grades itself.
+        ApplyEvaluationCoreAsync(context, doc, gradingBasis: null, ct);
+
+    public Task ApplyEvaluationAsync(DbContext context, Document doc, Document gradingBasis, CancellationToken ct) =>
+        ApplyEvaluationCoreAsync(context, doc, gradingBasis, ct);
+
+    private async Task ApplyEvaluationCoreAsync(DbContext context, Document doc, Document? gradingBasis, CancellationToken ct)
     {
-        // Load Vendor → ComplianceTemplate → Rules for the verdict computation, against the doc's CURRENT
-        // (possibly just-edited, uncommitted) VendorId, fixing up doc.Vendor on this same context. A
-        // SINGLE query (no AsSplitQuery): the root is ONE Vendor (not a set of Documents) and the only
-        // collection in the chain is template.Rules, so there is no cartesian payload multiplication — the
-        // batched fan-out splits because its root IS a set of documents whose ExtractionFields JSON would
-        // be re-shipped per rule, which does not apply here. The nav query honors the Vendor soft-delete
-        // filter, so a deleted vendor reads as no-template (Pending) exactly as the prior Include did.
-        var vendorRef = context.Entry(doc).Reference(d => d.Vendor);
-        if (doc.VendorId is not null)
-            await vendorRef.Query()
-                .Include(v => v!.ComplianceTemplate)
-                    .ThenInclude(t => t!.Rules)
-                .LoadAsync(ct);
+        // WHAT gets graded vs WHERE the verdict lands are two different documents when a basis is supplied
+        // (#460 / ADR 0030 Amendment 2). The basis is read-only: the tracked `doc` still receives the status
+        // and the check rows, and no basis value is ever copied onto it — that restraint is what keeps the
+        // caller writing exactly the columns it wrote before. Both carry the same Id, so the check rows and
+        // the clear-existing predicate are identical either way.
+        var basis = gradingBasis ?? doc;
+
+        // Load Vendor → ComplianceTemplate → Rules for the verdict computation, against the basis's CURRENT
+        // VendorId — for the tracked path that is the doc's possibly-just-edited, uncommitted value, fixed
+        // up on this same context. A SINGLE query (no AsSplitQuery): the root is ONE Vendor (not a set of
+        // Documents) and the only collection in the chain is template.Rules, so there is no cartesian
+        // payload multiplication — the batched fan-out splits because its root IS a set of documents whose
+        // ExtractionFields JSON would be re-shipped per rule, which does not apply here. The nav query
+        // honors the Vendor soft-delete filter, so a deleted vendor reads as no-template (Pending) exactly
+        // as the prior Include did.
+        if (gradingBasis is null)
+        {
+            var vendorRef = context.Entry(doc).Reference(d => d.Vendor);
+            if (doc.VendorId is not null)
+                await vendorRef.Query()
+                    .Include(v => v!.ComplianceTemplate)
+                        .ThenInclude(t => t!.Rules)
+                    .LoadAsync(ct);
+            else
+            {
+                // No vendor assigned: force the in-memory navigation to match the FK so ComputeOutcome reads
+                // no-template (Pending) even if a caller ever hands us a tracked doc with a stale Vendor loaded.
+                doc.Vendor = null;
+                vendorRef.IsLoaded = true;
+            }
+        }
         else
         {
-            // No vendor assigned: force the in-memory navigation to match the FK so ComputeOutcome reads
-            // no-template (Pending) even if a caller ever hands us a tracked doc with a stale Vendor loaded.
-            doc.Vendor = null;
-            vendorRef.IsLoaded = true;
+            // The basis is DETACHED, so there is no navigation to load through — query the vendor chain by
+            // the basis's own FK and hang it off the basis. AsNoTracking so a vendor row this context may
+            // already be tracking is neither overwritten nor pulled into the caller's unit of work; the
+            // same global filters (Vendor soft-delete, and the tenant filter on AppDbContext) apply to
+            // `Set<Vendor>()` as to the navigation query above, so a deleted vendor still reads
+            // no-template (Pending).
+            basis.Vendor = basis.VendorId is null
+                ? null
+                : await context.Set<Vendor>()
+                    .AsNoTracking()
+                    .Include(v => v.ComplianceTemplate)
+                        .ThenInclude(t => t!.Rules)
+                    .FirstOrDefaultAsync(v => v.Id == basis.VendorId.Value, ct);
         }
 
         // nowUtc comes from TimeProvider (not DateTime.UtcNow) so the expiration / expiring-soon date
         // boundaries in ComputeOutcome are deterministically testable.
         var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
-        var outcome = ComputeOutcome(doc, nowUtc, _correctedAdditionalInsuredWording);
+        var outcome = ComputeOutcome(basis, nowUtc, _correctedAdditionalInsuredWording);
 
         if (outcome.ClearExistingChecks)
         {
