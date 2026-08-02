@@ -789,6 +789,88 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted);
     }
 
+    /// <summary>
+    /// Commits the write a human's "Mark verified" (or a mid-read escalation) would land while the worker
+    /// is out at OCR + the LLM: a DIFFERENT connection, a real commit, and the worker's tracked snapshot
+    /// left stale. Constructed rather than raced, so the interleaving is the test's, not the scheduler's.
+    /// </summary>
+    private Func<Task> CommitTrustMidExtract(Guid docId, ExtractionTrust trust) => async () =>
+    {
+        await using var other = CreateSystemDb();
+        var doc = await other.Documents.SingleAsync(d => d.Id == docId);
+        doc.ExtractionTrust = trust;
+        doc.IsManuallyVerified = trust == ExtractionTrust.Trusted;
+        await other.SaveChangesAsync();
+    };
+
+    [Theory]
+    // The worker's decision equals the value its MINUTES-OLD snapshot already held, while the row itself
+    // moved to the opposite value mid-read. Both directions matter and both are one bug:
+    [InlineData(0.60, ExtractionTrust.Distrusted)] // a review-routed read must re-withdraw a mid-read confirmation
+    [InlineData(0.99, ExtractionTrust.Trusted)]    // a clean read must restore trust over a mid-read escalation
+    public async Task PersistSuccess_forces_its_trust_decision_over_a_write_that_landed_mid_extraction(
+        double verdictFieldConfidence, ExtractionTrust workerDecides)
+    {
+        // ProcessDocumentAsync loads the document BEFORE the OCR + LLM round trip and holds that tracked
+        // snapshot for the minutes the read takes. EF Core emits only properties whose current value
+        // DIFFERS from the snapshot, so assigning the snapshot's own value produces NO SET clause — and
+        // the row has moved: PUT /verify committed the opposite value on another connection. Without
+        // SetTrust's IsModified the extraction that was supposed to RE-DECIDE trust silently leaves the
+        // other writer's value standing, landing ManualRequired+Trusted (a distrusted basis rolling up as
+        // Covered — the ADR 0042 hole) or Completed+Distrusted (a clean read stranded at ActionNeeded).
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m, extractionTrust: workerDecides);
+        Extraction.Result = ResultWithFields(
+            ("expiration_date", "2027-03-15", verdictFieldConfidence),
+            ("policyholder_name", "Acme Vendor", 0.99),
+            ("insurer_name", "Acme Insurance", 0.99),
+            ("policy_number", "GL-12345", 0.99));
+        var landsMidRead = workerDecides == ExtractionTrust.Trusted
+            ? ExtractionTrust.Distrusted
+            : ExtractionTrust.Trusted;
+        Extraction.DuringExtract = CommitTrustMidExtract(docId, landsMidRead);
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionTrust.Should().Be(workerDecides,
+            "the read that just happened IS the document's basis, so its verdict on trust must reach the "
+            + "row even when it matches a snapshot the row has moved on from (#459)");
+        doc.ExtractionStatus.Should().Be(
+            workerDecides == ExtractionTrust.Trusted
+                ? ExtractionStatus.Completed
+                : ExtractionStatus.ManualRequired,
+            "the two columns stay in lockstep at the writer — one boolean, two columns");
+    }
+
+    [Theory]
+    // MarkFailed (the non-retryable arm) and RecordFailedAttempt's TERMINAL arm, same shape as above: both
+    // write Distrusted, and both can be handed a snapshot that already read Distrusted before a human
+    // confirmed the document mid-attempt.
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_terminal_failure_forces_its_distrust_over_a_confirmation_that_landed_mid_attempt(
+        bool nonRetryable)
+    {
+        // The failure writers share ProcessDocumentAsync's stale snapshot, so they share the no-op. A
+        // Failed row reading Trusted is precisely what MarkFailed's comment says can only come from a
+        // human confirmation AFTER the failure — this is the path that made it a lie.
+        var (_, docId) = await SeedDocAsync(
+            subscriptionSpendUsd: 0m,
+            failedAttempts: nonRetryable ? 0 : ExtractionWorker.MaxAttempts - 1,
+            extractionTrust: ExtractionTrust.Distrusted);
+        Extraction.ThrowNonRetryable = nonRetryable;
+        Extraction.ThrowOnExtract = !nonRetryable;
+        Extraction.DuringExtract = CommitTrustMidExtract(docId, ExtractionTrust.Trusted);
+
+        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed, "precondition: the budget is spent");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "a read the system could not complete must withdraw trust even when the snapshot it was "
+            + "holding already said Distrusted (#459)");
+    }
+
     // ----- #373: the model's documentType is normalized before it overwrites the stored type ----
 
     /// <summary>

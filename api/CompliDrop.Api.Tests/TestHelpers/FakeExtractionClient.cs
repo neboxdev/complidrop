@@ -58,6 +58,15 @@ public sealed class FakeExtractionClient : IExtractionClient
     public ExtractionResult Result { get; set; } = DefaultResult;
 
     /// <summary>
+    /// Optional hook awaited INSIDE the extraction call — i.e. after <c>ProcessDocumentAsync</c> has
+    /// already loaded (and is now tracking) the document, and before any persist writes it back. Lets a
+    /// test CONSTRUCT the mid-extraction interleaving deterministically — a committed write landing on a
+    /// separate connection while the worker is out at the LLM — instead of racing it (#459). Runs before
+    /// the throw/delay knobs so it also covers the failure writers.
+    /// </summary>
+    public Func<Task>? DuringExtract { get; set; }
+
+    /// <summary>
     /// The <c>documentTypeHint</c> of the most recent call, VERBATIM. The worker hands the stored
     /// <c>Document.DocumentType</c> straight through — suppressing the hint for <c>other</c> / unknown
     /// values is <c>ExtractionPrompts.BuildUserPrompt</c>'s job and only its job (#384, ADR 0051), so a
@@ -74,6 +83,7 @@ public sealed class FakeExtractionClient : IExtractionClient
     {
         ExtractCallCount++;
         LastDocumentTypeHint = documentTypeHint;
+        if (DuringExtract is { } hook) await hook();
         if (ThrowNonRetryable)
             throw new NonRetryableExtractionException("extraction.token_limit", "Simulated deterministic failure.");
         if (ExtractDelay > TimeSpan.Zero)
@@ -92,5 +102,6 @@ public sealed class FakeExtractionClient : IExtractionClient
         ExtractDelay = TimeSpan.Zero;
         Result = DefaultResult;
         LastDocumentTypeHint = null;
+        DuringExtract = null;
     }
 }
