@@ -1819,6 +1819,51 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             + "a verify that left Trusted behind would restore vendor coverage on a value nothing can read");
     }
 
+    [Theory]
+    [InlineData(ExtractionStatus.Pending)]
+    [InlineData(ExtractionStatus.Processing)]
+    [InlineData(ExtractionStatus.Failed)]
+    public async Task Marking_verified_cannot_buy_trust_over_an_unreadable_value_on_an_unsettled_row(
+        ExtractionStatus seeded)
+    {
+        // #459 review, C2. The sibling test above proves the SETTLED case; these are the three statuses
+        // the escalation deliberately refuses to overwrite — and gating TRUST on the same `wasSettled`
+        // check handed each of them a clean bill of health for one click:
+        //   Pending    — exactly where POST /reextract leaves a re-armed distrusted document. Trust was
+        //                the one thing that survived the re-arm (that survival IS the #459 fix); a bare
+        //                PUT /verify then handed it straight back, on a value nothing can parse.
+        //   Processing — the same window, one poll later.
+        //   Failed     — the DURABLE one: the detail page's manual-entry affordance exists for this case,
+        //                so a human typing an expiration the parser rejects is ordinary use. The status
+        //                can never move here, so nothing else would ever take the trust back.
+        // The status gate stays (withdrawing trust de-queues nothing; overwriting Pending would), which
+        // is asserted below alongside the trust — the two must move independently, not together.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedDocWithExpirationRule(auth.OrgId);
+        await using (var seed = CreateSystemDb())
+        {
+            var doc0 = await seed.Documents.FirstAsync(d => d.Id == docId);
+            doc0.ExpirationDate = null;
+            doc0.ExtractionFields = JsonDocument.Parse("""{"expiration_date":"12/31/2026 (per endorsement)"}""");
+            doc0.ExtractionStatus = seeded;
+            doc0.ExtractionTrust = ExtractionTrust.Distrusted; // as the read that routed it here left it
+            await seed.SaveChangesAsync();
+        }
+
+        (await auth.Client.PutAsync($"/api/documents/{docId}/verify", null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "asserting a document is verified cannot make an unreadable expiration readable, and the "
+            + "vendor rollup reads trust and nothing else — so a Trusted here is a false 'Covered'");
+        doc.ExtractionStatus.Should().Be(seeded,
+            "…while the STATUS gate is untouched: it exists only so the escalation can't de-queue the "
+            + "document, and withdrawing trust de-queues nothing");
+        doc.IsManuallyVerified.Should().BeTrue("the human did look — that part of the verify still lands");
+    }
+
     [Fact]
     public async Task Marking_verified_restores_trust_even_when_the_status_cannot_move()
     {

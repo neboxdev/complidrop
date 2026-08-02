@@ -974,27 +974,37 @@ public static class DocumentEndpoints
     //
     // #459 / ADR 0052: this is also the one REQUEST-side writer of ExtractionTrust, and it is the human
     // exit from the ADR 0042 coverage exclusion — for a Failed row it is the ONLY exit, since the status
-    // deliberately does not move. Trust is set from the RESULTING state, not from the status: a human
-    // vouching for the values earns Trusted, unless the unreadable-canonical-value escalation above
-    // re-raises the review, in which case the document is distrusted again on the spot. That pairing is
-    // what lets the rollup stop reading IsManuallyVerified, whose stickiness was the residue ADR 0042
-    // Amendment 2 recorded — this flag is re-decided by every later extraction, so a successful re-read
-    // followed by a terminal failure no longer reads as "a human confirmed it".
+    // deliberately does not move. That pairing is what lets the rollup stop reading IsManuallyVerified,
+    // whose stickiness was the residue ADR 0042 Amendment 2 recorded — trust is re-decided by every later
+    // extraction, so a successful re-read followed by a terminal failure no longer reads as "a human
+    // confirmed it".
+    //
+    // TRUST AND STATUS TAKE THE SAME QUESTION BUT NOT THE SAME GATE. Both ask "is a canonical value still
+    // unreadable?" — one predicate, asked once, of the document's RESULTING state. But the `wasSettled`
+    // guard belongs to the STATUS write ALONE. Its only job is not to de-queue: overwriting Pending would
+    // strand the document forever (the worker claims on ExtractionStatus == Pending) and Failed is its own
+    // louder error state. WITHDRAWING TRUST DE-QUEUES NOTHING — no worker, sweep or endpoint dispatches on
+    // the trust column; the vendor rollup merely reads it. So gating trust on the status too was a real
+    // hole (#459 review): on a re-armed row sitting at Pending, or a Failed row where a human typed an
+    // expiration the parser rejects, one click bought Trusted over a value nothing can read — precisely
+    // the clean bill of health ADR 0040 requires to fail closed and ADR 0052 says the click can no longer
+    // buy. Trust now follows readability on every status; only the escalation back to ManualRequired stays
+    // gated.
     private static void ResolveManualReview(Document doc)
     {
         var wasSettled = doc.ExtractionStatus
             is ExtractionStatus.Completed or ExtractionStatus.ManualRequired;
+        // Asked AFTER the caller has finalized the field mirror and the typed columns, and asked of the
+        // DOCUMENT rather than of the field names this request happened to submit (see above).
+        var unreadable = DocumentFieldReadability.HasUnreadableCanonicalValue(doc);
 
         doc.IsManuallyVerified = true;
-        doc.ExtractionTrust = ExtractionTrust.Trusted;
+        doc.ExtractionTrust = unreadable ? ExtractionTrust.Distrusted : ExtractionTrust.Trusted;
         if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
             doc.ExtractionStatus = ExtractionStatus.Completed;
 
-        if (wasSettled && DocumentFieldReadability.HasUnreadableCanonicalValue(doc))
-        {
+        if (wasSettled && unreadable)
             doc.ExtractionStatus = ExtractionStatus.ManualRequired;
-            doc.ExtractionTrust = ExtractionTrust.Distrusted;
-        }
     }
 
 
