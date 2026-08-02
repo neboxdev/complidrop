@@ -9,7 +9,34 @@ namespace CompliDrop.Api.Services;
 
 public interface IComplianceCheckService
 {
+    /// <summary>
+    /// The single-document PURE re-grade on the tenant context: load, compute the verdict the document's
+    /// CURRENT canonical inputs imply, save. It changes no inputs — only <see cref="Document.ComplianceStatus"/>
+    /// and the <see cref="ComplianceCheck"/> rows.
+    /// <para/>
+    /// ITS CONCURRENCY GUARD LIVES AT THE CALL SITE, and it has exactly one production call site:
+    /// <c>ComplianceEndpoints.RunCheck</c>, which runs it inside
+    /// <c>Endpoints/DocumentWriteConcurrency.RunAsync</c> (<c>REPEATABLE READ</c> + bounded re-run,
+    /// #461 / ADR 0030 Amendment 3). Bare, this method is a read → compute → write with no lock and no
+    /// token, so a field edit committing inside its window leaves the row holding the EDITED inputs
+    /// beside THIS verdict — a stored <c>Compliant</c> over a limit somebody just lowered, with passing
+    /// check rows citing a value the row no longer holds, and nothing to heal it.
+    /// <para/>
+    /// So a SECOND caller is not a free addition: it must either take the same guard or be a place where
+    /// the window provably cannot matter. Pinned by <c>Adr0030EnforcementTests</c>, which fails when the
+    /// production call count moves or when <c>RunCheck</c> stops routing through the guard — no
+    /// behavioural test can see either.
+    /// </summary>
     Task<ComplianceStatus> EvaluateAsync(Guid documentId, CancellationToken ct);
+
+    /// <summary>
+    /// The <see cref="SystemDbContext"/> twin of <see cref="EvaluateAsync"/>. Caller-less in production
+    /// since #337 folded the worker's grading into <c>PersistSuccess</c> (ADR 0030 § Neutral); retained as
+    /// the symmetric system-context entry point and exercised by the sample-grading tests. It carries the
+    /// same unguarded read → compute → write window, so a future production caller owes the same
+    /// question <see cref="EvaluateAsync"/>'s remarks pose — and note the tenant-context guard does not
+    /// transfer as-is: <c>DocumentWriteConcurrency</c> takes an <see cref="AppDbContext"/>.
+    /// </summary>
     Task<ComplianceStatus> EvaluateForSystemAsync(Guid documentId, CancellationToken ct);
 
     /// <summary>
@@ -253,6 +280,18 @@ public class ComplianceCheckService(
     //     0036 Amendment 2). That watermark — not the sweep — is what stops a stale verdict surviving an
     //     interrupted boot.
     //
+    // CONCURRENCY, and this is a recorded residual rather than an oversight (#461 / ADR 0030 Amendment 3
+    // § What stays open). This fan-out keeps READ COMMITTED and keeps the read → compute → write window
+    // that Amendment 3 closed on the single-document re-grade: a page's documents are loaded, graded and
+    // saved as one unit, so an edit committing inside that span leaves its document holding the edited
+    // inputs beside a verdict graded from the pre-edit ones. It was NOT put under
+    // DocumentWriteConcurrency's REPEATABLE READ, on purpose — the cost profile is a different one. A
+    // single conflicting edit anywhere in a page of up to PageSize documents would abandon and re-run the
+    // WHOLE page (up to MaxAttempts), and then skip it entirely, so one concurrent edit would forfeit
+    // hundreds of unrelated re-grades where today it degrades exactly one. And these callers run
+    // POST-COMMIT on a background token with no user to answer 409 to. Closing it wants per-document
+    // granularity, which is the batching this method exists to provide, undone.
+    //
     // Granularity note: a page commits as a unit (one SaveChanges), so one document that fails to persist
     // forfeits the re-grade of its WHOLE page (≤ PageSize), not just itself — coarser than the old
     // per-document loop. Accepted trade-off of batching the writes, and bounded: the one known write-path
@@ -457,6 +496,15 @@ public class ComplianceCheckService(
     // DocumentEndpoints.UpdateFields, extraction persist in ExtractionWorker.PersistSuccess) instead call
     // ApplyEvaluationAsync directly and fold the verdict into their OWN SaveChanges, so inputs and verdict
     // commit atomically and can never be left torn (#337).
+    //
+    // There is deliberately NO transaction, lock or token in here (#461 / ADR 0030 Amendment 3). The
+    // window between the read and the save is real — a field edit landing inside it leaves the row's
+    // edited inputs beside this verdict — but closing it belongs to the CALLER, because the two callers
+    // want different answers. EvaluateAsync's one caller (ComplianceEndpoints.RunCheck) wraps this in
+    // DocumentWriteConcurrency's REPEATABLE READ + bounded re-run, which needs an AppDbContext and an
+    // IResult to answer with; EvaluateForSystemAsync has no production caller. Taking the transaction in
+    // here would also mean Services/ owning transaction scope, which nothing else in this layer does,
+    // and would put the guard on a method the BATCHED fan-out deliberately does not use.
     private async Task<ComplianceStatus> EvaluateInternalAsync(DbContext context, Guid documentId, CancellationToken ct)
     {
         var doc = await context.Set<Document>().FirstOrDefaultAsync(d => d.Id == documentId, ct);
