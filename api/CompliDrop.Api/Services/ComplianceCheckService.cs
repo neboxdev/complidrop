@@ -490,11 +490,15 @@ public class ComplianceCheckService(
         // No SaveChanges — the caller commits the inputs and this verdict in ONE transaction (#337).
     }
 
-    // Loads the document, applies the verdict in place, and SAVES — the read-then-write convenience used
-    // by the pure RE-GRADE callers (Check-again, vendor/type assign's recompute, the template fan-outs)
-    // that do not themselves change the canonical inputs. The input-CHANGING paths (manual field edit in
-    // DocumentEndpoints.UpdateFields, extraction persist in ExtractionWorker.PersistSuccess) instead call
-    // ApplyEvaluationAsync directly and fold the verdict into their OWN SaveChanges, so inputs and verdict
+    // Loads the document, applies the verdict in place, and SAVES — the read-then-write convenience behind
+    // the two pure RE-GRADE entry points, which do not themselves change the canonical inputs: EvaluateAsync
+    // (the "Check again" button, its ONE production caller) and EvaluateForSystemAsync (its system-context
+    // twin, with no production caller). Nothing else reaches this method, and the near misses are worth
+    // naming because they used to be listed here as callers and are not: the vendor/type assign
+    // (DocumentEndpoints.UpdateDocument) calls ApplyEvaluationAsync and folds the verdict into its own
+    // SaveChanges, and the template/vendor fan-outs go through the BATCHED ReevaluateWhereAsync. The
+    // input-CHANGING paths (manual field edit in DocumentEndpoints.UpdateFields, extraction persist in
+    // ExtractionWorker.PersistSuccess) likewise call ApplyEvaluationAsync directly, so inputs and verdict
     // commit atomically and can never be left torn (#337).
     //
     // There is deliberately NO transaction, lock or token in here (#461 / ADR 0030 Amendment 3). The
