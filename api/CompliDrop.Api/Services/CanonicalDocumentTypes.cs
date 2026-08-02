@@ -42,7 +42,11 @@ namespace CompliDrop.Api.Services;
 /// unknown type with a 400 rather than coercing, because a human deliberately re-typing a document or
 /// writing a RULE is choosing what gets graded), and both extraction clients' structured-output schemas,
 /// which pin <c>documentType</c> to this exact list via <see cref="SchemaEnum"/> so the Gemini and
-/// Anthropic contracts cannot drift apart.
+/// Anthropic contracts cannot drift apart. Plus one POINT-OF-USE caller:
+/// <c>Extraction.ExtractionPrompts.BuildUserPrompt</c> emits the model's document-type hint only when
+/// <see cref="Normalize"/> yields a real member, and emits THAT member rather than its own input — so an
+/// un-laundered legacy row (see the known gap below) cannot put arbitrary stored text on a line the model
+/// reads as instruction (#384, ADR 0051).
 /// <para/>
 /// Mirrors pinned equal to <see cref="All"/> by <c>CanonicalDocumentTypeTests</c>: both provider schemas,
 /// the extraction prompt's DOCUMENT TYPES block, and <see cref="DisplayLabels"/>' label map (which

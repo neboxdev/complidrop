@@ -367,6 +367,42 @@ Both are defined in this repo's `.claude/agents/`.
     vocabulary is now pinned over HTTP in `RequestInputLengthTests`, not by set equality.)
     `RuleEngine/RuleSetLoader.DocumentTypes` is a SEPARATE set and deliberately NOT a mirror — an
     RD-c SUBSET (`coi | license | certification | other`) that must NOT be pinned equal to `All`.
+- UNTRUSTED input reaching the extraction PROMPT is ADR 0051 (#384). Two of the prompt's three parts
+  are vendor-authored — the document-type hint and the OCR text of a file the vendor wrote — so both
+  are DATA, never instruction. Pointers, not a second copy of the rationale:
+  - There is ONE user-message builder, `ExtractionPrompts.BuildUserPrompt`, called by BOTH clients.
+    The two providers used to hold byte-identical PRIVATE `BuildPrompt` copies, and `Extraction:Provider`
+    decides which one runs at config time — so a guard added to one is the same bug left live in the
+    other, invisibly to the diff. A re-introduced per-provider builder IS a real finding.
+  - The hint line is emitted ONLY when `CanonicalDocumentTypes.Normalize` returns a non-`Fallback`
+    member, and it prints the VOCABULARY's own spelling, never the caller's string — so even a
+    RECOGNISED value contributes zero caller-controlled bytes. Echoing the input back after merely
+    TESTING membership (`IsAllowed(x) ? x : ""`) IS a finding, not an equivalent. A positive `other`
+    still emits nothing (unchanged pre-#384 behaviour), and a canonical type IS still offered — a
+    blanket "just drop the hint" passes the injection tests while degrading extraction for every
+    honest document, and a test pins each member is still offered.
+  - It is NOT redundant with the #373/#389 ingress normalization, and "upstream already handles it" is
+    a refuted suggestion: ADR 0045 records that legacy non-canonical rows were DELIBERATELY not
+    laundered, so `Document.DocumentType` still legitimately holds arbitrary pre-#373 text. Point of
+    use is the only place that does not depend on an invariant having held for every row ever written.
+  - The OCR text stays VERBATIM — never stripped, escaped, or fence-sanitised. It is the thing the
+    product exists to read, and the `---` fence is a reading aid the content can reproduce, which is
+    why `SystemPrompt`'s UNTRUSTED CONTENT section says so out loud instead of leaning on it.
+    "Escape the fence in the OCR text" is the bug. A per-request NONCE delimiter is DEFERRED, not
+    refuted (ADR 0051 Option D — it breaks Anthropic prompt caching and the byte-exact cross-provider
+    agreement pin); do not re-report it as a gap.
+  - The clause is a MITIGATION, and the ADR says so: the hint guard is structural/absolute, the prompt
+    clause is probabilistic. The durable answers to a steered extraction are ADR 0042's confidence gate
+    and ADR 0040's fail-closed reads, which already exist. "A prompt clause isn't a real defence" is
+    recorded, not a new finding.
+  - Any prompt edit bumps `ExtractionPrompts.Version` AND re-pins the SHA in
+    `ExtractionPromptVersionTests` (the tripwire that makes the edit deliberate; `Version` is recorded
+    per document). Weakening, deleting, or routing around that pin IS a real finding. The clause's own
+    content pin lives in `ExtractionPromptInjectionTests` and asserts the FACTS the clause must state,
+    not its full prose, so a reword stays possible.
+  - Deliberately NOT flag-staged, unlike ADR 0043's wording: ADR 0047's asymmetry applies — a flag
+    stages a string whose flip changes what a VERDICT asserts, while telling a model not to obey the
+    document is one-directional, and default-OFF would leave the reported vulnerability live in prod.
 - A CLIPPED extraction field value is ADR 0049 (#444) — the disclosure half of ADR 0045 §4's
   truncate-not-drop clamp. The facts that follow are pointers into it, not a second copy.
   - The ADR 0045 §4 truncation is UNCHANGED: same policy, same `InputLengths.DocumentFieldValue`
