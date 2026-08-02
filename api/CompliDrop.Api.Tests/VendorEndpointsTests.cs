@@ -590,10 +590,14 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         // compliance badge" — is simply false for this shape. The vendor reads Action needed with no
         // reason anywhere.
         //
-        // Unreachable through the NEW writers, which is why it stays a recorded residue rather than a
-        // fixed bug: PersistSuccess pairs Completed with Trusted, and ResolveManualReview only ever
+        // Unreachable through any ONE of the new writers, which is why the deploy overlap is where it
+        // comes from: PersistSuccess pairs Completed with Trusted, and ResolveManualReview only ever
         // withdraws trust on a row whose status it simultaneously moves to ManualRequired (or cannot move
-        // at all — Pending/Processing/Failed).
+        // at all — Pending/Processing/Failed). NOT unreachable through two of them INTERLEAVED, though —
+        // MarkVerified is an unforced READ COMMITTED partial write, so a PersistSuccess commit inside its
+        // load→save window reaches this pair with no deploy involved (#465, ADR 0052 § Consequences' third
+        // path, pinned by Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read).
+        // Same shape either way, so the same remedy applies and this test covers both.
         var auth = await RegisterAndLoginAsync();
         var template = await CreateTemplateAsync(auth.Client, "Caterer");
         (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();

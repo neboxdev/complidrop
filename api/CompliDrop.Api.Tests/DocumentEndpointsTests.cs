@@ -2751,6 +2751,90 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
             + "API container's DateTime.UtcNow and shipped as a timestamp parameter");
     }
 
+    [Fact]
+    public async Task Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read()
+    {
+        // #459 review round 2, C1 — the pin behind the THIRD reachability path ADR 0052 § Consequences
+        // now records for an incoherent (status, trust) pair. MarkVerified is an unforced READ-COMMITTED
+        // partial write: it SELECTs the document, and EF then emits only the properties that differ from
+        // that snapshot. On an UNSETTLED row ResolveManualReview leaves ExtractionStatus alone by design
+        // (moving Pending would de-queue the document), so the UPDATE carries trust and NOT status.
+        //
+        // That partiality is exactly what makes the pair reachable without any deploy overlap: land
+        // ExtractionWorker.PersistSuccess's whole-tuple commit (ManualRequired + Distrusted) inside this
+        // request's load→save window and the row ends ManualRequired + TRUSTED — a distrusted basis
+        // rolling up as Covered, the ADR 0042 hole. The mirror (Completed + Distrusted) comes from the
+        // other seed. This is the ADR 0030 last-writer-wins class, the same family as #460 / #461.
+        //
+        // The interleave itself has no seam to construct through — one HTTP request, no injection point —
+        // so what is pinned is the PROPERTY that makes it reachable rather than the race. If this writer
+        // is ever made whole-tuple (the conditional-ExecuteUpdateAsync shape ADR 0052 weighs and declines,
+        // because it would drop the AuditSaveChangesInterceptor row on a human confirmation), this test is
+        // the one that must be updated deliberately, together with the residue bullet it backs.
+        //
+        // Read off the host's EF command log through a Serilog sink — the shape
+        // The_reextract_guard_compares_against_the_DATABASE_clock uses, for the same reason: no
+        // behavioural assertion can see which columns an UPDATE carried.
+        var sink = new CapturingLogEventSink();
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+
+        var reg = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            email = $"user-{Guid.NewGuid():N}@example.com",
+            password = "Password1234",
+            fullName = "Test User",
+            companyName = "Test Co",
+            industry = (string?)null,
+            companySize = (string?)null,
+            timeZone = "America/New_York",
+        });
+        reg.EnsureSuccessStatusCode();
+        var orgId = (await reg.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("organizationId").GetGuid();
+
+        // The state a re-armed distrusted document is really in — Pending in the queue, still carrying the
+        // previous read's dissent — and with READABLE values, so the confirmation genuinely flips trust
+        // (a no-op assignment would emit no SET clause at all and this test would pass vacuously).
+        var docId = await SeedExtractionStateAsync(orgId, ExtractionStatus.Pending, claimAge: null);
+        await using (var seed = CreateSystemDb())
+        {
+            var doc0 = await seed.Documents.FirstAsync(d => d.Id == docId);
+            doc0.ExtractionTrust = ExtractionTrust.Distrusted;
+            await seed.SaveChangesAsync();
+        }
+
+        (await client.PutAsync($"/api/documents/{docId}/verify", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using (var verify = CreateSystemDb())
+        {
+            var doc = await verify.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+            doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+                "precondition: the confirmation really did change trust, so the UPDATE below is not empty");
+            doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending,
+                "…and really did leave the status alone, which is the de-queue guard doing its job");
+        }
+
+        // Serilog renders the command text as a quoted string, so the SQL's own quotes arrive escaped.
+        var update = sink.Events
+            .Select(e => e.RenderMessage().Replace("\\\"", "\"", StringComparison.Ordinal))
+            .LastOrDefault(m => m.Contains("UPDATE \"Documents\"", StringComparison.Ordinal)
+                && m.Contains("\"IsManuallyVerified\"", StringComparison.Ordinal));
+        update.Should().NotBeNull(
+            "the confirmation's UPDATE must appear in the host's EF command log — if it does not, this "
+            + "test is a no-op and proves nothing about which columns the write carried");
+        update.Should().Contain("\"ExtractionTrust\" =",
+            "anti-no-op: the statement we are reading must be the one that writes trust");
+        update.Should().NotContain("\"ExtractionStatus\" =",
+            "the write is PARTIAL — trust without the status it was decided beside — so a worker commit "
+            + "landing between this request's SELECT and this UPDATE leaves the two columns disagreeing. "
+            + "Recorded as an accepted residue in ADR 0052 § Consequences (the ADR 0030 last-writer-wins "
+            + "class, family of #460/#461), NOT closed by widening DocumentWriteConcurrency's REPEATABLE "
+            + "READ guard to this writer");
+    }
+
     /// <summary>Serilog sink that records every emitted event; thread-safe for the host's loggers.</summary>
     private sealed class CapturingLogEventSink : ILogEventSink
     {

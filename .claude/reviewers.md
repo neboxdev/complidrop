@@ -263,7 +263,19 @@ Both are defined in this repo's `.claude/agents/`.
       REMEDY is user-reachable and is the exclusion's normal exit: any new-container writer rewrites
       trust, i.e. a re-extract that lands cleanly, or one `Mark verified`. Pinned (remedy included) by
       `A_Completed_row_the_boot_backfill_distrusted_reads_ActionNeeded_with_nothing_disclosing_why`.
-      Neither shape is reachable through the NEW writers.
+    - A THIRD path reaches BOTH pairs with no deploy overlap, corrected in round 2 of the #459 review and
+      ticketed as [#465](https://github.com/neboxdev/complidrop/issues/465) — the record used to say
+      "neither shape is reachable through the NEW writers", which is true of any ONE writer and false of
+      two INTERLEAVED. `MarkVerified` is an unforced READ COMMITTED partial write (SELECT, then EF emits
+      only what differs from that snapshot), and on an unsettled row `ResolveManualReview` leaves the
+      status alone — so the UPDATE carries trust WITHOUT it, and a `PersistSuccess` commit landing in that
+      window leaves `ManualRequired` + `Trusted`. ADR 0030 last-writer-wins class, same family as
+      #460/#461 and plausibly absorbed by #461's shape; `UpdateFields` is exempt (REPEATABLE READ + 40001
+      re-run). ACCEPTED, not overlooked: widening the RR guard to `MarkVerified` is itself a finding (see
+      the ADR 0030 block), and the conditional-`ExecuteUpdateAsync` alternative drops the
+      `AuditSaveChangesInterceptor` diff row on a human confirmation while still grading from the stale
+      snapshot. Pinned by
+      `Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read` (EF command log).
   - KNOWN in-flight disclosure gap, also ADR 0052 § Consequences — do not re-report: a re-armed
     DISTRUSTED doc (`Pending`/`Processing` + `Distrusted`) makes the vendor read ActionNeeded while the
     extraction badge reads `Reading…` rather than `Needs your review`. Bounded by one poll,

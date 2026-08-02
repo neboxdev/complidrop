@@ -187,10 +187,37 @@ throw on materialization.
     inference, or splitting the release so the read switch ships a deploy after the writers — real, but it
     trades a bounded one-overlap residue for a second release whose intermediate state (a column four
     writers maintain and nothing reads) has its own drift risk, and the read switch is this ticket's
-    deliverable. Both halves are UNREACHABLE through the new writers, which is what keeps them a
-    deploy artifact rather than a live state machine: `PersistSuccess` pairs `Completed` with `Trusted`,
-    and `ResolveManualReview` only withdraws trust on a row whose status it simultaneously raises to
-    `ManualRequired` — or cannot move at all.
+    deliverable.
+
+- **A THIRD path to both of those pairs, with no deploy overlap involved**
+  ([#465](https://github.com/neboxdev/complidrop/issues/465), round 2 of the #459 review). No single new
+  writer produces an incoherent pair — `PersistSuccess` pairs `Completed` with `Trusted`, and
+  `ResolveManualReview` only withdraws trust on a row whose status it simultaneously raises to
+  `ManualRequired`, or cannot move at all. But two of them **interleaved** do, because
+  `DocumentEndpoints.MarkVerified` is an unforced READ COMMITTED partial write: it SELECTs, and EF then
+  emits only the properties that differ from that snapshot. On an unsettled row `ResolveManualReview`
+  leaves `ExtractionStatus` alone, so the UPDATE carries trust WITHOUT the status it was decided beside.
+  Land `PersistSuccess`'s whole-tuple commit inside that window and the row ends `ManualRequired` +
+  `Trusted` — the fail-OPEN pair, reachable in ordinary operation. (The mirror, `Completed` + `Distrusted`,
+  comes from a legacy row carrying an unreadable canonical value at `Pending` + `Trusted`.) This is the
+  [ADR 0030](0030-compliance-verdict-combined-unit-of-work.md) last-writer-wins class — the same family as
+  [#460](https://github.com/neboxdev/complidrop/issues/460) and
+  [#461](https://github.com/neboxdev/complidrop/issues/461), and plausibly absorbed by whatever shape #461
+  lands. `UpdateFields` is NOT in it: ADR 0030 Amendment 1 puts that writer under `REPEATABLE READ` with a
+  `40001` re-run.
+
+  **Accepted here rather than closed**, and the two narrow closures are why. Widening
+  `DocumentWriteConcurrency`'s guard to `MarkVerified` is ruled out by `.claude/reviewers.md` (a change
+  that widens the guard to all document writes is itself a finding, pinned). A conditional
+  `ExecuteUpdateAsync` predicated on the status it read — the `Reextract` shape — bypasses
+  `AuditSaveChangesInterceptor`, so a **human confirmation**, the action that most wants a real audit
+  trail, would lose its Before/After diff row and keep only the flat `document.verified` event; ADR 0050
+  accepted that trade for a re-arm that already had its own explicit audit row. It also would not make the
+  decision fresh — `ResolveManualReview` reads readability from the same stale snapshot — so it refuses
+  without fixing, and refuse-then-reload-and-retry is `DocumentWriteConcurrency` under another name. The
+  PROPERTY that makes the interleave reachable is pinned instead, by
+  `Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read`, which reads the host's EF
+  command log: closing #465 means changing that test deliberately.
 
 - **A bounded in-flight window where the rollup demotes and the extraction badge does not say why.**
   Distinct from the deploy residue above and a consequence of Amendment 3 itself: a document at

@@ -385,9 +385,15 @@ public class ExtractionWorker(
     /// (<c>DocumentEndpoints.ResolveManualReview</c>), and the extraction that was supposed to RE-DECIDE
     /// trust would silently leave that confirmation standing. The row then reads
     /// <c>ManualRequired</c>/<c>Failed</c> paired with <c>Trusted</c> — a distrusted basis rolling up as
-    /// Covered, the exact ADR 0042 hole, in a shape ADR 0052 otherwise records as reachable only through
-    /// a deploy overlap. The mirror image is just as wrong: a clean re-read that means to RESTORE trust
-    /// over a mid-read escalation would no-op and strand the document at ActionNeeded.
+    /// Covered, the exact ADR 0042 hole. The mirror image is just as wrong: a clean re-read that means to
+    /// RESTORE trust over a mid-read escalation would no-op and strand the document at ActionNeeded.
+    /// <para/>
+    /// Forcing the column closes this writer's half only. ADR 0052 § Consequences records the OTHER two
+    /// paths to the same incoherent pairs, and neither is a deploy overlap alone: the request-side
+    /// <c>MarkVerified</c> is an unforced READ COMMITTED partial write, so a commit from HERE landing
+    /// inside ITS load→save window leaves the pair disagreeing the other way round
+    /// (<see href="https://github.com/neboxdev/complidrop/issues/465">#465</see>, the ADR 0030
+    /// last-writer-wins class). Do not read this comment as "the pairs are otherwise deploy-only".
     /// <para/>
     /// This is NOT the ADR 0030 stale-snapshot residual (<see
     /// href="https://github.com/neboxdev/complidrop/issues/460">#460</see>), which is about a writer
