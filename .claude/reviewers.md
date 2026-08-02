@@ -275,8 +275,11 @@ Both are defined in this repo's `.claude/agents/`.
       status alone — so the UPDATE carries trust WITHOUT it, and a `PersistSuccess` commit landing in that
       window leaves `ManualRequired` + `Trusted`. ADR 0030 last-writer-wins class, same family as
       #460 (closed by ADR 0030 Amendment 2, whose grading basis does not reach this — a status/trust pair
-      is not a verdict basis) and #461, plausibly absorbed by #461's shape; `UpdateFields` is exempt (REPEATABLE READ + 40001
-      re-run). ACCEPTED, not overlooked: widening the RR guard to `MarkVerified` is itself a finding (see
+      is not a verdict basis) and #461; `UpdateFields` is exempt (REPEATABLE READ + 40001
+      re-run). #461 HAS since shipped (ADR 0030 Amendment 3) and did NOT absorb it — the earlier
+      "plausibly absorbed by #461's shape" reading is retired: Amendment 3 took the RR guard for the
+      single-document RE-GRADE only, one named call site, and left every other writer on READ COMMITTED
+      by decision. ACCEPTED, not overlooked: widening the RR guard to `MarkVerified` is itself a finding (see
       the ADR 0030 block), and the conditional-`ExecuteUpdateAsync` alternative drops the
       `AuditSaveChangesInterceptor` diff row on a human confirmation while still grading from the stale
       snapshot. Pinned by
@@ -701,16 +704,48 @@ Both are defined in this repo's `.claude/agents/`.
   - It deliberately does NOT match `40P01 deadlock_detected` even though Postgres calls it retryable:
     the guard reorders no lock acquisition, so a deadlock here would be a NEW inversion that must
     surface. "Also retry deadlocks" is the bug, not the fix.
-  - The pure re-grade paths (`EvaluateAsync` / `EvaluateForSystemAsync` / the fan-outs) keep their
-    read→compute→write window and are OUT of scope by DECISION — not because they are harmless. They
-    write no INPUTS so they cannot lose an update, but `EvaluateInternalAsync` is a bare
-    `FirstOrDefaultAsync → ApplyEvaluationAsync → SaveChangesAsync` with no lock or token, so a
-    "Check again" that loaded before an `UpdateFields` LOWERED a limit writes its stale verdict back
-    after it: EF marks only `ComplianceStatus`/`UpdatedAt`, so the row keeps the lowered limit with a
-    stored `Compliant` and passing check rows citing values it no longer holds, and NOTHING re-grades
-    it (the sweep does date transitions only). Recorded in ADR 0030 Amendment 1 residual 1 and
-    ticketed as [#461](https://github.com/neboxdev/complidrop/issues/461) — not a NEW finding, but do
-    not let a diff or a doc call this window benign or self-healing either.
+  - The SINGLE-document pure re-grade is ADR 0030 **Amendment 3** (#461), Amendment 1's residual 1.
+    `EvaluateInternalAsync` is a bare `FirstOrDefaultAsync → ApplyEvaluationAsync → SaveChangesAsync`
+    with no lock or token, so a "Check again" that loaded before an `UpdateFields` LOWERED a limit used
+    to write its stale verdict back after it: EF marks only `ComplianceStatus`/`UpdatedAt`, so the row
+    kept the lowered limit with a stored `Compliant` and passing check rows citing values it no longer
+    held, and NOTHING re-graded it (the sweep does date transitions only). Never call this window benign
+    or self-healing — an earlier draft of the record did, and it was false. Facts that look like bugs
+    and are not:
+    - `ComplianceEndpoints.RunCheck` is the THIRD `DocumentWriteConcurrency.RunAsync` call site. That is
+      not the "widen the guard to all document writes" finding above — it is one named request-path
+      writer that co-writes a verdict, and the floor pin
+      (`An_unrelated_document_writer_still_wins_last_without_conflicting`, on `MarkVerified`) is
+      untouched. The worker, delete, sweep and BATCHED fan-outs all keep `READ COMMITTED`.
+    - Exhaustion answers `409` and LEAVES THE PREVIOUS VERDICT ALONE. Not a violation of the
+      degrade-to-`Pending` rule and not an oversight: the re-grade owns no inputs, so the row it walks
+      away from is already the winner's own atomic `(inputs, verdict)` pair. "Degrade it to `Pending`
+      for safety" IS a real finding — it would overwrite a CORRECT verdict with a non-committal one,
+      through the very write that kept conflicting, into a state nothing re-grades. So is "just answer
+      200 and let the client refetch": the one button whose promise is a fresh verdict would report a
+      re-check that never ran. Both are recorded rejections (ADR 0030 Amendment 3 Options H/I).
+    - The 409 carries `RegradeConflictMessage`, its OWN copy, and `RunAsync`'s message parameter is
+      REQUIRED for the same reason `onAttemptAbandoned` is. Reusing the edit copy would tell a user who
+      submitted nothing to "make your change again". Unifying the two messages IS a finding.
+    - The guard is at the CALL SITE, not in the service, and that is Amendment 3 Option J — layering
+      (transaction scope lives in `Endpoints/`; `Services/` must not reach into
+      `Endpoints/DocumentWriteConcurrency`) plus blast radius (`EvaluateInternalAsync` is shared with
+      the `SystemDbContext` path, which has no `AppDbContext`). Its cost is paid by
+      `Adr0030EnforcementTests`: `EvaluateAsync` must have exactly ONE production call site and
+      `RunCheck` must invoke it INSIDE the retryable callback. A new caller of the bare service method
+      IS a real finding, and so is hoisting the evaluate above the guard — same call counts, answer
+      computed once on the losing snapshot and merely re-served.
+    - `RunCheck` is block-bodied rather than an expression body ON PURPOSE: the shared brace-matching
+      extractor would otherwise span only the callback lambda and the gate would stop seeing the hoist.
+      "Simplify it to `=>`" un-pins it.
+    - KNOWN residuals, ADR 0030 Amendment 3 § What stays open — do not re-report as new. (a) The
+      BATCHED fan-outs (`ReevaluateWhereAsync`, behind the template/vendor/seed re-grades) keep the
+      window. Deliberate on cost profile: a page is up to 200 documents committed as ONE unit, so one
+      conflicting edit would abandon and re-run the whole page and then skip it — forfeiting hundreds of
+      unrelated re-grades where today exactly one goes stale — and these run post-commit on a background
+      token with no user to 409. "Wrap the fan-out too for consistency" is Option K, refuted. (b)
+      `EvaluateForSystemAsync` is unguarded and caller-less in production; the tenant guard does not
+      transfer as-is (`RunAsync` takes an `AppDbContext`).
   - The worker's STALE-BASIS grading is ADR 0030 **Amendment 2** (#460), the closing half of Amendment
     1's scenario B. `ExtractionWorker.PersistSuccess` holds a tracked snapshot across an OCR + LLM run
     that lasts minutes and EF writes back only what it MODIFIED, so every canonical verdict input it
@@ -816,7 +851,10 @@ Both are defined in this repo's `.claude/agents/`.
       re-read → commit window is NOT closed, only shrunk from the whole extraction run to one round
       trip, which makes it the same shape and size as #461's. Closing it needs conflict DETECTION on the
       commit, and every detecting shape re-pays the extraction. Equally, do not let a diff or a doc
-      describe #460 as fully closed.
+      describe #460 as fully closed. Since ADR 0030 Amendment 3 the two windows are the same SHAPE but
+      not the same REMEDY: #461 closed its half by taking `REPEATABLE READ`, which is available to a
+      re-grade precisely because a throw out of ITS `SaveChanges` costs a retry, not a re-paid OCR + LLM
+      run. "#461 shipped the guard, do the same here" IS the refuted suggestion, not a follow-up.
     - TWO more recorded residuals in the same section, also not new findings. (a) `unreadableFields` —
       and therefore `distrusted`, `ExtractionStatus` and `ExtractionTrust` — is STILL asked of the
       pre-run tracked entity twenty lines above the basis read, so a mid-run edit that fixes a typed
