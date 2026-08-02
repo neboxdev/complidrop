@@ -738,6 +738,12 @@ Both are defined in this repo's `.claude/agents/`.
     - `RunCheck` is block-bodied rather than an expression body ON PURPOSE: the shared brace-matching
       extractor would otherwise span only the callback lambda and the gate would stop seeing the hoist.
       "Simplify it to `=>`" un-pins it.
+    - NO frontend change, same as #366's: `recheck.onError` already toasts `err.message`, and nothing on
+      the page CONTRADICTS the 409. This is NOT the ADR 0050 Amendment 1 situation — there the client
+      held a payload asserting the read had finished, so every further click 409'd until a manual
+      reload. A re-grade conflict is transient (the next click almost always wins), so adding an
+      invalidate-on-409 here — while `UpdateFields`/`UpdateDocument` deliberately have none for the same
+      code — would be an inconsistency, not a fix.
     - KNOWN residuals, ADR 0030 Amendment 3 § What stays open — do not re-report as new. (a) The
       BATCHED fan-outs (`ReevaluateWhereAsync`, behind the template/vendor/seed re-grades) keep the
       window. Deliberate on cost profile: a page is up to 200 documents committed as ONE unit, so one
