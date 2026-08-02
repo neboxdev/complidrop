@@ -517,6 +517,54 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     }
 
     [Fact]
+    public async Task A_Completed_row_the_boot_backfill_distrusted_reads_ActionNeeded_with_nothing_disclosing_why()
+    {
+        // The FAIL-CLOSED twin of the test above, and the harsher half of the same deploy-overlap window
+        // (#459 review, C3 — recorded in ADR 0052 § Consequences). Same window, opposite direction: the
+        // boot migration marks a row Distrusted, then the OLD container — which knows nothing about the
+        // column — serves one more clean PersistSuccess or one more PUT /verify and writes the STATUS
+        // without the trust. The row lands Completed + Distrusted.
+        //
+        // Why it is worse than its sibling: it does not self-heal (nothing in the read ever forgives a
+        // Distrusted row) and NOTHING discloses it. That is asserted below rather than argued: the
+        // extraction badge reads "Read" and the compliance badge reads "Compliant", so ADR 0042's
+        // carve-out premise — "the documents list already renders a distinct extraction badge beside the
+        // compliance badge" — is simply false for this shape. The vendor reads Action needed with no
+        // reason anywhere.
+        //
+        // Unreachable through the NEW writers, which is why it stays a recorded residue rather than a
+        // fixed bug: PersistSuccess pairs Completed with Trusted, and ResolveManualReview only ever
+        // withdraws trust on a row whose status it simultaneously moves to ManualRequired (or cannot move
+        // at all — Pending/Processing/Failed).
+        var auth = await RegisterAndLoginAsync();
+        var template = await CreateTemplateAsync(auth.Client, "Caterer");
+        (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
+        var vendorId = await CreateVendorAsync(auth.Client, "Deploy Overlap Closed LLC", null);
+        (await UpdateVendorTemplateAsync(auth.Client, vendorId, template)).EnsureSuccessStatusCode();
+
+        var docId = await SeedVendorDocAsync(auth.OrgId, vendorId, "coi", ComplianceStatus.Compliant,
+            extractionStatus: ExtractionStatus.Completed, extractionTrust: ExtractionTrust.Distrusted);
+
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("ActionNeeded",
+            "the rollup reads trust and nothing else, so a Distrusted row is excluded whatever its status");
+
+        var detail = (await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}"))
+            .GetProperty("data");
+        detail.GetProperty("extractionStatus").GetString().Should().Be("Completed",
+            "no extraction badge disclosing the exclusion — this is the half of the residue with no "
+            + "second badge, so the ADR 0042 carve-out's premise does not hold for it");
+        detail.GetProperty("complianceStatus").GetString().Should().Be("Compliant",
+            "…nor does the compliance badge move: the document-level carve-out is deliberate (ADR 0042)");
+
+        // The documented EXIT, executed rather than asserted in prose: any NEW-container writer rewrites
+        // trust, so one confirmation (or one re-extract that lands cleanly) clears the row for good.
+        (await auth.Client.PutAsync($"/api/documents/{docId}/verify", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+        (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered",
+            "a human confirmation is the user-reachable remedy for a row the old container stranded");
+    }
+
+    [Fact]
     public async Task A_FAILED_extraction_a_human_confirmed_reads_Covered_again()
     {
         // The EXIT from ADR 0042 Amendment 2's Failed exclusion, and the reason it must exist. The
