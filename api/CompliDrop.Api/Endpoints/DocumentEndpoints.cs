@@ -852,6 +852,16 @@ public static class DocumentEndpoints
         // worker holds. Npgsql translates DateTime.UtcNow to bare now() — ADR 0009-clean, the same shape
         // the .SetProperty(d => d.UpdatedAt, DateTime.UtcNow) below already emits — so both sides read the
         // DB's clock as well as the one constant.
+        //
+        // ExtractionTrust is DELIBERATELY absent from the SetProperty list below, and that absence IS the
+        // #459 fix (ADR 0052). Re-arming moves the document's PIPELINE POSITION back to the queue; it says
+        // nothing about whether the values currently on the row can be trusted, and until trust had its own
+        // column this statement destroyed the ADR 0042 distrust signal by writing Pending over
+        // ManualRequired — so one click flipped the vendor rollup to Covered on the strength of the very
+        // extraction the system had flagged, and if the re-read then failed, nothing restored it. The trust
+        // column now rides through the re-arm untouched and is re-decided by whatever the re-read lands on
+        // (PersistSuccess) or by a human confirmation (ResolveManualReview). Adding a
+        // .SetProperty(d => d.ExtractionTrust, ExtractionTrust.Trusted) here re-opens exactly that hole.
         var rearmed = await db.Documents
             .Where(d => d.Id == id
                 && (d.ExtractionStatus != ExtractionStatus.Processing
@@ -961,17 +971,30 @@ public static class DocumentEndpoints
     // the worker's queue states and overwriting Pending would DE-QUEUE the document (ExtractionWorker
     // claims on ExtractionStatus == Pending), while Failed is its own louder error state with a
     // processing-error card. Either way the extraction path re-decides this flag when it lands.
+    //
+    // #459 / ADR 0052: this is also the one REQUEST-side writer of ExtractionTrust, and it is the human
+    // exit from the ADR 0042 coverage exclusion — for a Failed row it is the ONLY exit, since the status
+    // deliberately does not move. Trust is set from the RESULTING state, not from the status: a human
+    // vouching for the values earns Trusted, unless the unreadable-canonical-value escalation above
+    // re-raises the review, in which case the document is distrusted again on the spot. That pairing is
+    // what lets the rollup stop reading IsManuallyVerified, whose stickiness was the residue ADR 0042
+    // Amendment 2 recorded — this flag is re-decided by every later extraction, so a successful re-read
+    // followed by a terminal failure no longer reads as "a human confirmed it".
     private static void ResolveManualReview(Document doc)
     {
         var wasSettled = doc.ExtractionStatus
             is ExtractionStatus.Completed or ExtractionStatus.ManualRequired;
 
         doc.IsManuallyVerified = true;
+        doc.ExtractionTrust = ExtractionTrust.Trusted;
         if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
             doc.ExtractionStatus = ExtractionStatus.Completed;
 
         if (wasSettled && DocumentFieldReadability.HasUnreadableCanonicalValue(doc))
+        {
             doc.ExtractionStatus = ExtractionStatus.ManualRequired;
+            doc.ExtractionTrust = ExtractionTrust.Distrusted;
+        }
     }
 
 

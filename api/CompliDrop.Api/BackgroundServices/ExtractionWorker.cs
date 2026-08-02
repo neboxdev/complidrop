@@ -390,6 +390,14 @@ public class ExtractionWorker(
         if (doc.FailedAttempts >= MaxAttempts)
         {
             doc.ExtractionStatus = ExtractionStatus.Failed;
+            // TERMINAL failure ⇒ distrusted (#459 / ADR 0052), the durable form of ADR 0042 Amendment 2's
+            // premise: an extraction the system could not COMPLETE is at least as untrustworthy as one it
+            // distrusted, and nothing here touches the fields, the ComplianceCheck rows or the stored
+            // verdict — so whatever read them last is still the basis. Written on the TERMINAL arm only:
+            // while retries remain the document is merely back in the queue, its basis unchanged, and
+            // distrusting a good prior read over one transient hiccup would sink a legitimately-covered
+            // vendor for the length of the retry cycle.
+            doc.ExtractionTrust = ExtractionTrust.Distrusted;
         }
         else
         {
@@ -457,6 +465,10 @@ public class ExtractionWorker(
         CancellationToken ct)
     {
         doc.ExtractionStatus = ExtractionStatus.Failed;
+        // Terminal, so distrusted — same rule and same reason as RecordFailedAttempt's terminal arm
+        // (#459 / ADR 0052). Every writer of ExtractionStatus.Failed pairs it with Distrusted; a Failed
+        // row that reads Trusted can only come from a human confirmation AFTER the failure.
+        doc.ExtractionTrust = ExtractionTrust.Distrusted;
         doc.ProcessingError = Clamp($"{code}: {message}", ProcessingErrorMaxLength);
         doc.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -644,7 +656,7 @@ public class ExtractionWorker(
         // expiration date, the additional-insured party). So if ANY verdict-bearing field the model
         // actually returned came back below the SAME threshold, route the document to a human regardless
         // of the average, rather than let an extraction the system itself distrusts grade and roll up as
-        // "Covered" (VendorEndpoints.ComputeCoverage drops a ManualRequired doc from in-force coverage).
+        // "Covered" (VendorEndpoints.ComputeCoverage drops a Distrusted doc from in-force coverage).
         // An ABSENT field never trips this (only a present-but-low-confidence one): the model omits what
         // it can't find, and a missing required field is the rule engine's concern, not the gate's.
         var hasLowConfidenceVerdictField = extraction.Fields.Any(f =>
@@ -655,12 +667,19 @@ public class ExtractionWorker(
         // model's own reprocess signal; and an unreadable canonical value (#383) — a confidently-read
         // date/amount in a shape we can't parse fires none of the other three yet leaves a
         // compliance-critical column silently null.
-        doc.ExtractionStatus = avgConf < ManualReviewConfidenceThreshold
-                || hasLowConfidenceVerdictField
-                || extraction.NeedsReprocessing
-                || unreadableFields.Length > 0
-            ? ExtractionStatus.ManualRequired
-            : ExtractionStatus.Completed;
+        var distrusted = avgConf < ManualReviewConfidenceThreshold
+            || hasLowConfidenceVerdictField
+            || extraction.NeedsReprocessing
+            || unreadableFields.Length > 0;
+
+        // ONE boolean, TWO columns (#459 / ADR 0052). Pipeline POSITION and extraction TRUST used to be
+        // the same column, so Reextract's re-arm to Pending erased the distrust and nothing restored it.
+        // This read is what establishes the document's current basis, so it decides BOTH — and it is the
+        // only writer that can restore trust without a human: a clean re-read of a previously-distrusted
+        // document earns Trusted back here, which is what stops the flag being sticky the way
+        // IsManuallyVerified was (ADR 0042 Amendment 2's recorded residue).
+        doc.ExtractionStatus = distrusted ? ExtractionStatus.ManualRequired : ExtractionStatus.Completed;
+        doc.ExtractionTrust = distrusted ? ExtractionTrust.Distrusted : ExtractionTrust.Trusted;
         if (unreadableFields.Length > 0)
             logger.LogWarning(
                 "Document {DocumentId} returned {Count} canonical field(s) we could not parse ({Fields}); routed to manual review",
