@@ -461,9 +461,13 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         // last-writer-wins BY DECISION (ADR 0030 Amendment 1: an entity-level token there costs a
         // re-paid OCR + LLM run) and it writes the whole tuple in one go, for every input it EXTRACTS.
         // The double below is faithful to THAT: it writes the inputs it changes plus the verdict they
-        // imply, in one SaveChanges. It does not model the worker's own stale-basis residual (anything
-        // EF sees unmodified on its minutes-old snapshot is graded from the pre-run value and never
-        // written back — #460), which is a different interleave and out of scope for this suite.
+        // imply, in one SaveChanges. It does not model the worker's own stale-basis grading (anything
+        // EF sees unmodified on its minutes-old snapshot used to be graded from the pre-run value and is
+        // never written back — #460, since closed by ADR 0030 Amendment 2 and covered by
+        // ExtractionWorkerStaleBasisTests), which is a different interleave and out of scope for this
+        // suite. The double is deliberately NOT updated to match the real worker's grading basis: what it
+        // exists to be is an UNGUARDED whole-tuple competitor, and how that competitor picks its inputs
+        // changes nothing about the 40001 this test is watching for.
         //
         // Its DocumentField handling is a hazard of its own. It DELETES every row and re-inserts, so
         // the row the guarded writer loaded and is about to UPDATE by Id no longer exists. Under READ

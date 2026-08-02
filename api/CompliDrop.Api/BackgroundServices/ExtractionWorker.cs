@@ -401,6 +401,13 @@ public class ExtractionWorker(
     /// re-asserted here: the value is this read's OWN conclusion, computed from what the model just
     /// returned, and ADR 0052 §2 says these writers own it. "Last writer wins on the whole tuple" is the
     /// intended semantics — forcing the column is what makes this writer actually be one.
+    /// <para/>
+    /// #460 has since shipped on this very method (ADR 0030 Amendment 2, see <see cref="PersistSuccess"/>),
+    /// and the two sit side by side on purpose rather than by oversight. It reads a FRESH value and writes
+    /// NOTHING back, because a vendor id or a document type is a fact a REQUEST owns and re-asserting it
+    /// would be a lost update. This writes, because trust is a fact THIS read owns and not writing it would
+    /// leave someone else's answer standing. Making the two agree — unforcing this, or forcing the verdict
+    /// inputs (ADR 0030 Amendment 2 Option G) — is a defect in whichever direction it goes.
     /// </summary>
     private static void SetTrust(SystemDbContext db, Document doc, ExtractionTrust trust)
     {

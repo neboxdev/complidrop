@@ -18,6 +18,10 @@ namespace CompliDrop.Api.Endpoints;
 /// keeps a request's committed value beside a verdict computed from the pre-run one — <c>VendorId</c>
 /// always, <c>DocumentType</c> whenever <c>CanonicalDocumentTypes.NormalizeExtracted</c> returns the
 /// stored value, any typed column whose field the model omitted (ADR 0030 Amendment 1 residual 2, #460).
+/// That half is closed by ADR 0030 Amendment 2 — NOT by widening this guard, which is refuted for the
+/// worker (a throw out of its <c>SaveChanges</c> re-pays Document AI + the LLM) — but by
+/// <c>Services/DocumentGradingBasis</c>: the worker grades a read-only prediction of the row its own
+/// commit will leave and still writes only the columns it extracted.
 /// <para/>
 /// It does not help two PARTIAL writers either: <c>UpdateFields</c> and <c>UpdateDocument</c>
 /// each rebuild the entire <c>ExtractionFields</c> JSON mirror from their own read snapshot, but EF's
