@@ -193,8 +193,10 @@ Both are defined in this repo's `.claude/agents/`.
     may have moved (a mid-read `PUT /verify` commits the opposite value). Do NOT file this as the ADR
     0030 / #460 stale-snapshot residual, and do NOT read #460's read-only grading basis (ADR 0030
     Amendment 2, which ships on the same method) as a reason to unforce this: #460 is about verdict INPUTS
-    a REQUEST owns, which is why it grades from a fresh value and writes nothing; this is the writer's
-    OWN conclusion, which ADR 0052 §2 says it owns, so it writes. Pinned by
+    a REQUEST owns, which is why it grades from a fresh value and writes no input back — it FORCES
+    `ComplianceStatus` (`ForceVerdictWrite`) for the same reason this forces trust, because a verdict, like
+    trust, is the writer's OWN conclusion, which ADR 0052 §2 says it owns. The axis is ownership, not
+    mechanism. Pinned by
     `PersistSuccess_forces_its_trust_decision_over_a_write_that_landed_mid_extraction` and
     `A_terminal_failure_forces_its_distrust_over_a_confirmation_that_landed_mid_attempt`
     (`FakeExtractionClient.DuringExtract` constructs the interleaving; do not "simplify" it away).
@@ -722,9 +724,11 @@ Both are defined in this repo's `.claude/agents/`.
       named instances fall out of the one rule and so does the next column added to `Document`.
       Re-writing it as an enumeration (a vendor-id parameter, a per-column patch) IS a real finding —
       ADR 0030 Amendment 2 Option E.
-    - The basis is READ-ONLY with respect to the TRACKED entity — nothing is copied back onto it, so the
-      worker still emits exactly the columns it emitted before. (It DOES write the basis's own `Vendor`
-      navigation; "read-only" scopes to `doc`.) Assigning a re-read input onto the tracked entity (or
+    - The basis is READ-ONLY with respect to the TRACKED entity — no basis VALUE is copied back onto it, so
+      the worker still emits exactly the verdict INPUTS it emitted before. (It DOES write the basis's own
+      `Vendor` navigation; "read-only" scopes to `doc`. And it is about inputs, not about the column count:
+      the worker DOES now force `ComplianceStatus` — see the forced-verdict bullet below.) Assigning a
+      re-read input onto the tracked entity (or
       onto its `Vendor` navigation, which EF fixup turns into the same thing) makes the worker WRITE
       that column and clobber a request that landed mid-run — a LOST UPDATE the code does not have.
       Still a real finding. So is widening the RR guard or an `xmin` token to the worker (see the first
@@ -735,7 +739,11 @@ Both are defined in this repo's `.claude/agents/`.
       reads the persist's `UPDATE "Documents"` SET clause off the host's EF command log (the
       `Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read` shape) and requires
       `"VendorId" =` / `"DocumentType" =` / `"GeneralLiabilityLimit" =` absent with `"ExtractionStatus" =`
-      present as the anti-no-op; `A_write_that_lands_AFTER_the_basis_read_is_not_clobbered_by_the_persist`
+      present as the anti-no-op. The statement it reads is picked by `"ExtractionCompletedAt"`, a column
+      only the SUCCESS path writes — with `"ExtractionStatus"` as the picker, `RecordFailedAttempt` /
+      `MarkFailed`'s UPDATE satisfied all four assertions, so a THROWN persist passed. Weakening that
+      discriminator (or dropping the `ExtractionStatus == Completed` sanity assertion beside it) makes the
+      pin vacuous again. `A_write_that_lands_AFTER_the_basis_read_is_not_clobbered_by_the_persist`
       drives a competing PATCH from inside the worker's own `SavingChanges` through the test harness's
       `ConcurrentSystemWriteInterceptor` (the `SystemDbContext` twin of the #366 hook — a SEPARATE
       singleton on purpose, since `IAuditLogger` saves on `SystemDbContext` during ordinary requests).
@@ -759,6 +767,19 @@ Both are defined in this repo's `.claude/agents/`.
       `SetTrust` makes the worker's OWN conclusion durable (ADR 0052 §2 says it owns it); #460 is about
       verdict INPUTS a REQUEST owns. Forcing those is Amendment 2 Option G, refuted. Blurring the
       distinction in either direction is a defect.
+    - The VERDICT itself is on the `SetTrust` side of that line, and `ExtractionWorker.ForceVerdictWrite`
+      writes it accordingly — `IsModified` on `ComplianceStatus` after the try/catch, so BOTH the graded
+      verdict and the degrade-to-`Pending` land. Removing it, or narrowing it to one arm, IS a real
+      finding: `ApplyEvaluationAsync` only ASSIGNS, and a verdict EQUAL to the minutes-old snapshot emits
+      no SET clause while the `ComplianceCheck` rows are rewritten unconditionally and `UpdatedAt` keeps
+      the UPDATE running — so a mid-read PATCH's verdict survives beside this read's inputs and this
+      read's checks (strict→lenient reassignment, recomputed `NonCompliant` == the pre-run value, row
+      commits `Compliant` over a lowered limit and a FAILING check row; the catch arm's twin is a
+      `Pending` snapshot swallowing the degrade). Equally a finding in the other direction: extending the
+      force to a verdict INPUT is Option G, and extending it to the REQUEST-path callers contradicts
+      Amendment 1, whose `REPEATABLE READ` exists so a stale-basis UPDATE is REFUSED rather than forced.
+      Pinned per arm by `A_verdict_equal_to_the_stale_snapshot_is_still_WRITTEN_over_a_competitors` (SET
+      clause AND terminal tuple) and `A_failing_basis_read_degrades_the_verdict_without_requeuing_the_extraction`.
     - Grading the freshly-read row WHOLESALE is not a simplification of this, it is Option F and it is
       wrong in the false-affirmative direction: it discards the worker's own extraction, so a re-read
       that LOWERS a limit gets graded against the value the row is about to lose. Pinned by
@@ -766,8 +787,16 @@ Both are defined in this repo's `.claude/agents/`.
     - The basis read sits INSIDE `PersistSuccess`'s degrade-to-`Pending` `try` deliberately — it must
       never become a new way for the persist to THROW — and a `null` basis falls back to grading the
       tracked entity. Hoisting it out of the `try`, or making the null case throw, IS a real finding.
-      Pinned by `A_document_deleted_mid_extraction_persists_without_a_second_extraction` (which also
-      reassigns the vendor before deleting, so its verdict says WHICH branch ran).
+      Pinned by `A_failing_basis_read_degrades_the_verdict_without_requeuing_the_extraction`, which faults
+      the read's own `SELECT` through the test harness's `SystemCommandFaultInterceptor` (an
+      `IDbCommandInterceptor` on `SystemDbContext`, callback-armed like the two hooks above, self-disarming
+      after one fire) and requires the row to end `Completed` + `Pending` with `FailedAttempts` still 0
+      rather than back in the queue. That pin had to be BUILT: what
+      `A_document_deleted_mid_extraction_persists_without_a_second_extraction` pins is that a mid-run SOFT
+      delete lands as an ordinary completed persist through the NON-null branch (it also reassigns the
+      vendor first, so its verdict says which branch ran) — its basis read never fails and never returns
+      null, so hoisting the read left the whole suite green. A HARD delete is not an alternative pin: the
+      persist's own UPDATE would then throw for an unrelated reason.
     - `null` means a HARD delete, not "deleted mid-run". `GetDatabaseValues` issues an
       `AsNoTracking().IgnoreQueryFilters()` key lookup, so the SOFT delete every API path performs still
       yields a basis and the document is still graded as the row the commit leaves; no production path

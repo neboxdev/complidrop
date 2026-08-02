@@ -83,10 +83,11 @@ This is **not** the [ADR 0030](0030-compliance-verdict-combined-unit-of-work.md)
 ([#460](https://github.com/neboxdev/complidrop/issues/460)) and must not be filed under it. That residual is
 about a writer *grading from* verdict INPUTS the row has moved on from and re-asserting them; nothing is
 re-asserted here. ADR 0030 Amendment 2 has since closed #460 on this very method, and the contrast is the
-clearest statement of the boundary: it grades a freshly-read basis and writes NOTHING back, because those
-inputs belong to a request; this forces its column, because trust is this read's own conclusion. A change
-that makes the two consistent with each other — unforcing this, or forcing the verdict inputs — is a defect
-in whichever direction it goes. The value is this read's own conclusion, computed from what the model just returned, and
+clearest statement of the boundary, and it is a boundary of OWNERSHIP rather than of mechanism: Amendment 2
+grades a freshly-read basis and writes no verdict INPUT back, because those inputs belong to a request —
+while FORCING `ComplianceStatus` exactly as this forces `ExtractionTrust`, because the verdict, like trust,
+is this read's own conclusion. A change that makes the two consistent along the wrong axis — unforcing
+either conclusion, or forcing an input — is a defect in whichever direction it goes. The value is this read's own conclusion, computed from what the model just returned, and
 the table above says these writers own it — "last writer wins on the whole tuple" is the intended
 semantics, and forcing the column is what makes this writer actually be one.
 
