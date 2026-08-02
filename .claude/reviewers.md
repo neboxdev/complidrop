@@ -222,12 +222,24 @@ Both are defined in this repo's `.claude/agents/`.
     (`A_FAILED_extraction_a_human_confirmed_reads_Covered_again`,
     `A_vendor_whose_only_cert_is_a_FAILED_extraction_reads_ActionNeeded_not_Covered`).
   - `Pending`/`Processing` are still not excluded BY STATUS — the clause cannot see the status. An
-    in-flight doc is excluded only if it was ALREADY distrusted, i.e. already excluded the instant
-    before the re-arm, so ADR 0042 Amendment 2's carve-out keeps its actual protection (pinned:
+    in-flight doc is excluded exactly when it is `Distrusted`, and TWO paths reach that (round 2 of the
+    #459 review corrected this bullet: the second one used to be unreachable, so the record said the
+    exclusion was continuous "by construction"). (1) It was ALREADY distrusted and the re-arm carried the
+    distrust through — the queue writers leave trust alone, so it read ActionNeeded the instant before the
+    click. (2) `ResolveManualReview` distrusts it WHILE in flight, because trust follows READABILITY on
+    every status and only the `ManualRequired` escalation is de-queue-gated — so a `PUT /fields` /
+    `PUT /verify` leaving an unreadable canonical value on a `Pending`/`Processing` row withdraws trust
+    there too. Path 2 is a genuinely NEW mid-read demotion and it is ACCEPTED: fail-CLOSED (ADR 0040),
+    user-initiated, disclosed by the detail page's `ManualReviewCard` (which renders off
+    `unreadableFields`, not off the status), and cleared by the read the user is watching landing cleanly
+    or by a later save that leaves nothing unreadable. Pinned:
+    `A_field_save_that_leaves_an_unreadable_value_demotes_a_cert_that_is_already_in_flight`. ADR 0042
+    Amendment 2's carve-out keeps its actual protection either way — an ordinary re-extract of a TRUSTED
+    doc stays Covered throughout (pinned:
     `A_trusted_cert_being_re_extracted_stays_Covered_for_the_whole_in_flight_window`). Amendment 2's
     OLD assertion that a re-armed DISTRUSTED doc reads Covered in flight was reversed deliberately
     in Amendment 3 — do not "restore" it, and do not read the reversal as licence to exclude
-    in-flight statuses.
+    in-flight statuses BY STATUS.
   - The migration is ADDITIVE and its BACKFILL is a decision, not a default: it reproduces the
     pre-#459 read predicate verbatim (`ManualRequired`, or `Failed AND NOT IsManuallyVerified`) so
     no row excluded before the deploy is re-covered after it. "Just default everything to Trusted"

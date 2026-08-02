@@ -192,15 +192,28 @@ throw on materialization.
     and `ResolveManualReview` only withdraws trust on a row whose status it simultaneously raises to
     `ManualRequired` — or cannot move at all.
 
-- **A bounded in-flight window where the rollup demotes and no document surface says why.** Distinct from
-  the deploy residue above and a consequence of Amendment 3 itself: a re-armed DISTRUSTED document sits at
-  `Pending`/`Processing` + `Distrusted`, so the vendor reads Action needed while the extraction badge reads
-  `Reading…` rather than `Needs your review`. Same disclosure premise, same gap — but unlike the fail-closed
-  twin it is bounded by one poll and self-heals the moment the read lands, and the direction is the safe
-  one (the document read Action needed the instant before the click, and the user is watching the read they
-  just started). Accepted for those reasons rather than by surfacing trust on the wire, which is the
-  frontend change this decision declines. Reachable from the sequence pinned by
-  `A_distrusted_cert_that_is_re_extracted_and_then_fails_terminally_still_reads_ActionNeeded`.
+- **A bounded in-flight window where the rollup demotes and the extraction badge does not say why.**
+  Distinct from the deploy residue above and a consequence of Amendment 3 itself: a document at
+  `Pending`/`Processing` + `Distrusted` makes its vendor read Action needed while the extraction badge reads
+  `Reading…` rather than `Needs your review`, because the `ManualRequired` escalation is de-queue-gated and
+  the badge is the status. Bounded by one poll and self-healing the moment the read lands. **Two paths reach
+  it, and only the first is continuous** (the second was added by this review's round-1 fix and this bullet
+  was corrected in round 2 to name it):
+
+  - **A re-armed DISTRUSTED document.** The queue writers leave trust alone, so it read Action needed the
+    instant before the click and the user is watching the read they just started. Reachable from the
+    sequence pinned by
+    `A_distrusted_cert_that_is_re_extracted_and_then_fails_terminally_still_reads_ActionNeeded`.
+  - **A save that leaves an unreadable canonical value on an in-flight row.** `ResolveManualReview` decides
+    trust from readability on EVERY status, so a `PUT /fields` / `PUT /verify` can withdraw trust at
+    `Pending`/`Processing` — a NEW demotion, not a continuation, so the "it read Action needed the instant
+    before" clause does not cover it. Accepted anyway: it is fail-CLOSED (ADR 0040), user-initiated one
+    request earlier, and the detail page's `ManualReviewCard` DOES name the unreadable field, because it
+    renders off `unreadableFields` rather than off the extraction status. Pinned by
+    `A_field_save_that_leaves_an_unreadable_value_demotes_a_cert_that_is_already_in_flight`.
+
+  Accepted for those reasons rather than by surfacing trust on the wire, which is the frontend change this
+  decision declines.
 
 ### Neutral
 

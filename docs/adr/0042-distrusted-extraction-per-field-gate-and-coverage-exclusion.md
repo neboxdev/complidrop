@@ -270,13 +270,28 @@ a demotion may stay confined to the rollup (ADR 0052 Option F).
 - **The in-flight carve-out is REVERSED for distrusted documents.** Amendment 2 asserted, with a test, that a
   re-armed distrusted document reads **Covered** while the re-read is in flight. It now reads
   **ActionNeeded**, and the test's middle assertion was updated to match. That is not a widening of the
-  status clause — the clause cannot see the status at all. An in-flight document is excluded only if it was
-  ALREADY distrusted, which by construction means it was already excluded the instant before the re-arm:
-  every writer of `Distrusted` writes it onto a settled `ManualRequired`/`Failed` row, and every queue writer
-  (`Reextract`, `RecordFailedAttempt`'s retry arm, `RequeueInterruptedAsync`) leaves trust alone. The
-  carve-out's stated rationale — *"excluding in-flight statuses would drop every legitimately-compliant
-  vendor to ActionNeeded during any ordinary re-extract"* — is fully intact and separately pinned: an
-  ordinary re-extract of a **trusted** document keeps its vendor Covered at `Pending` and at `Processing`.
+  status clause — the clause cannot see the status at all. An in-flight document is excluded exactly when it
+  is `Distrusted`, and **two** paths reach that state (this paragraph originally named only the first, and
+  was corrected in round 2 of the #459 review — the second path did not exist when it was written):
+
+  1. **It was already distrusted and the re-arm carried the distrust through.** Every queue writer
+     (`Reextract`, `RecordFailedAttempt`'s retry arm, `RequeueInterruptedAsync`) leaves trust alone, so the
+     document read ActionNeeded the instant before the click. This exclusion is *continuous*.
+  2. **`ResolveManualReview` distrusts it while it is in flight.** Trust follows READABILITY on **every**
+     status — only the escalation back to `ManualRequired` is gated on the document having been settled,
+     because only that write could de-queue it — so a `PUT /fields` or `PUT /verify` that leaves an
+     unreadable canonical value on a `Pending`/`Processing` row withdraws trust there too. This is a
+     genuinely NEW mid-read demotion and it is **accepted**: it is fail-CLOSED (ADR 0040 — a value nothing
+     can parse must not roll up as Covered), it is user-initiated one request earlier, and it is disclosed —
+     the detail page's `ManualReviewCard` names the unreadable field, rendering off `unreadableFields`
+     rather than off the extraction status. It clears when the read the user is watching lands cleanly
+     (`PersistSuccess` re-decides trust) or when a later save leaves nothing unreadable. Pinned by
+     `A_field_save_that_leaves_an_unreadable_value_demotes_a_cert_that_is_already_in_flight`.
+
+  The carve-out's stated rationale — *"excluding in-flight statuses would drop every legitimately-compliant
+  vendor to ActionNeeded during any ordinary re-extract"* — is fully intact under both paths and separately
+  pinned: an ordinary re-extract of a **trusted** document keeps its vendor Covered at `Pending` and at
+  `Processing`, because nothing in the queue path touches trust.
 
 **One new residue, recorded in ADR 0052 § Consequences:** during a Railway deploy overlap the OLD container
 can write `ManualRequired`/`Failed` without writing trust, leaving a distrusted document reading `Trusted`

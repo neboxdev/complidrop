@@ -171,13 +171,25 @@ public static class VendorEndpoints
             // ADR 0042 Amendment 2 recorded and this closes).
             //
             // Pending/Processing are still not excluded BY THEIR STATUS -- the clause cannot see the status
-            // at all. An in-flight document is excluded only if it was ALREADY distrusted, which by
-            // construction means it was already excluded before the re-arm: every writer of Distrusted
-            // writes it onto a settled ManualRequired/Failed row, and the queue writers (Reextract,
-            // RecordFailedAttempt's retry arm, RequeueInterruptedAsync) leave trust alone. So an ordinary
-            // re-extract of a trusted document keeps its vendor Covered throughout, which is what ADR 0042
-            // Amendment 2's carve-out was protecting; what changes is that a re-read of a DISTRUSTED
-            // document no longer buys a clean bill of health for the length of the read (ADR 0042 Am. 3).
+            // at all. An in-flight document is excluded exactly when it is Distrusted, and there are TWO
+            // ways it can be (#459 review round 2 -- the second one used to be impossible, which is why
+            // this comment claimed the exclusion was continuous "by construction"):
+            //   1. It was ALREADY distrusted and the re-arm carried the distrust through. The queue writers
+            //      (Reextract, RecordFailedAttempt's retry arm, RequeueInterruptedAsync) leave trust alone,
+            //      so the document read ActionNeeded the instant before the click -- continuous.
+            //   2. It is distrusted WHILE in flight, by ResolveManualReview: trust follows READABILITY on
+            //      every status (only the escalation back to ManualRequired is de-queue-gated), so a
+            //      PUT /fields or PUT /verify that leaves an unreadable canonical value on a Pending/
+            //      Processing row withdraws trust there too. That IS a new mid-read demotion, and it is
+            //      the intended one: fail-CLOSED per ADR 0040 and user-initiated, with the detail page
+            //      naming the field to correct (ManualReviewCard renders off unreadableFields, not off the
+            //      status). It clears when the read the user is watching lands cleanly, or when a later
+            //      save leaves nothing unreadable. Pinned by
+            //      A_field_save_that_leaves_an_unreadable_value_demotes_a_cert_that_is_already_in_flight.
+            // What is unchanged is the protection ADR 0042 Amendment 2's carve-out actually exists for: an
+            // ordinary re-extract of a trusted document keeps its vendor Covered throughout, because
+            // nothing in the queue path touches trust. What Amendment 3 changed is that a re-read of a
+            // DISTRUSTED document no longer buys a clean bill of health for the length of the read.
             //
             // #443 / ADR 0048: a doc NOTHING EVER GRADED (zero ComplianceCheck rows -- no checklist, an
             // empty checklist, or a checklist whose rules all govern other document types, which is
