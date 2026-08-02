@@ -733,8 +733,11 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             "a clean read of the document is exactly what makes its values trustworthy again");
     }
 
-    [Fact]
-    public async Task Trust_survives_a_retry_and_is_withdrawn_only_when_the_failure_is_terminal()
+    [Theory]
+    [InlineData(ExtractionTrust.Trusted)]
+    [InlineData(ExtractionTrust.Distrusted)]
+    public async Task Trust_survives_a_retry_and_is_withdrawn_only_when_the_failure_is_terminal(
+        ExtractionTrust seeded)
     {
         // RecordFailedAttempt writes trust on its TERMINAL arm only. While retries remain the document is
         // merely back in the queue and its basis is unchanged — whatever read it last still stands — so
@@ -742,7 +745,17 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         // of the retry cycle, the same over-reach ADR 0042 Amendment 2's Pending/Processing carve-out
         // refused. Once the budget is spent, though, the read the user asked for will never happen, and an
         // extraction the system could not COMPLETE is at least as untrustworthy as one it distrusted.
-        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        //
+        // BOTH seeds, because "the retry arm leaves trust alone" has two failure directions and only one of
+        // them is dangerous (#459 review round 2). Seeded Trusted this asserted the helper's own default, so
+        // the arm that RESTORES trust — a retry writing `Trusted` explicitly, which is the #459 regression
+        // in miniature: a distrusted document silently returned to Covered by one transient hiccup — could
+        // never redden it. The Distrusted case is the discriminating one; its two sibling non-writer pins
+        // (Reextract_re_arms_the_queue_without_clearing_the_distrust, Graceful_shutdown_mid_attempt_
+        // requeues_without_counting_a_failure) seed Distrusted for exactly this reason. Keep both: the
+        // Trusted case is what keeps the TERMINAL assertion below discriminating, since a row seeded
+        // Distrusted would read Distrusted at the end however the terminal arm behaved.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m, extractionTrust: seeded);
         Extraction.ThrowOnExtract = true;
         var worker = BuildWorker();
 
@@ -751,8 +764,9 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         await worker.ProcessDocumentAsync(firstClaim!.Value, CancellationToken.None);
         var afterOne = await GetDocAsync(docId);
         afterOne.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "the budget is not spent yet");
-        afterOne.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
-            "a requeued attempt says nothing about the values already on the row");
+        afterOne.ExtractionTrust.Should().Be(seeded,
+            "a requeued attempt says nothing about the values already on the row — neither the retry arm "
+            + "nor ClaimNextAsync's raw ClaimSql may move trust in EITHER direction");
 
         // …then spend the rest of the budget.
         for (var i = 1; i < ExtractionWorker.MaxAttempts; i++)
