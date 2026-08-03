@@ -424,10 +424,12 @@ public class ExportService(SystemDbContext db) : IExportService
     /// It counts DISTINCT RULES, not check rows, and that difference is load-bearing for the one caller
     /// that PRINTS the number: the CSV's <c>RequirementsChecked</c> column (#468 review). ADR 0030
     /// § Consequences accepts that a document can transiently hold BOTH writers' check rows after a
-    /// concurrent re-grade — two rows citing the SAME rule — and that residue is scoped there as a
-    /// detail-page display desync, where the count and the list the user is reading agree. An auditor's CSV
-    /// has no list beside it, so a raw row count would state "2 requirements checked" against a checklist
-    /// holding exactly one rule, which is a claim about the evidence rather than a rendering artifact.
+    /// concurrent re-grade — two rows citing the SAME rule — and scopes that residue to DISPLAY, which
+    /// ADR 0030 Amendment 4 had to correct at BOTH read sites that turn it into an assertion (the detail
+    /// page reconciles the rows against the standing verdict; this column counts rules). An auditor's CSV
+    /// carries no list of rows beside the number, so a raw row count would state "2 requirements checked"
+    /// against a checklist holding exactly one rule — a claim about the evidence rather than a rendering
+    /// artifact, on the artifact where reliance forms.
     /// <para/>
     /// Every OTHER consumer of this map reads it through <see cref="DocumentGrading.IsGraded(int)"/>, whose
     /// only question is <c>&gt; 0</c> — and the distinct count is zero exactly when the row count is — so

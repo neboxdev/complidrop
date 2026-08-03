@@ -383,7 +383,14 @@ Both are defined in this repo's `.claude/agents/`.
     list beside it in the CSV a raw count would tell an auditor "2 requirements checked" against a
     one-rule checklist. Reverting it to `.ComplianceChecks.Count` IS a real finding; it is also invisible
     to every other consumer, since `DocumentGrading.IsGraded` asks only `> 0` and the distinct count is
-    zero exactly when the row count is. Each PDF's rows go through its OWN `internal` seam carrying its
+    zero exactly when the row count is — a property that holds because `ComplianceCheck.ComplianceRuleId`
+    is a non-nullable `Guid` (SQL `COUNT(DISTINCT col)` drops NULLs), and that is now the FOURTH leg of
+    `NeverGradedCoverageTests.The_SQL_grading_predicate_agrees_with_the_in_memory_one_and_with_the_check_rows`
+    rather than an unwritten premise. THREE spellings of the graded fact ship, not two —
+    `DocumentGrading`'s remarks enumerate them; a doc or comment still saying "exactly two" is stale.
+    `ExportEndpointsTests.Csv_RequirementsChecked_counts_the_DISTINCT_rules_a_document_was_measured_against`
+    is the only assertion in the suite where this column is not 0 or 1, i.e. the only one that can tell it
+    apart from a boolean — deleting it lets `Any() ? 1 : 0` pass. Each PDF's rows go through its OWN `internal` seam carrying its
     OWN check-count read — `AuditReportRowsAsync` and `VendorPackageLinesAsync` — because a `%PDF` smoke
     test can't tell a wired-up count map from an empty one (empty annotates EVERY row; a dropped
     annotation certifies a doc nothing graded), and neither is visible in the FlateDecode bytes. Inlining
@@ -914,8 +921,12 @@ Both are defined in this repo's `.claude/agents/`.
       is NOT dead: its own check-row writers run under `REPEATABLE READ`, where the same interleave is a
       `40001` the re-run answers, but the BATCHED fan-out keeps `READ COMMITTED` and reaches it — where it
       used to forfeit a whole page of unrelated re-grades. Unobservable through the RR writers, so it is
-      pinned directly by `The_same_tolerance_applies_on_the_request_path_context`; dropping that
-      registration is otherwise invisible.
+      pinned by `The_same_tolerance_applies_on_the_request_path_context` (the mechanism, on a two-command
+      batch) AND by `A_batched_fan_out_page_commits_its_re_grades_through_an_orphaned_check_row` (#468
+      review S5 — a real rule edit fanning out over a two-document page, which is the only place the
+      per-command attribution the `Entries.All(IsCheckRowDelete)` guard depends on is exercised against a
+      MIXED batch of `Document` UPDATEs + check DELETEs + check INSERTs). Dropping the registration is
+      otherwise invisible.
     - The suppression's TRACE is one WARNING per `SaveChanges` plus one DEBUG line per row, and that split
       is deliberate (#468 review). The hook runs once per ORPHANED ROW — EF/Npgsql attributes a
       rows-affected mismatch to the single modification command that produced it, which is the same
@@ -925,22 +936,66 @@ Both are defined in this repo's `.claude/agents/`.
       `A_save_that_loses_many_check_rows_warns_ONCE_for_the_whole_unit_of_work` (three orphans, one
       warning, three Debug lines) and by the count assertion in the #468 interleave test. Ids only, never
       `ActualValue`/`Notes` — those carry extracted document content.
+    - The tally is keyed on the `DbContext` (a `ConditionalWeakTable`), NOT instance fields, and it flushes
+      from ALL THREE endings EF has — completed, failed and CANCELED (#468 review S2/S7). Neither is
+      polish. Instance fields are correct only because `DbContextOptions` happens to be scoped, so a
+      singleton registration (or one instance handed to both contexts) would merge two units of work and
+      make the aggregate the line CLAIMS to carry a lie; and a canceled save's tally is never "dropped by
+      the next save's reset" because the worker disposes its scope the moment the persist returns, while
+      Npgsql can observe a cancellation AFTER the batch reached the server. Re-inlining either IS a real
+      finding; pinned by `Two_contexts_sharing_ONE_interceptor_each_report_their_OWN_suppression` (an
+      INTERLEAVE — two sequential saves pass either way) and
+      `A_save_CANCELED_after_its_batch_still_reports_the_suppression`.
     - `IntegrationTestBase.CreateSystemDb` / `CreateAppDb` wire this interceptor BESIDE
       `AuditSaveChangesInterceptor`, so a harness-built context matches production. Not optional
       politeness: without it a test written through the ubiquitous helper silently gets different
       `SaveChanges` semantics from the code it is about, and a future reproduction of #468 driven through
       it would see the pre-fix throw and call the bug live. The NEXT interceptor is covered mechanically by
       `HarnessSmokeTests.The_db_helpers_wire_every_save_interceptor_the_application_wires`, which compares
-      the application-assembly interceptor types on the DI-resolved context against the helper's.
-    - KNOWN residue, ADR 0030 § Consequences — do not re-report: the competing re-grade's own check rows
-      are already committed when this writer's inserts land, so the document can transiently hold BOTH
-      sets. That is the display desync the ADR always described, now the whole residue of this window
-      instead of a thrown persist, and it is pinned as such in the regression test. A unique index on
-      `(DocumentId, ComplianceRuleId)` to stop it is Option O, refuted — it turns the residue into a 23505
-      out of the persist, i.e. the money-burning loop from a third direction. DISPLAY is the whole scope,
-      and one surface had to move to make that true: the ADR 0048 `RequirementsChecked` CSV column is the
-      only read site that PRINTS this number, so `ExportService.CheckCountsAsync` counts DISTINCT RULES —
-      "simplify it back to `.ComplianceChecks.Count`" IS a real finding (see the ADR 0048 block).
+      the application-assembly interceptor types on the DI-resolved context against the helper's — and
+      asserts the application side CONTAINS both wired types first, because two empty sets satisfy
+      `BeEquivalentTo` exactly when the reflection seam has stopped seeing anything (#468 review S4).
+      Deleting that precondition IS a real finding.
+    - KNOWN residue, ADR 0030 § Consequences — do not re-report the DUPLICATE ROWS themselves: the
+      competing re-grade's own check rows are already committed when this writer's inserts land, so the
+      document can transiently hold BOTH sets. That is the display desync the ADR always described, now the
+      whole residue of this window instead of a thrown persist, and it is pinned as such in the regression
+      test. Amendment 4 WIDENS it (pre-diff the worker threw rather than committing a mixed set onto an
+      already-graded document), which is why the read sites were re-examined rather than inherited. A
+      unique index on `(DocumentId, ComplianceRuleId)` to stop it is Option O, refuted — it turns the
+      residue into a 23505 out of the persist, the money-burning loop from a third direction.
+    - DISPLAY is the whole scope, and TWO read sites had to move to make that true. Both are real findings
+      to undo:
+      - the ADR 0048 `RequirementsChecked` CSV column is the only read site that PRINTS this number, so
+        `ExportService.CheckCountsAsync` counts DISTINCT RULES — "simplify it back to
+        `.ComplianceChecks.Count`" IS a real finding (see the ADR 0048 block);
+      - the document detail page reconciles the rows against the standing verdict before EITHER verdict
+        card reads them (`renderedChecks` in `frontend/src/app/(dashboard)/documents/[id]/page.tsx`, #468
+        review round 2). Round 1 justified leaving it alone by asserting the "{n} other requirements met"
+        line "counts what it just listed"; that sentence was FALSE and is retracted in the ADR — the line
+        lives in `NonComplianceExplainer`, counts the PASSED rows, and `WhatWeCheckedCard` returns null
+        the moment any check fails, so in the state where the number prints there is no list beside it.
+        Three properties of the reconciliation, each load-bearing:
+        - it de-duplicates per `complianceRuleId`, so a one-rule checklist can never read "1 other
+          requirement met." beside the single failure it just listed;
+        - it drops rows CONTRADICTING an affirmative verdict, because the cards read `complianceChecks`
+          while the badge reads `complianceStatus` — a stale losing-writer FAILED row otherwise printed
+          "Why isn't this compliant?" plus an "Email {vendor} to fix this" mailto on a Compliant document,
+          and an outbound message to a third party is not "display";
+        - the anchor is the VERDICT, never `checkedAt`. "Keep the newest row" IS the plausible-looking
+          wrong fix: `CheckedAt` is stamped at GRADING time and the winning writer graded FIRST and
+          committed LAST, so newest-wins keeps the LOSER — and in the mirror case hides a live failure
+          behind a stale passing row. The failing row is preferred wherever the verdict is not affirmative
+          for that reason.
+        It does NOT violate the ADR 0040 / 0048 / 0049 no-re-derivation rules and "make the backend send
+        it" is not the fix here: those facts (`unreadableFields`, the never-checked CAUSE,
+        `fieldValueTruncated`) come from the server because the page cannot know them, whereas this is
+        arithmetic over rows already on the page plus the verdict already on the payload.
+      - `frontend/src/test/fixtures.ts`'s `makeComplianceCheck` derives `complianceRuleId` from an
+        overridden `id` for the same reason — two rows with different ids are two requirements, and a
+        multi-check fixture silently sharing the base rule id would now collapse to one rendered
+        requirement and assert nothing. Spelling `complianceRuleId` explicitly is how a test states the
+        duplicate-row residue.
   - NO frontend change: the 409's message is already jargon-free copy that both call sites surface
     through their generic `err.message` toast. This is NOT the ADR 0050 Amendment 1 situation (there
     the client held a payload that actively CONTRADICTED the 409); here the user's edits survive in the

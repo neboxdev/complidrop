@@ -220,10 +220,12 @@ artifacts so they cannot diverge, and each surface discloses in its own establis
 This column is the only surface that PRINTS the number instead of thresholding it at zero, and
 [ADR 0030](0030-compliance-verdict-combined-unit-of-work.md) § Consequences accepts that a concurrent
 re-grade can leave a document holding BOTH writers' check rows — two rows citing the same rule. That
-residue is scoped there as a detail-page display desync, where the count and the list of rows the reader
-is looking at agree; an auditor's CSV has no such list beside it, so a raw row count would state "2
+residue is scoped there as a DISPLAY desync, and ADR 0030 Amendment 4 had to correct both read sites
+that turned it into an assertion: the detail page now reconciles the rows against the standing verdict
+before rendering them, and this column counts distinct rules. A raw row count here would state "2
 requirements checked" against a checklist holding exactly one rule — a claim about the EVIDENCE rather
-than a rendering artifact, and the export is precisely where reliance forms. Counting distinct rules
+than a rendering artifact, and the export is precisely where reliance forms, with no list of rows beside
+the number for a reader to reconcile it against. Counting distinct rules
 leaves everything else byte-identical: `IsGraded` asks only `> 0`, and the distinct count is zero exactly
 when the row count is, so the two PDFs' annotation, the demoted verdict, and every `d.ComplianceChecks
 .Any()` read site are unmoved. Pinned against the real doubled state by
