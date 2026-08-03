@@ -1146,7 +1146,8 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
     /// </summary>
     private async Task<Guid> SeedQueuedDocWithExpirationAsync(
         Guid orgId, Guid vendorId, DateTime? expirationColumn, string expirationRaw,
-        ExtractionTrust trust = ExtractionTrust.Trusted)
+        ExtractionTrust trust = ExtractionTrust.Trusted,
+        ComplianceStatus complianceStatus = ComplianceStatus.Pending)
     {
         var now = DateTime.UtcNow;
         var docId = Guid.NewGuid();
@@ -1166,7 +1167,7 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
                 DocumentType = "coi",
                 ExtractionStatus = ExtractionStatus.Pending,
                 ExtractionTrust = trust,
-                ComplianceStatus = ComplianceStatus.Pending,
+                ComplianceStatus = complianceStatus,
                 GeneralLiabilityLimit = 2_000_000m,
                 ExpirationDate = expirationColumn,
                 ExtractionFields = JsonDocument.Parse(JsonSerializer.Serialize(new Dictionary<string, string>
@@ -1561,6 +1562,107 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         (await BuildWorker().ClaimNextAsync(CancellationToken.None)).Should().BeNull(
             "the document is settled — neither Pending nor a stale Processing claim — so the next poll has "
             + "nothing to pick up");
+        Extraction.ExtractCallCount.Should().Be(1, "…and the extraction was therefore paid for exactly once");
+    }
+
+    [Fact]
+    public async Task A_failing_GRADE_still_leaves_the_trust_decision_judging_the_basis_it_already_read()
+    {
+        // #467 review, S1 — the arm no test reached: a grade that fails AFTER a successful basis read.
+        // The sibling failure test faults the BASIS READ, where `basis` is null and `basis ?? doc`
+        // collapses to the fallback, so nothing said what a document whose RECOMPUTE failed commits.
+        // Same FIXED interleave as the headline test (the row moves on under the worker and the column
+        // stays out of the UPDATE), but the fault is armed on the vendor-chain read the grade issues,
+        // which comes after the basis read on the same context.
+        //
+        // What it discriminates, measured rather than assumed. The tidy-up S1 named — `basis = null;`
+        // inside the catch — is now BEHAVIOURALLY NEUTRAL, because ReconcileCanonicalCopiesWithTheRow
+        // runs before the grade and leaves the tracked entity's raw copies agreeing with the row, so the
+        // walk gives the same answer whichever object it is handed (C1; recorded in ADR 0052 Amendment 1).
+        // The ORDER is what is load-bearing now, and it is what this test pins together with the headline
+        // one: hoisting the readability walk back ABOVE the try — S1's other named tidy-up, and the
+        // literal pre-#467 shape — makes both go red, because the pre-reconciliation snapshot still shows
+        // a null column beside the model's unparseable text.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
+        var docId = await SeedQueuedDocWithExpirationAsync(
+            auth.OrgId, vendorId, expirationColumn: null, expirationRaw: UnreadableExpiration,
+            trust: ExtractionTrust.Distrusted,
+            // Seeded AFFIRMATIVE so the Pending below is a genuine degrade rather than the value the row
+            // already held — ADR 0030's "never a confident verdict from stale inputs", in the one shape
+            // where the recompute did not run at all.
+            complianceStatus: ComplianceStatus.Compliant);
+        var corrected = FarFuture;
+        var correctedText = corrected.ToString("yyyy-MM-dd");
+
+        var fault = Fixture.Factory.Services.GetRequiredService<SystemCommandFaultInterceptor>();
+        Extraction.Result = Extracted(
+            "coi", ("general_liability_limit", "2000000"), ("expiration_date", UnreadableExpiration));
+        Extraction.DuringExtract = async () =>
+        {
+            var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+            {
+                fields = new[] { new { fieldName = "expiration_date", fieldValue = correctedText } }
+            });
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+            // The basis read is a key lookup on "Documents" and is deliberately NOT matched. The vendor
+            // chain (Vendor → ComplianceTemplate → Rules) is the grade's first read and runs on this same
+            // SystemDbContext; the request above ran on AppDbContext, so nothing it did can trip this.
+            // Self-disarms on fire.
+            fault.ShouldFault = sql => sql.Contains("FROM \"Vendors\"", StringComparison.Ordinal);
+        };
+
+        int faults;
+        try
+        {
+            await ClaimAndProcessAsync(docId);
+        }
+        finally
+        {
+            faults = fault.FaultCount;
+            fault.Reset();
+        }
+
+        faults.Should().Be(1,
+            "the GRADE really did fail — a predicate that matched nothing, or one that matched the basis "
+            + "read instead, would make every assertion below a statement about a different arm");
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.Pending,
+            "precondition + ADR 0030: a recompute that threw degrades the verdict rather than leaving the "
+            + "affirmative one this document was seeded with (and that the mid-run edit re-affirmed)");
+        var graded = await db.Documents.AsNoTracking()
+            .Include(d => d.Vendor)
+                .ThenInclude(v => v!.ComplianceTemplate)
+                    .ThenInclude(t => t!.Rules)
+            .FirstAsync(d => d.Id == docId);
+        ComplianceCheckService.ComputeOutcome(graded, DateTime.UtcNow).Status
+            .Should().Be(ComplianceStatus.Compliant,
+                "anti-no-op for the line above: the row this commit LEFT does grade to a confident "
+                + "verdict, so the Pending it carries is the degrade rather than an honest 'nothing here "
+                + "to grade' — the recompute genuinely did not run");
+
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "the extraction itself SUCCEEDED — only the verdict is unknown — so the queue position is "
+            + "settled and nothing re-reads this document");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+            "the basis was read successfully BEFORE the grade threw, and it is still the row this commit "
+            + "leaves — dropping it in the catch would put this document back at ManualRequired + "
+            + "Distrusted over a value it does not carry, which is #467 itself (ADR 0052 Amendment 1)");
+
+        (await AssertTrustAgreesWithTheRowAsync(auth.Client, docId)).Should().BeEmpty();
+
+        var rendered = await ReadRenderedFieldAsync(auth.Client, docId, "expiration_date");
+        rendered.Row.Should().Be(correctedText,
+            "the copies are reconciled from the same basis and BEFORE the grade, so a failing grade "
+            + "cannot leave the field editor showing a value the column disagrees with either");
+
+        doc.FailedAttempts.Should().Be(0, "nothing was charged against the retry budget");
+        (await BuildWorker().ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+            "the document is settled — neither Pending nor a stale Processing claim — so the next poll "
+            + "has nothing to pick up");
         Extraction.ExtractCallCount.Should().Be(1, "…and the extraction was therefore paid for exactly once");
     }
 

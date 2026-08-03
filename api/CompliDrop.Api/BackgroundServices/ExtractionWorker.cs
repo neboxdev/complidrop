@@ -885,6 +885,14 @@ public class ExtractionWorker(
     /// every basis consumer has: nothing here may become a new way for <c>PersistSuccess</c> to throw,
     /// which is a re-paid Document AI + LLM run (see <see cref="Clamp"/>). It is pure in-memory work over
     /// a dictionary and a list.
+    /// <para/>
+    /// ONE CONSEQUENCE worth recording rather than rediscovering. Once this has run,
+    /// <see cref="DocumentFieldReadability"/> gives the SAME answer for the tracked entity as for the
+    /// basis, by construction: a reconciled field's raw copy is blank or a canonical rendering, so it is
+    /// never unreadable on either, and an unreconciled one has equal typed columns on both. Amendment 1's
+    /// <c>basis ?? doc</c> below therefore states the intent and owns the FALLBACK — no basis means no
+    /// reconciliation either, i.e. the pre-#467 answer — while what the tests can still discriminate is
+    /// the ORDER: move the walk back ABOVE this call and the ticket's bug returns intact.
     /// </summary>
     private static void ReconcileCanonicalCopiesWithTheRow(
         Document doc,
