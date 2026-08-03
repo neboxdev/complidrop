@@ -132,6 +132,31 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
     }
 
     /// <summary>
+    /// Adds one more rule to <paramref name="vendorId"/>'s checklist and returns its id, so a test can
+    /// grade on a field OTHER than the money floor <see cref="SeedVendorAsync"/> writes (#467 review
+    /// round 2, S3). Needed for exactly one thing here: a canonical field whose typed column is NULL is
+    /// the only shape in which <c>ComplianceCheckService.LookupValue</c> reaches its raw-string
+    /// FALLBACK — the <c>ExtractionFields</c> mirror — which is why the reconciliation has to run before
+    /// the grade and not after.
+    /// </summary>
+    private async Task<Guid> AddRuleAsync(Guid vendorId, string documentType, string fieldName, string op)
+    {
+        var ruleId = Guid.NewGuid();
+        await using var db = CreateSystemDb();
+        var templateId = await db.Vendors
+            .Where(v => v.Id == vendorId)
+            .Select(v => v.ComplianceTemplateId)
+            .FirstAsync();
+        db.ComplianceRules.Add(new ComplianceRule
+        {
+            Id = ruleId, ComplianceTemplateId = templateId!.Value, DocumentType = documentType,
+            FieldName = fieldName, Operator = op, SortOrder = 100,
+        });
+        await db.SaveChangesAsync();
+        return ruleId;
+    }
+
+    /// <summary>
     /// A second vendor on the SAME checklist as <paramref name="twinVendorId"/>. Lets an interleave move
     /// the FK without moving the verdict, so a test can assert which vendor the row ends up pointing at
     /// without also depending on the residual window ADR 0030 Amendment 2 records as still open.
@@ -217,10 +242,21 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
     /// only thing that can move the verdict is which inputs graded it. A field ABSENT from this list is
     /// absent from the response, which is precisely how a typed column stays unmodified.
     /// </summary>
-    private static ExtractionResult Extracted(string? documentType, params (string Name, string Value)[] fields) => new(
+    private static ExtractionResult Extracted(string? documentType, params (string Name, string Value)[] fields) =>
+        ExtractedAt(documentType, [.. fields.Select(f => (f.Name, f.Value, 0.95))]);
+
+    /// <summary>
+    /// <see cref="Extracted"/> with a PER-FIELD confidence, for the one <c>ManualRequired</c> trigger the
+    /// 0.95 fixture can never reach: ADR 0042's per-verdict-bearing-field gate (#467 review round 2). That
+    /// trigger describes the READING, so it does not consult the grading basis and is not part of the
+    /// agreement invariant <see cref="AssertTrustAgreesWithTheRowAsync"/> asserts — a fixture using this
+    /// helper must therefore assert the pair directly rather than through that biconditional.
+    /// </summary>
+    private static ExtractionResult ExtractedAt(
+        string? documentType, params (string Name, string Value, double Confidence)[] fields) => new(
         DocumentType: documentType,
         DocumentSubType: null,
-        Fields: [.. fields.Select(f => new ExtractedField(f.Name, f.Value, "currency", 0.95))],
+        Fields: [.. fields.Select(f => new ExtractedField(f.Name, f.Value, "currency", f.Confidence))],
         NeedsReprocessing: false,
         Usage: new ExtractionUsage(InputTokens: 1000, OutputTokens: 200, EstimatedCostUsd: 0.01m));
 
@@ -1228,12 +1264,17 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
     /// (<c>value={edits[f.fieldName] ?? f.fieldValue ?? ""}</c>) — the <c>ExtractionFields</c> mirror
     /// entry beside it, and the row's <c>originalValue</c>, which the page prints as <i>was: …</i>.
     /// <para/>
+    /// <c>ManuallyEdited</c> and <c>Confidence</c> come along because they are what a reconciled row
+    /// NAMES ITSELF with (#467 review round 2): the page prints <c>✎ Manually edited</c> off the first
+    /// and outlines the input off the second (amber below 0.9, rose below 0.7), so a test that asserts
+    /// only the values cannot tell a corrected row from a read one.
+    /// <para/>
     /// Asserted separately from <see cref="AssertTrustAgreesWithTheRowAsync"/> because they are different
     /// claims. That one says the badge and the named cause agree; this one says the VALUES the user is
     /// shown agree with the typed column those conclusions were drawn from. A row can satisfy the first
     /// and still contradict itself on screen — which is exactly what C1 found.
     /// </summary>
-    private static async Task<(string? Row, string? Mirror, string? WasOriginally)> ReadRenderedFieldAsync(
+    private static async Task<RenderedField> ReadRenderedFieldAsync(
         HttpClient client, Guid docId, string fieldName)
     {
         var data = (await client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}"))
@@ -1248,7 +1289,12 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
             ? Text(entry)
             : null;
 
-        return (Text(field.GetProperty("fieldValue")), mirror, Text(field.GetProperty("originalValue")));
+        return new RenderedField(
+            Text(field.GetProperty("fieldValue")),
+            mirror,
+            Text(field.GetProperty("originalValue")),
+            field.GetProperty("isManuallyEdited").GetBoolean(),
+            field.GetProperty("confidence").GetDouble());
 
         static string? Text(JsonElement e) => e.ValueKind switch
         {
@@ -1257,6 +1303,9 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
             _ => e.GetRawText(),
         };
     }
+
+    private sealed record RenderedField(
+        string? Row, string? Mirror, string? WasOriginally, bool ManuallyEdited, double Confidence);
 
     [Fact]
     public async Task A_canonical_value_a_mid_run_edit_FIXED_leaves_no_review_with_nothing_to_name()
@@ -1352,8 +1401,19 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         //
         // Nothing is DISTRUSTED here, and that is the point: a cleared value is honestly ABSENT, not
         // unreadable (ADR 0040 — blank stays blank), so no review card would ever have named it.
+        //
+        // This is also the test that pins the ORDER (#467 review round 2, S3). The reconciliation runs
+        // BEFORE ApplyEvaluationAsync because the JSON mirror is a verdict input in its own right —
+        // LookupValue consults it whenever the typed column is null, which is exactly this row — and
+        // nothing pinned that: every other fixture grades on general_liability_limit, whose column is
+        // never null, so the fallback is never reached and moving the call below the grade changes no
+        // verdict anywhere. The expiration_date `required` rule below is what makes the order visible:
+        // graded FIRST it resolves the model's surviving date and PASSES; graded after the
+        // reconciliation there is nothing left to resolve and it fails, which is the answer the
+        // persisted row grades to.
         var auth = await RegisterAndLoginAsync();
         var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
+        var expirationRuleId = await AddRuleAsync(vendorId, "coi", "expiration_date", "required");
         var seeded = FarFuture;
         var seededText = seeded.ToString("yyyy-MM-dd");
         var docId = await SeedQueuedDocWithExpirationAsync(
@@ -1398,6 +1458,22 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         (await AssertTrustAgreesWithTheRowAsync(auth.Client, docId)).Should().BeEmpty(
             "an absent value is not an unreadable one, so this document is correctly NOT routed to a "
             + "human — which is precisely why the copies may not keep claiming a date instead");
+
+        // …and the ORDER, measured by the one thing that can see it: a VERDICT. ReadTerminalStateAsync
+        // has already required the stored status to equal what the PERSISTED row grades to, so grading
+        // the pre-reconciliation mirror (the model's date, which satisfies `required`) commits Compliant
+        // over a row that grades NonCompliant — a torn pair, red on that assertion alone. Restated here
+        // so the failure names the mechanism rather than a status mismatch.
+        terminal.Doc.ComplianceStatus.Should().Be(ComplianceStatus.NonCompliant,
+            "the row carries no expiration at all, so the `required` rule fails. Move "
+            + "ReconcileCanonicalCopiesWithTheRow below ApplyEvaluationAsync — the plausible 'make it "
+            + "always run' tidy-up — and LookupValue's raw fallback resolves the date the reconciliation "
+            + "was about to remove, certifying a certificate against a value the row will not hold");
+        var expirationCheck = terminal.Checks.Single(c => c.ComplianceRuleId == expirationRuleId);
+        expirationCheck.IsPassed.Should().BeFalse();
+        expirationCheck.ActualValue.Should().BeNull(
+            "the explainer row must show the user nothing where the row holds nothing — an ActualValue "
+            + "here is the mirror's stale date quoted back as evidence");
     }
 
     [Fact]
@@ -1664,6 +1740,248 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
             "the document is settled — neither Pending nor a stale Processing claim — so the next poll "
             + "has nothing to pick up");
         Extraction.ExtractCallCount.Should().Be(1, "…and the extraction was therefore paid for exactly once");
+    }
+
+    /// <summary>A SECOND unparseable spelling of the same expiration, distinct from
+    /// <see cref="UnreadableExpiration"/> so a test can tell which row kept which answer.</summary>
+    private const string UnreadableExpirationVariant = "12/31/2029 (see endorsement CG 20 26)";
+
+    [Fact]
+    public async Task One_canonical_field_answered_TWICE_still_keeps_each_rows_own_answer()
+    {
+        // #467 review round 2, C1. The reconciliation walks `fieldsDict.Keys`, and that dictionary is
+        // keyed ORDINALLY (it is built straight from the response), while the staged-row match is
+        // OrdinalIgnoreCase. So a response carrying `expiration_date` AND `Expiration_Date` — both
+        // canonical, both unparseable, so neither reaches the column — reconciles the SAME two rows
+        // twice. Unguarded, the second pass demoted the value the FIRST pass had already written, so
+        // every row ended with originalValue == fieldValue and the detail page's guard
+        // (`f.originalValue && f.originalValue !== f.fieldValue`) rendered nothing: the model's own
+        // answer erased from the row, which is the one thing ADR 0052 Amendment 1 § "The raw copies come
+        // too" promises the demotion PRESERVES. DocumentField.ApplyCorrection captures it once.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
+        var docId = await SeedQueuedDocWithExpirationAsync(
+            auth.OrgId, vendorId, expirationColumn: null, expirationRaw: UnreadableExpiration,
+            trust: ExtractionTrust.Distrusted);
+        var corrected = FarFuture;
+        var correctedText = corrected.ToString("yyyy-MM-dd");
+
+        // BOTH spellings must be unparseable: a parseable one would MODIFY the column, put it in the
+        // UPDATE and leave the two documents agreeing, so no reconciliation would run at all.
+        Extraction.Result = Extracted(
+            "coi",
+            ("general_liability_limit", "2000000"),
+            ("expiration_date", UnreadableExpiration),
+            ("Expiration_Date", UnreadableExpirationVariant));
+        Extraction.DuringExtract = async () =>
+        {
+            var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+            {
+                fields = new[] { new { fieldName = "expiration_date", fieldValue = correctedText } }
+            });
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        };
+
+        await ClaimAndProcessAsync(docId);
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.ExpirationDate.Should().Be(corrected,
+            "precondition: neither answer parses, so the column stays out of the UPDATE and the row "
+            + "keeps the user's date — which is what makes both spellings reconcile");
+
+        var canonical = await ReadRenderedFieldAsync(auth.Client, docId, "expiration_date");
+        canonical.Row.Should().Be(correctedText);
+        canonical.WasOriginally.Should().Be(UnreadableExpiration,
+            "this row's own answer is what it must remember. A second demotion pass overwrites it with "
+            + "the value already on the row, and `was: …` then renders NOTHING");
+
+        var variant = await ReadRenderedFieldAsync(auth.Client, docId, "Expiration_Date");
+        variant.Row.Should().Be(correctedText,
+            "a second spelling is a second row the field editor renders, and it may not keep claiming a "
+            + "date the column does not carry either");
+        variant.WasOriginally.Should().Be(UnreadableExpirationVariant,
+            "…and it remembers ITS answer, not the other spelling's — the demotion is per row");
+
+        (await AssertTrustAgreesWithTheRowAsync(auth.Client, docId)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_reconciled_field_that_tripped_the_confidence_gate_names_itself_on_the_row()
+    {
+        // The arm every fixture above holds OFF, and the one #467's agreement invariant deliberately
+        // does NOT cover (ADR 0052 Amendment 1 § The invariant this buys): the per-verdict-bearing-field
+        // confidence gate. It reads the RESPONSE, has no mirror on the row, and so keeps describing this
+        // READING — "make the four triggers consistent" is the bug, not the fix.
+        //
+        // What is worth pinning is where that leaves the DISCLOSURE, because the reconciliation moves it.
+        // The model re-reads the expiration at 0.5 (the gate fires, average 0.8 clears) and answers with
+        // the value the row held at claim time, so the column stays out of the UPDATE and the row keeps
+        // the date a mid-run save committed. The reconciliation then rewrites that row's raw copies from
+        // the column — and pins its confidence to 1.0, because the value on screen is now the USER's, not
+        // the model's, and an amber/rose outline over it would tell the user to double-check their own
+        // typing about a value the model never produced.
+        //
+        // So this document commits ManualRequired + Distrusted with NOTHING outlined, and that is
+        // correct rather than the ADR 0040 dead end: the row names itself with `✎ Manually edited` +
+        // `was: …`, and the "Save changes" the card asks for runs ResolveManualReview, which clears the
+        // flag because nothing is unreadable. Leaving the model's 0.5 on the row instead — the tidy-
+        // looking way to keep the outline — is what this test refuses.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
+        var seeded = FarFuture;
+        var seededText = seeded.ToString("yyyy-MM-dd");
+        var docId = await SeedQueuedDocWithExpirationAsync(
+            auth.OrgId, vendorId, expirationColumn: seeded, expirationRaw: seededText);
+        var corrected = seeded.AddDays(45);
+        var correctedText = corrected.ToString("yyyy-MM-dd");
+
+        Extraction.Result = ExtractedAt(
+            "coi",
+            ("general_liability_limit", "2000000", 0.95),
+            ("expiration_date", seededText, 0.5),
+            ("policy_number", "POL-1", 0.95));
+        Extraction.DuringExtract = async () =>
+        {
+            var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+            {
+                fields = new[] { new { fieldName = "expiration_date", fieldValue = correctedText } }
+            });
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        };
+
+        await ClaimAndProcessAsync(docId);
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.ExpirationDate.Should().Be(corrected,
+            "precondition: the model answered with the snapshot's own date, so the column stays out of "
+            + "the UPDATE and the mid-run correction survives — the interleave the reconciliation exists "
+            + "for");
+        terminal.Doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired);
+        terminal.Doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "the per-field gate fired on the READING (0.5 on a verdict-bearing field), and reconciling a "
+            + "row's copies is not a reason to trust a reading the system already distrusts — this "
+            + "trigger never consulted the basis and must not start");
+
+        var body = await auth.Client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        var data = body.GetProperty("data");
+        data.GetProperty("unreadableFields").EnumerateArray().Should().BeEmpty(
+            "nothing on this row is unparseable, so the readability trigger correctly names nothing — "
+            + "`Distrusted` beside an EMPTY unreadableFields is the legitimate shape the other three "
+            + "triggers commit by design (ADR 0052 Amendment 1)");
+        data.GetProperty("fields").EnumerateArray()
+            .Select(f => f.GetProperty("confidence").GetDouble())
+            .Should().OnlyContain(c => c >= 0.9,
+                "…and after the reconciliation NOTHING on this document is outlined either (the page "
+                + "returns no border class at or above 0.9), so the amber outline is not what names this "
+                + "review. The record must say so — the naming mechanism here is the corrected row "
+                + "itself");
+
+        var rendered = await ReadRenderedFieldAsync(auth.Client, docId, "expiration_date");
+        rendered.Row.Should().Be(correctedText);
+        rendered.Mirror.Should().Be(correctedText);
+        rendered.WasOriginally.Should().Be(seededText,
+            "`was: …` is half of what names this row — the value the model read is still on screen, "
+            + "beside the one the row will be graded from");
+        rendered.ManuallyEdited.Should().BeTrue("…and `✎ Manually edited` is the other half");
+        rendered.Confidence.Should().Be(1.0,
+            "the value shown is the USER's, so it carries no reading's uncertainty. Restoring the "
+            + "model's 0.5 here outlines the user's own typed date and prints \"Please verify\" about a "
+            + "value the model never produced — a false statement about content, traded for an outline");
+
+        var untouched = await ReadRenderedFieldAsync(auth.Client, docId, "policy_number");
+        untouched.ManuallyEdited.Should().BeFalse();
+        untouched.Confidence.Should().Be(0.95,
+            "a field the reconciliation did not touch keeps the reading's own confidence — the pin is "
+            + "scoped to reconciled rows, not a blanket 1.0");
+    }
+
+    [Fact]
+    public async Task A_reconciled_AMOUNT_takes_the_columns_own_rendering_and_keeps_the_models_answer()
+    {
+        // #467 review round 2, S1: every reconcile fixture above uses expiration_date, so the AMOUNT
+        // branch of SameTypedColumn — the one CanonicalDocumentFields' doc comment singles out as the
+        // reason the comparison is on the TYPED value — had no integration coverage, and the rendering
+        // its reconciliation lands in the field editor was an accident rather than a decision.
+        //
+        // Same interleave as the headline test, one column over: the model answers with the limit the
+        // row held at claim time, so ApplyToTypedColumn's assignment matches the snapshot and the column
+        // stays out of the UPDATE, while a mid-run correction owns what the row actually carries.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
+        var docId = await SeedQueuedDocAsync(auth.OrgId, vendorId, gl: 1_000_000m);
+
+        Extraction.Result = Extracted("coi", ("general_liability_limit", "1000000"));
+        Extraction.DuringExtract = async () =>
+        {
+            var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+            {
+                fields = new[] { new { fieldName = "general_liability_limit", fieldValue = "2000000" } }
+            });
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        };
+
+        await ClaimAndProcessAsync(docId);
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.GeneralLiabilityLimit.Should().Be(2_000_000m,
+            "precondition: the worker's own value equalled its snapshot, so the column stayed out of the "
+            + "UPDATE and the correction survives");
+        terminal.Doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant,
+            "2M clears the 1M floor on the value the row actually holds");
+
+        var rendered = await ReadRenderedFieldAsync(auth.Client, docId, "general_liability_limit");
+        rendered.Row.Should().Be("2000000.00",
+            "the copies take the COLUMN's own rendering — the same string LookupValue compares and the "
+            + "readability predicate reads — so what the field editor shows parses back to exactly the "
+            + "amount being committed. The scale-2 tail is numeric(18,2)'s, and pinning it here makes it "
+            + "a decision: change the rendering and this is what says the user-visible copy moved");
+        rendered.Mirror.Should().Be("2000000.00");
+        rendered.WasOriginally.Should().Be("1000000",
+            "the model's own answer is demoted, not discarded");
+        rendered.ManuallyEdited.Should().BeTrue();
+        rendered.Confidence.Should().Be(1.0);
+    }
+
+    [Fact]
+    public async Task A_field_whose_column_the_row_AGREES_on_is_left_exactly_as_the_model_read_it()
+    {
+        // #467 review round 2, S2 — the direction nothing asserted: what an ORDINARY re-extraction does
+        // to a field the reconciliation must NOT touch. No interleave at all here; the row's committed
+        // limit and the model's answer are the same number, so SameTypedColumn says "same" and the row
+        // keeps the reading verbatim, unflagged, at the reading's own confidence.
+        //
+        // The discriminator this buys is the typed-vs-rendering property. Rewrite SameTypedColumn's
+        // amount arm as a string comparison over TypedColumnValue and every #467 fixture stays green —
+        // but the numeric(18,2) round-trip renders "2000000.00" where a freshly parsed answer renders
+        // "2000000", so the reconciliation false-fires HERE: the money row is rewritten to the column's
+        // rendering, flagged "✎ Manually edited", pinned to 1.0 and given a spurious `was: …`, on a
+        // document nothing raced. (The pure form of the same property is
+        // CanonicalDocumentFieldsTests.An_amount_compares_on_the_NUMBER_not_on_its_rendering.)
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
+        var docId = await SeedQueuedDocAsync(auth.OrgId, vendorId, gl: 2_000_000m);
+
+        Extraction.Result = Extracted("coi", ("general_liability_limit", "2000000"));
+
+        await ClaimAndProcessAsync(docId);
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.GeneralLiabilityLimit.Should().Be(2_000_000m);
+
+        var rendered = await ReadRenderedFieldAsync(auth.Client, docId, "general_liability_limit");
+        rendered.Row.Should().Be("2000000",
+            "the row and the column agree, so there is nothing to reconcile and the model's own answer "
+            + "stands exactly as read — not restated in the column's rendering");
+        rendered.Mirror.Should().Be("2000000");
+        rendered.WasOriginally.Should().BeNull(
+            "…and there is no provenance to record, because nothing corrected this value");
+        rendered.ManuallyEdited.Should().BeFalse(
+            "a machine read is not a manual edit. The page prints `✎ Manually edited` off this flag and "
+            + "the detail page counts these fields in its \"Read again will discard N corrections\" "
+            + "warning — a false one warns the user about losing work nobody did");
+        rendered.Confidence.Should().Be(0.95,
+            "…and the reading's own confidence survives, so the outline still fires for a field the "
+            + "model really was unsure of");
     }
 
     /// <summary>

@@ -223,4 +223,83 @@ public class CanonicalDocumentFieldsTests
         doc.EffectiveDate.Should().Be(new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
         doc.ExpirationDate.Should().Be(new DateTime(2027, 1, 1, 0, 0, 0, DateTimeKind.Utc));
     }
+
+    // ---- SameTypedColumn (#467, ADR 0052 Amendment 1) ----
+    //
+    // The predicate ExtractionWorker.ReconcileCanonicalCopiesWithTheRow keys on: "will the pending
+    // commit leave a DIFFERENT value in this field's typed column than the one the response just
+    // produced?" A false answer rewrites the row's raw copies, flags the row manually edited and pins
+    // its confidence, so both directions are user-visible and both are pinned here — the amount branch
+    // especially, which the integration suite reaches only through the money field (#467 review round
+    // 2, S1/S2).
+
+    [Fact]
+    public void An_amount_compares_on_the_NUMBER_not_on_its_rendering()
+    {
+        // THE property CanonicalDocumentFields' own doc comment calls load-bearing, and it had no test.
+        // A freshly-parsed 2000000m and the numeric(18,2) round-trip of the same amount are the SAME
+        // number whose decimal.ToString() differs ("2000000" vs "2000000.00"). Rewrite the amount arm as
+        // a string comparison over DocumentFieldReadability.TypedColumnValue — the tidy-looking
+        // "compare them the way the user sees them" — and every ordinary re-extraction starts
+        // false-firing the reconciliation: the money row is rewritten to the column's rendering, flagged
+        // "✎ Manually edited", pinned to confidence 1.0 and given a spurious "was: …", on a document
+        // nothing raced and nothing corrected.
+        var freshlyParsed = new Document();
+        CanonicalDocumentFields.ApplyToTypedColumn(freshlyParsed, "general_liability_limit", "2000000");
+        var columnRoundTrip = new Document { GeneralLiabilityLimit = 2_000_000.00m };
+
+        DocumentFieldReadability.TypedColumnValue(freshlyParsed, "general_liability_limit")
+            .Should().NotBe(DocumentFieldReadability.TypedColumnValue(columnRoundTrip, "general_liability_limit"),
+                "anti-no-op: the two documents must actually RENDER differently, or a string comparison "
+                + "would agree with the value comparison here and this test would pin nothing");
+        CanonicalDocumentFields.SameTypedColumn(freshlyParsed, columnRoundTrip, "general_liability_limit")
+            .Should().BeTrue("equal amounts at different SCALE are one value, not a disagreement");
+    }
+
+    [Fact]
+    public void An_amount_that_really_differs_reads_as_a_disagreement()
+    {
+        // The other direction, so the test above cannot be satisfied by a predicate that answers "same"
+        // unconditionally — which would silently retire the whole reconciliation.
+        var a = new Document { GeneralLiabilityLimit = 2_000_000m };
+        var b = new Document { GeneralLiabilityLimit = 2_000_001m };
+
+        CanonicalDocumentFields.SameTypedColumn(a, b, "general_liability_limit").Should().BeFalse();
+        CanonicalDocumentFields.SameTypedColumn(a, new Document(), "general_liability_limit").Should().BeFalse(
+            "a null column is a real answer — 'the row will carry no limit' — not a missing one");
+    }
+
+    [Theory]
+    [InlineData("effective_date")]
+    [InlineData("expiration_date")]
+    public void A_date_column_compares_by_instant(string fieldName)
+    {
+        var a = new Document();
+        var b = new Document();
+        CanonicalDocumentFields.ApplyToTypedColumn(a, fieldName, "2027-03-01")
+            .Should().Be(TypedColumnResult.Parsed,
+                "anti-no-op: both spellings must actually reach the column, or the agreement below is "
+                + "two nulls agreeing and says nothing about how instants compare");
+        CanonicalDocumentFields.ApplyToTypedColumn(b, fieldName, "03/01/2027")
+            .Should().Be(TypedColumnResult.Parsed);
+
+        CanonicalDocumentFields.SameTypedColumn(a, b, fieldName).Should().BeTrue(
+            "two spellings of one date parse to one instant, so the row carries no disagreement");
+        CanonicalDocumentFields.SameTypedColumn(a, new Document(), fieldName).Should().BeFalse();
+        CanonicalDocumentFields.SameTypedColumn(new Document(), new Document(), fieldName).Should().BeTrue(
+            "two nulls agree — a field the row will carry no value for is not a contradiction");
+    }
+
+    [Fact]
+    public void A_non_canonical_field_has_no_typed_column_to_disagree_about()
+    {
+        // The reconciliation walks every field the response carried and skips non-canonical names
+        // BEFORE asking this, so the arm is defensive — but a "same" answer here is the safe one: a
+        // false would rewrite a free-text row from a column that does not exist.
+        var a = new Document { GeneralLiabilityLimit = 1_000_000m };
+        var b = new Document { GeneralLiabilityLimit = 9_000_000m };
+
+        CanonicalDocumentFields.SameTypedColumn(a, b, "policy_number").Should().BeTrue();
+        CanonicalDocumentFields.SameTypedColumn(a, b, null).Should().BeTrue();
+    }
 }

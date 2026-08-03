@@ -145,6 +145,18 @@ public class Adr0052EnforcementTests
             "anti-no-op: the derivation must still recognise the label the allow-list writes, or this "
             + "gate enforces the prose-only entitlement over an EMPTY set of files");
 
+        // The REVERSE direction (#467 review round 2, S4), and it is the same "promise in a value
+        // string" hole one level up. ProseOnlyMentions is derived by StartsWith, so an entry whose
+        // label drifted off the START of its value — a reword, an added lead-in like "the #460 basis —
+        // PROSE ONLY — …" — silently leaves the derived set and its whole file goes back to being
+        // waved through by AllowedMentions, while this dictionary still names it as anchored. The
+        // per-entry loop below cannot see that: it only ever visits files the derivation returned.
+        ProseOnlyAnchors.Keys.Should().BeSubsetOf(proseOnly,
+            "every file this class claims to anchor must still BE prose-only. A key here that the "
+            + "derivation no longer returns is a file with a whole-file waiver and no code-level check "
+            + "at all — put " + ProseOnlyLabel + " back at the start of its AllowedMentions value, or "
+            + "delete the anchor deliberately");
+
         foreach (var relative in proseOnly)
         {
             ProseOnlyAnchors.TryGetValue(relative, out var anchor).Should().BeTrue(
