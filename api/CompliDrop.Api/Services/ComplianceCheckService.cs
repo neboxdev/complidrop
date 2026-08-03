@@ -168,16 +168,22 @@ public interface IComplianceCheckService
 /// how many pages did not complete cleanly (the fan-out is best-effort — a failed page is logged, not thrown,
 /// so a shared system-rule mutation that already committed can't be un-done by a re-grade hiccup).
 /// <para/>
-/// <see cref="FailedPages"/> counts TWO distinct arms since #470 / ADR 0030 Amendment 5, and the second one is
-/// why <see cref="Regraded"/> and <see cref="FailedPages"/> are not complementary:
+/// <see cref="FailedPages"/> counts THREE distinct arms since #470 / ADR 0030 Amendment 5, and the last two
+/// are why <see cref="Regraded"/> and <see cref="FailedPages"/> are not complementary:
 /// <list type="number">
 /// <item>the page's own <c>SaveChanges</c> was caught-and-skipped — nothing committed, and those documents are
 /// NOT in <see cref="Regraded"/>;</item>
 /// <item>the page COMMITTED and its post-commit verification pass then threw — the documents were re-graded
-/// (so they ARE in <see cref="Regraded"/>) but nobody confirmed the verdicts against a fresh read.</item>
+/// (so they ARE in <see cref="Regraded"/>) but nobody confirmed the verdicts against a fresh read;</item>
+/// <item>the page COMMITTED and the verification SPENT ITS BOUND on a document whose inputs kept moving —
+/// same terminal state as (2), reached without an exception, so it counts the same way. Splitting it out is
+/// how a give-up used to escape the count while <see cref="AllSucceeded"/> still said the fan-out was
+/// durable.</item>
 /// </list>
 /// So <c>Targeted == Regraded</c> beside <c>AllSucceeded == false</c> is a REACHABLE tuple, not a
-/// contradiction — pinned by <c>ComplianceFanoutTests.A_failed_verification_pass_counts_the_committed_page_as_failed</c>.
+/// contradiction — pinned by <c>ComplianceFanoutTests.A_failed_verification_pass_counts_the_committed_page_as_failed</c>
+/// (arm 2) and <c>ComplianceFanoutTests.A_page_left_unconfirmed_by_a_spent_bound_counts_as_a_failed_page</c>
+/// (arm 3).
 /// <para/>
 /// <see cref="AllSucceeded"/> is the durability signal the seed keys on: only a fan-out that skipped NO page and
 /// CONFIRMED every page it committed may advance a system template's <c>RegradedThroughRevision</c>, so an
@@ -358,28 +364,41 @@ public class ComplianceCheckService(
             // A page that never committed has nothing to verify — and it must not be counted twice.
             if (applied is null) continue;
 
+            // The documents this page COMMITTED whose verdicts nothing has since CONFIRMED against a fresh
+            // read. Seeded FULL — until a verification pass has read a document and found the row still
+            // saying what this page asserted, nothing about it is confirmed — and narrowed by VerifyPageAsync
+            // as each pass lands. Owned HERE rather than returned so it is readable after a THROW as well as
+            // after a normal return: a page whose pass 1 confirmed 199 of 200 documents and then threw
+            // correcting the 200th has exactly ONE unconfirmed document, and that is the one worth naming.
+            var unconfirmed = new HashSet<Guid>(applied.Keys);
             try
             {
-                await VerifyPageAsync(context, applied, nowUtc, ct);
+                await VerifyPageAsync(context, applied, nowUtc, unconfirmed, ct);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // Counted as a FAILED page even though the page's own SaveChanges committed, because that
-                // is what the counter is FOR: RegradeResult.AllSucceeded gates the seed's re-grade
-                // watermark (#416, ADR 0036 Amendment 2), and a page whose verdicts are committed but
-                // UNVERIFIED is exactly a page the next boot should re-fire. `regraded` deliberately still
-                // counts these documents — they were re-graded; what failed is the confirmation.
-                failedPages++;
                 logger.LogError(ex,
-                    "Re-evaluation verification pass failed for a page of {Count} documents; their verdicts "
-                    + "are committed but unconfirmed against a fresh read. Document ids (up to {Max} shown): "
-                    + "{DocumentIds}",
-                    applied.Count, LoggedIdSampleSize, IdSample(applied.Keys));
+                    "Re-evaluation verification pass failed for a page of {Count} documents; {Unconfirmed} of "
+                    + "them are left committed but unconfirmed against a fresh read. Document ids (up to "
+                    + "{Max} shown): {DocumentIds}",
+                    applied.Count, unconfirmed.Count, LoggedIdSampleSize, IdSample(unconfirmed));
             }
             finally
             {
                 context.ChangeTracker.Clear();
             }
+
+            // ONE rule covering BOTH ways verification can end without confirming, because they leave the
+            // SAME state: verdicts committed, nobody re-read them. A page counts as FAILED even though its
+            // own SaveChanges committed, because that is what the counter is FOR — RegradeResult.AllSucceeded
+            // gates the seed's re-grade watermark (#416, ADR 0036 Amendment 2), and a committed-but-
+            // unconfirmed page is exactly a page the next boot should re-fire. Splitting the two arms is how
+            // the give-up used to escape the count entirely: AllSucceeded stayed true, the watermark advanced
+            // over a document graded from inputs that moved under it, and nothing was left to heal it.
+            // `regraded` deliberately still counts these documents — they WERE re-graded; what failed is the
+            // confirmation. Cancellation never reaches here (it propagates out of the two catches above), so
+            // a shutdown is still not a page failure.
+            if (unconfirmed.Count > 0) failedPages++;
         }
         return new RegradeResult(docIds.Count, regraded, failedPages);
     }
@@ -405,12 +424,20 @@ public class ComplianceCheckService(
 
     /// <summary>
     /// How many times a committed page is re-read and re-graded to CONFIRM the verdicts it wrote (#470,
-    /// ADR 0030 Amendment 5). Two, over a set that shrinks to the documents that actually moved, so a
-    /// document must lose THREE consecutive races — the page's own write plus both corrections — before
-    /// the fan-out leaves it. Same reasoning as <see cref="DocumentConcurrency.MaxAttempts"/> (3 total
-    /// chances at a correct verdict) and deliberately not that constant: this bounds a best-effort
-    /// background CONFIRMATION over a whole page, not a request's retry of one document, and the two must
-    /// be free to move apart.
+    /// ADR 0030 Amendment 5). Two, over a set that shrinks to the documents that actually moved.
+    /// <para/>
+    /// Stated as what the loop DOES, since the bound is easy to over-claim: the fan-out issues up to THREE
+    /// writes for one document — the page's own plus one per pass — and gives up after TWO detected
+    /// DISAGREEMENTS, leaving the third write committed but never re-read. Nothing observes that last
+    /// write's fate, which is precisely why it is disclosed rather than assumed good (the give-up Warning in
+    /// <see cref="VerifyPageAsync"/>, and the failed-page count it drives). And a disagreement means only
+    /// "a verdict input moved between the two reads" — NOT that this fan-out's write lost a race: a
+    /// competitor committing AFTER the page's UPDATE produces one too (the harmless idempotent rewrite the
+    /// same amendment records).
+    /// <para/>
+    /// Same reasoning as <see cref="DocumentConcurrency.MaxAttempts"/> (3 total chances at a correct
+    /// verdict) and deliberately not that constant: this bounds a best-effort background CONFIRMATION over
+    /// a whole page, not a request's retry of one document, and the two must be free to move apart.
     /// </summary>
     internal const int MaxVerificationPasses = 2;
 
@@ -422,8 +449,12 @@ public class ComplianceCheckService(
     /// <c>Data/ComplianceCheckDeleteConcurrencyInterceptor</c> follows for its per-row suppression trace.
     /// Bounded because a page is up to <see cref="DefaultReevaluationPageSize"/> documents and a log line is
     /// not a dump; the count printed beside the sample is always the complete one.
+    /// <para/>
+    /// <c>internal</c> so the cap itself can be pinned by test rather than restated as a magic number —
+    /// a line that promised "up to {Max} shown" and then printed the whole page would be the dump this
+    /// bound exists to prevent.
     /// </summary>
-    private const int LoggedIdSampleSize = 20;
+    internal const int LoggedIdSampleSize = 20;
 
     private static Guid[] IdSample(IEnumerable<Guid> ids) => [.. ids.Take(LoggedIdSampleSize)];
 
@@ -465,11 +496,18 @@ public class ComplianceCheckService(
     /// there the sweep re-applies its date transition on the next hourly tick.</item>
     /// </list>
     /// The benefit bought with those two facts is that the common case reads once and writes nothing.
+    /// <para/>
+    /// <paramref name="unconfirmed"/> is the caller's OWN set, seeded with every document this page
+    /// committed and narrowed here as passes confirm. It is a parameter rather than a return value because
+    /// the caller needs it after a THROW as much as after a normal return — that is what makes the failure
+    /// line name the documents actually left behind, and what lets ONE rule at the call site count both an
+    /// exception and a spent bound as the failed page they equally are.
     /// </summary>
     private async Task VerifyPageAsync(
         DbContext context,
         IReadOnlyDictionary<Guid, EvaluationOutcome> applied,
         DateTime nowUtc,
+        HashSet<Guid> unconfirmed,
         CancellationToken ct)
     {
         var expected = applied;
@@ -494,6 +532,13 @@ public class ComplianceCheckService(
                 if (!OutcomeMatches(outcome, expected[doc.Id])) movers.Add((doc, outcome));
             }
 
+            // Narrow BEFORE the correction is written, because it is THIS PASS'S READ that confirms the
+            // non-movers: the row says what this fan-out asserted about them, and that stays true whether or
+            // not the write below lands. A document that vanished from the re-read leaves the set for the
+            // same reason it leaves `expected` — it is going away, so nobody owes it a confirmation.
+            unconfirmed.Clear();
+            foreach (var (moved, _) in movers) unconfirmed.Add(moved.Id);
+
             if (movers.Count == 0) return;
 
             logger.LogInformation(
@@ -513,14 +558,18 @@ public class ComplianceCheckService(
         // refuted for exactly this caller shape, since a pure re-grade owns no inputs and would be
         // replacing a possibly-correct verdict with a non-committal one through the very write that keeps
         // losing. Whoever keeps winning is a combined-unit-of-work writer committing its own consistent
-        // pair, so the next thing that grades this document heals it.
-        if (expected.Count > 0)
+        // pair, so the next thing that GRADES this document reconciles it — but nothing SCHEDULES that
+        // (ComplianceSweepBackgroundService does date transitions only), which is why the line below names
+        // an action instead of promising a self-heal. `unconfirmed` is the same set as `expected.Keys` here
+        // BY CONSTRUCTION, and it is what is read so there is one answer to "what is still unconfirmed".
+        if (unconfirmed.Count > 0)
             logger.LogWarning(
                 "Gave up confirming {Count} document(s) after {Passes} verification pass(es): their inputs "
                 + "changed inside every pass, so the last correction is committed but unconfirmed. They keep "
-                + "that verdict rather than being degraded, and the next evaluation of them heals it. "
-                + "Document ids (up to {Max} shown): {DocumentIds}",
-                expected.Count, MaxVerificationPasses, LoggedIdSampleSize, IdSample(expected.Keys));
+                + "that verdict rather than being degraded, and NOTHING re-grades them automatically — run "
+                + "Check again on the ids below, or re-fire the fan-out, to reconcile them. Document ids (up "
+                + "to {Max} shown): {DocumentIds}",
+                unconfirmed.Count, MaxVerificationPasses, LoggedIdSampleSize, IdSample(unconfirmed));
     }
 
     /// <summary>
