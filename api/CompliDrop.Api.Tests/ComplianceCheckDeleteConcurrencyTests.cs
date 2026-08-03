@@ -1,13 +1,18 @@
+using System.Net;
+using System.Net.Http.Json;
 using System.Text.Json;
 using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Serilog.Core;
 
 namespace CompliDrop.Api.Tests;
 
@@ -502,6 +507,167 @@ public sealed class ComplianceCheckDeleteConcurrencyTests(IntegrationTestFixture
             "…A lost exactly one row, and its tally survived B's whole save running inside A's completion hook");
         warnings.Should().ContainSingle(m => m.Contains("deleted 2 ComplianceCheck row(s)"),
             "…and B lost two, reported against B rather than folded into A's line");
+    }
+
+    [Fact]
+    public async Task A_batched_fan_out_page_commits_its_re_grades_through_an_orphaned_check_row()
+    {
+        // #468 review S5, and the test that makes the AppDbContext registration mean what the ADR says it
+        // means. That registration is justified by ONE production writer — ComplianceCheckService's BATCHED
+        // re-grade fan-out, which stays READ COMMITTED while every other AppDbContext check-row writer runs
+        // under REPEATABLE READ — but it was pinned by a hand-made two-command batch on a scope-resolved
+        // context. The fan-out's real shape is one SaveChanges carrying N Document UPDATEs + M check
+        // DELETEs + K check INSERTs, and whether EF still attributes a rows-affected mismatch there to the
+        // single orphaned DELETE (which the Entries.All(IsCheckRowDelete) guard REQUIRES) is exactly the
+        // assumption the interceptor's remarks rest on. A mixed page-sized batch is where that assumption
+        // is either true or is not.
+        //
+        // The stake is a page, not a document: before the interceptor a competing edit anywhere in a page
+        // of up to DefaultReevaluationPageSize documents forfeited the WHOLE page's re-grade, and the
+        // fan-out's per-page catch swallows the failure — so it never surfaced anywhere.
+        var sink = new CapturingLogEventSink();
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+
+        var reg = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            email = $"user-{Guid.NewGuid():N}@example.com",
+            password = "Password1234",
+            fullName = "Test User",
+            companyName = "Test Co",
+            industry = (string?)null,
+            companySize = (string?)null,
+            timeZone = "America/New_York",
+        });
+        reg.EnsureSuccessStatusCode();
+        var orgId = (await reg.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("organizationId").GetGuid();
+
+        // TWO documents on one vendor's checklist, both already graded — so one page carries both, and the
+        // orphaned rows belong to only one of them.
+        var (docA, checkA, ruleId, templateId, vendorId) = await SeedFanOutAsync(orgId);
+        var (docB, checkB) = await SeedSecondDocumentAsync(orgId, vendorId, ruleId);
+
+        // The competing writer, fired from inside the fan-out page's OWN SaveChanges — after
+        // ApplyEvaluationsAsync bulk-loaded and staged the page's check rows, before EF issues the batch.
+        // The rule upsert saves the RULE first on this same context, so the first firing is that save and
+        // the second is the fan-out's; deleting on the first would leave nothing staged to orphan.
+        var hook = factory.Services.GetRequiredService<ConcurrentDocumentWriteInterceptor>();
+        var saves = 0;
+        hook.OnSavingChanges = async () =>
+        {
+            if (++saves != 2) return;
+            hook.OnSavingChanges = null;
+            await using var other = CreateSystemDb();
+            await other.ComplianceChecks.Where(c => c.Id == checkA).ExecuteDeleteAsync();
+        };
+
+        HttpResponseMessage resp;
+        try
+        {
+            // A rule EDIT — the production trigger for this fan-out, and the one whose remarks call a
+            // document left on its pre-edit verdict "a genuine false Compliant".
+            resp = await client.PostAsJsonAsync($"/api/compliance/templates/{templateId}/rules", new
+            {
+                id = ruleId,
+                documentType = "coi",
+                fieldName = "general_liability_limit",
+                @operator = "min_value",
+                expectedValue = "3000000", // TIGHTENED: 2M no longer clears it, so the verdict must move
+                errorMessage = (string?)null,
+                sortOrder = 0,
+            });
+        }
+        finally
+        {
+            hook.Reset();
+        }
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        saves.Should().BeGreaterThanOrEqualTo(2, "precondition: the fan-out's own SaveChanges is the second one");
+
+        await using var read = CreateSystemDb();
+        var rows = await read.ComplianceChecks.AsNoTracking()
+            .Where(c => c.DocumentId == docA || c.DocumentId == docB)
+            .Select(c => new { c.Id, c.DocumentId, c.IsPassed })
+            .ToListAsync();
+
+        // The page COMMITTED — both documents, not just the one whose rows survived. This is what the
+        // pre-#468 behaviour cost: one orphaned row aborted the whole page, and the per-page catch made
+        // that silent.
+        rows.Select(r => r.DocumentId).Should().BeEquivalentTo([docA, docB],
+            "every document in the page keeps a re-graded check row — a page is one unit of work, so the "
+            + "orphan would have forfeited BOTH documents' re-grades, not just its own");
+        rows.Should().NotContain(r => r.Id == checkA || r.Id == checkB,
+            "…and these are the fan-out's OWN new rows: the clear it staged is what the tightened rule "
+            + "replaces, so a page that merely survived without re-grading is not the same as one that ran");
+        rows.Should().OnlyContain(r => !r.IsPassed, "2M no longer clears the tightened 3M floor");
+        (await read.Documents.AsNoTracking()
+                .Where(d => d.Id == docA || d.Id == docB)
+                .Select(d => d.ComplianceStatus).ToListAsync())
+            .Should().AllBeEquivalentTo(ComplianceStatus.NonCompliant,
+                "the verdict rides in the same unit of work as the check rows (ADR 0030)");
+
+        // The tolerance actually FIRED — without this the test passes identically if the interleave never
+        // produced a zero-row DELETE at all, which is how a fan-out reproduction goes quietly green.
+        sink.Events.Select(e => e.RenderMessage())
+            .Where(m => m.Contains("treating those deletes as done", StringComparison.Ordinal))
+            .Should().ContainSingle("one SaveChanges is one event, and this page ran one")
+            .Which.Should().Contain("deleted 1 ComplianceCheck row(s)").And.Contain("across 1 document(s)",
+                "…attributed to the ONE document whose row was taken, out of a batch that also carried the "
+                + "other document's Document UPDATE, its DELETE and both INSERTs — the per-command "
+                + "attribution the Deleted-entry guard depends on");
+        sink.Events.Select(e => e.RenderMessage())
+            .Should().NotContain(m => m.Contains("Re-evaluation fan-out failed for a page", StringComparison.Ordinal),
+                "the page must not reach its own catch — that arm is where a forfeited page hides");
+    }
+
+    /// <summary>The fan-out fixture: a vendor on a one-rule checklist plus one graded document on it.</summary>
+    private async Task<(Guid DocId, Guid CheckId, Guid RuleId, Guid TemplateId, Guid VendorId)> SeedFanOutAsync(Guid orgId)
+    {
+        var (docId, checkId, ruleId) = await SeedCheckedDocumentAsync(orgId);
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.FirstAsync(d => d.Id == docId);
+        var vendorId = doc.VendorId!.Value;
+        var templateId = await db.Vendors.Where(v => v.Id == vendorId)
+            .Select(v => v.ComplianceTemplateId!.Value).FirstAsync();
+        return (docId, checkId, ruleId, templateId, vendorId);
+    }
+
+    /// <summary>A second graded document on the same vendor, so the fan-out's page carries two.</summary>
+    private async Task<(Guid DocId, Guid CheckId)> SeedSecondDocumentAsync(Guid orgId, Guid vendorId, Guid ruleId)
+    {
+        var now = DateTime.UtcNow;
+        var docId = Guid.NewGuid();
+        var checkId = Guid.NewGuid();
+
+        await using var db = CreateSystemDb();
+        db.Documents.Add(new Document
+        {
+            Id = docId,
+            OrganizationId = orgId,
+            VendorId = vendorId,
+            OriginalFileName = "coi-2.pdf",
+            BlobStorageUrl = "blob://d2",
+            BlobStoragePath = $"blob/{docId:N}.pdf",
+            FileSizeBytes = 1024,
+            ContentType = "application/pdf",
+            DocumentType = "coi",
+            ExtractionStatus = ExtractionStatus.Completed,
+            ComplianceStatus = ComplianceStatus.Compliant,
+            GeneralLiabilityLimit = 2_000_000m,
+            ExtractionFields = JsonDocument.Parse("""{"general_liability_limit":"2000000"}"""),
+            ExpirationDate = now.AddYears(1),
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        db.ComplianceChecks.Add(new ComplianceCheck
+        {
+            Id = checkId, DocumentId = docId, ComplianceRuleId = ruleId, IsPassed = true, CheckedAt = now,
+        });
+        await db.SaveChangesAsync();
+        return (docId, checkId);
     }
 
     [Fact]
