@@ -757,17 +757,56 @@ Both are defined in this repo's `.claude/agents/`.
       reload. A re-grade conflict is transient (the next click almost always wins), so adding an
       invalidate-on-409 here — while `UpdateFields`/`UpdateDocument` deliberately have none for the same
       code — would be an inconsistency, not a fix.
-    - KNOWN residuals, ADR 0030 Amendment 3 § What stays open — do not re-report as new. (a) The
-      BATCHED fan-outs (`ReevaluateWhereAsync`, behind the template/vendor/seed re-grades) keep the
-      window, ticketed as [#470](https://github.com/neboxdev/complidrop/issues/470) (`bug`, so it indexes
-      into epic #48) — which is also the live successor Amendment 2 § What stays open now points at for
-      the worker's basis-read→commit window, #461 having closed. Deliberate on cost profile: a page is up
-      to 200 documents committed as ONE unit, so one
-      conflicting edit would abandon and re-run the whole page and then skip it — forfeiting hundreds of
-      unrelated re-grades where today exactly one goes stale — and these run post-commit on a background
-      token with no user to 409. "Wrap the fan-out too for consistency" is Option K, refuted. (b)
+    - KNOWN residual, ADR 0030 Amendment 3 § What stays open — do not re-report as new:
       `EvaluateForSystemAsync` is unguarded and caller-less in production; the tenant guard does not
-      transfer as-is (`RunAsync` takes an `AppDbContext`).
+      transfer as-is (`RunAsync` takes an `AppDbContext`). The BATCHED fan-outs were the other one and
+      have since CLOSED (#470, Amendment 5 — see its own block below); they still keep `READ COMMITTED`,
+      so a diff that puts them under the guard is still Option K.
+  - The BATCHED fan-out's window is ADR 0030 **Amendment 5** (#470), Amendment 3's other residual.
+    `ComplianceCheckService.ReevaluateWhereAsync` loads a page, grades it and saves it under
+    `READ COMMITTED`, so an edit committing inside that span left the document holding the EDITED inputs
+    beside a verdict graded from the pre-edit ones. It is closed from the OTHER side: the page commits
+    exactly as before, then `VerifyPageAsync` re-reads it and re-grades ONLY the documents whose fresh
+    outcome differs from the one the page applied. Facts that look like bugs and are not:
+    - "Just wrap the fan-out in `DocumentWriteConcurrency.RunAsync` for consistency with the three
+      request-path writers" is **Option K, refuted** — a page is up to `DefaultReevaluationPageSize`
+      (200) documents committed as ONE unit, so one conflicting edit anywhere in it abandons and re-runs
+      the whole page and then skips it, forfeiting hundreds of unrelated re-grades to protect one. These
+      callers also run post-commit on `PostCommitRegrade`'s background token with no user to 409. The
+      fan-out KEEPS `READ COMMITTED`, deliberately.
+    - Detection is the RE-GRADE (`OutcomeMatches`: status, `ClearExistingChecks`, and the check tuples
+      keyed by `ComplianceRuleId`), never a column comparison. "Compare `UpdatedAt` / the typed columns
+      instead, it's cheaper" is a real finding twice over: `AuditSaveChangesInterceptor` re-stamps
+      `UpdatedAt` on the fan-out's OWN write so no `Documents` column survives as a post-commit signal
+      (Option R), and a narrow input projection is the ENUMERATION Amendment 2 Option E refutes — it
+      misses an `ExtractionFields`-only edit such as `certificate_holder` (Option S).
+    - It compares against what the page APPLIED, not against the row's stored status + check rows
+      (Option T). That cannot miss a stale verdict — any writer that replaced the verdict since is a
+      combined-unit-of-work writer, so its row re-grades to what it already holds — and it saves a
+      checks query on EVERY page. The occasional idempotent rewrite is the accepted cost.
+    - `nowUtc` is the fan-out's own clock reading, reused by every pass ON PURPOSE. Re-reading the clock
+      would make an expiry boundary crossed mid-fan-out look like a moved input on documents nobody
+      touched. "Use a fresh `nowUtc` for the verification" is a finding.
+    - The bound is `MaxVerificationPasses` (2) over a SHRINKING set, and a document that keeps moving
+      KEEPS the last verdict computed. "Degrade it to `Pending` when the bound is spent" is Amendment 3
+      **Option I**, refuted for this caller shape: a pure re-grade owns no inputs, so it would replace a
+      possibly-correct verdict with a non-committal one through the very write that kept losing.
+    - A verification FAILURE increments `failedPages` even though the page's own `SaveChanges`
+      committed, and `Regraded` still counts those documents. Deliberate: `AllSucceeded` gates the seed's
+      re-grade watermark (#416, ADR 0036 Amendment 2), and a committed-but-unconfirmed page is exactly
+      one the next boot should re-fire.
+    - The seed path (`ReevaluateForTemplateForSystemAsync`) runs BEFORE `app.Run()`, so it can never
+      overlap a request and its verification always finds nothing. "Skip verification there" is
+      **Option U**, rejected — a caller-specific exemption encodes `Program.cs`'s ordering inside
+      `Services/` to save one page-read at boot.
+    - Nothing on this path triggers an extraction or any paid call; it is pure DB work. The extra cost
+      is ONE page-sized read per page, and a confirmed page writes nothing at all (pinned by
+      `A_page_nobody_touched_is_confirmed_without_a_second_write`).
+    - KNOWN residuals, ADR 0030 Amendment 5 § What stays open — do not re-report as new: the correction
+      pass has its own (strictly smaller) window, which the bound and the Warning answer; the transiently
+      doubled check rows are unchanged (Amendment 4); and the WORKER's basis-read→commit window lost its
+      ticket when #470 closed and is now carried by Amendment 2 § What stays open — Amendment 5's shape
+      does NOT transfer there (a second unit of work on the persist costs a re-paid extraction).
   - The worker's STALE-BASIS grading is ADR 0030 **Amendment 2** (#460), the closing half of Amendment
     1's scenario B. `ExtractionWorker.PersistSuccess` holds a tracked snapshot across an OCR + LLM run
     that lasts minutes and EF writes back only what it MODIFIED, so every canonical verdict input it
