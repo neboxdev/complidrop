@@ -1139,6 +1139,7 @@ api/**/*Stripe*
 api/**/*Billing*
 api/**/AppDbContext.cs
 api/**/AuditSaveChangesInterceptor.cs
+api/**/ComplianceCheckDeleteConcurrencyInterceptor.cs
 api/**/*Portal*
 frontend/src/app/(auth)/**
 frontend/src/lib/api.ts
@@ -1150,6 +1151,10 @@ api/**/*.csproj
 
 (The last four are the deploy surface: merge auto-deploys, so CI definitions, the
 container image, and dependency manifests are an unreviewed-path-to-prod risk.)
+
+(`ComplianceCheckDeleteConcurrencyInterceptor.cs` is listed BY NAME, not as
+`api/**/*Interceptor*`: it changes `SaveChanges` semantics on BOTH contexts like the audit
+one beside it, while a wildcard would drag every test-only interceptor into a clearance.)
 
 ## Labels
 
