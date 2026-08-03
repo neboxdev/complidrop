@@ -1221,6 +1221,42 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         return unreadable;
     }
 
+    /// <summary>
+    /// The copies of one field the detail page RENDERS, read off the wire (#467 review, C1): the
+    /// <c>DocumentField</c> row's value — what the field editor's input binds to
+    /// (<c>value={edits[f.fieldName] ?? f.fieldValue ?? ""}</c>) — the <c>ExtractionFields</c> mirror
+    /// entry beside it, and the row's <c>originalValue</c>, which the page prints as <i>was: …</i>.
+    /// <para/>
+    /// Asserted separately from <see cref="AssertTrustAgreesWithTheRowAsync"/> because they are different
+    /// claims. That one says the badge and the named cause agree; this one says the VALUES the user is
+    /// shown agree with the typed column those conclusions were drawn from. A row can satisfy the first
+    /// and still contradict itself on screen — which is exactly what C1 found.
+    /// </summary>
+    private static async Task<(string? Row, string? Mirror, string? WasOriginally)> ReadRenderedFieldAsync(
+        HttpClient client, Guid docId, string fieldName)
+    {
+        var data = (await client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}"))
+            .GetProperty("data");
+
+        var field = data.GetProperty("fields").EnumerateArray()
+            .Single(f => f.GetProperty("fieldName").GetString() == fieldName);
+
+        var fields = data.GetProperty("extractionFields");
+        string? mirror = fields.ValueKind == JsonValueKind.Object
+            && fields.TryGetProperty(fieldName, out var entry)
+            ? Text(entry)
+            : null;
+
+        return (Text(field.GetProperty("fieldValue")), mirror, Text(field.GetProperty("originalValue")));
+
+        static string? Text(JsonElement e) => e.ValueKind switch
+        {
+            JsonValueKind.Null or JsonValueKind.Undefined => null,
+            JsonValueKind.String => e.GetString(),
+            _ => e.GetRawText(),
+        };
+    }
+
     [Fact]
     public async Task A_canonical_value_a_mid_run_edit_FIXED_leaves_no_review_with_nothing_to_name()
     {
@@ -1244,7 +1280,11 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         var docId = await SeedQueuedDocWithExpirationAsync(
             auth.OrgId, vendorId, expirationColumn: null, expirationRaw: UnreadableExpiration,
             trust: ExtractionTrust.Distrusted);
-        var corrected = FarFuture.ToString("yyyy-MM-dd");
+        // Captured ONCE (#467 review, S4): FarFuture reads the real clock, and this test PUTs it, then
+        // asserts it twice with HTTP round-trips and a whole worker run in between — a UTC midnight
+        // rollover across those reads would fail the test for a reason unrelated to the fix.
+        var corrected = FarFuture;
+        var correctedText = corrected.ToString("yyyy-MM-dd");
 
         Extraction.Result = Extracted(
             "coi", ("general_liability_limit", "2000000"), ("expiration_date", UnreadableExpiration));
@@ -1252,13 +1292,13 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         {
             var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
             {
-                fields = new[] { new { fieldName = "expiration_date", fieldValue = corrected } }
+                fields = new[] { new { fieldName = "expiration_date", fieldValue = correctedText } }
             });
             resp.StatusCode.Should().Be(HttpStatusCode.OK);
 
             await using var probe = CreateSystemDb();
             var mid = await probe.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
-            mid.ExpirationDate.Should().Be(FarFuture,
+            mid.ExpirationDate.Should().Be(corrected,
                 "precondition: the correction really committed, so the pre-run snapshot's null column is "
                 + "a value the row has MOVED ON FROM rather than one it still holds");
             mid.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
@@ -1269,7 +1309,7 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         await ClaimAndProcessAsync(docId);
 
         var terminal = await ReadTerminalStateAsync(docId);
-        terminal.Doc.ExpirationDate.Should().Be(FarFuture,
+        terminal.Doc.ExpirationDate.Should().Be(corrected,
             "the worker's own value equals its snapshot's null, so the column stays out of the UPDATE and "
             + "the user's correction survives — the very reason the pre-run walk was judging a ghost");
         terminal.Doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
@@ -1278,6 +1318,85 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
             + "Distrusted here is a vendor at Action needed that no document surface can explain");
 
         (await AssertTrustAgreesWithTheRowAsync(auth.Client, docId)).Should().BeEmpty();
+
+        // …and "nothing on this row is unreadable" has to be true of the ROW, not merely of the one copy
+        // the predicate reaches first (#467 review, C1). DocumentFieldReadability short-circuits on the
+        // non-null typed column before it ever looks at the raw value — while the persist rewrites BOTH
+        // raw copies from the response unconditionally. Unreconciled, this document commits the model's
+        // unparseable text into the field editor and the JSON mirror, under a Completed/Trusted badge and
+        // a Compliant verdict graded from the date the user typed, with unreadableFields empty and nothing
+        // naming the disagreement: a document whose own screen contradicts itself.
+        var rendered = await ReadRenderedFieldAsync(auth.Client, docId, "expiration_date");
+        rendered.Row.Should().Be(correctedText,
+            "the field editor binds to this value, so it must be the one the row will be GRADED from — "
+            + "not a value the commit already decided to leave behind");
+        rendered.Mirror.Should().Be(correctedText,
+            "…and the JSON mirror is the same claim in the other copy, and a verdict input in its own "
+            + "right (LookupValue's raw-string fallback), so it may not disagree either");
+        rendered.WasOriginally.Should().Be(UnreadableExpiration,
+            "the model's own answer is not discarded, it is DEMOTED to the provenance the detail page "
+            + "already renders as \"was: …\" — the correction won the column, so it owns the value");
+    }
+
+    [Fact]
+    public async Task A_mid_run_CLEAR_the_read_did_not_overwrite_leaves_no_field_value_claiming_otherwise()
+    {
+        // The OTHER direction of C1's disagreement, and the one that fails OPEN. The user CLEARS the
+        // expiration mid-read; the model returns the value the row held at claim time, so
+        // ApplyToTypedColumn assigns the snapshot's own date, the property is unmodified and the column
+        // stays out of the UPDATE — the clear survives. Unreconciled, both raw copies still show a date:
+        // a certificate that "expires" on a day its column does not carry can never turn Expired, never
+        // enters an expiring-soon window and never triggers a reminder, which is ADR 0040's harm reached
+        // from the copy side rather than from the parser's.
+        //
+        // Nothing is DISTRUSTED here, and that is the point: a cleared value is honestly ABSENT, not
+        // unreadable (ADR 0040 — blank stays blank), so no review card would ever have named it.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
+        var seeded = FarFuture;
+        var seededText = seeded.ToString("yyyy-MM-dd");
+        var docId = await SeedQueuedDocWithExpirationAsync(
+            auth.OrgId, vendorId, expirationColumn: seeded, expirationRaw: seededText);
+
+        Extraction.Result = Extracted(
+            "coi", ("general_liability_limit", "2000000"), ("expiration_date", seededText));
+        Extraction.DuringExtract = async () =>
+        {
+            var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+            {
+                fields = new[] { new { fieldName = "expiration_date", fieldValue = (string?)null } }
+            });
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+            await using var probe = CreateSystemDb();
+            (await probe.Documents.AsNoTracking().FirstAsync(d => d.Id == docId)).ExpirationDate
+                .Should().BeNull(
+                    "precondition: the clear really committed, so the date the model returns below is one "
+                    + "the row has MOVED ON FROM rather than one it still holds");
+        };
+
+        await ClaimAndProcessAsync(docId);
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.ExpirationDate.Should().BeNull(
+            "the worker's own value equals its snapshot, so the column stays out of the UPDATE and the "
+            + "user's clear survives — the same mechanism as the FIXED interleave, one direction over");
+        terminal.Doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        terminal.Doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted);
+
+        var rendered = await ReadRenderedFieldAsync(auth.Client, docId, "expiration_date");
+        rendered.Row.Should().BeNull(
+            "the row carries no expiration, so the field editor must not show one — a value here is a "
+            + "date nothing will ever be graded against");
+        rendered.Mirror.Should().BeNull(
+            "…and the mirror is the copy LookupValue's raw-string fallback reads, so leaving the model's "
+            + "date there would let it resolve a value the column does not hold");
+        rendered.WasOriginally.Should().Be(seededText,
+            "the model's answer is preserved as provenance rather than discarded");
+
+        (await AssertTrustAgreesWithTheRowAsync(auth.Client, docId)).Should().BeEmpty(
+            "an absent value is not an unreadable one, so this document is correctly NOT routed to a "
+            + "human — which is precisely why the copies may not keep claiming a date instead");
     }
 
     [Fact]

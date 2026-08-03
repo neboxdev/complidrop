@@ -656,6 +656,10 @@ public class ExtractionWorker(
             CanonicalDocumentFields.ApplyToTypedColumn(doc, f.Name, f.Value);
 
         db.DocumentFields.RemoveRange(db.DocumentFields.Where(df => df.DocumentId == doc.Id));
+        // Held in hand as well as staged: ReconcileCanonicalCopiesWithTheRow may still have to correct one
+        // of these rows, once the basis below says which value the commit will actually leave in the
+        // matching typed column (#467 review, C1).
+        var stagedFields = new List<DocumentField>(extraction.Fields.Count);
         foreach (var f in extraction.Fields)
         {
             // Clamped to the DocumentField column widths (#373). These three strings come VERBATIM from
@@ -663,7 +667,7 @@ public class ExtractionWorker(
             // varchar(2000) / varchar(50) — and `description_of_operations`, which the prompt asks for, is
             // routinely long on an ACORD 25 with an ACORD 101 continuation. See Clamp for why an overflow
             // here is not a graceful failure but ~15 re-paid OCR + LLM runs.
-            db.DocumentFields.Add(new DocumentField
+            var row = new DocumentField
             {
                 Id = Guid.NewGuid(),
                 DocumentId = doc.Id,
@@ -673,7 +677,9 @@ public class ExtractionWorker(
                 Confidence = f.Confidence,
                 IsManuallyEdited = false,
                 OriginalValue = null
-            });
+            };
+            stagedFields.Add(row);
+            db.DocumentFields.Add(row);
         }
 
         var avgConf = extraction.Fields.Count > 0
@@ -752,6 +758,11 @@ public class ExtractionWorker(
         try
         {
             basis = await DocumentGradingBasis.AfterPendingCommitAsync(db, doc, ct);
+            // BEFORE the grade, not after: the reconciliation edits the JSON mirror, which is a verdict
+            // input in its own right (ComplianceCheckService.LookupValue's raw-string fallback reads it
+            // when the typed column is null). Grading first would let the fallback resolve a value the
+            // reconciliation is about to remove.
+            if (basis is not null) ReconcileCanonicalCopiesWithTheRow(doc, basis, fieldsDict, stagedFields);
             if (basis is null) await compliance.ApplyEvaluationAsync(db, doc, ct);
             else await compliance.ApplyEvaluationAsync(db, doc, basis, ct);
         }
@@ -833,6 +844,90 @@ public class ExtractionWorker(
         // bare of a try/catch, because a catch here would have nothing safe to do — the bookkeeping save in
         // ProcessDocumentAsync's catch runs on this same context and re-throws.
         await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Makes the two USER-VISIBLE copies of a canonical field — the <see cref="Document.ExtractionFields"/>
+    /// JSON mirror and the <see cref="DocumentField"/> row — agree with the typed column the pending commit
+    /// will actually LEAVE (#467 review, C1).
+    /// <para/>
+    /// The three copies do not move together. <c>ApplyToTypedColumn</c> ASSIGNS, so a value equal to the
+    /// minutes-old snapshot leaves the property unmodified and EF omits the column — whatever a request
+    /// committed inside the window survives. The mirror and the rows are rewritten from the response
+    /// UNCONDITIONALLY. So the ticket's own interleave (a null column, a mid-run correction, a model answer
+    /// nothing can parse) committed a row whose column held the user's valid date while both copies the
+    /// field editor renders held <c>"12/31/2029 (per endorsement)"</c> — under a <c>Completed</c>/
+    /// <c>Trusted</c> badge and a verdict graded from the surviving column, with <c>unreadableFields</c>
+    /// EMPTY because <see cref="DocumentFieldReadability"/> short-circuits on the non-null column before it
+    /// ever looks at the raw value the user is being shown. Fixing WHICH ROW the trust conclusion is about
+    /// (Amendment 1) is what exposed this: the row is only "clean" if its copies say what its column says.
+    /// <para/>
+    /// The rule is one sentence: <b>a raw copy this persist writes may not contradict the column the commit
+    /// will leave.</b> Where <see cref="CanonicalDocumentFields.SameTypedColumn"/> says the basis and the
+    /// tracked entity disagree, the response's value is one the row will NOT be graded from, so the copies
+    /// take the basis's rendering instead — and the response's own answer is preserved on the row as
+    /// <see cref="DocumentField.OriginalValue"/>, which the detail page already renders as <i>was: …</i>.
+    /// <see cref="Document.ExtractionRawJson"/> keeps the provider's verbatim answer either way, so the
+    /// forensic trail is untouched.
+    /// <para/>
+    /// Scoped to canonical fields the response ACTUALLY carried, because the defect is a copy this persist
+    /// WRITES. A field the model omitted has no mirror entry and no row here at all — nothing claims
+    /// anything about it, so there is nothing to reconcile (and inventing an entry would be this writer
+    /// asserting a value it never read).
+    /// <para/>
+    /// NOT ADR 0030 Amendment 2 Option G, which stays refuted: the typed columns are untouched, and this
+    /// worker still emits exactly the columns it emitted before. It writes STRICTLY LESS of a request's
+    /// value away than it did — the mirror and the rows were already being clobbered wholesale; one entry
+    /// now echoes the committed column instead of overwriting it with a contradiction. Nothing is assigned
+    /// onto a typed column, so no verdict input a REQUEST owns is re-asserted by the worker.
+    /// <para/>
+    /// Called from inside the caller's degrade-to-<c>Pending</c> try, so it inherits the placement rule
+    /// every basis consumer has: nothing here may become a new way for <c>PersistSuccess</c> to throw,
+    /// which is a re-paid Document AI + LLM run (see <see cref="Clamp"/>). It is pure in-memory work over
+    /// a dictionary and a list.
+    /// </summary>
+    private static void ReconcileCanonicalCopiesWithTheRow(
+        Document doc,
+        Document basis,
+        Dictionary<string, object?> fieldsDict,
+        List<DocumentField> stagedFields)
+    {
+        var corrected = false;
+        foreach (var fieldName in fieldsDict.Keys.ToArray())
+        {
+            if (!CanonicalDocumentFields.IsCanonical(fieldName)) continue;
+            if (CanonicalDocumentFields.SameTypedColumn(doc, basis, fieldName)) continue;
+
+            // The rendering the readability predicate itself reads the column through, so the copy we
+            // leave behind parses back to exactly the value being committed — or is a JSON null when the
+            // row carries none, which RawFieldValue reads as ABSENT rather than as unreadable (ADR 0040:
+            // blank stays blank).
+            var committed = DocumentFieldReadability.TypedColumnValue(basis, fieldName);
+            fieldsDict[fieldName] = committed;
+            corrected = true;
+
+            foreach (var row in stagedFields)
+            {
+                if (!string.Equals(row.FieldName, fieldName, StringComparison.OrdinalIgnoreCase)) continue;
+                // OriginalValue inherits FieldValue's width (ModelConfiguration), and FieldValue is
+                // already clamped, so this cannot 22001.
+                row.OriginalValue = row.FieldValue;
+                row.FieldValue = committed;
+                // The value on this row is no longer one the model read, and the row must not claim it
+                // was: the detail page prints "✎ Manually edited" and counts these fields in the
+                // "Read again will discard N corrections" warning, both of which are now true of it.
+                row.IsManuallyEdited = true;
+                row.Confidence = 1.0;
+            }
+        }
+
+        if (!corrected) return;
+        doc.ExtractionFields = JsonDocument.Parse(JsonSerializer.Serialize(fieldsDict));
+        // The basis is "the row this commit will leave", and the mirror is a property this writer MODIFIES
+        // — so the overlay took the tracked value and has to keep taking it. Both of the conclusions drawn
+        // below from this instance read it: the grade (through LookupValue's raw fallback) and the
+        // readability walk.
+        basis.ExtractionFields = doc.ExtractionFields;
     }
 
     /// <summary>
