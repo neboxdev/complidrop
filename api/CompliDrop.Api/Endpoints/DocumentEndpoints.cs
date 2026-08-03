@@ -724,10 +724,11 @@ public static class DocumentEndpoints
                 }
                 else
                 {
-                    if (field.OriginalValue is null) field.OriginalValue = field.FieldValue;
-                    field.FieldValue = update.FieldValue;
-                    field.IsManuallyEdited = true;
-                    field.Confidence = 1.0;
+                    // The shared corrected-row idiom (#467 review round 2, S5) — capture-once
+                    // provenance, the new value, the edited flag and the pinned confidence, in ONE
+                    // owner shared with ExtractionWorker.ReconcileCanonicalCopiesWithTheRow. Behaviour
+                    // here is unchanged: this branch already guarded the OriginalValue assignment.
+                    field.ApplyCorrection(update.FieldValue);
                 }
 
                 // Mirror the edit into the canonical compliance inputs (#216): the JSON dict (every

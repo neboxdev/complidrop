@@ -917,15 +917,20 @@ public class ExtractionWorker(
             foreach (var row in stagedFields)
             {
                 if (!string.Equals(row.FieldName, fieldName, StringComparison.OrdinalIgnoreCase)) continue;
-                // OriginalValue inherits FieldValue's width (ModelConfiguration), and FieldValue is
-                // already clamped, so this cannot 22001.
-                row.OriginalValue = row.FieldValue;
-                row.FieldValue = committed;
-                // The value on this row is no longer one the model read, and the row must not claim it
-                // was: the detail page prints "✎ Manually edited" and counts these fields in the
-                // "Read again will discard N corrections" warning, both of which are now true of it.
-                row.IsManuallyEdited = true;
-                row.Confidence = 1.0;
+                // The ONE owner of "this row now holds a corrected value" (#467 review round 2, S5):
+                // demote the model's answer to OriginalValue, take the committed one, flag the row and
+                // pin its confidence. The detail page prints "✎ Manually edited" and "was: …" and counts
+                // these fields in the "Read again will discard N corrections" warning, all of which are
+                // now true of it. OriginalValue inherits FieldValue's width, and FieldValue is already
+                // clamped, so the demotion cannot 22001.
+                //
+                // The provenance capture is IDEMPOTENT there, which this loop needs (#467 review round 2,
+                // C1): fieldsDict is ORDINAL while this match is OrdinalIgnoreCase, so a response
+                // carrying `expiration_date` AND `Expiration_Date` reaches these same rows twice — and an
+                // unguarded second demotion would set OriginalValue to the value the first pass just
+                // wrote, making it equal FieldValue, which is exactly the state the page's `was: …` guard
+                // renders as nothing. The model's own answer would be gone from the row.
+                row.ApplyCorrection(committed);
             }
         }
 

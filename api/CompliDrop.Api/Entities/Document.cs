@@ -143,4 +143,40 @@ public class DocumentField
     public string? OriginalValue { get; set; }
 
     public Document Document { get; set; } = null!;
+
+    /// <summary>
+    /// Records that this row now holds a value the extraction did NOT read — the four-assignment
+    /// "corrected field" idiom, with ONE owner (#467 review round 2, S5). Two writers reach it: the
+    /// human correction (<c>DocumentEndpoints.UpdateFields</c>) and
+    /// <c>ExtractionWorker.ReconcileCanonicalCopiesWithTheRow</c>, which replaces a canonical field's
+    /// raw copies when the pending commit will leave a different value in the typed column.
+    /// <para/>
+    /// <b>The provenance is captured ONCE.</b> <see cref="OriginalValue"/> is what the row said before
+    /// anything corrected it, and the detail page prints it as <i>was: …</i> only while it DIFFERS from
+    /// the value on screen — so a second pass overwriting it with the already-corrected value does not
+    /// merely duplicate work, it DELETES the disclosure. Reachable in the worker from a response
+    /// carrying one canonical field under two spellings (<c>expiration_date</c> and
+    /// <c>Expiration_Date</c>): the response dictionary is ORDINAL, so both are walked, while the row
+    /// match is <see cref="StringComparison.OrdinalIgnoreCase"/>, so both walks reach the same rows.
+    /// <para/>
+    /// <b>The confidence is pinned to 1.0, and that is a decision rather than bookkeeping.</b> The
+    /// detail page outlines a field by CONFIDENCE (amber below 0.9, rose below 0.7) and prints
+    /// "Please verify" beside it — claims about how well the MODEL read this value. After a correction
+    /// the value on screen is not the model's reading at all, so carrying the reading's uncertainty
+    /// onto it would flag the user's own text as doubtful. What names a corrected row instead is this
+    /// method's other two assignments: <see cref="IsManuallyEdited"/> renders as
+    /// <c>✎ Manually edited</c> and <see cref="OriginalValue"/> as <i>was: …</i>. Same convention
+    /// <c>DocumentFieldReadability</c> already records ("a manual edit pins its confidence to 1.0").
+    /// <para/>
+    /// <see cref="OriginalValue"/> shares <see cref="FieldValue"/>'s column width
+    /// (<c>ModelConfiguration</c>, pinned by <c>AuditClientInputClampTests</c>), so copying one into
+    /// the other can never overflow; <paramref name="correctedValue"/> is the caller's to guard.
+    /// </summary>
+    public void ApplyCorrection(string? correctedValue)
+    {
+        OriginalValue ??= FieldValue;
+        FieldValue = correctedValue;
+        IsManuallyEdited = true;
+        Confidence = 1.0;
+    }
 }
