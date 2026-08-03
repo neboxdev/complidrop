@@ -64,6 +64,14 @@ namespace CompliDrop.Api.Tests;
 /// verdict, <see cref="A_failing_basis_read_degrades_the_verdict_without_requeuing_the_extraction"/> for
 /// the degrade-to-<c>Pending</c> — which doubles as the pin that the basis read lives INSIDE the
 /// best-effort <c>try</c>, since no existing test made that read fail.
+/// <para/>
+/// One more interleave lands in the same window and is NOT about the basis at all
+/// (<see cref="A_regrade_that_deletes_the_check_rows_this_persist_staged_costs_no_extraction"/>, #468): a
+/// competing re-grade deletes the <c>ComplianceCheck</c> rows this persist has STAGED for removal, so its
+/// DELETE matches nothing. It lives here because this suite already owns the after-the-basis-read harness,
+/// and because its landing is the same one every test above is measured against — a throw out of
+/// <c>PersistSuccess</c> costs another paid OCR + LLM run. The mechanism that answers it has its own suite,
+/// <see cref="ComplianceCheckDeleteConcurrencyTests"/>.
 /// </summary>
 public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
 {
@@ -529,12 +537,16 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         // pins exactly one thing — the worker's UPDATE must not carry VendorId.
         //
         // And that checklist governs PERMITs while the document is a COI, so neither writer ever produces a
-        // ComplianceCheck row. Not tidiness: ApplyEvaluationAsync materializes the document's existing check
-        // rows and stages a RemoveRange, so a competing regrade landing in THIS window deletes the very rows
-        // the persist has staged and EF answers DbUpdateConcurrencyException out of PersistSuccess — the
-        // re-paid-extraction landing. That hazard predates #460 (it arrived with #337, and ADR 0030
-        // § Consequences under-calls it "cosmetic") and is ticketed as #468; giving these vendors a
-        // governing rule would silently make this test about THAT instead, and flakily so.
+        // ComplianceCheck row. That started as a dodge around #468 — a competing regrade landing in THIS
+        // window deletes the very rows ApplyEvaluationAsync has staged for removal, which used to throw
+        // DbUpdateConcurrencyException out of PersistSuccess, the re-paid-extraction landing. #468 is now
+        // CLOSED (ComplianceCheckDeleteConcurrencyInterceptor), so the dodge no longer avoids a failure; it
+        // is kept because it keeps this pin saying exactly ONE thing. A governing checklist here would make
+        // the terminal check rows a MIXED set — the competing regrade's plus the persist's, the residue ADR
+        // 0030 § Consequences records — and this test's subject is the emitted COLUMN SET, not the check
+        // rows. The check-row interleave has its own named pin:
+        // A_regrade_that_deletes_the_check_rows_this_persist_staged_costs_no_extraction, which uses a
+        // governing checklist precisely because that is the shape that reaches it.
         var auth = await RegisterAndLoginAsync();
         var start = await SeedVendorAsync(auth.OrgId, "Start", ("coi", "5000000"));
         var mid = await SeedVendorAsync(auth.OrgId, "Mid", ("permit", "1000000"));
@@ -938,6 +950,96 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         await act.Should().ThrowAsync<ArgumentException>()
             .WithParameterName("gradingBasis")
             .WithMessage("The grading basis must be a DETACHED document*");
+    }
+
+    [Fact]
+    public async Task A_regrade_that_deletes_the_check_rows_this_persist_staged_costs_no_extraction()
+    {
+        // #468. ApplyEvaluationAsync clears the document's existing ComplianceCheck rows by MATERIALIZING
+        // them and staging a RemoveRange, so EF emits a DELETE per row keyed on its primary key. A
+        // competing regrade that commits inside the window between that read and the persist's SaveChanges
+        // has already deleted exactly those rows, so the persist's DELETE affects 0 rows and EF answers
+        // DbUpdateConcurrencyException — out of PersistSuccess, which is the most expensive failure in this
+        // codebase: ProcessDocumentAsync's catch re-saves on the SAME context, so FailedAttempts never
+        // increments and the document is zombie-reclaimed every five minutes RE-PAYING Document AI + the
+        // LLM (ExtractionWorker.Clamp's remarks).
+        //
+        // The checklist GOVERNS the document's type on purpose — that is what makes both writers produce
+        // check rows, and it is the difference between this test and
+        // A_write_that_lands_AFTER_the_basis_read_is_not_clobbered_by_the_persist, whose vendors
+        // deliberately share a checklist that governs nothing.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
+        // Seeded BELOW what the model returns below, so the worker genuinely MODIFIES the column and it is
+        // therefore in the persist's UPDATE — otherwise the assertion that the extraction's inputs
+        // committed would be measuring the competing edit's value instead (ADR 0030 Amendment 2).
+        var docId = await SeedQueuedDocAsync(auth.OrgId, vendorId, gl: 1_000_000m);
+        // The rows the persist will stage for removal. Without them the clear stages nothing and the
+        // interleave below cannot reach the hazard at all.
+        await MarkGradedAsync(auth.OrgId, docId);
+
+        var hook = Fixture.Factory.Services.GetRequiredService<ConcurrentSystemWriteInterceptor>();
+        Extraction.Result = Extracted("coi", ("general_liability_limit", "2000000"));
+        Extraction.DuringExtract = () =>
+        {
+            // Armed only now, so it cannot fire on a save that precedes the extraction call. The competing
+            // request has to land AFTER ApplyEvaluationAsync read the check rows and BEFORE the persist's
+            // UPDATE — which is exactly this hook's window.
+            hook.OnSavingChanges = async () =>
+            {
+                hook.OnSavingChanges = null;
+                var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+                {
+                    fields = new[] { new { fieldName = "general_liability_limit", fieldValue = "4000000" } }
+                });
+                resp.StatusCode.Should().Be(HttpStatusCode.OK,
+                    "the competing edit is an ordinary request — and its re-grade is what deletes the rows "
+                    + "the persist has staged");
+            };
+            return Task.CompletedTask;
+        };
+
+        try
+        {
+            await ClaimAndProcessAsync(docId);
+        }
+        finally
+        {
+            hook.Reset();
+        }
+
+        // ReadTerminalStateAsync also re-asserts the ADR 0030 invariant itself — the persisted verdict is
+        // what the persisted inputs grade to — so the tolerated delete cannot have bought a consistent
+        // status by skipping the grading.
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "the persist must commit through the interleave — a throw here is caught as a COUNTED FAILURE "
+            + "and the document goes back in the queue for another paid OCR + LLM run");
+        terminal.Doc.FailedAttempts.Should().Be(0, "…so nothing was charged against the retry budget");
+        terminal.Doc.ProcessingError.Should().BeNull("…and no failure was recorded against the document");
+        terminal.Doc.GeneralLiabilityLimit.Should().Be(2_000_000m,
+            "the extraction's own inputs still commit — the deletes stay in the persist's own SaveChanges, "
+            + "so this is still ONE unit of work and not a partial one");
+        terminal.Doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant,
+            "2M clears the 1M floor — the verdict this persist computed is the one that lands, forced into "
+            + "the UPDATE as always (ExtractionWorker.ForceVerdictWrite)");
+
+        // The recorded RESIDUE, pinned rather than left to prose (ADR 0030 § Consequences): the competing
+        // re-grade's own check rows were already committed when this persist's inserts landed, so the
+        // document transiently holds BOTH sets. That is the display desync the ADR always described — and
+        // the whole trade this ticket makes, since the alternative was a thrown persist. Both rows cite a
+        // rule that GOVERNS the row as it now stands (ReadTerminalStateAsync asserts that), so the
+        // "What we checked" panel never renders a requirement that does not apply.
+        terminal.Checks.Should().HaveCount(2,
+            "one row from the competing edit's re-grade and one from this persist — the transient duplicate "
+            + "ADR 0030 § Consequences records, cleared by the document's next evaluation");
+
+        // The real form of "no failure path may cost a second OCR + LLM run": drive a SECOND poll cycle and
+        // require the queue to have nothing for it.
+        (await BuildWorker().ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+            "the document is settled at Completed — neither Pending nor a stale Processing claim — so the "
+            + "next poll has nothing to pick up");
+        Extraction.ExtractCallCount.Should().Be(1, "…and the extraction was therefore paid for exactly once");
     }
 
     /// <summary>
