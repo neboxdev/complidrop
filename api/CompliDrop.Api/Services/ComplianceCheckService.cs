@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Linq.Expressions;
 using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Data;
@@ -154,8 +155,9 @@ public interface IComplianceCheckService
     /// them on a user-initiated Check-again / rule edit / reassignment. Same batched, best-effort
     /// machinery as the endpoint fan-out (ADR 0030: each page commits verdict + checks in ONE unit of
     /// work). Returns a <see cref="RegradeResult"/> (targeted / regraded / failed-page counts, sample docs
-    /// excluded) so the seed can tell a FULLY-successful fan-out from one that caught-and-skipped a page —
-    /// only the former may advance the template's re-grade watermark (#416, ADR 0036 Amendment 2).
+    /// excluded) so the seed can tell a FULLY-successful fan-out from one that caught-and-skipped a page OR
+    /// could not CONFIRM a page it committed (#470, ADR 0030 Amendment 5) — only the former may advance the
+    /// template's re-grade watermark (#416, ADR 0036 Amendment 2).
     /// </summary>
     Task<RegradeResult> ReevaluateForTemplateForSystemAsync(Guid templateId, CancellationToken ct);
 }
@@ -163,11 +165,30 @@ public interface IComplianceCheckService
 /// <summary>
 /// Outcome of a batched re-grade fan-out. <see cref="Targeted"/> is how many documents the predicate
 /// selected; <see cref="Regraded"/> how many were actually re-evaluated and committed; <see cref="FailedPages"/>
-/// how many pages had their <c>SaveChanges</c> caught-and-skipped (the fan-out is best-effort — a failed page is
-/// logged, not thrown, so a shared system-rule mutation that already committed can't be un-done by a re-grade
-/// hiccup). <see cref="AllSucceeded"/> is the durability signal the seed keys on: only a fan-out that skipped NO
-/// page may advance a system template's <c>RegradedThroughRevision</c>, so an interrupted or partially-failed
-/// re-grade re-fires on the next boot until every document catches up (#416, ADR 0036 Amendment 2).
+/// how many pages did not complete cleanly (the fan-out is best-effort — a failed page is logged, not thrown,
+/// so a shared system-rule mutation that already committed can't be un-done by a re-grade hiccup).
+/// <para/>
+/// <see cref="FailedPages"/> counts THREE distinct arms since #470 / ADR 0030 Amendment 5, and the last two
+/// are why <see cref="Regraded"/> and <see cref="FailedPages"/> are not complementary:
+/// <list type="number">
+/// <item>the page's own <c>SaveChanges</c> was caught-and-skipped — nothing committed, and those documents are
+/// NOT in <see cref="Regraded"/>;</item>
+/// <item>the page COMMITTED and its post-commit verification pass then threw — the documents were re-graded
+/// (so they ARE in <see cref="Regraded"/>) but nobody confirmed the verdicts against a fresh read;</item>
+/// <item>the page COMMITTED and the verification SPENT ITS BOUND on a document whose inputs kept moving —
+/// same terminal state as (2), reached without an exception, so it counts the same way. Splitting it out is
+/// how a give-up used to escape the count while <see cref="AllSucceeded"/> still said the fan-out was
+/// durable.</item>
+/// </list>
+/// So <c>Targeted == Regraded</c> beside <c>AllSucceeded == false</c> is a REACHABLE tuple, not a
+/// contradiction — pinned by <c>ComplianceFanoutTests.A_failed_verification_pass_counts_the_committed_page_as_failed</c>
+/// (arm 2) and <c>ComplianceFanoutTests.A_page_left_unconfirmed_by_a_spent_bound_counts_as_a_failed_page</c>
+/// (arm 3).
+/// <para/>
+/// <see cref="AllSucceeded"/> is the durability signal the seed keys on: only a fan-out that skipped NO page and
+/// CONFIRMED every page it committed may advance a system template's <c>RegradedThroughRevision</c>, so an
+/// interrupted, partially-failed or unconfirmed re-grade re-fires on the next boot until every document catches
+/// up (#416, ADR 0036 Amendment 2).
 /// </summary>
 public readonly record struct RegradeResult(int Targeted, int Regraded, int FailedPages)
 {
@@ -280,19 +301,21 @@ public class ComplianceCheckService(
     //     0036 Amendment 2). That watermark — not the sweep — is what stops a stale verdict surviving an
     //     interrupted boot.
     //
-    // CONCURRENCY, and this is a recorded, TICKETED residual rather than an oversight — #470, recorded in
-    // ADR 0030 Amendment 3 § What stays open when #461 closed the single-document half of it. Its first
-    // obligation is to measure the population; "accepted, keep the record" is a legitimate outcome.
-    // This fan-out keeps READ COMMITTED and keeps the read → compute → write window
-    // that Amendment 3 closed on the single-document re-grade: a page's documents are loaded, graded and
-    // saved as one unit, so an edit committing inside that span leaves its document holding the edited
-    // inputs beside a verdict graded from the pre-edit ones. It was NOT put under
-    // DocumentWriteConcurrency's REPEATABLE READ, on purpose — the cost profile is a different one. A
-    // single conflicting edit anywhere in a page of up to PageSize documents would abandon and re-run the
-    // WHOLE page (up to MaxAttempts), and then skip it entirely, so one concurrent edit would forfeit
-    // hundreds of unrelated re-grades where today it degrades exactly one. And these callers run
-    // POST-COMMIT on a background token with no user to answer 409 to. Closing it wants per-document
-    // granularity, which is the batching this method exists to provide, undone.
+    // CONCURRENCY — #470 / ADR 0030 Amendment 5. This fan-out keeps READ COMMITTED and it is NOT put under
+    // DocumentWriteConcurrency's REPEATABLE READ (Amendment 3 Option K, refuted): a page is up to PageSize
+    // documents committed as ONE unit, so a single conflicting edit anywhere in it would abandon and re-run
+    // the WHOLE page (up to MaxAttempts) and then skip it — forfeiting hundreds of unrelated re-grades where
+    // the window degrades exactly one. These callers also run POST-COMMIT on a background token, with no
+    // user to answer 409 to.
+    //
+    // So the window is closed from the OTHER side: the page commits exactly as before, and VerifyPageAsync
+    // then re-reads it and re-grades ONLY the documents whose verdict the page's own commit left
+    // contradicting their inputs. Detection is by RE-GRADING, never by comparing a list of columns — a
+    // fresh outcome that differs from the one this page applied IS the signal, so it covers every verdict
+    // input including one added tomorrow (the same mechanism-not-enumeration rule as
+    // Services/DocumentGradingBasis; ADR 0030 Amendment 2 Option E refutes the enumeration). Bounded at
+    // MaxVerificationPasses over a SHRINKING set, so a document nobody is editing costs one extra read and
+    // zero writes, and a document somebody keeps editing cannot spin the fan-out.
     //
     // Granularity note: a page commits as a unit (one SaveChanges), so one document that fails to persist
     // forfeits the re-grade of its WHOLE page (≤ PageSize), not just itself — coarser than the old
@@ -316,21 +339,12 @@ public class ComplianceCheckService(
         foreach (var page in docIds.Chunk(reevaluationPageSize))
         {
             ct.ThrowIfCancellationRequested();
+
+            IReadOnlyDictionary<Guid, EvaluationOutcome>? applied = null;
             try
             {
-                var docs = await context.Set<Document>()
-                    .Where(d => page.Contains(d.Id))
-                    .Include(d => d.Vendor)
-                        .ThenInclude(v => v!.ComplianceTemplate)
-                            .ThenInclude(t => t!.Rules)
-                    // Split query so a document's ExtractionFields JSON isn't re-transmitted once per
-                    // rule (a single join multiplies each doc row — and its JSON payload — by the
-                    // rule count). OrderBy gives the split its stable key.
-                    .OrderBy(d => d.Id)
-                    .AsSplitQuery()
-                    .ToListAsync(ct);
-
-                await ApplyEvaluationsAsync(context, docs, nowUtc, ct);
+                var docs = await LoadPageAsync(context, page, ct);
+                applied = await ApplyEvaluationsAsync(context, docs, nowUtc, ct);
                 regraded += docs.Count;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -346,8 +360,263 @@ public class ComplianceCheckService(
                 // the fan-out began, so clearing here cannot lose it.
                 context.ChangeTracker.Clear();
             }
+
+            // A page that never committed has nothing to verify — and it must not be counted twice.
+            if (applied is null) continue;
+
+            // The documents this page COMMITTED whose verdicts nothing has since CONFIRMED against a fresh
+            // read. Seeded FULL — until a verification pass has read a document and found the row still
+            // saying what this page asserted, nothing about it is confirmed — and narrowed by VerifyPageAsync
+            // as each pass lands. Owned HERE rather than returned so it is readable after a THROW as well as
+            // after a normal return: a page whose pass 1 confirmed 199 of 200 documents and then threw
+            // correcting the 200th has exactly ONE unconfirmed document, and that is the one worth naming.
+            var unconfirmed = new HashSet<Guid>(applied.Keys);
+            try
+            {
+                await VerifyPageAsync(context, applied, nowUtc, unconfirmed, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError(ex,
+                    "Re-evaluation verification pass failed for a page of {Count} documents; {Unconfirmed} of "
+                    + "them are left committed but unconfirmed against a fresh read. Document ids (up to "
+                    + "{Max} shown): {DocumentIds}",
+                    applied.Count, unconfirmed.Count, LoggedIdSampleSize, IdSample(unconfirmed));
+            }
+            finally
+            {
+                context.ChangeTracker.Clear();
+            }
+
+            // ONE rule covering BOTH ways verification can end without confirming, because they leave the
+            // SAME state: verdicts committed, nobody re-read them. A page counts as FAILED even though its
+            // own SaveChanges committed, because that is what the counter is FOR — RegradeResult.AllSucceeded
+            // gates the seed's re-grade watermark (#416, ADR 0036 Amendment 2), and a committed-but-
+            // unconfirmed page is exactly a page the next boot should re-fire. Splitting the two arms is how
+            // the give-up used to escape the count entirely: AllSucceeded stayed true, the watermark advanced
+            // over a document graded from inputs that moved under it, and nothing was left to heal it.
+            // `regraded` deliberately still counts these documents — they WERE re-graded; what failed is the
+            // confirmation. Cancellation never reaches here (it propagates out of the two catches above), so
+            // a shutdown is still not a page failure.
+            if (unconfirmed.Count > 0) failedPages++;
         }
         return new RegradeResult(docIds.Count, regraded, failedPages);
+    }
+
+    /// <summary>
+    /// The ONE page-load shape, shared by the initial grade and every verification pass (#470). They must
+    /// read the same graph or the verification would grade a different document than the page did and
+    /// "the verdict moved" would stop meaning "the inputs moved" — the same reason
+    /// <see cref="WithChecklist"/> exists for the single-document path.
+    /// </summary>
+    private static Task<List<Document>> LoadPageAsync(DbContext context, Guid[] ids, CancellationToken ct) =>
+        context.Set<Document>()
+            .Where(d => ids.Contains(d.Id))
+            .Include(d => d.Vendor)
+                .ThenInclude(v => v!.ComplianceTemplate)
+                    .ThenInclude(t => t!.Rules)
+            // Split query so a document's ExtractionFields JSON isn't re-transmitted once per
+            // rule (a single join multiplies each doc row — and its JSON payload — by the
+            // rule count). OrderBy gives the split its stable key.
+            .OrderBy(d => d.Id)
+            .AsSplitQuery()
+            .ToListAsync(ct);
+
+    /// <summary>
+    /// How many times a committed page is re-read and re-graded to CONFIRM the verdicts it wrote (#470,
+    /// ADR 0030 Amendment 5). Two, over a set that shrinks to the documents that actually moved.
+    /// <para/>
+    /// Stated as what the loop DOES, since the bound is easy to over-claim: the fan-out issues up to THREE
+    /// writes for one document — the page's own plus one per pass — and gives up after TWO detected
+    /// DISAGREEMENTS, leaving the third write committed but never re-read. Nothing observes that last
+    /// write's fate, which is precisely why it is disclosed rather than assumed good (the give-up Warning in
+    /// <see cref="VerifyPageAsync"/>, and the failed-page count it drives). And a disagreement means only
+    /// "a verdict input moved between the two reads" — NOT that this fan-out's write lost a race: a
+    /// competitor committing AFTER the page's UPDATE produces one too (the harmless idempotent rewrite the
+    /// same amendment records).
+    /// <para/>
+    /// Same reasoning as <see cref="DocumentConcurrency.MaxAttempts"/> (3 total chances at a correct
+    /// verdict) and deliberately not that constant: this bounds a best-effort background CONFIRMATION over
+    /// a whole page, not a request's retry of one document, and the two must be free to move apart.
+    /// </summary>
+    internal const int MaxVerificationPasses = 2;
+
+    /// <summary>
+    /// How many document ids a fan-out failure line NAMES. A verdict left committed-but-unconfirmed is an
+    /// event somebody has to be able to act on, and a bare count is not actionable — the ids are already in
+    /// hand on both arms, so they are logged. IDS ONLY: never an <c>ActualValue</c> or a <c>Notes</c> string,
+    /// which are document CONTENT — the same rule
+    /// <c>Data/ComplianceCheckDeleteConcurrencyInterceptor</c> follows for its per-row suppression trace.
+    /// Bounded because a page is up to <see cref="DefaultReevaluationPageSize"/> documents and a log line is
+    /// not a dump; the count printed beside the sample is always the complete one.
+    /// <para/>
+    /// <c>internal</c> so the cap itself can be pinned by test rather than restated as a magic number —
+    /// a line that promised "up to {Max} shown" and then printed the whole page would be the dump this
+    /// bound exists to prevent.
+    /// </summary>
+    internal const int LoggedIdSampleSize = 20;
+
+    private static Guid[] IdSample(IEnumerable<Guid> ids) => [.. ids.Take(LoggedIdSampleSize)];
+
+    /// <summary>
+    /// Re-reads the page this fan-out has just committed and re-grades ONLY the documents whose verdict no
+    /// longer follows from their inputs — the #470 half of ADR 0030's invariant on the batched fan-out.
+    /// <para/>
+    /// A page is loaded, graded and saved under <c>READ COMMITTED</c>, so a <c>PUT /documents/{id}/fields</c>
+    /// (or an <c>ExtractionWorker</c> persist) committing inside that span leaves its document holding the
+    /// EDITED inputs beside the verdict this page graded from the pre-edit ones, with
+    /// <see cref="ComplianceCheck"/> rows citing values the row no longer holds — an affirmative verdict
+    /// standing over inputs somebody just lowered, which nothing heals (the nightly sweep does date
+    /// transitions only).
+    /// <para/>
+    /// The signal is the RE-GRADE ITSELF: recompute each document's outcome from a fresh read and compare it
+    /// to the outcome the page applied. Equal ⇒ nothing that decides this verdict moved, whoever wrote in the
+    /// window, and NOTHING is written. Different ⇒ the inputs moved, and the fresh outcome replaces the stale
+    /// one. That is a mechanism rather than a column list, so it covers `ExtractionFields`, the typed
+    /// columns, <see cref="Document.VendorId"/>, <see cref="Document.DocumentType"/> and any verdict input
+    /// added later, by construction (ADR 0030 Amendment 2 Option E refutes the enumeration).
+    /// <para/>
+    /// <paramref name="nowUtc"/> is the fan-out's OWN clock reading, reused deliberately: grading the
+    /// verification against a later `now` would turn an expiry boundary crossed mid-fan-out into a "mover"
+    /// on documents nobody touched, so a difference here means an INPUT changed and nothing else.
+    /// <para/>
+    /// Comparing against what the page APPLIED — rather than against the row's stored status and check rows
+    /// (ADR 0030 Amendment 5 Option T) — costs no extra query and cannot MISS a stale verdict. TWO kinds of
+    /// writer can have replaced this page's verdict since it committed, and neither hides one:
+    /// <list type="bullet">
+    /// <item>An ADR 0030 combined-unit-of-work writer, which commits its own <c>(inputs, verdict)</c> pair.
+    /// A row that disagrees with the page's outcome while agreeing with its OWN inputs simply re-grades to
+    /// the values it already holds — one harmless idempotent rewrite.</item>
+    /// <item><c>ComplianceSweepBackgroundService</c>, which is deliberately NOT one of them: it writes
+    /// <see cref="Document.ComplianceStatus"/> through two <c>ExecuteUpdateAsync</c> calls with no inputs and
+    /// no check rows anywhere in that unit of work. It is safe HERE because its transitions are
+    /// monotonic-forward and purely DATE-driven, which <see cref="ComputeOutcome"/> reproduces from the same
+    /// row — so a document nobody edited compares EQUAL to what the page applied, is not written at all, and
+    /// KEEPS the sweep's newer verdict. Only a document that also moved a verdict input is rewritten, and
+    /// there the sweep re-applies its date transition on the next hourly tick.</item>
+    /// </list>
+    /// The benefit bought with those two facts is that the common case reads once and writes nothing.
+    /// <para/>
+    /// <paramref name="unconfirmed"/> is the caller's OWN set, seeded with every document this page
+    /// committed and narrowed here as passes confirm. It is a parameter rather than a return value because
+    /// the caller needs it after a THROW as much as after a normal return — that is what makes the failure
+    /// line name the documents actually left behind, and what lets ONE rule at the call site count both an
+    /// exception and a spent bound as the failed page they equally are.
+    /// </summary>
+    private async Task VerifyPageAsync(
+        DbContext context,
+        IReadOnlyDictionary<Guid, EvaluationOutcome> applied,
+        DateTime nowUtc,
+        HashSet<Guid> unconfirmed,
+        CancellationToken ct)
+    {
+        var expected = applied;
+        for (var pass = 1; pass <= MaxVerificationPasses && expected.Count > 0; pass++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // MUST come before the re-read. EF resolves a query against already-tracked instances and does
+            // NOT refresh their values, so without this the "fresh" documents would be the very entities
+            // this fan-out just wrote and every pass would confirm itself.
+            context.ChangeTracker.Clear();
+
+            var fresh = await LoadPageAsync(context, [.. expected.Keys], ct);
+
+            var movers = new List<(Document Doc, EvaluationOutcome Outcome)>();
+            foreach (var doc in fresh)
+            {
+                // A document that vanished from the re-read was soft-deleted (or moved out of the tenant
+                // filter) after the page committed — it is simply absent from `fresh`, and re-grading a row
+                // that is going away is not this pass's business.
+                var outcome = ComputeOutcome(doc, nowUtc, _correctedAdditionalInsuredWording);
+                if (!OutcomeMatches(outcome, expected[doc.Id])) movers.Add((doc, outcome));
+            }
+
+            // Narrow BEFORE the correction is written, because it is THIS PASS'S READ that confirms the
+            // non-movers: the row says what this fan-out asserted about them, and that stays true whether or
+            // not the write below lands. A document that vanished from the re-read leaves the set for the
+            // same reason it leaves `expected` — it is going away, so nobody owes it a confirmation.
+            unconfirmed.Clear();
+            foreach (var (moved, _) in movers) unconfirmed.Add(moved.Id);
+
+            if (movers.Count == 0) return;
+
+            logger.LogInformation(
+                "Re-evaluation verification pass {Pass} found {Count} document(s) whose inputs changed while "
+                + "the page was being graded; re-grading those and leaving the rest untouched",
+                pass, movers.Count);
+
+            // Only the movers are written, so one concurrent edit costs its OWN document a second re-grade
+            // and costs the other documents in the page nothing (the anti-forfeit property Option K lacks).
+            // The clear-and-replace of their check rows composes with
+            // ComplianceCheckDeleteConcurrencyInterceptor exactly as every other re-grade does (#468).
+            expected = await ApplyOutcomesAsync(context, movers, nowUtc, ct);
+        }
+
+        // The bound is spent and something is still moving. LEAVE the last verdict this fan-out computed:
+        // the alternative — degrading it to Pending "for safety" — is ADR 0030 Amendment 3 Option I,
+        // refuted for exactly this caller shape, since a pure re-grade owns no inputs and would be
+        // replacing a possibly-correct verdict with a non-committal one through the very write that keeps
+        // losing. Whoever keeps winning is a combined-unit-of-work writer committing its own consistent
+        // pair, so the next thing that GRADES this document reconciles it — but nothing SCHEDULES that
+        // (ComplianceSweepBackgroundService does date transitions only), which is why the line below names
+        // an action instead of promising a self-heal. `unconfirmed` is the same set as `expected.Keys` here
+        // BY CONSTRUCTION, and it is what is read so there is one answer to "what is still unconfirmed".
+        if (unconfirmed.Count > 0)
+            logger.LogWarning(
+                "Gave up confirming {Count} document(s) after {Passes} verification pass(es): their inputs "
+                + "changed inside every pass, so the last correction is committed but unconfirmed. They keep "
+                + "that verdict rather than being degraded, and NOTHING re-grades them automatically — run "
+                + "Check again on the ids below, or re-fire the fan-out, to reconcile them. Document ids (up "
+                + "to {Max} shown): {DocumentIds}",
+                unconfirmed.Count, MaxVerificationPasses, LoggedIdSampleSize, IdSample(unconfirmed));
+    }
+
+    /// <summary>
+    /// Whether two evaluations of the same document say the SAME thing — the whole assertion a re-grade
+    /// makes, not just its headline. The status alone would miss a document whose aggregate verdict is
+    /// unchanged while its check rows moved (a different rule now failing, an <c>ActualValue</c> the row no
+    /// longer holds), which is half of what #470 describes.
+    /// <para/>
+    /// Keyed on <see cref="ComplianceCheck.ComplianceRuleId"/> rather than positional, because
+    /// <c>template.Rules</c> carries no ORDER BY and two loads may materialize it differently — a
+    /// positional compare would call every document a mover on a reordered read. <see cref="ComplianceCheck.Id"/>
+    /// (freshly minted per evaluation) and <see cref="ComplianceCheck.CheckedAt"/> (this fan-out's clock) are
+    /// deliberately excluded: neither is an assertion about the document.
+    /// <para/>
+    /// <see cref="EvaluationOutcome.ClearExistingChecks"/> is compared too, and it also GATES the row
+    /// comparison — an <c>Expired</c> outcome deliberately leaves the existing check rows alone
+    /// (<see cref="ComputeOutcome"/>), so its empty <c>NewChecks</c> asserts nothing about them.
+    /// </summary>
+    private static bool OutcomeMatches(in EvaluationOutcome fresh, in EvaluationOutcome applied)
+    {
+        if (fresh.Status != applied.Status || fresh.ClearExistingChecks != applied.ClearExistingChecks)
+            return false;
+        if (!fresh.ClearExistingChecks) return true;
+        if (fresh.NewChecks.Count != applied.NewChecks.Count) return false;
+
+        var appliedByRule = applied.NewChecks.ToDictionary(c => c.ComplianceRuleId);
+        foreach (var check in fresh.NewChecks)
+        {
+            if (!appliedByRule.TryGetValue(check.ComplianceRuleId, out var before)) return false;
+            if (before.IsPassed != check.IsPassed
+                || !string.Equals(before.ActualValue, check.ActualValue, StringComparison.Ordinal)
+                || !string.Equals(before.Notes, check.Notes, StringComparison.Ordinal))
+                return false;
+        }
+        return true;
+    }
+
+    // Grades one page and applies it. The COMPUTE half is split from the write half because the
+    // verification pass (#470) has already computed its outcomes — that is how it decided who moved — and
+    // grading each mover a second time to write it would be both wasteful and a second chance to disagree.
+    private Task<IReadOnlyDictionary<Guid, EvaluationOutcome>> ApplyEvaluationsAsync(
+        DbContext context, IReadOnlyList<Document> docs, DateTime nowUtc, CancellationToken ct)
+    {
+        var outcomes = new List<(Document Doc, EvaluationOutcome Outcome)>(docs.Count);
+        foreach (var doc in docs)
+            outcomes.Add((doc, ComputeOutcome(doc, nowUtc, _correctedAdditionalInsuredWording)));
+        return ApplyOutcomesAsync(context, outcomes, nowUtc, ct);
     }
 
     // Applies one page of evaluations as a single round-trip group: one bulk load of the page's
@@ -360,13 +629,17 @@ public class ComplianceCheckService(
     // ComplianceCheckDeleteConcurrencyInterceptor, for why that exposure is answered rather than
     // designed out (#468). This fan-out runs READ COMMITTED and catches per page, so before that
     // interceptor a competing re-grade forfeited the WHOLE page's re-grade, not just one document's.
-    private async Task ApplyEvaluationsAsync(DbContext context, IReadOnlyList<Document> docs, DateTime nowUtc, CancellationToken ct)
+    //
+    // Returns the outcomes it committed, keyed by document: that map is what VerifyPageAsync compares the
+    // next fresh grade against, so "what this fan-out last asserted about this document" is carried by the
+    // code that asserted it rather than re-derived from the row afterwards.
+    private static async Task<IReadOnlyDictionary<Guid, EvaluationOutcome>> ApplyOutcomesAsync(
+        DbContext context,
+        IReadOnlyList<(Document Doc, EvaluationOutcome Outcome)> outcomes,
+        DateTime nowUtc,
+        CancellationToken ct)
     {
-        if (docs.Count == 0) return;
-
-        var outcomes = new List<(Document Doc, EvaluationOutcome Outcome)>(docs.Count);
-        foreach (var doc in docs)
-            outcomes.Add((doc, ComputeOutcome(doc, nowUtc, _correctedAdditionalInsuredWording)));
+        if (outcomes.Count == 0) return ReadOnlyDictionary<Guid, EvaluationOutcome>.Empty;
 
         // The id set is drawn from the Documents query above — tenant-filtered on AppDbContext, or
         // cross-org BY DESIGN on SystemDbContext (#400) — so this delete over the ComplianceChecks
@@ -389,6 +662,7 @@ public class ComplianceCheckService(
         }
 
         await context.SaveChangesAsync(ct);
+        return outcomes.ToDictionary(o => o.Doc.Id, o => o.Outcome);
     }
 
     public Task ApplyEvaluationAsync(DbContext context, Document doc, CancellationToken ct) =>

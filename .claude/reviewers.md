@@ -757,17 +757,124 @@ Both are defined in this repo's `.claude/agents/`.
       reload. A re-grade conflict is transient (the next click almost always wins), so adding an
       invalidate-on-409 here — while `UpdateFields`/`UpdateDocument` deliberately have none for the same
       code — would be an inconsistency, not a fix.
-    - KNOWN residuals, ADR 0030 Amendment 3 § What stays open — do not re-report as new. (a) The
-      BATCHED fan-outs (`ReevaluateWhereAsync`, behind the template/vendor/seed re-grades) keep the
-      window, ticketed as [#470](https://github.com/neboxdev/complidrop/issues/470) (`bug`, so it indexes
-      into epic #48) — which is also the live successor Amendment 2 § What stays open now points at for
-      the worker's basis-read→commit window, #461 having closed. Deliberate on cost profile: a page is up
-      to 200 documents committed as ONE unit, so one
-      conflicting edit would abandon and re-run the whole page and then skip it — forfeiting hundreds of
-      unrelated re-grades where today exactly one goes stale — and these run post-commit on a background
-      token with no user to 409. "Wrap the fan-out too for consistency" is Option K, refuted. (b)
+    - KNOWN residual, ADR 0030 Amendment 3 § What stays open — do not re-report as new:
       `EvaluateForSystemAsync` is unguarded and caller-less in production; the tenant guard does not
-      transfer as-is (`RunAsync` takes an `AppDbContext`).
+      transfer as-is (`RunAsync` takes an `AppDbContext`). The BATCHED fan-outs were the other one and
+      have since CLOSED (#470, Amendment 5 — see its own block below); they still keep `READ COMMITTED`,
+      so a diff that puts them under the guard is still Option K.
+  - The BATCHED fan-out's window is ADR 0030 **Amendment 5** (#470), Amendment 3's other residual.
+    `ComplianceCheckService.ReevaluateWhereAsync` loads a page, grades it and saves it under
+    `READ COMMITTED`, so an edit committing inside that span left the document holding the EDITED inputs
+    beside a verdict graded from the pre-edit ones. It is closed from the OTHER side: the page commits
+    exactly as before, then `VerifyPageAsync` re-reads it and re-grades ONLY the documents whose fresh
+    outcome differs from the one the page applied. Facts that look like bugs and are not:
+    - "Just wrap the fan-out in `DocumentWriteConcurrency.RunAsync` for consistency with the three
+      request-path writers" is **Option K, refuted** — a page is up to `DefaultReevaluationPageSize`
+      (200) documents committed as ONE unit, so one conflicting edit anywhere in it abandons and re-runs
+      the whole page and then skips it, forfeiting hundreds of unrelated re-grades to protect one. These
+      callers also run post-commit on `PostCommitRegrade`'s background token with no user to 409. The
+      fan-out KEEPS `READ COMMITTED`, deliberately.
+    - Detection is the RE-GRADE (`OutcomeMatches`: status, `ClearExistingChecks`, and the check tuples
+      keyed by `ComplianceRuleId`), never a column comparison. "Compare `UpdatedAt` / the typed columns
+      instead, it's cheaper" is a real finding twice over: `AuditSaveChangesInterceptor` re-stamps
+      `UpdatedAt` on the fan-out's OWN write so no `Documents` column survives as a post-commit signal
+      (Option R), and a narrow input projection is the ENUMERATION Amendment 2 Option E refutes — it
+      misses an `ExtractionFields`-only edit such as `certificate_holder` (Option S). The INPUT side is
+      the mechanism; the CHECK-ROW comparison inside `OutcomeMatches` is an enumeration on purpose, and
+      it is pinned mechanically —
+      `Adr0030EnforcementTests.OutcomeMatches_compares_every_assertion_bearing_ComplianceCheck_column`
+      requires every `ComplianceCheck` column to be compared or named as an exclusion (`Id`,
+      `DocumentId`, `CheckedAt`). Adding a column to that entity without touching either IS a finding.
+      What counts as a column is read off the EF MODEL (`IEntityType.GetProperties()`), and reverting
+      that to a reflection filter on the declaring NAMESPACE is a finding both ways: this codebase's
+      enums live in `CompliDrop.Api.Entities`, so an enum-typed column (its own idiom for a graded
+      assertion) read as a NAVIGATION and was never censused, while a collection navigation was
+      DEMANDED in the comparison. The per-column match is scoped to the method's `ComplianceCheck` row
+      locals and bounded at identifier edges — a bare `Contain($".{column}")` is satisfied for free by
+      `fresh.Status`, `NewChecks.Count`, `StringComparison.Ordinal` and, for a future `Note` column, by
+      `check.Notes`; "simplify it back to a substring over the whole body" is a finding. The census's
+      anti-no-op must drive the census's OWN helper (`The_census_rejects_a_comparison_that_dropped_a_column`)
+      — the version that hand-copied one `Contain` line asserted only that FluentAssertions throws on a
+      missing substring and could not see the enum hole in the filter it claimed to guard.
+    - It compares against what the page APPLIED, not against the row's stored status + check rows
+      (Option T). Two writers can have replaced the verdict since, and neither hides one: a
+      combined-unit-of-work writer (its row re-grades to what it already holds), and
+      `ComplianceSweepBackgroundService`, which is NOT one of them — it writes `ComplianceStatus`
+      through two `ExecuteUpdate`s with no inputs and no check rows. The sweep is safe here because its
+      transitions are monotonic-forward and DATE-driven, which `ComputeOutcome` reproduces against the
+      same held `nowUtc`, so an unedited document compares EQUAL, is not written, and KEEPS the sweep's
+      newer verdict. Option T also saves a checks query on EVERY page. The occasional idempotent
+      rewrite is the accepted cost. ("The sweep contradicts the premise" is a real finding against a
+      diff that restores the old one-writer wording; it is not a bug in the behaviour.)
+    - `nowUtc` is the fan-out's own clock reading, reused by every pass ON PURPOSE. Re-reading the clock
+      would make an expiry boundary crossed mid-fan-out look like a moved input on documents nobody
+      touched. "Use a fresh `nowUtc` for the verification" is a finding, and it is now pinned —
+      `The_verification_grades_against_the_fan_outs_OWN_clock_reading` uses an advancing `TimeProvider`
+      plus a certificate expiring between its two instants, because a `FixedTimeProvider` cannot tell a
+      held reading from a fresh one and the swap used to leave the whole suite green.
+    - The bound is `MaxVerificationPasses` (2) over a SHRINKING set, and a document that keeps moving
+      KEEPS the last verdict computed. "Degrade it to `Pending` when the bound is spent" is Amendment 3
+      **Option I**, refuted for this caller shape: a pure re-grade owns no inputs, so it would replace a
+      possibly-correct verdict with a non-committal one through the very write that kept losing. State
+      the bound as what the LOOP does — up to three writes, give up after TWO detected disagreements,
+      third write never re-read — and note a disagreement means "an input moved between the two reads",
+      not "this fan-out's write lost a race" (a competitor committing AFTER the page's UPDATE makes one
+      too). A record that says "must lose three consecutive races" is the over-claim this corrected.
+    - A page the verification could not CONFIRM increments `failedPages` even though the page's own
+      `SaveChanges` committed, and `Regraded` still counts those documents. BOTH endings count — the
+      verification THREW, or it spent its bound — because they leave the identical state, and the
+      give-up escaping the count is the #470 round-2 bug: `AllSucceeded` stayed true, the seed advanced
+      `RegradedThroughRevision` over it and nothing was left to heal it. `AllSucceeded` gates that
+      watermark (#416, ADR 0036 Amendment 2). So `FailedPages` has THREE meanings and
+      `Targeted == Regraded` beside `AllSucceeded == false` is REACHABLE — pinned by
+      `ComplianceFanoutTests.A_failed_verification_pass_counts_the_committed_page_as_failed` (thrown)
+      and `A_page_left_unconfirmed_by_a_spent_bound_counts_as_a_failed_page` (give-up), the only tests
+      anywhere that observe a `RegradeResult` from the real service rather than a fake. Splitting the
+      two arms apart again — one `failedPages++` inside the catch instead of the ONE rule on the
+      unconfirmed set — is a finding. The `RegradeResult` summary, the interface's *Returns* sentence,
+      the seed's log line (`page(s) failed or unconfirmed`) and ADR 0036 Amendment 2 all say so; a diff
+      that reverts any of them to the one-arm wording is a finding.
+    - Both fan-out failure lines name the documents left UNCONFIRMED (`VerifyPageAsync` narrows a
+      caller-owned set as each pass confirms), never the whole page. Reverting the Error arm to
+      `applied.Keys` is a finding: a pass that confirmed 199 of 200 and then threw would report all 200,
+      and the bounded `LoggedIdSampleSize` sample would show the one document needing attention with
+      ~10% probability. Only a fault on verification pass TWO can discriminate the two
+      (`A_failed_verification_pass_names_only_the_documents_still_unconfirmed`); the cap and the
+      complete count beside it are `A_failed_verification_pass_names_at_most_the_bounded_id_sample`.
+      Ids ONLY on both lines — never an `ActualValue` or a `Notes` string, which are document content.
+    - The give-up Warning names an OPERATOR ACTION ("nothing re-grades them automatically — run Check
+      again on the ids below"). Restoring "the next evaluation of them heals it" is a finding: nothing
+      schedules one, which is what § What it costs when it lands says.
+    - The seed path (`ReevaluateForTemplateForSystemAsync`) runs BEFORE `app.Run()` — but that rules out
+      only THIS container's requests. A Railway rolling deploy leaves the PREVIOUS container serving
+      requests and polling extractions against the same database while the new one seeds (the same
+      overlap the ADR 0052 block above treats as reachable), so the seed's verification is a LIVE safety
+      net, not a dead read — and it is the one caller whose `RegradeResult` is consumed. "Skip
+      verification there because it can never overlap" is **Option U**, rejected on BOTH counts: the
+      premise is false, and the exemption would encode one process's startup ordering inside `Services/`
+      to save one page-read at boot. Asserting the old "it always finds nothing" is itself a finding.
+    - Nothing on this path triggers an extraction or any paid call; it is pure DB work. The extra cost
+      is ONE page-sized read per page, and a confirmed page writes nothing at all (pinned by
+      `A_page_nobody_touched_is_confirmed_without_a_second_write`). That read materialises the whole
+      `Document`, `ExtractionRawJson` included (~20 KB of unread OCR text per doc, ~4 MB per full page),
+      so this amendment pays that twice — MEASURED in ADR 0030 Amendment 5 § The measurement and left
+      to [#423](https://github.com/neboxdev/complidrop/issues/423), which owns the fat column and
+      predates #470. Re-reporting the doubling as new is a finding against the reviewer, not the code;
+      a narrower fix is refuted (both loads must share `LoadPageAsync`, and a projection cannot be
+      tracked for the write).
+    - KNOWN residuals, ADR 0030 Amendment 5 § What stays open — do not re-report as new: the correction
+      pass has its own (strictly smaller) window, which the bound and the Warning answer; the transiently
+      doubled check rows are unchanged (Amendment 4); and the WORKER's basis-read→commit window lost its
+      ticket when #470 closed and is now carried by Amendment 2 § What stays open — Amendment 5's shape
+      does NOT transfer there (a second unit of work on the persist costs a re-paid extraction).
+    - On the doubled rows specifically: this pass is NOT a healer for them. `OutcomeMatches` compares two
+      in-memory `EvaluationOutcome`s and never reads a stored `ComplianceCheck`, so a doubled set is
+      invisible to it — it clears only as a SIDE EFFECT of re-grading a document whose verdict INPUT
+      moved. A competing PURE re-grade ("Check again") rewrites the rows while moving no input, so the
+      fresh outcome equals the applied one, nothing is written, and both sets stand until the document's
+      next evaluation (pinned by `A_competing_PURE_re_grade_leaves_the_doubled_check_rows_in_place`).
+      Any record claiming the outcome comparison "sees the doubled set as a disagreement" is wrong and
+      was retracted in the ADR; restoring it is a finding.
   - The worker's STALE-BASIS grading is ADR 0030 **Amendment 2** (#460), the closing half of Amendment
     1's scenario B. `ExtractionWorker.PersistSuccess` holds a tracked snapshot across an OCR + LLM run
     that lasts minutes and EF writes back only what it MODIFIED, so every canonical verdict input it
@@ -955,7 +1062,11 @@ Both are defined in this repo's `.claude/agents/`.
       the application-assembly interceptor types on the DI-resolved context against the helper's — and
       asserts the application side CONTAINS both wired types first, because two empty sets satisfy
       `BeEquivalentTo` exactly when the reflection seam has stopped seeing anything (#468 review S4).
-      Deleting that precondition IS a real finding.
+      Deleting that precondition IS a real finding. Both helpers take `params IInterceptor[] extra`
+      (#470 review round 2) so a test that needs a fault/interleave hook ADDS it on top of the
+      production list instead of hand-rolling a third copy — that smoke gate only sees the helper, so a
+      hand-built context diverges invisibly. A new hand-built `AppDbContext`/`SystemDbContext` in the
+      test tree that re-spells the interceptor list IS a finding.
     - KNOWN residue, ADR 0030 § Consequences — do not re-report the DUPLICATE ROWS themselves: the
       competing re-grade's own check rows are already committed when this writer's inserts land, so the
       document can transiently hold BOTH sets. That is the display desync the ADR always described, now the

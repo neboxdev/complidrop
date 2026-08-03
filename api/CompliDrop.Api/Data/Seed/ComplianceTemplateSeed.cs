@@ -291,8 +291,15 @@ public static class ComplianceTemplateSeed
                         .ExecuteUpdateAsync(s => s.SetProperty(t => t.RegradedThroughRevision, targetRevision), ct);
                 }
 
+                // "failed or unconfirmed" because RegradeResult.FailedPages counts more than a skipped page
+                // since #470 (ADR 0030 Amendment 5): a page whose own SaveChanges was skipped, and a page
+                // that COMMITTED but whose verification could not CONFIRM it — either because the
+                // verification threw or because it spent its bound on a document whose inputs kept moving.
+                // The latter two keep their documents inside {Regraded}, so "re-graded 200/200 … (1 page(s)
+                // failed)" is a real and non-contradictory line — the watermark is held back in every case,
+                // which is the only thing this log has to explain.
                 logger?.LogInformation(
-                    "Seed: converged system template '{Template}' — re-graded {Regraded}/{Targeted} document(s) across orgs ({FailedPages} page(s) failed; watermark {WatermarkState}).",
+                    "Seed: converged system template '{Template}' — re-graded {Regraded}/{Targeted} document(s) across orgs ({FailedPages} page(s) failed or unconfirmed; watermark {WatermarkState}).",
                     tpl.Name, result.Regraded, result.Targeted, result.FailedPages,
                     result.AllSucceeded ? $"advanced to revision {targetRevision}" : "held back for retry on the next boot");
             }
