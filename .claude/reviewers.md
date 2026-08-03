@@ -793,8 +793,11 @@ Both are defined in this repo's `.claude/agents/`.
       singleton on purpose, since `IAuditLogger` saves on `SystemDbContext` during ordinary requests).
       Neither is decoration: the mid-run request in the first must move all three columns or the
       absences prove nothing, and the two vendors in the second must share ONE checklist that does NOT
-      govern the document's type (see #468 — a competing regrade that deletes the check rows this
-      persist has staged throws out of `SaveChanges`). "Simplify" either and the pin goes vacuous.
+      govern the document's type. That last one STARTED as a dodge around #468 (a competing regrade
+      deleting the check rows the persist has staged used to throw out of `SaveChanges`); #468 is now
+      closed, so it is kept to keep that pin single-purpose — a governing checklist would drag the mixed
+      check-row residue into a test whose subject is the emitted column set, and the check-row interleave
+      has its own pin (see the Amendment 4 block below). "Simplify" either and the pin goes vacuous.
     - The basis overload ENFORCES two preconditions with `ArgumentException` — same `Id` as the tracked
       doc (check rows are stamped from the BASIS while the clear-existing predicate keys on the TRACKED
       one) and DETACHED (its `Vendor` navigation is assigned from an `AsNoTracking` query, which on a
@@ -874,8 +877,45 @@ Both are defined in this repo's `.claude/agents/`.
       regrade that deletes the `ComplianceCheck` rows `ApplyEvaluationAsync` has STAGED for removal makes
       the persist's DELETE affect 0 rows, so EF throws `DbUpdateConcurrencyException` out of
       `PersistSuccess` — the re-paid-extraction landing, not the "cosmetic" display desync ADR 0030
-      § Consequences describes. Predates #460 (it arrived with #337),
-      [#468](https://github.com/neboxdev/complidrop/issues/468).
+      § Consequences describes. Predates #460 (it arrived with #337). CLOSED by
+      [#468](https://github.com/neboxdev/complidrop/issues/468) / Amendment 4 — see the block below; do
+      not re-report it as open, and do not read its closure as closing residual (a) or the re-read →
+      commit window, which are different residuals.
+  - The tolerated check-row DELETE is ADR 0030 **Amendment 4** (#468). `ApplyEvaluationCoreAsync` clears by
+    MATERIALIZING the rows and staging a `RemoveRange`, so EF emits a per-row DELETE keyed on the PK and
+    demands one row each; a competing re-grade committing in the window leaves them matching nothing.
+    `Data/ComplianceCheckDeleteConcurrencyInterceptor` suppresses that concurrency exception. Facts that
+    look like bugs and are not:
+    - The `RemoveRange` is the DECISION, not the leftover. "Just use `ExecuteDeleteAsync` — it's set-based
+      and row-count-insensitive" IS the refuted suggestion (Amendment 4 Option L): it runs outside the
+      change tracker, issues its statement immediately, and joins the caller's transaction only when one is
+      explicitly OPEN — and `ExtractionWorker.PersistSuccess` and `EvaluateForSystemAsync` own none, so the
+      clear would commit separately from the inserts and the verdict. That is the two-transaction shape
+      #337 removed, failing in the worse direction (a later `SaveChanges` failure leaves a document whose
+      checks were deleted and never rewritten). Pinned by
+      `ComplianceCheckDeleteConcurrencyTests.The_check_row_clear_does_not_execute_until_the_caller_saves`.
+    - Giving the worker an explicit transaction so that clear could join it is Option M, also refuted, and
+      for a reason a diff makes easy to miss: a DATABASE-level failure inside `PersistSuccess`'s
+      best-effort grading `try` would then abort the transaction, so the degrade-to-`Pending`
+      `SaveChanges` answers `25P02` and throws out of the persist — the re-paid extraction again.
+      `A_failing_basis_read_degrades_the_verdict_without_requeuing_the_extraction` is what goes red.
+    - The suppression is SCOPED and both widenings are real findings: it fires only when EVERY entry is a
+      `ComplianceCheck` in state `Deleted`. A check-row UPDATE that matches nothing must still throw
+      (nothing updates these rows in place), and so must a delete of anything else — the persist stages
+      `DocumentField` deletes in the same `SaveChanges`, so "suppress any zero-row delete" is one line away
+      and would hide a genuinely lost row. Both directions are pinned.
+    - Registered on BOTH contexts on purpose (the rule is a property of the ROW). The `AppDbContext` half
+      is NOT dead: its own check-row writers run under `REPEATABLE READ`, where the same interleave is a
+      `40001` the re-run answers, but the BATCHED fan-out keeps `READ COMMITTED` and reaches it — where it
+      used to forfeit a whole page of unrelated re-grades. Unobservable through the RR writers, so it is
+      pinned directly by `The_same_tolerance_applies_on_the_request_path_context`; dropping that
+      registration is otherwise invisible.
+    - KNOWN residue, ADR 0030 § Consequences — do not re-report: the competing re-grade's own check rows
+      are already committed when this writer's inserts land, so the document can transiently hold BOTH
+      sets. That is the display desync the ADR always described, now the whole residue of this window
+      instead of a thrown persist, and it is pinned as such in the regression test. A unique index on
+      `(DocumentId, ComplianceRuleId)` to stop it is Option O, refuted — it turns the residue into a 23505
+      out of the persist, i.e. the money-burning loop from a third direction.
   - NO frontend change: the 409's message is already jargon-free copy that both call sites surface
     through their generic `err.message` toast. This is NOT the ADR 0050 Amendment 1 situation (there
     the client held a payload that actively CONTRADICTED the 409); here the user's edits survive in the
