@@ -59,8 +59,12 @@ namespace CompliDrop.Api.Data;
 /// request path writes checks through <see cref="AppDbContext"/> and the worker and the seed fan-out
 /// through <see cref="SystemDbContext"/>, and the rule is a property of the ROW, not of the caller.
 /// </summary>
-public sealed class ComplianceCheckDeleteConcurrencyInterceptor : SaveChangesInterceptor
+public sealed class ComplianceCheckDeleteConcurrencyInterceptor(
+    ILogger<ComplianceCheckDeleteConcurrencyInterceptor> logger) : SaveChangesInterceptor
 {
+    // BOTH overrides, because EF dispatches to whichever matches the SaveChanges the caller made and a
+    // sync one would otherwise keep throwing. Every production writer here is async; the sync half is
+    // covered by the same test as the async half so the two cannot drift.
     public override InterceptionResult ThrowingConcurrencyException(
         ConcurrencyExceptionEventData eventData,
         InterceptionResult result) =>
@@ -73,13 +77,32 @@ public sealed class ComplianceCheckDeleteConcurrencyInterceptor : SaveChangesInt
         ValueTask.FromResult(IsCheckRowAlreadyGone(eventData) ? InterceptionResult.Suppress() : result);
 
     /// <summary>
-    /// True when the whole mismatch is check rows this writer wanted gone and something else got to first.
+    /// True when the whole mismatch is check rows this writer wanted gone and something else got to them
+    /// first — and it LOGS when it says so, because a suppressed exception is otherwise an event with no
+    /// trace at all, and the interleave it reports is exactly the one that leaves the document holding two
+    /// writers' check rows.
+    /// <para/>
+    /// Ids only, never the entities: <see cref="ComplianceCheck.ActualValue"/> and
+    /// <see cref="ComplianceCheck.Notes"/> carry extracted document content, which must not reach logs or
+    /// Sentry (the same rule the extraction worker's unreadable-field warning follows).
     /// <para/>
     /// The empty-entry case deliberately returns false: an attribution EF could not resolve to any entry is
     /// not one this can reason about, so it keeps the exception.
     /// </summary>
-    private static bool IsCheckRowAlreadyGone(ConcurrencyExceptionEventData eventData) =>
-        eventData.Entries.Count > 0 && eventData.Entries.All(IsCheckRowDelete);
+    private bool IsCheckRowAlreadyGone(ConcurrencyExceptionEventData eventData)
+    {
+        if (eventData.Entries.Count == 0 || !eventData.Entries.All(IsCheckRowDelete)) return false;
+
+        logger.LogWarning(
+            "A concurrent re-grade had already deleted {Count} ComplianceCheck row(s) this write staged for "
+            + "removal (document {DocumentIds}); treating the delete as done rather than failing the unit of "
+            + "work. The document may transiently hold both writers' check rows until its next evaluation.",
+            eventData.Entries.Count,
+            string.Join(", ", eventData.Entries
+                .Select(e => e.Property(nameof(ComplianceCheck.DocumentId)).CurrentValue)
+                .Distinct()));
+        return true;
+    }
 
     private static bool IsCheckRowDelete(EntityEntry entry) =>
         entry.State == EntityState.Deleted

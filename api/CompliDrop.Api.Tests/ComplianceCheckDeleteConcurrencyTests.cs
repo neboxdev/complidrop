@@ -102,8 +102,13 @@ public sealed class ComplianceCheckDeleteConcurrencyTests(IntegrationTestFixture
         await other.ComplianceChecks.Where(c => c.Id == checkId).ExecuteDeleteAsync();
     }
 
-    [Fact]
-    public async Task A_check_row_another_writer_already_deleted_does_not_fail_the_save()
+    [Theory]
+    // EF dispatches the suppression to the override matching the SaveChanges the caller made, so both
+    // halves have to be real. Production writes here are all async; a sync one would otherwise keep
+    // throwing, and nothing else in the suite would notice.
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_check_row_another_writer_already_deleted_does_not_fail_the_save(bool asynchronous)
     {
         var auth = await RegisterAndLoginAsync();
         var (docId, checkId, ruleId) = await SeedCheckedDocumentAsync(auth.OrgId);
@@ -124,7 +129,11 @@ public sealed class ComplianceCheckDeleteConcurrencyTests(IntegrationTestFixture
             IsPassed = false, CheckedAt = DateTime.UtcNow,
         });
 
-        var act = () => db.SaveChangesAsync();
+        var act = async () =>
+        {
+            if (asynchronous) await db.SaveChangesAsync();
+            else db.SaveChanges();
+        };
 
         await act.Should().NotThrowAsync(
             "the row this writer wanted gone IS gone — a delete that matched nothing is the outcome it "
@@ -137,6 +146,11 @@ public sealed class ComplianceCheckDeleteConcurrencyTests(IntegrationTestFixture
             .Should().Equal([replacementId],
                 "suppressing the exception must not abandon the unit of work — the rest of the batch, "
                 + "including the replacement check row, still commits");
+
+        db.Entry(stale).State.Should().Be(EntityState.Detached,
+            "a suppressed save still COMPLETES, so EF accepts the changes and the deleted entry leaves the "
+            + "tracker — an entry left Deleted would be re-attempted by the next SaveChanges on this "
+            + "context, which is how a tolerated delete could still poison a later write");
     }
 
     [Fact]
