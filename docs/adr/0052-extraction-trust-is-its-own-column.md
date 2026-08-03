@@ -91,6 +91,15 @@ either conclusion, or forcing an input — is a defect in whichever direction it
 the table above says these writers own it — "last writer wins on the whole tuple" is the intended
 semantics, and forcing the column is what makes this writer actually be one.
 
+**AMENDED by Amendment 1** ([#467](https://github.com/neboxdev/complidrop/issues/467)): *"computed from
+what the model just returned"* named the wrong SUBJECT, and only for the readability trigger. That half of
+`PersistSuccess`'s decision now reads ADR 0030 Amendment 2's grading basis — the row this commit will
+LEAVE — because "is a canonical value unreadable?" is a question about a ROW and the pre-run snapshot is
+not the row. Everything above about OWNERSHIP stands unchanged: this table is still the whole writer set,
+the queue path still writes nothing, the three worker writers still go through `SetTrust`, and `SetTrust`
+still forces the column. The other three triggers (both confidence gates, `NeedsReprocessing`) describe
+the READING, have no mirror on the row, and are untouched.
+
 ### 3. `ComputeCoverage` consults trust directly, and the `IsManuallyVerified` clause is RETIRED
 
 The in-force test's extraction clause collapses from two status-shaped clauses plus an escape hatch to one:
@@ -325,8 +334,158 @@ the plausible next question here ("distrusted *why* — low confidence, unreadab
 kind of thing that gets crammed into an existing column. An enum whose members are named states leaves that
 door open without forcing it, and it reads the same way `ExtractionStatus` and `ComplianceStatus` already do.
 
+## Amendment 1 (2026-08-03) — trust is this READ's conclusion about the ROW THIS COMMIT WILL LEAVE
+
+§2 says the trust value is "the worker's OWN conclusion, computed from what the model just returned". The
+first half of that is a statement about OWNERSHIP and is unchanged. The second half named a SUBJECT, and
+it named the wrong one — the conclusion has to be about a row, and the row it was about had ceased to
+exist. [#467](https://github.com/neboxdev/complidrop/issues/467).
+
+**The mechanism, and it is ADR 0030 Amendment 2's exactly.** `ExtractionWorker.PersistSuccess` asked
+`DocumentFieldReadability.UnreadableCanonicalFields(doc)` of the TRACKED entity —
+`ProcessDocumentAsync`'s pre-run snapshot, held across the whole OCR + LLM run. Its result drives
+`distrusted`, hence `ExtractionStatus` and `SetTrust`, hence ADR 0042 coverage exclusion.
+`CanonicalDocumentFields.ApplyToTypedColumn` **assigns**, and an assignment equal to the minutes-old
+snapshot leaves the property unmodified, so EF omits the column and whatever a request committed in the
+window survives. The walk therefore judged values the commit was about to leave behind.
+
+Reachable in ordinary use: a document sits at `ExpirationDate = null` from a prior
+[ADR 0040](0040-unreadable-canonical-value-fails-closed.md) unreadable read; the user clicks **Read
+again** and, while it runs, types the correct expiration and saves; the model returns the same
+unparseable text (`expiration_date: "12/31/2026 (per endorsement)"`). `ApplyToTypedColumn` writes null
+over a null snapshot, the column stays out of the UPDATE, and the row keeps the user's valid date — while
+the walk, looking at the snapshot, sees a null column beside non-blank unparseable raw text and commits
+`ManualRequired` + `Distrusted`.
+
+**What that costs is the DISCLOSURE, not the verdict.** `DocumentFieldReadability` re-derived at READ
+time against the persisted row finds nothing (`TypedColumnValue` is non-null), so
+`GET /api/documents/{id}` reports `unreadableFields: []` while `ComputeCoverage` drops the document from
+in-force coverage and the vendor reads **Action needed**. § Neutral's last bullet is the premise that
+fails: the disclosure this decision rests on is the detail page's review card, and `ManualReviewCard`
+picks its variant off `unreadableFields`. With that list empty it renders the LOW-CONFIDENCE copy —
+*"the ones outlined in amber are the least certain"* — on a document read at 0.95 and 1.0, so nothing is
+outlined. That is the ADR 0040 Amendment 2 dead end reached from the other side, and it is the state the
+#459 round-2 gate exists to avoid. (The ticket described it as rendering NO card; the gate is
+`ManualRequired || unreadableFields.length > 0`, an OR, so a card does render — it just points at
+something that is not there. Recorded because the record should be right, not because it changes the
+call.) `Mark verified` is the exit, so it is recoverable rather than stuck.
+
+### Decision
+
+**The readability trigger reads the [ADR 0030 Amendment 2](0030-compliance-verdict-combined-unit-of-work.md#amendment-2-2026-08-02--the-worker-grades-the-row-its-own-commit-will-leave)
+grading basis** — `Services/DocumentGradingBasis.AfterPendingCommitAsync`, the row's current committed
+values overlaid with exactly the properties EF is about to write — falling back to the tracked entity
+when there is no basis. One line in `PersistSuccess`:
+
+```csharp
+var unreadableFields = DocumentFieldReadability.UnreadableCanonicalFields(basis ?? doc);
+```
+
+The trust decision and the `ExtractionStatus` write move below the grading `try` so they can be decided
+from it, and `basis` is hoisted out of that `try` so a failure in `ApplyEvaluationAsync` — which happens
+strictly AFTER a successful basis read — does not cost the basis.
+
+**This is not the same question as ownership, and §2 is amended rather than reversed.** Four things §2
+asserts are untouched: these four writers are the only ones, the queue path still writes nothing, the
+three worker writers still go through `SetTrust`, and `SetTrust` still FORCES the column. The force is
+what makes the conclusion this writer's; the basis is what makes it about the right row. ADR 0030
+Amendment 2 already shipped exactly this pair for the verdict on this very method — grade the basis
+(`ApplyEvaluationAsync(db, doc, basis, ct)`), then force the answer in (`ForceVerdictWrite`) — and the
+sentence in §2 that draws the contrast with #460 stays true, because that contrast is about verdict
+INPUTS a REQUEST owns and no input is re-asserted here either. The basis is read-only with respect to
+`doc`; the worker still emits exactly the columns it emitted before.
+
+**Only ONE of the four `ManualRequired` triggers moves, and the split is the point.** Low average
+confidence, a low-confidence verdict-bearing field ([ADR 0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md))
+and the model's `NeedsReprocessing` signal are facts about the READING. They have no mirror on the row
+and never will, so there is nothing to ask a basis about and they keep describing this read. Readability
+is a fact about a ROW. The two live in one boolean because they answer one question — *should a human
+look at this?* — but they are measured against different things, and conflating them is what produced the
+bug.
+
+### The invariant this buys, and why it holds
+
+**On the persisted row, `ExtractionStatus`/`ExtractionTrust` and the read-time `unreadableFields` list
+agree** — so a `ManualRequired` document always names a cause. Both are now derived from the same row:
+the basis IS the row this commit leaves (for every property this writer sets), and the read-time list is
+derived from that row. It is agreement **by construction**, the same argument Amendment 2 makes for the
+verdict, and it is bounded by the same residual — a request committing between the basis read and the
+`SaveChanges` (ADR 0030 Amendment 2 § What stays open, still open, still not given a remedy that costs an
+extraction).
+
+Two further facts make the change safe in the direction that matters:
+
+- **The new distrust set is a strict SUBSET of the old one, so nothing that failed closed now fails
+  open.** For the basis to read unreadable, the basis's typed column must be null while its raw value is
+  non-blank and unparseable. The raw value comes from the response mirror; a field present in the mirror
+  is a field `ApplyToTypedColumn` ran for; an unparseable value makes it assign `null`. So the TRACKED
+  column is null too, whether or not the assignment counted as modified — i.e. basis-unreadable implies
+  tracked-unreadable. The difference between the two answers is exactly the false-positive population:
+  documents where a request committed a readable value the row keeps.
+- **The fallback is the old answer, and by the line above that is the fail-CLOSED one.** A `null` basis
+  (the row is genuinely gone — a hard delete, which no production path performs) or a basis read that
+  threw both fall back to the tracked entity. Over-distrusting is recoverable by one `Mark verified` or
+  one clean re-read; under-distrusting is a green badge over a value nothing can parse.
+
+The inverse interleave — a mid-run save that BREAKS a previously-readable value — lands correctly for a
+different reason, and is pinned rather than argued: the worker's own extracted values overwrite BOTH
+copies (the typed column is modified because it differs from the snapshot, and the JSON mirror is
+rewritten wholesale), so the row the commit leaves is the clean one and the persist RESTORES the trust
+the save withdrew (Amendment 3 path 2 in
+[ADR 0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) is what withdrew it).
+
+### Consequences
+
+- **The bug closes at its root**, and closes for every canonical field at once rather than for the one
+  the ticket happened to reach: nothing is enumerated, the basis is derived from the change tracker.
+- **Trust's SUBJECT is now the same row the verdict's is**, so the two conclusions this writer commits
+  can no longer be about different documents. That is a coherence gain the ticket did not ask for and is
+  the strongest argument for this shape over the alternatives below.
+- **`ExtractionStatus` and `ExtractionTrust` fall out of the basis's own overlay**, because they are now
+  assigned after it is read. Immaterial by inspection and recorded so it is not rediscovered as a defect:
+  `ComplianceCheckService` reads neither column, and `DocumentFieldReadability` reads only the canonical
+  fields. `SetTrust` still forces its column, so the ordering costs the write nothing. Noted on
+  `DocumentGradingBasis.AfterPendingCommitAsync` beside the pre-existing `UpdatedAt` exception.
+- **A second consumer now depends on the basis read**, so its failure mode matters twice. It still sits
+  inside the degrade guard and still never throws out of `PersistSuccess` — a throw there is the re-paid
+  Document AI + LLM run this codebase measures every worker change against — and that placement keeps its
+  existing pin (`A_failing_basis_read_degrades_the_verdict_without_requeuing_the_extraction`) plus a new
+  one for the trust arm.
+- **The deploy-overlap and `MarkVerified` residues in § Consequences are unchanged**, in both directions.
+  They are about two writers disagreeing on a PAIR of columns, not about which row a single writer judged.
+
+### Alternatives considered (Amendment 1)
+
+- **Option H — keep trust describing THIS READ's output, and make the disclosure agree by persisting the
+  unreadable-field list.** The literal reading of §2, and the only way to keep it. **Rejected**: it needs
+  a new column (or a re-derivation from `ExtractionRawJson` / the `DocumentField` rows), and what it would
+  then disclose is FALSE about the document — the card would say *"We couldn't read the expiration date
+  on this document"* beside an input holding the valid date the user typed and saved, and tell them to
+  correct it. Naming a cause that is not true is worse than naming none; the ticket's requirement is that
+  a review NAMES a cause, not that it names a memory.
+- **Option I — leave the walk on the tracked entity and drop the coverage exclusion for this case.**
+  Cheaper, and it removes the user-visible harm (the vendor stops reading Action needed). **Rejected**: it
+  is ADR 0042's exclusion with a hole cut in it, and the hole is unprincipled — the exclusion would apply
+  or not depending on whether a request happened to commit inside an extraction window. It also leaves the
+  stored `ManualRequired` in place, so the document still reads "Needs your review" with nothing to fix.
+- **Option J — gate the trust write on the status the way `ResolveManualReview` gates its escalation.**
+  §3 already refutes this for the request path (withdrawing trust de-queues nothing, so `wasSettled` has
+  no business gating it), and it does not address this bug at all: the persist's write is not being
+  refused, it is being decided from the wrong row.
+- **Option K — `REPEATABLE READ` or an `xmin` token on the worker so the pre-run snapshot cannot go
+  stale.** The general fix for the whole family. **Rejected, unchanged from ADR 0030 Option A, Amendment 1
+  and Amendment 4 Option P**: every detecting shape throws out of the `SaveChanges` whose failure costs a
+  re-paid extraction.
+- **Option L — compute readability from the RESPONSE alone, ignoring the row entirely** (did the model
+  return a canonical value we could not parse?). Simple, and it is arguably the purest statement of "this
+  read's output". **Rejected**: it is the shape #383 review round 2 already removed. It re-introduces a
+  second mechanism for "is this document in the #383 state?" beside `DocumentFieldReadability`, with
+  nothing pinning the two equal — and it is wrong in the ticket's own case, where the model's unparseable
+  answer never reaches the column.
+
 ## References
 
-- Tickets: [#459](https://github.com/neboxdev/complidrop/issues/459), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic); the read-time predecessors [#401](https://github.com/neboxdev/complidrop/issues/401) and [#365](https://github.com/neboxdev/complidrop/issues/365)
-- ADRs: [0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) (the distrust signal and the coverage exclusion this makes durable — Amendment 3 records the reversal of its in-flight carve-out), [0040](0040-unreadable-canonical-value-fails-closed.md) (the unreadable-value escalation `ResolveManualReview` re-raises), [0048](0048-never-graded-document-asserts-no-affirmative-verdict.md) (the OTHER axis that withholds an unread document from coverage), [0050](0050-reextract-refuses-a-live-extraction-claim.md) (the re-arm this must survive), [0016](0016-apply-ef-migrations-on-startup.md) (auto-migrate on boot — why the migration is additive and cheap), [0030](0030-compliance-verdict-combined-unit-of-work.md) (the unit of work `PersistSuccess` writes both columns inside)
-- Code: `Entities/Document.cs` (`ExtractionTrust`), `Data/ModelConfiguration.cs` (mapping + store default), `Migrations/20260802080136_AddDocumentExtractionTrust.cs` (the additive migration + seed), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `MarkFailed`, `RecordFailedAttempt`), `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview`, `Reextract`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo`), `DTOs/Vendors/VendorDtos.cs` (`VendorCoverage`'s contract comment), `frontend/src/app/(dashboard)/documents/[id]/page.tsx` (the one frontend change — `ManualReviewCard`'s gate), `CompliDrop.Api.Tests/Adr0052EnforcementTests.cs` (the read-surface / writer-set gate), `CompliDrop.Api.Tests/TestHelpers/SourceScan.cs` (the shared scanner the gates use)
+- Tickets: [#459](https://github.com/neboxdev/complidrop/issues/459), [#467](https://github.com/neboxdev/complidrop/issues/467) (Amendment 1), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic); the read-time predecessors [#401](https://github.com/neboxdev/complidrop/issues/401) and [#365](https://github.com/neboxdev/complidrop/issues/365)
+- ADRs: [0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) (the distrust signal and the coverage exclusion this makes durable — Amendment 3 records the reversal of its in-flight carve-out), [0040](0040-unreadable-canonical-value-fails-closed.md) (the unreadable-value escalation `ResolveManualReview` re-raises, and the walk Amendment 1 re-points at the basis), [0048](0048-never-graded-document-asserts-no-affirmative-verdict.md) (the OTHER axis that withholds an unread document from coverage), [0050](0050-reextract-refuses-a-live-extraction-claim.md) (the re-arm this must survive), [0016](0016-apply-ef-migrations-on-startup.md) (auto-migrate on boot — why the migration is additive and cheap), [0030](0030-compliance-verdict-combined-unit-of-work.md) (the unit of work `PersistSuccess` writes both columns inside; Amendment 2 is the grading basis Amendment 1 here borrows, and its § What stays open is where #467 was recorded)
+- Code: `Entities/Document.cs` (`ExtractionTrust`), `Data/ModelConfiguration.cs` (mapping + store default), `Migrations/20260802080136_AddDocumentExtractionTrust.cs` (the additive migration + seed), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `MarkFailed`, `RecordFailedAttempt`), `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview`, `Reextract`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo`), `DTOs/Vendors/VendorDtos.cs` (`VendorCoverage`'s contract comment), `frontend/src/app/(dashboard)/documents/[id]/page.tsx` (the one frontend change — `ManualReviewCard`'s gate), `CompliDrop.Api.Tests/Adr0052EnforcementTests.cs` (the read-surface / writer-set gate), `CompliDrop.Api.Tests/TestHelpers/SourceScan.cs` (the shared scanner the gates use); for Amendment 1 `Services/DocumentGradingBasis.cs` (the basis, now read by both of this writer's conclusions) and `Services/DocumentFieldReadability.cs` (the one predicate, unchanged — only its SUBJECT moved)
+- Tests (Amendment 1): `CompliDrop.Api.Tests/ExtractionWorkerStaleBasisTests.cs` — four pins sharing `AssertTrustAgreesWithTheRowAsync`, which reads the persisted row AND `GET /api/documents/{id}` and requires the committed trust/status pair and the wire `unreadableFields` list to agree. The biconditional is only legitimate because every fixture holds the other three triggers off (0.95 on every field, `NeedsReprocessing: false`), so readability is the sole trigger. `A_canonical_value_a_mid_run_edit_FIXED_leaves_no_review_with_nothing_to_name` is the ticket's interleave and the one that goes red on the pre-fix code; `A_canonical_value_this_read_leaves_unreadable_still_routes_to_review_and_NAMES_it` pins fail-CLOSED and doubles as the discriminator against a readability walk over a plain re-read of the row (ADR 0030 Amendment 2 Option F's mistake in a new place — that shape would call the document clean while its committed column is null); `A_mid_run_edit_that_BREAKS_a_value_the_read_replaces_does_not_strand_the_document` is the inverse direction, with an in-window probe asserting the save really withdrew trust first so the restoration is not vacuous; and `A_failing_basis_read_falls_back_to_what_this_read_produced_and_still_withdraws_trust` pins the fallback arm, the degrade, and that the failure still costs no second OCR + LLM run
