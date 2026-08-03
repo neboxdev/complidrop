@@ -376,12 +376,18 @@ Both are defined in this repo's `.claude/agents/`.
   - The export discloses the COUNT as well as the demoted label, through the one shared
     `ExportService.ComplianceCell`: the two PDFs append `" (no requirements checked)"` inline (the
     `"(superseded)"` shape, and the two compose), the CSV instead carries a `RequirementsChecked`
-    column so its `Compliance` cell stays machine-filterable. That asymmetry is deliberate. Each PDF's
-    rows go through its OWN `internal` seam carrying its OWN check-count read —
-    `AuditReportRowsAsync` and `VendorPackageLinesAsync` — because a `%PDF` smoke test can't tell a
-    wired-up count map from an empty one (empty annotates EVERY row; a dropped annotation certifies a
-    doc nothing graded), and neither is visible in the FlateDecode bytes. Inlining either back into its
-    builder un-pins that wiring.
+    column so its `Compliance` cell stays machine-filterable. That asymmetry is deliberate. The column is
+    the ONLY read site that prints this number rather than thresholding it at zero, which is why
+    `ExportService.CheckCountsAsync` counts DISTINCT RULES and not check rows (#468 review): ADR 0030
+    § Consequences accepts a document transiently holding BOTH writers' rows for one rule, and with no
+    list beside it in the CSV a raw count would tell an auditor "2 requirements checked" against a
+    one-rule checklist. Reverting it to `.ComplianceChecks.Count` IS a real finding; it is also invisible
+    to every other consumer, since `DocumentGrading.IsGraded` asks only `> 0` and the distinct count is
+    zero exactly when the row count is. Each PDF's rows go through its OWN `internal` seam carrying its
+    OWN check-count read — `AuditReportRowsAsync` and `VendorPackageLinesAsync` — because a `%PDF` smoke
+    test can't tell a wired-up count map from an empty one (empty annotates EVERY row; a dropped
+    annotation certifies a doc nothing graded), and neither is visible in the FlateDecode bytes. Inlining
+    either back into its builder un-pins that wiring.
   - The ordinal-case-SENSITIVE applicable-rules filter vs `ComputeCoverage`'s case-INsensitive
     required-type match is a KNOWN live disagreement (it is how the never-graded state is reachable
     without any legacy data). ADR 0048 Option E records why it was NOT unified here — widening what
@@ -910,12 +916,31 @@ Both are defined in this repo's `.claude/agents/`.
       used to forfeit a whole page of unrelated re-grades. Unobservable through the RR writers, so it is
       pinned directly by `The_same_tolerance_applies_on_the_request_path_context`; dropping that
       registration is otherwise invisible.
+    - The suppression's TRACE is one WARNING per `SaveChanges` plus one DEBUG line per row, and that split
+      is deliberate (#468 review). The hook runs once per ORPHANED ROW — EF/Npgsql attributes a
+      rows-affected mismatch to the single modification command that produced it, which is the same
+      per-command attribution the `Deleted`-entry guard relies on — so a warning inside it is a warning per
+      row: a page-sized burst on the batched fan-out, with eagerly-formatted arguments, on the fan-out
+      thread. "Log it where it happens" IS the regression; pinned by
+      `A_save_that_loses_many_check_rows_warns_ONCE_for_the_whole_unit_of_work` (three orphans, one
+      warning, three Debug lines) and by the count assertion in the #468 interleave test. Ids only, never
+      `ActualValue`/`Notes` — those carry extracted document content.
+    - `IntegrationTestBase.CreateSystemDb` / `CreateAppDb` wire this interceptor BESIDE
+      `AuditSaveChangesInterceptor`, so a harness-built context matches production. Not optional
+      politeness: without it a test written through the ubiquitous helper silently gets different
+      `SaveChanges` semantics from the code it is about, and a future reproduction of #468 driven through
+      it would see the pre-fix throw and call the bug live. The NEXT interceptor is covered mechanically by
+      `HarnessSmokeTests.The_db_helpers_wire_every_save_interceptor_the_application_wires`, which compares
+      the application-assembly interceptor types on the DI-resolved context against the helper's.
     - KNOWN residue, ADR 0030 § Consequences — do not re-report: the competing re-grade's own check rows
       are already committed when this writer's inserts land, so the document can transiently hold BOTH
       sets. That is the display desync the ADR always described, now the whole residue of this window
       instead of a thrown persist, and it is pinned as such in the regression test. A unique index on
       `(DocumentId, ComplianceRuleId)` to stop it is Option O, refuted — it turns the residue into a 23505
-      out of the persist, i.e. the money-burning loop from a third direction.
+      out of the persist, i.e. the money-burning loop from a third direction. DISPLAY is the whole scope,
+      and one surface had to move to make that true: the ADR 0048 `RequirementsChecked` CSV column is the
+      only read site that PRINTS this number, so `ExportService.CheckCountsAsync` counts DISTINCT RULES —
+      "simplify it back to `.ComplianceChecks.Count`" IS a real finding (see the ADR 0048 block).
   - NO frontend change: the 409's message is already jargon-free copy that both call sites surface
     through their generic `err.message` toast. This is NOT the ADR 0050 Amendment 1 situation (there
     the client held a payload that actively CONTRADICTED the 409); here the user's edits survive in the

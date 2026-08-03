@@ -216,6 +216,20 @@ artifacts so they cannot diverge, and each surface discloses in its own establis
 - **The CSV** gains a `RequirementsChecked` **column** (the integer count) rather than a parenthetical,
   because `Compliance` there is a machine-filterable cell, exactly like `Superseded` next to it.
 
+**The exported count is DISTINCT RULES, not check rows** (added by the #468 review; `CheckCountsAsync`).
+This column is the only surface that PRINTS the number instead of thresholding it at zero, and
+[ADR 0030](0030-compliance-verdict-combined-unit-of-work.md) § Consequences accepts that a concurrent
+re-grade can leave a document holding BOTH writers' check rows — two rows citing the same rule. That
+residue is scoped there as a detail-page display desync, where the count and the list of rows the reader
+is looking at agree; an auditor's CSV has no such list beside it, so a raw row count would state "2
+requirements checked" against a checklist holding exactly one rule — a claim about the EVIDENCE rather
+than a rendering artifact, and the export is precisely where reliance forms. Counting distinct rules
+leaves everything else byte-identical: `IsGraded` asks only `> 0`, and the distinct count is zero exactly
+when the row count is, so the two PDFs' annotation, the demoted verdict, and every `d.ComplianceChecks
+.Any()` read site are unmoved. Pinned against the real doubled state by
+`ExtractionWorkerStaleBasisTests.A_regrade_that_deletes_the_check_rows_this_persist_staged_costs_no_extraction`,
+which constructs the interleave and then reads this cell.
+
 `ComplianceCell` is `internal` so its wording can be pinned by a unit test: both PDFs are
 FlateDecode-compressed and not text-assertable. Each PDF's rows are `internal` seams for the same reason —
 `ExportService.VendorPackageLinesAsync` and `ExportService.AuditReportRowsAsync`, **each performing its own
@@ -335,5 +349,5 @@ exact bug with an extra step.
 ## References
 
 - Tickets: [#443](https://github.com/neboxdev/complidrop/issues/443), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
-- ADRs: [0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) (the coverage-exclusion precedent this follows, and whose document-level carve-out it deliberately does not), [0041](0041-future-effective-not-yet-in-force-reads-pending.md) (the read-only-overlay mechanism this reuses verbatim on a third axis), [0040](0040-unreadable-canonical-value-fails-closed.md) (the same fail-closed posture), [0045](0045-canonical-document-type-vocabulary.md) (why the never-graded population is reachable and is not laundered), [0030](0030-compliance-verdict-combined-unit-of-work.md) (why an affirmative stored verdict normally commits with its check rows), [0027](0027-compliance-date-window-boundaries.md) (the date-window convention the demotion sits beside)
+- ADRs: [0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) (the coverage-exclusion precedent this follows, and whose document-level carve-out it deliberately does not), [0041](0041-future-effective-not-yet-in-force-reads-pending.md) (the read-only-overlay mechanism this reuses verbatim on a third axis), [0040](0040-unreadable-canonical-value-fails-closed.md) (the same fail-closed posture), [0045](0045-canonical-document-type-vocabulary.md) (why the never-graded population is reachable and is not laundered), [0030](0030-compliance-verdict-combined-unit-of-work.md) (why an affirmative stored verdict normally commits with its check rows — and, Amendment 4, why the exported count is distinct RULES: its accepted mixed-check-row residue is scoped to DISPLAY, which §5's column would otherwise have turned into an evidence claim), [0027](0027-compliance-date-window-boundaries.md) (the date-window convention the demotion sits beside)
 - Code: `Services/DocumentGrading.cs` (the recognizer), `Services/ComplianceStatusDeriver.cs` (`Effective`, `ReadsPending`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo` + both projections), `Endpoints/DocumentEndpoints.cs` (list status arms + projection, detail), `Endpoints/DashboardEndpoints.cs` (`Stats`), `Services/ExportService.cs` (`ComplianceCell`, `CheckCountsAsync`, `NeverGradedAnnotation`, `AuditReportRowsAsync`, `VendorPackageLinesAsync`, the CSV `RequirementsChecked` column), `frontend/src/app/(dashboard)/documents/[id]/page.tsx` (`NotCheckedExplainer`), `frontend/src/lib/document-types.ts` (`canonicalDocumentType`)
