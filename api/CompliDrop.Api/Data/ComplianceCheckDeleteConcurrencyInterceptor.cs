@@ -62,6 +62,16 @@ namespace CompliDrop.Api.Data;
 public sealed class ComplianceCheckDeleteConcurrencyInterceptor(
     ILogger<ComplianceCheckDeleteConcurrencyInterceptor> logger) : SaveChangesInterceptor
 {
+    // The tally behind the ONE summary line per SaveChanges — see FlushTally for why it is not one line
+    // per suppressed row. Plain fields rather than anything thread-safe, because there is exactly one of
+    // these per DbContext: AddDbContext registers DbContextOptions as SCOPED (so the instance handed to
+    // AddInterceptors is built per scope, once per context type), the test harness builds a fresh one per
+    // context, and a DbContext is single-threaded by contract anyway. Registering this as a SINGLETON
+    // shared across contexts would break that and is why the reset/flush pair is spelled out below rather
+    // than left implicit.
+    private int _suppressedRows;
+    private HashSet<Guid>? _suppressedDocuments;
+
     // BOTH overrides, because EF dispatches to whichever matches the SaveChanges the caller made and a
     // sync one would otherwise keep throwing. Every production writer here is async; the sync half is
     // covered by the same test as the async half so the two cannot drift.
@@ -76,11 +86,67 @@ public sealed class ComplianceCheckDeleteConcurrencyInterceptor(
         CancellationToken cancellationToken = default) =>
         ValueTask.FromResult(IsCheckRowAlreadyGone(eventData) ? InterceptionResult.Suppress() : result);
 
+    // The tally's lifetime is one SaveChanges: cleared as it starts, emitted when it ends either way. A
+    // save that is CANCELED emits nothing — its tally is dropped by the next save's reset — because a
+    // canceled unit of work committed nothing there is anything to explain.
+    public override InterceptionResult<int> SavingChanges(
+        DbContextEventData eventData, InterceptionResult<int> result)
+    {
+        ResetTally();
+        return base.SavingChanges(eventData, result);
+    }
+
+    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+        DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+    {
+        ResetTally();
+        return base.SavingChangesAsync(eventData, result, cancellationToken);
+    }
+
+    public override int SavedChanges(SaveChangesCompletedEventData eventData, int result)
+    {
+        FlushTally();
+        return base.SavedChanges(eventData, result);
+    }
+
+    public override ValueTask<int> SavedChangesAsync(
+        SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default)
+    {
+        FlushTally();
+        return base.SavedChangesAsync(eventData, result, cancellationToken);
+    }
+
+    // A suppression followed by an UNRELATED failure elsewhere in the same batch still gets its line: the
+    // save did not commit, but "these check rows were already gone" is exactly the context that failure
+    // needs to be read against.
+    public override void SaveChangesFailed(DbContextErrorEventData eventData)
+    {
+        FlushTally();
+        base.SaveChangesFailed(eventData);
+    }
+
+    public override Task SaveChangesFailedAsync(
+        DbContextErrorEventData eventData, CancellationToken cancellationToken = default)
+    {
+        FlushTally();
+        return base.SaveChangesFailedAsync(eventData, cancellationToken);
+    }
+
     /// <summary>
     /// True when the whole mismatch is check rows this writer wanted gone and something else got to them
-    /// first — and it LOGS when it says so, because a suppressed exception is otherwise an event with no
-    /// trace at all, and the interleave it reports is exactly the one that leaves the document holding two
+    /// first — and it records the fact, because a suppressed exception is otherwise an event with no trace
+    /// at all, and the interleave it reports is exactly the one that leaves the document holding two
     /// writers' check rows.
+    /// <para/>
+    /// It TALLIES rather than logging a warning, because this runs once per ORPHANED ROW and not once per
+    /// save: EF/Npgsql attributes a rows-affected mismatch to the single modification command that produced
+    /// it (which is also why the <see cref="IsCheckRowDelete"/> guard survives the worker's mixed batch of
+    /// a <see cref="Document"/> UPDATE + <see cref="DocumentField"/> writes + check-row DELETEs), so
+    /// <c>eventData.Entries</c> holds one entry every time. On a single-document writer that is a handful
+    /// of invocations; on <c>ComplianceCheckService.ReevaluateWhereAsync</c>'s batched fan-out one page is
+    /// up to <c>DefaultReevaluationPageSize</c> documents' worth of check rows in ONE SaveChanges, so a
+    /// warning here would put a page-sized burst of lines — and their eager formatting — on the fan-out
+    /// thread. The per-row detail stays available at Debug; <see cref="FlushTally"/> emits the aggregate.
     /// <para/>
     /// Ids only, never the entities: <see cref="ComplianceCheck.ActualValue"/> and
     /// <see cref="ComplianceCheck.Notes"/> carry extracted document content, which must not reach logs or
@@ -93,15 +159,47 @@ public sealed class ComplianceCheckDeleteConcurrencyInterceptor(
     {
         if (eventData.Entries.Count == 0 || !eventData.Entries.All(IsCheckRowDelete)) return false;
 
-        logger.LogWarning(
-            "A concurrent re-grade had already deleted {Count} ComplianceCheck row(s) this write staged for "
-            + "removal (document {DocumentIds}); treating the delete as done rather than failing the unit of "
-            + "work. The document may transiently hold both writers' check rows until its next evaluation.",
-            eventData.Entries.Count,
-            string.Join(", ", eventData.Entries
-                .Select(e => e.Property(nameof(ComplianceCheck.DocumentId)).CurrentValue)
-                .Distinct()));
+        _suppressedRows += eventData.Entries.Count;
+        var detailed = logger.IsEnabled(LogLevel.Debug);
+        foreach (var entry in eventData.Entries)
+        {
+            if (entry.Property(nameof(ComplianceCheck.DocumentId)).CurrentValue is not Guid documentId) continue;
+            (_suppressedDocuments ??= []).Add(documentId);
+            if (detailed)
+            {
+                logger.LogDebug(
+                    "A ComplianceCheck row this write staged for removal was already gone (document "
+                    + "{DocumentId}); a concurrent re-grade deleted it first.",
+                    documentId);
+            }
+        }
+
         return true;
+    }
+
+    /// <summary>
+    /// ONE warning per SaveChanges that suppressed anything, naming the aggregate the message actually
+    /// carries (rows, and how many documents they spanned) — the per-document ids are the Debug lines
+    /// above. Silent when nothing was suppressed, which is every save in ordinary operation.
+    /// </summary>
+    private void FlushTally()
+    {
+        if (_suppressedRows == 0) return;
+
+        logger.LogWarning(
+            "A concurrent re-grade had already deleted {Count} ComplianceCheck row(s) that this unit of "
+            + "work staged for removal, across {DocumentCount} document(s); treating those deletes as done "
+            + "rather than failing the unit of work. Each affected document may transiently hold both "
+            + "writers' check rows until its next evaluation.",
+            _suppressedRows,
+            _suppressedDocuments?.Count ?? 0);
+        ResetTally();
+    }
+
+    private void ResetTally()
+    {
+        _suppressedRows = 0;
+        _suppressedDocuments?.Clear();
     }
 
     private static bool IsCheckRowDelete(EntityEntry entry) =>
