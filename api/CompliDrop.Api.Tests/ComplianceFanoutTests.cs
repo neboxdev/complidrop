@@ -349,4 +349,90 @@ public sealed class ComplianceFanoutTests(IntegrationTestFixture fixture) : Inte
         statuses.Count(s => s == ComplianceStatus.NonCompliant).Should().Be(2, "the surviving page must still be re-graded");
         statuses.Count(s => s == ComplianceStatus.Compliant).Should().Be(2, "the failed page's documents keep their prior verdict");
     }
+
+    /// <summary>
+    /// The command text that appears ONLY in <c>LoadPageAsync</c>'s root query, and therefore the way this
+    /// suite counts page loads. The fan-out's id snapshot projects <c>d."Id"</c> alone and the split query
+    /// for <c>template.Rules</c> projects rule columns, so neither carries the jsonb column an unprojected
+    /// <c>Document</c> materialization does. (That it IS shipped, twice per page and read by nothing, is
+    /// <see href="https://github.com/neboxdev/complidrop/issues/423">#423</see>.)
+    /// </summary>
+    private const string PageLoadMarker = "\"ExtractionRawJson\"";
+
+    [Fact]
+    public async Task A_failed_verification_pass_counts_the_committed_page_as_failed()
+    {
+        // #470 / ADR 0030 Amendment 5: the page commits, then VerifyPageAsync re-reads it. If that
+        // confirmation throws, the page counts as FAILED even though its own SaveChanges committed —
+        // because RegradeResult.AllSucceeded is what gates the seed's re-grade watermark (#416, ADR 0036
+        // Amendment 2), and a page whose verdicts are committed but UNVERIFIED is exactly a page the next
+        // boot must re-fire. Swallowed silently, the watermark would advance over it and nothing would ever
+        // re-grade those documents — the stale-verdict-survives-forever hole the watermark exists to close.
+        //
+        // Driven through ReevaluateForTemplateForSystemAsync, the ONE entry point that returns a
+        // RegradeResult and the one caller whose consumer reads it. This is also the only place any test
+        // observes a RegradeResult produced by the REAL service rather than by a fake reevaluator.
+        var orgId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        await SeedOrgWithTemplateAsync(orgId, templateId);
+        var vendor = await SeedVendorAsync(orgId, templateId);
+        // Deliberately wrong stored verdicts, so "the page committed" is observable rather than assumed.
+        var failing = await SeedDocAsync(orgId, vendor, glLimit: 1_000_000m, stored: ComplianceStatus.Compliant);
+        var passing = await SeedDocAsync(orgId, vendor, glLimit: 3_000_000m, stored: ComplianceStatus.Pending);
+
+        // Fail the SECOND page load of the run — i.e. the verification's, not the grade's. The fault is
+        // raised from ReaderExecutingAsync, before the command reaches Postgres, so the connection stays
+        // usable and nothing is left half-executed: a transient read failure, which is the realistic shape.
+        var fault = new SystemCommandFaultInterceptor();
+        var pageLoads = 0;
+        fault.ShouldFault = sql =>
+            sql.Contains(PageLoadMarker, StringComparison.Ordinal) && ++pageLoads == 2;
+
+        var user = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = orgId };
+        var logger = new ListLogger<ComplianceCheckService>();
+        RegradeResult result;
+        await using (var appDb = CreateAppDb(user))
+        await using (var sysDb = new SystemDbContext(
+            new DbContextOptionsBuilder<SystemDbContext>()
+                .UseNpgsql(Fixture.ConnectionString)
+                .AddInterceptors(
+                    new AuditSaveChangesInterceptor(() => user),
+                    new ComplianceCheckDeleteConcurrencyInterceptor(
+                        NullLogger<ComplianceCheckDeleteConcurrencyInterceptor>.Instance),
+                    fault)
+                .Options))
+        {
+            var svc = new ComplianceCheckService(appDb, sysDb, new FixedTimeProvider(FixedNow), logger);
+
+            // Must NOT throw: the fan-out is best-effort per page, and the triggering seed convergence has
+            // already committed.
+            result = await svc.ReevaluateForTemplateForSystemAsync(templateId, default);
+        }
+
+        fault.FaultCount.Should().Be(1,
+            "anti-no-op: without a fault actually raised, every assertion below would pass on a clean run");
+
+        result.Targeted.Should().Be(2);
+        result.Regraded.Should().Be(2,
+            "the page's own SaveChanges committed — those documents WERE re-graded; what failed is the "
+            + "confirmation. (Had the fault landed on the GRADE's page load instead, this would be 0.)");
+        result.FailedPages.Should().Be(1,
+            "a committed-but-unconfirmed page is one the next boot must re-fire (#470, ADR 0030 Amendment 5)");
+        result.AllSucceeded.Should().BeFalse(
+            "AllSucceeded gates ComplianceTemplateSeed's RegradedThroughRevision advance; advancing it over "
+            + "an unverified page would leave a stale verdict with nothing left to heal it (#416)");
+        result.Regraded.Should().Be(result.Targeted,
+            "and this tuple — everything re-graded, yet not all succeeded — is REACHABLE, which is what the "
+            + "RegradeResult contract had to be amended to say (it previously described one arm only)");
+
+        logger.Entries.Should().Contain(
+            e => e.Message.Contains("verification pass failed for a page", StringComparison.Ordinal),
+            "the failure is logged as well as counted");
+
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.SingleAsync(d => d.Id == failing)).ComplianceStatus
+            .Should().Be(ComplianceStatus.NonCompliant, "the page's verdicts are committed, not rolled back");
+        (await verify.Documents.SingleAsync(d => d.Id == passing)).ComplianceStatus
+            .Should().Be(ComplianceStatus.Compliant);
+    }
 }
