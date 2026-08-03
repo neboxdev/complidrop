@@ -6,6 +6,7 @@ using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace CompliDrop.Api.Tests;
 
@@ -102,6 +103,30 @@ public sealed class ComplianceCheckDeleteConcurrencyTests(IntegrationTestFixture
         await other.ComplianceChecks.Where(c => c.Id == checkId).ExecuteDeleteAsync();
     }
 
+    /// <summary>
+    /// <paramref name="count"/> further check rows against the same rule — the shape one document's clear
+    /// stages when a checklist has several requirements, minted here against ONE rule because nothing
+    /// constrains that pair (ADR 0030 Amendment 4 Option O declines the unique index) and the rule is not
+    /// what this suite is about.
+    /// </summary>
+    private async Task<List<Guid>> AddCheckRowsAsync(Guid docId, Guid ruleId, int count)
+    {
+        await using var db = CreateSystemDb();
+        List<Guid> ids = [];
+        for (var i = 0; i < count; i++)
+        {
+            var id = Guid.NewGuid();
+            ids.Add(id);
+            db.ComplianceChecks.Add(new ComplianceCheck
+            {
+                Id = id, DocumentId = docId, ComplianceRuleId = ruleId,
+                IsPassed = true, CheckedAt = DateTime.UtcNow,
+            });
+        }
+        await db.SaveChangesAsync();
+        return ids;
+    }
+
     [Theory]
     // EF dispatches the suppression to the override matching the SaveChanges the caller made, so both
     // halves have to be real. Production writes here are all async; a sync one would otherwise keep
@@ -189,6 +214,39 @@ public sealed class ComplianceCheckDeleteConcurrencyTests(IntegrationTestFixture
     }
 
     [Fact]
+    public async Task A_context_built_by_the_harness_helper_tolerates_it_too()
+    {
+        // IntegrationTestBase.CreateSystemDb / CreateAppDb wire the interceptors Program.cs wires, so a
+        // context built through them behaves like production (#468 review S1). Without that, the two SCOPE
+        // tests below would pass identically with the interceptor deleted from Program.cs the moment
+        // someone rewrote them through the ubiquitous helper — and a future reproduction of this bug driven
+        // through it would see the pre-#468 throw and conclude the bug is still live. The mechanical
+        // forcing function for the NEXT interceptor is
+        // HarnessSmokeTests.The_db_helpers_wire_every_save_interceptor_the_application_wires; this is the
+        // behavioural half, and it is the helper's own semantics under test rather than the DI container's.
+        var auth = await RegisterAndLoginAsync();
+        var (docId, checkId, ruleId) = await SeedCheckedDocumentAsync(auth.OrgId);
+
+        await using var db = CreateSystemDb();
+        var stale = await db.ComplianceChecks.FirstAsync(c => c.Id == checkId);
+
+        await DeleteCheckRowElsewhereAsync(checkId);
+
+        db.ComplianceChecks.Remove(stale);
+        db.ComplianceChecks.Add(new ComplianceCheck
+        {
+            Id = Guid.NewGuid(), DocumentId = docId, ComplianceRuleId = ruleId,
+            IsPassed = false, CheckedAt = DateTime.UtcNow,
+        });
+
+        var act = () => db.SaveChangesAsync();
+
+        await act.Should().NotThrowAsync(
+            "the harness helper must not give a test different SaveChanges semantics from the production "
+            + "code path it is written to exercise");
+    }
+
+    [Fact]
     public async Task A_check_row_UPDATE_that_matches_nothing_still_fails_the_save()
     {
         // Scope, direction one. Nothing in this codebase updates a check row in place — they are cleared
@@ -247,6 +305,52 @@ public sealed class ComplianceCheckDeleteConcurrencyTests(IntegrationTestFixture
         await act.Should().ThrowAsync<DbUpdateConcurrencyException>(
             "the tolerance is scoped to ComplianceCheck — widening it to every zero-row delete would hide "
             + "a genuinely lost row");
+    }
+
+    [Fact]
+    public async Task A_save_that_loses_many_check_rows_warns_ONCE_for_the_whole_unit_of_work()
+    {
+        // #468 review S2. The suppression hook runs once per ORPHANED ROW — EF/Npgsql attributes a
+        // rows-affected mismatch to the single modification command that produced it, which is the same
+        // per-command attribution that lets the IsCheckRowDelete guard survive the worker's mixed batch. So
+        // a warning inside the hook is a warning PER ROW: immaterial on a single-document writer, a
+        // page-sized burst on ComplianceCheckService.ReevaluateWhereAsync, whose one SaveChanges clears up
+        // to DefaultReevaluationPageSize documents' checks and whose fan-out thread would then block on log
+        // I/O with eagerly-formatted arguments. The per-row detail belongs at Debug; the warning is one
+        // line per unit of work, carrying the aggregate its wording claims.
+        //
+        // Hand-built context rather than CreateSystemDb(): the helper logs to NullLogger, and here the LOG
+        // is the observable under test.
+        var auth = await RegisterAndLoginAsync();
+        var (docId, checkId, ruleId) = await SeedCheckedDocumentAsync(auth.OrgId);
+        List<Guid> all = [checkId, .. await AddCheckRowsAsync(docId, ruleId, 2)];
+
+        var logger = new ListLogger<ComplianceCheckDeleteConcurrencyInterceptor>();
+        await using var db = new SystemDbContext(new DbContextOptionsBuilder<SystemDbContext>()
+            .UseNpgsql(Fixture.ConnectionString)
+            .AddInterceptors(
+                new AuditSaveChangesInterceptor(() => null),
+                new ComplianceCheckDeleteConcurrencyInterceptor(logger))
+            .Options);
+        var stale = await db.ComplianceChecks.Where(c => all.Contains(c.Id)).ToListAsync();
+        stale.Should().HaveCount(3, "precondition: three rows for one clear to stage");
+
+        await using (var other = CreateSystemDb())
+            await other.ComplianceChecks.Where(c => all.Contains(c.Id)).ExecuteDeleteAsync();
+
+        db.ComplianceChecks.RemoveRange(stale);
+
+        var act = () => db.SaveChangesAsync();
+
+        await act.Should().NotThrowAsync();
+        logger.Entries.Where(e => e.Level == LogLevel.Warning).Should().ContainSingle(
+                "one SaveChanges is one event, however many of its rows another writer got to first")
+            .Which.Message.Should()
+                .Contain("deleted 3 ComplianceCheck row(s)",
+                    "…and that one line carries the aggregate — a per-row line can only ever say 1")
+                .And.Contain("across 1 document(s)");
+        logger.Entries.Count(e => e.Level == LogLevel.Debug).Should().Be(3,
+            "the per-row detail is kept, at a level a busy fan-out is not paying for");
     }
 
     [Fact]
