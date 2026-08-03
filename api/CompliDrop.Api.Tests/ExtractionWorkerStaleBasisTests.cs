@@ -65,6 +65,14 @@ namespace CompliDrop.Api.Tests;
 /// the degrade-to-<c>Pending</c> — which doubles as the pin that the basis read lives INSIDE the
 /// best-effort <c>try</c>, since no existing test made that read fail.
 /// <para/>
+/// The last section is #467 (ADR 0052 Amendment 1), the SIBLING of everything above: the trust decision
+/// asked <c>DocumentFieldReadability</c> of the same pre-run snapshot, by the same mechanism, and so
+/// described a row that no longer existed. It now reads the basis too, and the four tests assert the
+/// acceptance invariant on the PERSISTED row rather than on the worker's intent — that the committed
+/// trust/status pair and the read-time <c>unreadableFields</c> list AGREE, via
+/// <see cref="AssertTrustAgreesWithTheRowAsync"/>, in both interleave directions (a mid-run edit that
+/// FIXES a value and one that BREAKS it) plus the fail-CLOSED fallback when the basis is unavailable.
+/// <para/>
 /// One more interleave lands in the same window and is NOT about the basis at all
 /// (<see cref="A_regrade_that_deletes_the_check_rows_this_persist_staged_costs_no_extraction"/>, #468): a
 /// competing re-grade deletes the <c>ComplianceCheck</c> rows this persist has STAGED for removal, so its
@@ -1113,6 +1121,328 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
             + "next poll has nothing to pick up");
         ExtractionOf(host.Services).ExtractCallCount.Should().Be(1,
             "…and the extraction was therefore paid for exactly once");
+    }
+
+    // ---- #467 / ADR 0052 Amendment 1: the TRUST decision reads the same basis the verdict does ----
+
+    /// <summary>An expiration in a shape <c>CanonicalDocumentFields.ParseUtcDate</c> refuses — ADR 0040's
+    /// own example. Non-blank, so it is UNREADABLE rather than absent, and the two are opposite facts.</summary>
+    private const string UnreadableExpiration = "12/31/2029 (per endorsement)";
+
+    /// <summary>Far enough out that no verdict below is date-driven, so the only thing that can move a
+    /// status is the readability of the value under test.</summary>
+    private static DateTime FarFuture => DateTime.UtcNow.Date.AddYears(2);
+
+    /// <summary>
+    /// A queued document whose <c>expiration_date</c> is seeded in a chosen READABILITY state, with the
+    /// typed column and the JSON mirror set INDEPENDENTLY. That independence is the point: it is the only
+    /// way to construct the state a prior ADR 0040 unreadable read leaves behind — a null column beside
+    /// non-blank text the parser refuses — which <see cref="SeedQueuedDocAsync"/> cannot express because
+    /// it derives both copies from one value.
+    /// <para/>
+    /// <c>general_liability_limit</c> is always seeded readable and always matches the vendor floor, so
+    /// the checklist grades on a value no interleave here touches and every verdict below stays
+    /// <c>Compliant</c> — leaving the trust axis as the only thing under test.
+    /// </summary>
+    private async Task<Guid> SeedQueuedDocWithExpirationAsync(
+        Guid orgId, Guid vendorId, DateTime? expirationColumn, string expirationRaw,
+        ExtractionTrust trust = ExtractionTrust.Trusted)
+    {
+        var now = DateTime.UtcNow;
+        var docId = Guid.NewGuid();
+        var blobPath = $"blob/{docId:N}.pdf";
+        await using (var db = CreateSystemDb())
+        {
+            db.Documents.Add(new Document
+            {
+                Id = docId,
+                OrganizationId = orgId,
+                VendorId = vendorId,
+                OriginalFileName = "coi.pdf",
+                BlobStorageUrl = "blob://d",
+                BlobStoragePath = blobPath,
+                FileSizeBytes = 1024,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Pending,
+                ExtractionTrust = trust,
+                ComplianceStatus = ComplianceStatus.Pending,
+                GeneralLiabilityLimit = 2_000_000m,
+                ExpirationDate = expirationColumn,
+                ExtractionFields = JsonDocument.Parse(JsonSerializer.Serialize(new Dictionary<string, string>
+                {
+                    ["general_liability_limit"] = "2000000",
+                    ["expiration_date"] = expirationRaw,
+                })),
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await Fixture.Factory.Services.GetRequiredService<IBlobStorageService>()
+            .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
+        return docId;
+    }
+
+    /// <summary>
+    /// #467's acceptance invariant, asserted on the PERSISTED row and on the WIRE: the trust/status pair
+    /// the persist committed and the read-time <c>unreadableFields</c> list must AGREE, so a document
+    /// reading "Needs your review" always names a cause a user can act on. Returns that list.
+    /// <para/>
+    /// It is a BICONDITIONAL, and that is only legitimate because every fixture in this section holds the
+    /// other three <c>ManualRequired</c> triggers off — <see cref="Extracted"/> returns 0.95 on every
+    /// field (clearing both confidence gates) and <c>NeedsReprocessing: false</c>. Under that constraint
+    /// readability is the ONLY trigger, so the two directions are the two ways #467 can be wrong:
+    /// distrusted-without-an-unreadable-value is the DISCLOSURE bug the ticket reports (the vendor drops
+    /// to Action needed and the detail page's <c>ManualReviewCard</c>, which renders off this very list,
+    /// falls back to copy pointing at an amber outline that a high-confidence unreadable value never
+    /// gets), and an-unreadable-value-without-distrust is the fail-OPEN mirror ADR 0040 exists to
+    /// prevent.
+    /// <para/>
+    /// The list is read through <c>GET /api/documents/{id}</c> rather than by calling the walk again, so
+    /// the assertion is about the surface the card actually renders from.
+    /// </summary>
+    private async Task<string[]> AssertTrustAgreesWithTheRowAsync(HttpClient client, Guid docId)
+    {
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+
+        var body = await client.GetFromJsonAsync<JsonElement>($"/api/documents/{docId}");
+        var unreadable = body.GetProperty("data").GetProperty("unreadableFields")
+            .EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+        var carriesUnreadableValue = unreadable.Length > 0;
+        (doc.ExtractionTrust == ExtractionTrust.Distrusted).Should().Be(carriesUnreadableValue,
+            "extraction trust and the read-time unreadable list describe the SAME row, so they must agree "
+            + $"(row: trust {doc.ExtractionTrust}, unreadableFields [{string.Join(", ", unreadable)}])");
+        (doc.ExtractionStatus == ExtractionStatus.ManualRequired).Should().Be(carriesUnreadableValue,
+            "…and one boolean drives both columns, so the status cannot disagree with the trust beside it");
+        return unreadable;
+    }
+
+    [Fact]
+    public async Task A_canonical_value_a_mid_run_edit_FIXED_leaves_no_review_with_nothing_to_name()
+    {
+        // THE #467 interleave, straight from the ticket. The document sits at ExpirationDate = null from a
+        // prior ADR 0040 unreadable read; the user clicks "Read again" and, while it runs, types the
+        // correct expiration and saves; the model returns the same unparseable text.
+        //
+        // ApplyToTypedColumn writes null over a null snapshot, so the property is NOT modified, EF omits
+        // the column, and the row keeps the user's valid date. But the readability walk used to be asked
+        // of that PRE-RUN snapshot, so it saw a null column beside non-blank unparseable raw text and the
+        // row committed ManualRequired + Distrusted — over a row nothing on which is unreadable.
+        //
+        // The disclosure is what that costs. DocumentFieldReadability re-derived at READ time against the
+        // persisted row returns nothing (the typed column is non-null), so the vendor rollup drops to
+        // Action needed with no document surface naming why, and ManualReviewCard falls through to its
+        // low-confidence copy — "the ones outlined in amber are the least certain" — on a document whose
+        // fields are all 0.95 and 1.0, so nothing is outlined. That is the ADR 0040 Amendment 2 dead end,
+        // reached from the other side.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
+        var docId = await SeedQueuedDocWithExpirationAsync(
+            auth.OrgId, vendorId, expirationColumn: null, expirationRaw: UnreadableExpiration,
+            trust: ExtractionTrust.Distrusted);
+        var corrected = FarFuture.ToString("yyyy-MM-dd");
+
+        Extraction.Result = Extracted(
+            "coi", ("general_liability_limit", "2000000"), ("expiration_date", UnreadableExpiration));
+        Extraction.DuringExtract = async () =>
+        {
+            var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+            {
+                fields = new[] { new { fieldName = "expiration_date", fieldValue = corrected } }
+            });
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+            await using var probe = CreateSystemDb();
+            var mid = await probe.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+            mid.ExpirationDate.Should().Be(FarFuture,
+                "precondition: the correction really committed, so the pre-run snapshot's null column is "
+                + "a value the row has MOVED ON FROM rather than one it still holds");
+            mid.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+                "precondition: ResolveManualReview restored trust from the resulting state (ADR 0052 §2), "
+                + "so the persist below is what takes it away again if anything does");
+        };
+
+        await ClaimAndProcessAsync(docId);
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.ExpirationDate.Should().Be(FarFuture,
+            "the worker's own value equals its snapshot's null, so the column stays out of the UPDATE and "
+            + "the user's correction survives — the very reason the pre-run walk was judging a ghost");
+        terminal.Doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        terminal.Doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+            "nothing on the row this commit leaves is unreadable, so there is nothing to distrust — and a "
+            + "Distrusted here is a vendor at Action needed that no document surface can explain");
+
+        (await AssertTrustAgreesWithTheRowAsync(auth.Client, docId)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_canonical_value_this_read_leaves_unreadable_still_routes_to_review_and_NAMES_it()
+    {
+        // Fail-CLOSED must stay fail-closed: #467 is a DISCLOSURE defect, not an over-strict verdict, so
+        // the fix may not buy a clean bill of health for a row that really does carry a value nothing can
+        // parse. Here the worker's own read is the unreadable one and its value WINS the column (the
+        // snapshot held a real date, so the assignment to null IS modified and IS in the UPDATE), which
+        // makes the row the commit leaves genuinely unreadable — and the mid-run edit that corrected it is
+        // overwritten, ADR 0017's last-writer-wins on a column the worker actually wrote.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
+        var seeded = FarFuture;
+        var docId = await SeedQueuedDocWithExpirationAsync(
+            auth.OrgId, vendorId, expirationColumn: seeded, expirationRaw: seeded.ToString("yyyy-MM-dd"));
+
+        Extraction.Result = Extracted(
+            "coi", ("general_liability_limit", "2000000"), ("expiration_date", UnreadableExpiration));
+        Extraction.DuringExtract = async () =>
+        {
+            var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+            {
+                fields = new[]
+                {
+                    new { fieldName = "expiration_date", fieldValue = seeded.AddDays(30).ToString("yyyy-MM-dd") }
+                }
+            });
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        };
+
+        await ClaimAndProcessAsync(docId);
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.ExpirationDate.Should().BeNull(
+            "the worker DID write this column — an unparseable value clears it (ADR 0040) — so the row the "
+            + "commit leaves is the unreadable one, whatever the mid-run edit had made it");
+        terminal.Doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired);
+        terminal.Doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "a canonical value nothing can parse certifies nothing, and a fix that reads the basis must "
+            + "not turn that into a clean read (ADR 0040 fails CLOSED; ADR 0042 drops it from coverage)");
+
+        // The `Equal` overload taking a because-string needs the expectation as an explicit collection —
+        // the params overload would read the reason as a second expected element.
+        (await AssertTrustAgreesWithTheRowAsync(auth.Client, docId)).Should().Equal(
+            ["expiration_date"],
+            "the detail page's review card renders off this list, so the document names the field "
+            + "blocking its vendor's coverage");
+    }
+
+    [Fact]
+    public async Task A_mid_run_edit_that_BREAKS_a_value_the_read_replaces_does_not_strand_the_document()
+    {
+        // The INVERSE interleave: the mid-run request makes a previously-readable value unreadable, and
+        // the read that lands is clean. ADR 0052 Amendment 3 path 2 is the first half — trust follows
+        // readability on EVERY status, so the save withdraws trust on a Processing row and the vendor
+        // drops to Action needed mid-read, accepted because the card names the field. The persist is the
+        // second half: it must RESTORE trust, because its own values overwrite both copies and the row it
+        // leaves is readable. Judging the pre-run snapshot happens to agree here; judging the SUBMITTED
+        // field names, or leaving trust alone because "the worker only lowers it", would not — the
+        // document would sit at Distrusted over a date it does not carry, with an empty unreadable list
+        // and no way back short of Mark verified.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
+        var seeded = FarFuture;
+        var extracted = seeded.AddDays(60);
+        var docId = await SeedQueuedDocWithExpirationAsync(
+            auth.OrgId, vendorId, expirationColumn: seeded, expirationRaw: seeded.ToString("yyyy-MM-dd"));
+
+        Extraction.Result = Extracted(
+            "coi",
+            ("general_liability_limit", "2000000"),
+            ("expiration_date", extracted.ToString("yyyy-MM-dd")));
+        Extraction.DuringExtract = async () =>
+        {
+            var resp = await auth.Client.PutAsJsonAsync($"/api/documents/{docId}/fields", new
+            {
+                fields = new[] { new { fieldName = "expiration_date", fieldValue = UnreadableExpiration } }
+            });
+            resp.StatusCode.Should().Be(HttpStatusCode.OK);
+
+            await using var probe = CreateSystemDb();
+            var mid = await probe.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+            mid.ExpirationDate.Should().BeNull();
+            mid.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+                "precondition: the save really did withdraw trust on an in-flight row (ADR 0052 "
+                + "Amendment 3 path 2) — otherwise the persist below has nothing to restore and this "
+                + "test proves nothing about the inverse direction");
+        };
+
+        await ClaimAndProcessAsync(docId);
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Doc.ExpirationDate.Should().Be(extracted,
+            "the worker extracted this field, so its value is what the UPDATE carries (ADR 0017)");
+        terminal.Doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        terminal.Doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+            "the row this commit leaves is readable, so the read that just landed restores the trust the "
+            + "mid-run save withdrew — the only writer that can do so without a human (ADR 0052 §2)");
+
+        (await AssertTrustAgreesWithTheRowAsync(auth.Client, docId)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_failing_basis_read_falls_back_to_what_this_read_produced_and_still_withdraws_trust()
+    {
+        // The fallback arm #467 adds, and it has to be pinned in the fail-CLOSED direction because that is
+        // the direction it exists for. When the basis is unavailable — the read threw, or the row is
+        // genuinely gone — the walk falls back to the tracked entity, i.e. the pre-#467 answer. That
+        // answer is a strict SUPERSET of the basis answer (a basis-unreadable field implies a
+        // tracked-unreadable one, since ApplyToTypedColumn nulls the column for every unparseable value
+        // the response carries), so the fallback can over-distrust but never under-distrust.
+        //
+        // No mid-run edit here on purpose: with the row unmoved the tracked entity IS the row, so the
+        // fallback's answer is also the true one and the agreement invariant still holds — which is what
+        // makes "fail closed" a statement about the row rather than about the snapshot.
+        var auth = await RegisterAndLoginAsync();
+        var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
+        var docId = await SeedQueuedDocWithExpirationAsync(
+            auth.OrgId, vendorId, expirationColumn: null, expirationRaw: UnreadableExpiration,
+            trust: ExtractionTrust.Distrusted);
+
+        var fault = Fixture.Factory.Services.GetRequiredService<SystemCommandFaultInterceptor>();
+        Extraction.Result = Extracted(
+            "coi", ("general_liability_limit", "2000000"), ("expiration_date", UnreadableExpiration));
+        // ProcessDocumentAsync's own load already happened before the extraction call, so the next SELECT
+        // of "Documents" on the worker's SystemDbContext is the grading-basis read. Self-disarms on fire.
+        Extraction.DuringExtract = () =>
+        {
+            fault.ShouldFault = sql => sql.Contains("FROM \"Documents\"", StringComparison.Ordinal);
+            return Task.CompletedTask;
+        };
+
+        int faults;
+        try
+        {
+            await ClaimAndProcessAsync(docId);
+        }
+        finally
+        {
+            faults = fault.FaultCount;
+            fault.Reset();
+        }
+
+        faults.Should().Be(1,
+            "the basis read really did fail — a predicate that matched nothing would make every assertion "
+            + "below a statement about the ordinary success path");
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            "with no basis to judge, the trust decision falls back to what this read produced — which is "
+            + "unreadable, so the document still reaches a human");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted);
+        doc.ComplianceStatus.Should().Be(ComplianceStatus.Pending,
+            "…and the verdict still degrades exactly as before: a failing basis read must never become a "
+            + "throw out of PersistSuccess, which is a re-paid Document AI + LLM run");
+        doc.FailedAttempts.Should().Be(0, "…so nothing was charged against the retry budget");
+
+        (await AssertTrustAgreesWithTheRowAsync(auth.Client, docId)).Should().Equal("expiration_date");
+
+        (await BuildWorker().ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+            "the document is settled — neither Pending nor a stale Processing claim — so the next poll has "
+            + "nothing to pick up");
+        Extraction.ExtractCallCount.Should().Be(1, "…and the extraction was therefore paid for exactly once");
     }
 
     /// <summary>
