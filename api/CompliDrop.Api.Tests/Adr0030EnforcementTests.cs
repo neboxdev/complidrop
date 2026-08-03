@@ -1,3 +1,5 @@
+using System.Reflection;
+using CompliDrop.Api.Entities;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 
@@ -208,5 +210,94 @@ public class Adr0030EnforcementTests
             .Should().Contain(RunCheckSignature,
                 "the ADR 0030 Amendment 3 gate anchors on this exact declaration; update the constant with "
                 + "the rename");
+    }
+
+    /// <summary>The Amendment 5 comparison the census below covers.</summary>
+    private const string OutcomeMatchesSignature = "private static bool OutcomeMatches(";
+
+    /// <summary>
+    /// The <see cref="ComplianceCheck"/> columns deliberately OUTSIDE the comparison, each for a stated
+    /// reason: <c>Id</c> is freshly minted per evaluation, <c>DocumentId</c> is the key the outcomes are
+    /// paired ON, and <c>CheckedAt</c> is the fan-out's own clock. None of the three is an assertion ABOUT
+    /// the document, so a difference in one is not a moved input.
+    /// </summary>
+    private static readonly string[] NonAssertionCheckColumns =
+        [nameof(ComplianceCheck.Id), nameof(ComplianceCheck.DocumentId), nameof(ComplianceCheck.CheckedAt)];
+
+    /// <summary>Below this the extractor latched onto the wrong span and the census is vacuous.</summary>
+    private const int MinOutcomeMatchesLines = 8;
+
+    [Fact]
+    public void OutcomeMatches_compares_every_assertion_bearing_ComplianceCheck_column()
+    {
+        // Amendment 5's detection is a MECHANISM on the input side — a fresh grade that disagrees IS the
+        // signal, so nothing enumerates verdict inputs and a column added to Document tomorrow is covered
+        // the day it is added. The comparison of the resulting CHECK ROWS is the one half that is a
+        // hand-written enumeration, and nothing kept it honest: a column added to ComplianceCheck would
+        // drop silently out of it, so a genuinely-changed outcome would compare EQUAL, no mover would be
+        // found, and the stale verdict this whole amendment exists to correct would be left standing.
+        //
+        // The codebase's answer to an enumeration that must not drift is a mechanical census (the
+        // HarnessSmokeTests shape): adding a column goes RED until somebody decides whether it is part of
+        // the assertion, and records that decision in the exclusion list above.
+        var body = SourceScan.ExtractMethodBody(
+            File.ReadAllText(SourceScan.ProductionFile("Services", "ComplianceCheckService.cs")),
+            OutcomeMatchesSignature);
+
+        body.Split('\n').Length.Should().BeGreaterOrEqualTo(MinOutcomeMatchesLines,
+            $"the extracted OutcomeMatches body is implausibly short ({body.Length} chars) — the extractor "
+            + "latched onto the wrong span and this census would pass on an empty read");
+
+        var scalars = typeof(ComplianceCheck)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            // Navigations are the entity graph, not the assertion: ComputeOutcome never populates them and
+            // an EvaluationOutcome carries none.
+            .Where(p => p.PropertyType.Namespace?.StartsWith("CompliDrop", StringComparison.Ordinal) != true)
+            .Select(p => p.Name)
+            .ToList();
+
+        scalars.Should().Contain(NonAssertionCheckColumns,
+            "the exclusion list must still name real columns — a renamed one would otherwise silently "
+            + "excuse a column that no longer exists while leaving its replacement uncompared");
+
+        foreach (var column in scalars.Except(NonAssertionCheckColumns))
+            body.Should().Contain($".{column}",
+                $"ComplianceCheck.{column} is part of what a check row ASSERTS, so two evaluations that "
+                + "differ in it are not the same evaluation. Either compare it in OutcomeMatches or add it "
+                + "to NonAssertionCheckColumns with the reason (#470, ADR 0030 Amendment 5)");
+    }
+
+    [Fact]
+    public void The_census_rejects_a_comparison_that_dropped_a_column()
+    {
+        // The census's own anti-no-op: prove it REJECTS the regression it exists to catch, rather than
+        // passing because every property name happens to appear somewhere in a long method.
+        const string dropped = """
+            class C
+            {
+                private static bool OutcomeMatches(in EvaluationOutcome fresh, in EvaluationOutcome applied)
+                {
+                    if (fresh.Status != applied.Status || fresh.ClearExistingChecks != applied.ClearExistingChecks)
+                        return false;
+                    if (!fresh.ClearExistingChecks) return true;
+                    if (fresh.NewChecks.Count != applied.NewChecks.Count) return false;
+                    var appliedByRule = applied.NewChecks.ToDictionary(c => c.ComplianceRuleId);
+                    foreach (var check in fresh.NewChecks)
+                    {
+                        if (!appliedByRule.TryGetValue(check.ComplianceRuleId, out var before)) return false;
+                        if (before.IsPassed != check.IsPassed) return false;
+                    }
+                    return true;
+                }
+            }
+            """;
+
+        var body = SourceScan.ExtractMethodBody(dropped, OutcomeMatchesSignature);
+        body.Should().Contain(".IsPassed", "the fixture's remaining comparisons must PASS the census…");
+
+        var act = () => body.Should().Contain($".{nameof(ComplianceCheck.ActualValue)}");
+        act.Should().Throw<Exception>(
+            "…so only the DROPPED column rejects it. A shape like this leaves a check row citing a value "
+            + "the row no longer holds, with the headline verdict unchanged — exactly #470's terminal state");
     }
 }
