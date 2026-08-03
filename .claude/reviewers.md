@@ -235,9 +235,18 @@ Both are defined in this repo's `.claude/agents/`.
       persisted row, a `ManualRequired` raised by an unreadable canonical value agrees with the read-time
       `unreadableFields` list, so THAT document always names a cause. It does NOT generalise. The two
       confidence gates and `NeedsReprocessing` commit `ManualRequired` + `Distrusted` with an EMPTY list
-      by design — the gates are named by the amber field outline, `NeedsReprocessing` alone names nothing
-      and below-0.9 is the only thing the outline fires on — so **`Distrusted` beside
-      `unreadableFields: []` is a common, legitimate row, not a violation**. Pinned by six tests in
+      by design, so **`Distrusted` beside `unreadableFields: []` is a common, legitimate row, not a
+      violation**. WHAT names those three, corrected in round 2 — the old wording ("the gates are named
+      by the amber field outline") is now wrong in both halves and must not be quoted back:
+      `fieldBorderClass` is TIERED (nothing ≥ 0.9, amber below, ROSE below 0.7), so the per-field gate's
+      own field is outlined rose, not amber; and a RECONCILED row is pinned to confidence 1.0, so when
+      the gate's field is also the reconciled one NOTHING is outlined. That row names itself with
+      `✎ Manually edited` + `was: …` instead, which is the honest marker — the value in that input is
+      the USER's, so an outline over it would say the MODEL read their typing badly. "Restore the
+      model's confidence so the outline fires" is ADR 0052 Amendment 1 Option M, refuted; "surface
+      reconciled fields on the wire like `unreadableFields`" is Option N, declined on cost. Pinned by
+      `A_reconciled_field_that_tripped_the_confidence_gate_names_itself_on_the_row`, which asserts the
+      pair DIRECTLY (it is outside the biconditional by construction). Also pinned by six tests in
       `ExtractionWorkerStaleBasisTests` sharing `AssertTrustAgreesWithTheRowAsync` (the row +
       `GET /api/documents/{id}`), covering both interleave directions, the CLEAR direction, the fallback
       and a failing GRADE; the biconditional those tests assert is only legitimate because every fixture
@@ -255,8 +264,24 @@ Both are defined in this repo's `.claude/agents/`.
       - Typed columns are UNTOUCHED (forcing one is ADR 0030 Amendment 2 Option G, refuted), the worker
         emits exactly the columns it emitted before, and it now clobbers strictly LESS of a request's
         value. The model's answer is preserved as `DocumentField.OriginalValue` (the page's *was: …*).
+      - The demotion has ONE owner, `DocumentField.ApplyCorrection` (round 2, C1 + S5), shared with
+        `DocumentEndpoints.UpdateFields`: capture-once `OriginalValue`, the new `FieldValue`,
+        `IsManuallyEdited`, `Confidence = 1.0`. The capture-once half is load-bearing in the WORKER
+        specifically — `fieldsDict` is ORDINAL while the row match is `OrdinalIgnoreCase`, so a response
+        answering one canonical field under two spellings reaches the same rows twice and an unguarded
+        second demotion sets `OriginalValue` to the value just written, which the page renders as
+        NOTHING. Re-inlining either copy, or dropping the guard as "the worker's rows are fresh", is the
+        bug back. The `1.0` is a DECISION (see the outline bullet above), not bookkeeping.
       - It runs BEFORE `ApplyEvaluationAsync` because the mirror is itself a verdict input
-        (`LookupValue`'s raw-string fallback). Moving it after is a torn pair.
+        (`LookupValue`'s raw-string fallback, reachable only where a canonical field's typed column is
+        NULL). Moving it after is a torn pair, and that is now pinned by a VERDICT rather than prose:
+        `A_mid_run_CLEAR_…` carries an `expiration_date` `required` rule for exactly this.
+      - `CanonicalDocumentFields.SameTypedColumn` compares the TYPED value, never a rendering: a
+        freshly-parsed `2000000m` and the `numeric(18,2)` round-trip are one number whose
+        `ToString()` differs, so a string comparison false-fires the reconciliation on every ordinary
+        re-extraction (the money row rewritten to "2000000.00", flagged manually edited, pinned to 1.0).
+        Pinned purely (`An_amount_compares_on_the_NUMBER_not_on_its_rendering`) and integrated
+        (`A_field_whose_column_the_row_AGREES_on_is_left_exactly_as_the_model_read_it`).
       - Once it has run the tracked entity and the basis give the SAME readability answer, so
         `basis ?? doc` is the statement of intent plus the fallback's owner rather than the sole guard.
         "It is redundant, inline it" misses what is load-bearing: the ORDER. Hoisting the walk back above
