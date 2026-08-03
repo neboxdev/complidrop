@@ -355,7 +355,11 @@ public class ComplianceCheckService(
     // page commits atomically. RemoveRange (not ExecuteDelete) keeps the delete on the SAME
     // SaveChanges/transaction as the inserts AND on the audit-interceptor path; because
     // ComplianceCheck has no DeletedAt the interceptor leaves it a hard delete with no audit row,
-    // exactly as the prior per-document RemoveRange did.
+    // exactly as the prior per-document RemoveRange did. Same shape, same reason and same
+    // zero-row-delete exposure as ApplyEvaluationCoreAsync's clear above — see it, and
+    // ComplianceCheckDeleteConcurrencyInterceptor, for why that exposure is answered rather than
+    // designed out (#468). This fan-out runs READ COMMITTED and catches per page, so before that
+    // interceptor a competing re-grade forfeited the WHOLE page's re-grade, not just one document's.
     private async Task ApplyEvaluationsAsync(DbContext context, IReadOnlyList<Document> docs, DateTime nowUtc, CancellationToken ct)
     {
         if (docs.Count == 0) return;
@@ -479,6 +483,17 @@ public class ComplianceCheckService(
         {
             // Materialized (ToListAsync) before RemoveRange — handing RemoveRange an IQueryable would
             // execute the delete-driving query on the blocking sync path.
+            //
+            // RemoveRange, not ExecuteDeleteAsync, and that is the DECISION (#468). The staged deletes ride
+            // in the CALLER's own SaveChanges, which is what keeps the clear, the new check rows and the
+            // verdict in ONE transaction on every caller (#337 / ADR 0030) — including the two that own no
+            // explicit transaction, ExtractionWorker.PersistSuccess and EvaluateForSystemAsync, where a
+            // set-based ExecuteDeleteAsync would issue its own statement and COMMIT the clear separately.
+            // The cost is that EF emits a per-row DELETE keyed on the primary key and demands one row each,
+            // so a competing re-grade committing between this read and the caller's SaveChanges leaves them
+            // matching nothing. That is answered where it belongs — ComplianceCheckDeleteConcurrencyInterceptor
+            // makes a check-row DELETE row-count-tolerant — rather than by moving the delete out of the unit
+            // of work. Do not "simplify" this to a set-based clear.
             var existing = await context.Set<ComplianceCheck>()
                 .Where(c => c.DocumentId == doc.Id)
                 .ToListAsync(ct);

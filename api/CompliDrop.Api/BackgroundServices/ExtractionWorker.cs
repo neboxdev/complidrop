@@ -804,6 +804,14 @@ public class ExtractionWorker(
 
         ForceVerdictWrite(db, doc);
 
+        // ONE SaveChanges carries the extracted inputs, the DocumentField rows, the cleared + rewritten
+        // ComplianceCheck rows and the verdict (#337 / ADR 0030). It must not THROW — see Clamp for what
+        // that costs — and the clear is one of the ways it could: ApplyEvaluationAsync stages a per-row
+        // DELETE of the checks it read, and a competing re-grade committing in the window between that read
+        // and this line leaves them matching nothing. ComplianceCheckDeleteConcurrencyInterceptor makes
+        // that a success rather than a DbUpdateConcurrencyException (#468); this line is deliberately left
+        // bare of a try/catch, because a catch here would have nothing safe to do — the bookkeeping save in
+        // ProcessDocumentAsync's catch runs on this same context and re-throws.
         await db.SaveChangesAsync(ct);
     }
 

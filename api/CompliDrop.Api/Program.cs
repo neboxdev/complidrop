@@ -135,8 +135,11 @@ builder.Services.AddCookieJwtAuth();
 builder.Services.AddDbContext<AppDbContext>((sp, options) =>
 {
     options.UseNpgsql(builder.Configuration.GetConnectionString("Database"));
-    options.AddInterceptors(new AuditSaveChangesInterceptor(
-        () => sp.GetService<ICurrentUser>()));
+    options.AddInterceptors(
+        new AuditSaveChangesInterceptor(() => sp.GetService<ICurrentUser>()),
+        // A ComplianceCheck DELETE that matched nothing is a success, not a conflict (#468) — see the
+        // interceptor's remarks. On BOTH contexts because the rule is a property of the row.
+        new ComplianceCheckDeleteConcurrencyInterceptor());
 });
 
 builder.Services.AddDbContext<SystemDbContext>((sp, options) =>
@@ -165,8 +168,11 @@ builder.Services.AddDbContext<SystemDbContext>((sp, options) =>
         Options = "-c idle_in_transaction_session_timeout=120000",
     }.ConnectionString;
     options.UseNpgsql(systemConnectionString);
-    options.AddInterceptors(new AuditSaveChangesInterceptor(
-        () => sp.GetService<ICurrentUser>()));
+    options.AddInterceptors(
+        new AuditSaveChangesInterceptor(() => sp.GetService<ICurrentUser>()),
+        // #468. This is the context ExtractionWorker.PersistSuccess saves through, where a throw out of
+        // SaveChanges is not a 500 but a re-paid Document AI + LLM run on every zombie reclaim.
+        new ComplianceCheckDeleteConcurrencyInterceptor());
 });
 
 // ============================================================
