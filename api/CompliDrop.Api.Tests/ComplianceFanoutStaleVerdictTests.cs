@@ -2,14 +2,19 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using CompliDrop.Api.BackgroundServices;
+using CompliDrop.Api.Configuration;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
+using CompliDrop.Api.Services.Extraction;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Serilog.Core;
 
 namespace CompliDrop.Api.Tests;
@@ -43,6 +48,14 @@ public sealed class ComplianceFanoutStaleVerdictTests(IntegrationTestFixture fix
     private const string RequiredGl = "2000000";
     private const decimal PassingGl = 3_000_000m;
     private const string FailingGl = "1000000";
+
+    /// <summary>
+    /// A SECOND passing limit. It exists so one interleave can move the evidence without moving the
+    /// headline: both this and <see cref="PassingGl"/> clear <see cref="RequiredGl"/>, so
+    /// <c>OutcomeMatches</c>' status comparison cannot short-circuit and the CHECK-TUPLE half has to do the
+    /// detecting. Every other value in this suite crosses the floor.
+    /// </summary>
+    private const decimal PartialGl = 2_500_000m;
 
     /// <summary>
     /// The information line <c>VerifyPageAsync</c> emits when it finds a document whose inputs moved. Every
@@ -201,6 +214,76 @@ public sealed class ComplianceFanoutStaleVerdictTests(IntegrationTestFixture fix
             .CountAsync(a => a.EntityType == nameof(Document) && a.EntityId == docId && a.Action == "document.updated");
     }
 
+    /// <summary>
+    /// A QUEUED (<c>Pending</c>) COI with its blob actually stored, so the extraction worker can claim and
+    /// process it for real. <paramref name="host"/> is the per-test host: the blob fake is a HOST singleton,
+    /// so the bytes have to land in the store the worker under test will read from.
+    /// </summary>
+    private async Task<Guid> SeedQueuedDocAsync(IServiceProvider host, Guid orgId, Guid vendorId, decimal gl)
+    {
+        var now = DateTime.UtcNow;
+        var docId = Guid.NewGuid();
+        var blobPath = $"blob/{docId:N}.pdf";
+        await using (var db = CreateSystemDb())
+        {
+            db.Documents.Add(new Document
+            {
+                Id = docId,
+                OrganizationId = orgId,
+                VendorId = vendorId,
+                OriginalFileName = "coi.pdf",
+                BlobStorageUrl = "blob://d",
+                BlobStoragePath = blobPath,
+                FileSizeBytes = 1024,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Pending,
+                ComplianceStatus = ComplianceStatus.Pending,
+                GeneralLiabilityLimit = gl,
+                ExtractionFields = JsonDocument.Parse($$"""{"general_liability_limit":"{{gl:0}}"}"""),
+                ExpirationDate = now.AddYears(1),
+                CreatedAt = now,
+                UpdatedAt = now
+            });
+            db.DocumentFields.Add(new DocumentField
+            {
+                Id = Guid.NewGuid(), DocumentId = docId, FieldName = "general_liability_limit",
+                FieldValue = $"{gl:0}", FieldType = "currency", Confidence = 0.95
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await host.GetRequiredService<IBlobStorageService>()
+            .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
+        return docId;
+    }
+
+    /// <summary>
+    /// One PRIOR check row against the fixture's rule. It is the precondition for the doubled-set residue
+    /// (ADR 0030 § Consequences, Amendment 4): both writers materialize the SAME row and stage a per-row
+    /// DELETE of it, so whichever commits first leaves the other's DELETE matching nothing — tolerated
+    /// since #468 — and both writers' INSERTs then stand. A document with no prior rows has nothing for
+    /// either DELETE to miss.
+    /// </summary>
+    private async Task SeedPriorCheckAsync(Guid docId, Guid ruleId, decimal cited)
+    {
+        await using var db = CreateSystemDb();
+        db.ComplianceChecks.Add(new ComplianceCheck
+        {
+            Id = Guid.NewGuid(), DocumentId = docId, ComplianceRuleId = ruleId,
+            IsPassed = true, ActualValue = $"{cited:0}", CheckedAt = DateTime.UtcNow
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>The two columns the extraction worker OWNS — neither is the verification pass's to write.</summary>
+    private async Task<(ExtractionStatus Status, ExtractionTrust Trust)> ReadExtractionStateAsync(Guid docId)
+    {
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+        return (doc.ExtractionStatus, doc.ExtractionTrust);
+    }
+
     private static IEnumerable<string> Messages(CapturingLogEventSink sink) =>
         sink.Events.Select(e => e.RenderMessage());
 
@@ -261,6 +344,205 @@ public sealed class ComplianceFanoutStaleVerdictTests(IntegrationTestFixture fix
             + "limit somebody just lowered is #337's state, reached through the fan-out");
         terminal.CitedLimits.Should().Equal([1_000_000m],
             "and the check rows must cite the value the row actually holds, not the one the page graded");
+    }
+
+    [Fact]
+    public async Task An_edit_that_keeps_the_verdict_but_moves_the_evidence_is_still_corrected()
+    {
+        // The half of the detection the STATUS comparison cannot reach, and the only shape in this suite
+        // that exercises it. Every other interleave crosses the 2M floor, so `fresh.Status != applied.Status`
+        // is already true on line one of OutcomeMatches and the check-tuple comparison below it is never
+        // consulted in a mover case. Here BOTH limits pass: the badge is Compliant before and after, while
+        // the check row — the evidence an auditor reads, and what the detail page's explainer renders —
+        // would be left asserting "we measured $3,000,000" against a row holding $2,500,000.
+        //
+        // A fan-out that compared only the status would leave exactly that and this suite would stay green.
+        var sink = new CapturingLogEventSink();
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        var f = await SeedAsync(factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true }));
+        var docId = await SeedDocAsync(f.OrgId, f.VendorId, PassingGl, ComplianceStatus.Pending);
+
+        // Pinned rather than assumed: if a future edit to these constants made the competing value cross the
+        // floor, this test would silently decay into a duplicate of the first one.
+        var floor = decimal.Parse(RequiredGl, CultureInfo.InvariantCulture);
+        PassingGl.Should().BeGreaterThan(floor);
+        PartialGl.Should().BeGreaterThan(floor, "the whole point is that the STATUS does not move");
+
+        var hook = factory.Services.GetRequiredService<ConcurrentDocumentWriteInterceptor>();
+        var saves = 0;
+        var competingWrites = 0;
+        hook.OnSavingChanges = async () =>
+        {
+            if (++saves != 2) return;
+            competingWrites++;
+            (await EditGlAsync(f.Client, docId, $"{PartialGl:0}")).EnsureSuccessStatusCode();
+        };
+
+        HttpResponseMessage resp;
+        try
+        {
+            resp = await UpsertRuleAsync(f);
+        }
+        finally
+        {
+            hook.Reset();
+        }
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        competingWrites.Should().Be(1, "precondition: the edit landed inside the page's own SaveChanges");
+        Messages(sink).Should().Contain(m => m.Contains(MoverLine, StringComparison.Ordinal),
+            "the page's assertion about this document moved even though its verdict did not — a fan-out "
+            + "that stopped at the status would find nothing here");
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Gl.Should().Be(PartialGl, "the user's edit is the winner of the input write");
+        terminal.Status.Should().Be(ComplianceStatus.Compliant,
+            "both limits clear the floor, so the headline verdict is the same before and after — which is "
+            + "exactly why the status comparison alone cannot detect this");
+        terminal.CitedLimits.Should().Equal([PartialGl],
+            "the check row must cite the value the row actually holds. Left uncorrected it would cite "
+            + "$3,000,000 beside a $2,500,000 limit — one row, one rule, and the two disagree");
+    }
+
+    [Fact]
+    public async Task A_competing_PURE_re_grade_leaves_the_doubled_check_rows_in_place()
+    {
+        // The boundary of what the verification pass is, pinned so the record cannot drift back into
+        // claiming more (ADR 0030 Amendment 5 § What stays open). OutcomeMatches compares two IN-MEMORY
+        // EvaluationOutcomes and never reads a stored ComplianceCheck row, so the doubled set left by a
+        // competing clear-and-replace is INVISIBLE to it. A pure re-grade ("Check again") is the case that
+        // makes that observable: it rewrites the check rows while moving no verdict INPUT, so the fresh
+        // grade equals the one the page applied, nothing is a mover, nothing is written — and the document
+        // is left holding both writers' rows until its next evaluation.
+        //
+        // That is the residue Amendment 4 accepted, not a new defect: the two read sites that turn these
+        // rows into an assertion are already reconciled (the export counts DISTINCT rules; the detail page's
+        // renderedChecks collapses them against the standing verdict).
+        var sink = new CapturingLogEventSink();
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        var f = await SeedAsync(factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true }));
+        var docId = await SeedDocAsync(f.OrgId, f.VendorId, PassingGl, ComplianceStatus.Pending);
+        await SeedPriorCheckAsync(docId, f.RuleId, PassingGl);
+
+        var hook = factory.Services.GetRequiredService<ConcurrentDocumentWriteInterceptor>();
+        var saves = 0;
+        var competingWrites = 0;
+        hook.OnSavingChanges = async () =>
+        {
+            if (++saves != 2) return;
+            competingWrites++;
+            // The "Check again" button: a pure re-grade that writes NO input (ADR 0030 Amendment 3).
+            var recheck = await f.Client.PostAsync($"/api/compliance/check/{docId}", content: null);
+            recheck.EnsureSuccessStatusCode();
+        };
+
+        HttpResponseMessage resp;
+        try
+        {
+            resp = await UpsertRuleAsync(f);
+        }
+        finally
+        {
+            hook.Reset();
+        }
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        competingWrites.Should().Be(1, "precondition: the re-grade committed inside the page's own SaveChanges");
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Gl.Should().Be(PassingGl, "a pure re-grade owns no inputs, so nothing about the row moved");
+        terminal.Status.Should().Be(ComplianceStatus.Compliant);
+        terminal.CitedLimits.Should().HaveCount(2,
+            "both writers cleared the same prior row and inserted their own; the loser's DELETE matched "
+            + "nothing and was tolerated (#468), so the document transiently holds BOTH sets");
+        terminal.CitedLimits.Should().OnlyContain(v => v == PassingGl);
+
+        Messages(sink).Should().NotContain(m => m.Contains(MoverLine, StringComparison.Ordinal),
+            "and the verification pass did NOT see it: its comparison is between two computed outcomes, "
+            + "never against the stored rows, so a writer that rewrites check rows without moving a verdict "
+            + "INPUT produces an identical fresh grade and no mover. The doubled set is cleared by the "
+            + "document's next evaluation, not by this pass");
+    }
+
+    [Fact]
+    public async Task An_extraction_persist_committing_inside_a_page_leaves_no_stale_verdict()
+    {
+        // The collider the Amendment 5 measurement calls DECISIVE, constructed. #470's own framing was that
+        // the triggering mutations are rare and admin-initiated, so two humans colliding is negligible — but
+        // ExtractionWorker polls every 5s and PersistSuccess commits canonical inputs + verdict in one unit
+        // of work, so an org with a single portal upload in flight collides with no second person existing.
+        // A rule edit while one document is being extracted is an ordinary Tuesday.
+        //
+        // It also pins the SCOPE of the correction: the verification writes the verdict and its check rows,
+        // and nothing else. The worker owns ExtractionStatus + ExtractionTrust (ADR 0052) and a correction
+        // pass that clobbered either would be a real regression this suite must see, not one only the ADR
+        // 0052 suites would catch.
+        var sink = new CapturingLogEventSink();
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        var f = await SeedAsync(factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true }));
+        var docId = await SeedQueuedDocAsync(factory.Services, f.OrgId, f.VendorId, PassingGl);
+
+        // The extraction LOWERS the limit below the floor — the direction that matters, since the page is
+        // about to commit a Compliant graded from the 3M the row is losing.
+        var extraction = factory.Services.GetRequiredService<FakeExtractionClient>();
+        extraction.Result = new ExtractionResult(
+            DocumentType: "coi",
+            DocumentSubType: null,
+            Fields: [new ExtractedField("general_liability_limit", FailingGl, "currency", 0.95)],
+            NeedsReprocessing: false,
+            Usage: new ExtractionUsage(InputTokens: 1000, OutputTokens: 200, EstimatedCostUsd: 0.01m));
+
+        var hook = factory.Services.GetRequiredService<ConcurrentDocumentWriteInterceptor>();
+        var saves = 0;
+        var competingWrites = 0;
+        hook.OnSavingChanges = async () =>
+        {
+            if (++saves != 2) return;
+            competingWrites++;
+            // A REAL claim + process on the same database, driven to completion inside the page's window —
+            // the worker is a background service, so there is no request to fire at it.
+            var worker = new ExtractionWorker(
+                factory.Services.GetRequiredService<IServiceScopeFactory>(),
+                Options.Create(new ExtractionSettings()),
+                NullLogger<ExtractionWorker>.Instance);
+            var claimed = await worker.ClaimNextAsync(CancellationToken.None);
+            claimed.Should().Be(docId, "precondition: the queued document is the one the worker picks up");
+            await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+        };
+
+        HttpResponseMessage resp;
+        try
+        {
+            resp = await UpsertRuleAsync(f);
+        }
+        finally
+        {
+            hook.Reset();
+        }
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        competingWrites.Should().Be(1, "precondition: the persist committed inside the page's own SaveChanges");
+        extraction.ExtractCallCount.Should().Be(1, "…and it really was an extraction, not a no-op claim");
+        Messages(sink).Should().Contain(m => m.Contains(MoverLine, StringComparison.Ordinal),
+            "precondition: the page committed a verdict the persist's inputs no longer imply");
+
+        var terminal = await ReadTerminalStateAsync(docId);
+        terminal.Gl.Should().Be(1_000_000m, "the extraction is the winner of the input write (ADR 0017)");
+        terminal.Status.Should().Be(ComplianceStatus.NonCompliant,
+            "the persisted verdict must be what the persisted inputs grade to — the page's Compliant was "
+            + "graded from the 3M this persist overwrote");
+        terminal.CitedLimits.Should().Equal([1_000_000m]);
+
+        var extractionState = await ReadExtractionStateAsync(docId);
+        extractionState.Status.Should().Be(ExtractionStatus.Completed,
+            "the correction writes the verdict and its check rows, never a column the worker owns — "
+            + "re-arming the queue here would re-pay Document AI + the LLM");
+        extractionState.Trust.Should().Be(ExtractionTrust.Trusted,
+            "and never ExtractionTrust either (ADR 0052): this pass reached no conclusion about the "
+            + "document's basis, so it must not overwrite the one the persist did reach");
     }
 
     [Fact]
@@ -396,6 +678,12 @@ public sealed class ComplianceFanoutStaleVerdictTests(IntegrationTestFixture fix
 
         Messages(sink).Should().Contain(m => m.Contains(GaveUpLine, StringComparison.Ordinal),
             "an unconfirmed verdict left behind is an event somebody must be able to find");
+        Messages(sink).Should().Contain(
+            m => m.Contains(GaveUpLine, StringComparison.Ordinal)
+                && m.Contains(docId.ToString(), StringComparison.OrdinalIgnoreCase),
+            "…and 'find' means the DOCUMENT, not a count: the ids are in hand, so the line names them "
+            + "(ids only — never an ActualValue or a Notes string, which are document content). Both "
+            + "fan-out failure lines go through the same bounded ComplianceCheckService.IdSample");
 
         var terminal = await ReadTerminalStateAsync(docId);
         terminal.Gl.Should().Be(1_000_000m, "the last edit is the winner of the input write");
