@@ -5,6 +5,7 @@ using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -351,6 +352,156 @@ public sealed class ComplianceCheckDeleteConcurrencyTests(IntegrationTestFixture
                 .And.Contain("across 1 document(s)");
         logger.Entries.Count(e => e.Level == LogLevel.Debug).Should().Be(3,
             "the per-row detail is kept, at a level a busy fan-out is not paying for");
+    }
+
+    /// <summary>
+    /// Test-only: hijacks the hook that fires right AFTER the batch executed and right BEFORE the
+    /// interceptor under test flushes its tally — the one window where a unit of work's suppression is
+    /// recorded and not yet reported. Registered AHEAD of the real interceptor, so it wins that ordering
+    /// (EF invokes save-changes interceptors in registration order) and the real one's own
+    /// <c>SavedChangesAsync</c> never runs.
+    /// </summary>
+    private sealed class AfterBatchInterceptor : SaveChangesInterceptor
+    {
+        private bool _reentrant;
+
+        /// <summary>Runs inside the armed save's completion hook. Null means inert.</summary>
+        public Func<Task>? OnSaved { get; set; }
+
+        /// <summary>When true, the completion hook throws <see cref="OperationCanceledException"/>.</summary>
+        public bool CancelInstead { get; set; }
+
+        public override async ValueTask<int> SavedChangesAsync(
+            SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default)
+        {
+            if (OnSaved is { } callback && !_reentrant)
+            {
+                // The callback saves through a SECOND context on the same shared interceptor, which comes
+                // back through here; a plain flag is enough because this fixture's tests are serial.
+                _reentrant = true;
+                try { await callback(); }
+                finally { _reentrant = false; }
+            }
+
+            if (CancelInstead) throw new OperationCanceledException();
+            return await base.SavedChangesAsync(eventData, result, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// A context wired the way production wires one, with <paramref name="logger"/> where the LOG is the
+    /// observable (<c>CreateSystemDb</c> logs to NullLogger) and <paramref name="before"/> registered ahead
+    /// of the interceptor under test.
+    /// </summary>
+    private SystemDbContext BuildContext(
+        ComplianceCheckDeleteConcurrencyInterceptor interceptor, params ISaveChangesInterceptor[] before) =>
+        new(new DbContextOptionsBuilder<SystemDbContext>()
+            .UseNpgsql(Fixture.ConnectionString)
+            .AddInterceptors([new AuditSaveChangesInterceptor(() => null), .. before, interceptor])
+            .Options);
+
+    [Fact]
+    public async Task A_save_CANCELED_after_its_batch_still_reports_the_suppression()
+    {
+        // #468 review S2. EF ends a SaveChanges three ways, and the tally has to be emitted on all three:
+        // it dies with the CONTEXT, and the callers that matter here dispose their scope the moment the
+        // save returns, so a tally left behind by a canceled save is never "dropped by the next save's
+        // reset" — there is no next save. The reachable cancellation is the extraction worker's own:
+        // PersistSuccess saves on the token it was handed, so a shutdown or a per-attempt timeout lands
+        // exactly here, on the one writer whose suppressed deletes are why this class exists. And an
+        // Npgsql cancellation can be observed AFTER the batch reached the server, so "canceled" does not
+        // mean "committed nothing" — which is why the suppression must still be traced.
+        //
+        // Cancelling from the completion hook models that shape precisely: the batch ran (the suppression
+        // is already tallied) and only then does the unit of work cancel.
+        var auth = await RegisterAndLoginAsync();
+        var (docId, checkId, ruleId) = await SeedCheckedDocumentAsync(auth.OrgId);
+
+        var logger = new ListLogger<ComplianceCheckDeleteConcurrencyInterceptor>();
+        var cancelAfterBatch = new AfterBatchInterceptor { CancelInstead = true };
+        await using var db = BuildContext(new ComplianceCheckDeleteConcurrencyInterceptor(logger), cancelAfterBatch);
+        var stale = await db.ComplianceChecks.FirstAsync(c => c.Id == checkId);
+
+        await DeleteCheckRowElsewhereAsync(checkId);
+
+        db.ComplianceChecks.Remove(stale);
+        db.ComplianceChecks.Add(new ComplianceCheck
+        {
+            Id = Guid.NewGuid(), DocumentId = docId, ComplianceRuleId = ruleId,
+            IsPassed = false, CheckedAt = DateTime.UtcNow,
+        });
+
+        var act = () => db.SaveChangesAsync();
+
+        await act.Should().ThrowAsync<OperationCanceledException>(
+            "precondition: this save ends CANCELED, not completed and not failed — so only the canceled "
+            + "hook can report what it suppressed");
+        logger.Entries.Where(e => e.Level == LogLevel.Warning).Should().ContainSingle(
+                "a suppression with no trace at all is the thing this logging exists to prevent, and a "
+                + "canceled save is not a save that suppressed nothing")
+            .Which.Message.Should().Contain("deleted 1 ComplianceCheck row(s)");
+    }
+
+    [Fact]
+    public async Task Two_contexts_sharing_ONE_interceptor_each_report_their_OWN_suppression()
+    {
+        // #468 review S7. The tally used to be plain instance fields, correct only because the natural
+        // wiring happens to give one interceptor per context (DbContextOptions is scoped). That premise was
+        // documented rather than enforced — and a SINGLETON registration, or one instance handed to both
+        // contexts' option builders, would merge two units of work into one tally and make the aggregate
+        // this warning claims to carry ("{Count} row(s) across {DocumentCount} document(s)") a lie.
+        //
+        // So: ONE interceptor, TWO contexts, and an INTERLEAVE rather than two sequential saves — sequential
+        // ones pass either way, since each flushes before the next resets. Context A's save is held at its
+        // completion hook, where its suppression is tallied but not yet reported, and B's whole save runs
+        // inside it. With instance fields, B's SavingChanges resets the one tally and B's flush drains it,
+        // so A's suppression is reported by nobody: exactly one warning instead of two.
+        var auth = await RegisterAndLoginAsync();
+        var (docA, checkA, ruleA) = await SeedCheckedDocumentAsync(auth.OrgId);
+        var (docB, checkB, ruleB) = await SeedCheckedDocumentAsync(auth.OrgId);
+        List<Guid> bRows = [checkB, .. await AddCheckRowsAsync(docB, ruleB, 1)];
+
+        var logger = new ListLogger<ComplianceCheckDeleteConcurrencyInterceptor>();
+        var shared = new ComplianceCheckDeleteConcurrencyInterceptor(logger);
+        var interleave = new AfterBatchInterceptor();
+
+        await using var a = BuildContext(shared, interleave);
+        await using var b = BuildContext(shared, interleave);
+
+        var staleA = await a.ComplianceChecks.FirstAsync(c => c.Id == checkA);
+        var staleB = await b.ComplianceChecks.Where(c => bRows.Contains(c.Id)).ToListAsync();
+        staleB.Should().HaveCount(2, "precondition: B's clear stages two rows, so its aggregate differs from A's");
+
+        await DeleteCheckRowElsewhereAsync(checkA);
+        await using (var other = CreateSystemDb())
+            await other.ComplianceChecks.Where(c => bRows.Contains(c.Id)).ExecuteDeleteAsync();
+
+        a.ComplianceChecks.Remove(staleA);
+        a.ComplianceChecks.Add(new ComplianceCheck
+        {
+            Id = Guid.NewGuid(), DocumentId = docA, ComplianceRuleId = ruleA,
+            IsPassed = false, CheckedAt = DateTime.UtcNow,
+        });
+        b.ComplianceChecks.RemoveRange(staleB);
+
+        interleave.OnSaved = async () =>
+        {
+            interleave.OnSaved = null;
+            await b.SaveChangesAsync();
+        };
+
+        var act = () => a.SaveChangesAsync();
+
+        await act.Should().NotThrowAsync();
+
+        var warnings = logger.Entries.Where(e => e.Level == LogLevel.Warning).Select(e => e.Message).ToList();
+        warnings.Should().HaveCount(2,
+            "each context's unit of work is its own event — one interceptor instance serving two of them "
+            + "must not merge or drop either");
+        warnings.Should().ContainSingle(m => m.Contains("deleted 1 ComplianceCheck row(s)"),
+            "…A lost exactly one row, and its tally survived B's whole save running inside A's completion hook");
+        warnings.Should().ContainSingle(m => m.Contains("deleted 2 ComplianceCheck row(s)"),
+            "…and B lost two, reported against B rather than folded into A's line");
     }
 
     [Fact]

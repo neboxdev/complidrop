@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using CompliDrop.Api.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
@@ -62,15 +63,23 @@ namespace CompliDrop.Api.Data;
 public sealed class ComplianceCheckDeleteConcurrencyInterceptor(
     ILogger<ComplianceCheckDeleteConcurrencyInterceptor> logger) : SaveChangesInterceptor
 {
-    // The tally behind the ONE summary line per SaveChanges — see FlushTally for why it is not one line
-    // per suppressed row. Plain fields rather than anything thread-safe, because there is exactly one of
-    // these per DbContext: AddDbContext registers DbContextOptions as SCOPED (so the instance handed to
-    // AddInterceptors is built per scope, once per context type), the test harness builds a fresh one per
-    // context, and a DbContext is single-threaded by contract anyway. Registering this as a SINGLETON
-    // shared across contexts would break that and is why the reset/flush pair is spelled out below rather
-    // than left implicit.
-    private int _suppressedRows;
-    private HashSet<Guid>? _suppressedDocuments;
+    /// <summary>The per-<see cref="DbContext"/> accumulation behind the ONE summary line per
+    /// <c>SaveChanges</c> — see <see cref="FlushTally"/> for why it is not one line per suppressed row.</summary>
+    private sealed class Tally
+    {
+        public int Rows;
+        public HashSet<Guid>? Documents;
+    }
+
+    // Keyed on the CONTEXT EF hands every hook rather than held as instance fields, so the reset/flush
+    // pair is correct under any registration lifetime instead of under a documented one. The natural
+    // wiring (DbContextOptions is SCOPED, so AddInterceptors gets one instance per scope per context type)
+    // already gives one interceptor per context, but "already" is not "by construction": a SINGLETON
+    // registration, or one instance passed to both contexts' option builders, would merge two units of
+    // work into one tally and make the aggregate this warning claims to carry a lie. A weak table keys the
+    // state where it actually belongs and lets the entry die with the context. Nothing here is on a hot
+    // path — it is touched only by a save that suppressed something.
+    private readonly ConditionalWeakTable<DbContext, Tally> _tallies = [];
 
     // BOTH overrides, because EF dispatches to whichever matches the SaveChanges the caller made and a
     // sync one would otherwise keep throwing. Every production writer here is async; the sync half is
@@ -86,33 +95,34 @@ public sealed class ComplianceCheckDeleteConcurrencyInterceptor(
         CancellationToken cancellationToken = default) =>
         ValueTask.FromResult(IsCheckRowAlreadyGone(eventData) ? InterceptionResult.Suppress() : result);
 
-    // The tally's lifetime is one SaveChanges: cleared as it starts, emitted when it ends either way. A
-    // save that is CANCELED emits nothing — its tally is dropped by the next save's reset — because a
-    // canceled unit of work committed nothing there is anything to explain.
+    // The tally's lifetime is one SaveChanges: cleared as it starts, emitted when it ends — and EF has
+    // THREE ways for one to end, so all three flush. Leaving any of them out would not merely delay the
+    // line, it would lose it: the tally dies with the context, and the scope-per-save callers (the worker
+    // disposes its scope the moment ProcessDocumentAsync returns) never reach a "next save" to drop it.
     public override InterceptionResult<int> SavingChanges(
         DbContextEventData eventData, InterceptionResult<int> result)
     {
-        ResetTally();
+        ResetTally(eventData.Context);
         return base.SavingChanges(eventData, result);
     }
 
     public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
         DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
     {
-        ResetTally();
+        ResetTally(eventData.Context);
         return base.SavingChangesAsync(eventData, result, cancellationToken);
     }
 
     public override int SavedChanges(SaveChangesCompletedEventData eventData, int result)
     {
-        FlushTally();
+        FlushTally(eventData.Context);
         return base.SavedChanges(eventData, result);
     }
 
     public override ValueTask<int> SavedChangesAsync(
         SaveChangesCompletedEventData eventData, int result, CancellationToken cancellationToken = default)
     {
-        FlushTally();
+        FlushTally(eventData.Context);
         return base.SavedChangesAsync(eventData, result, cancellationToken);
     }
 
@@ -121,15 +131,36 @@ public sealed class ComplianceCheckDeleteConcurrencyInterceptor(
     // needs to be read against.
     public override void SaveChangesFailed(DbContextErrorEventData eventData)
     {
-        FlushTally();
+        FlushTally(eventData.Context);
         base.SaveChangesFailed(eventData);
     }
 
     public override Task SaveChangesFailedAsync(
         DbContextErrorEventData eventData, CancellationToken cancellationToken = default)
     {
-        FlushTally();
+        FlushTally(eventData.Context);
         return base.SaveChangesFailedAsync(eventData, cancellationToken);
+    }
+
+    // A CANCELED save flushes too, and this pair is not symmetry for its own sake (#468 review S2). The
+    // reachable cancellation is the extraction worker's: PersistSuccess saves on the request's own
+    // CancellationToken, so a shutdown or a per-attempt timeout lands here — on the one writer whose
+    // suppressed deletes are why this class exists. Npgsql can also observe the cancellation AFTER the
+    // batch reached the server, so "canceled" does not imply "committed nothing"; dropping the tally would
+    // leave a possibly-committed suppression with no trace at all, which is the very thing the logging is
+    // for. Emitting it costs an extra Warning on a save that may have rolled back — cheap, and the wording
+    // is about the deletes rather than about the commit.
+    public override void SaveChangesCanceled(DbContextEventData eventData)
+    {
+        FlushTally(eventData.Context);
+        base.SaveChangesCanceled(eventData);
+    }
+
+    public override Task SaveChangesCanceledAsync(
+        DbContextEventData eventData, CancellationToken cancellationToken = default)
+    {
+        FlushTally(eventData.Context);
+        return base.SaveChangesCanceledAsync(eventData, cancellationToken);
     }
 
     /// <summary>
@@ -159,12 +190,19 @@ public sealed class ComplianceCheckDeleteConcurrencyInterceptor(
     {
         if (eventData.Entries.Count == 0 || !eventData.Entries.All(IsCheckRowDelete)) return false;
 
-        _suppressedRows += eventData.Entries.Count;
+        // EF supplies the saving context on every one of these events, so the null arm is belt-and-braces —
+        // and it keeps the TRACE rather than the tally: an unattributable suppression is reported on the
+        // spot instead of being silently dropped, since being unable to AGGREGATE an event is not a reason
+        // to stop recording it.
+        var tally = eventData.Context is { } context ? _tallies.GetOrCreateValue(context) : null;
+        if (tally is not null) tally.Rows += eventData.Entries.Count;
+
         var detailed = logger.IsEnabled(LogLevel.Debug);
+        HashSet<Guid> documents = tally is null ? [] : tally.Documents ??= [];
         foreach (var entry in eventData.Entries)
         {
             if (entry.Property(nameof(ComplianceCheck.DocumentId)).CurrentValue is not Guid documentId) continue;
-            (_suppressedDocuments ??= []).Add(documentId);
+            documents.Add(documentId);
             if (detailed)
             {
                 logger.LogDebug(
@@ -174,6 +212,7 @@ public sealed class ComplianceCheckDeleteConcurrencyInterceptor(
             }
         }
 
+        if (tally is null) Warn(eventData.Entries.Count, documents.Count);
         return true;
     }
 
@@ -182,24 +221,32 @@ public sealed class ComplianceCheckDeleteConcurrencyInterceptor(
     /// carries (rows, and how many documents they spanned) — the per-document ids are the Debug lines
     /// above. Silent when nothing was suppressed, which is every save in ordinary operation.
     /// </summary>
-    private void FlushTally()
+    private void FlushTally(DbContext? context)
     {
-        if (_suppressedRows == 0) return;
+        if (context is null || !_tallies.TryGetValue(context, out var tally) || tally.Rows == 0) return;
 
+        Warn(tally.Rows, tally.Documents?.Count ?? 0);
+        Reset(tally);
+    }
+
+    private void Warn(int rows, int documentCount) =>
         logger.LogWarning(
             "A concurrent re-grade had already deleted {Count} ComplianceCheck row(s) that this unit of "
             + "work staged for removal, across {DocumentCount} document(s); treating those deletes as done "
             + "rather than failing the unit of work. Each affected document may transiently hold both "
             + "writers' check rows until its next evaluation.",
-            _suppressedRows,
-            _suppressedDocuments?.Count ?? 0);
-        ResetTally();
+            rows,
+            documentCount);
+
+    private void ResetTally(DbContext? context)
+    {
+        if (context is not null && _tallies.TryGetValue(context, out var tally)) Reset(tally);
     }
 
-    private void ResetTally()
+    private static void Reset(Tally tally)
     {
-        _suppressedRows = 0;
-        _suppressedDocuments?.Clear();
+        tally.Rows = 0;
+        tally.Documents?.Clear();
     }
 
     private static bool IsCheckRowDelete(EntityEntry entry) =>
