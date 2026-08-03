@@ -1,7 +1,8 @@
-using System.Reflection;
+using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 
 namespace CompliDrop.Api.Tests;
 
@@ -227,6 +228,126 @@ public class Adr0030EnforcementTests
     /// <summary>Below this the extractor latched onto the wrong span and the census is vacuous.</summary>
     private const int MinOutcomeMatchesLines = 8;
 
+    /// <summary>
+    /// The locals <c>OutcomeMatches</c> binds a <see cref="ComplianceCheck"/> ROW to: <c>check</c> (the
+    /// fresh evaluation's row), <c>before</c> (the row the page applied) and <c>c</c> (the pairing-key
+    /// lambda's parameter). A column counts as compared only when it is read off at least
+    /// <see cref="MinCheckRowOperands"/> DISTINCT ones — which is what makes the census say "this column is
+    /// compared BETWEEN THE TWO ROWS" rather than "this token appears somewhere in the method".
+    /// <para/>
+    /// It has to be a declared list because source text carries no types. That is the same shape as
+    /// <see cref="NonAssertionCheckColumns"/> and it fails the same safe way: renaming a local goes RED
+    /// here until somebody updates it. Matching the whole body instead is what the first cut did, and three
+    /// identifiers already in that method would have satisfied a future column for free — <c>fresh.Status</c>
+    /// and <c>applied.Status</c> (an <c>EvaluationOutcome</c>, not a check row) a <c>Status</c> column,
+    /// <c>NewChecks.Count</c> a <c>Count</c> one, <c>StringComparison.Ordinal</c> an <c>Ordinal</c> one.
+    /// </summary>
+    private static readonly string[] CheckRowOperands = ["check", "before", "c"];
+
+    /// <summary>
+    /// Two, because a comparison reads the column off BOTH sides. The value comparisons spell that
+    /// <c>before.X != check.X</c>; the pairing key spells it <c>ToDictionary(c =&gt; c.ComplianceRuleId)</c>
+    /// keyed against <c>check.ComplianceRuleId</c> — different shape, same fact, so one rule covers both
+    /// and neither needs its own exemption.
+    /// </summary>
+    private const int MinCheckRowOperands = 2;
+
+    /// <summary>
+    /// The MAPPED COLUMNS of <paramref name="entity"/>, read off the EF model rather than off reflection —
+    /// the authoritative "is this a column" answer, and one that cannot drift from
+    /// <c>Data/ModelConfiguration</c>.
+    /// <para/>
+    /// The reflection filter this replaced excluded every property whose TYPE is declared under
+    /// <c>CompliDrop</c>, which is wrong in BOTH directions. This codebase's enums live in
+    /// <c>CompliDrop.Api.Entities</c> (<c>ComplianceStatus</c>, <c>ExtractionStatus</c>,
+    /// <c>ExtractionTrust</c> are all declared in <c>Entities/Document.cs</c>), so an enum-typed
+    /// <see cref="ComplianceCheck"/> column — this codebase's own idiom for a graded assertion — was
+    /// classified as a NAVIGATION and never censused, leaving the gate green while the column dropped
+    /// silently out of <c>OutcomeMatches</c>. And a collection navigation (<c>ICollection&lt;T&gt;</c>,
+    /// namespace <c>System.Collections.Generic</c>) was DEMANDED in the comparison. <c>IEntityType</c>
+    /// answers both by construction: enums are properties, navigations are not. Pinned by
+    /// <see cref="The_census_reads_its_columns_off_the_EF_model_so_an_enum_column_counts"/>.
+    /// </summary>
+    private static IReadOnlyList<string> MappedColumns(Type entity)
+    {
+        // Model-only: building the model never opens a connection, so this needs no fixture and no
+        // container. The connection string is a syntactic placeholder.
+        using var context = new SystemDbContext(
+            new DbContextOptionsBuilder<SystemDbContext>()
+                .UseNpgsql("Host=localhost;Database=model-only;Username=u;Password=p")
+                .Options);
+        var entityType = context.Model.FindEntityType(entity)
+            ?? throw new InvalidOperationException(
+                $"{entity.Name} is not a mapped entity — the census would read nothing");
+        return [.. entityType.GetProperties().Select(p => p.Name)];
+    }
+
+    /// <summary>
+    /// Whether <paramref name="body"/> reads <paramref name="column"/> off <paramref name="operand"/> as a
+    /// WHOLE identifier. The boundary check on both sides is the point: a bare <c>Contain(".Notes")</c> is
+    /// satisfied by a longer name, so a future <c>Note</c> column would be excused by the existing
+    /// <c>check.Notes</c> and an <c>Actual</c> one by <c>check.ActualValue</c>.
+    /// </summary>
+    private static bool ReadsColumnOff(string body, string operand, string column)
+    {
+        var needle = $"{operand}.{column}";
+        for (var at = 0; (at = body.IndexOf(needle, at, StringComparison.Ordinal)) >= 0; at += needle.Length)
+        {
+            var after = at + needle.Length;
+            if ((at == 0 || !IsIdentifierChar(body[at - 1]))
+                && (after >= body.Length || !IsIdentifierChar(body[after])))
+                return true;
+        }
+        return false;
+
+        static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+    }
+
+    /// <summary>
+    /// The census's per-column rule, callable with an arbitrary column name so the anti-no-ops can drive it
+    /// against the REAL body with a hypothetical column instead of hand-copying an assertion.
+    /// </summary>
+    internal static void AssertColumnIsCompared(string body, string column)
+    {
+        var operands = CheckRowOperands.Where(o => ReadsColumnOff(body, o, column)).ToList();
+        operands.Should().HaveCountGreaterOrEqualTo(MinCheckRowOperands,
+            $"ComplianceCheck.{column} is part of what a check row ASSERTS, so two evaluations that differ "
+            + "in it are not the same evaluation, and OutcomeMatches must read it off BOTH rows "
+            + $"(found it on: {(operands.Count == 0 ? "neither row" : string.Join(", ", operands))}). Either "
+            + "compare it in OutcomeMatches or add it to NonAssertionCheckColumns with the reason "
+            + "(#470, ADR 0030 Amendment 5)");
+    }
+
+    /// <summary>
+    /// The census itself — the reflection, the column selection and the per-column rule in ONE place, so
+    /// the production check and its anti-no-op below drive the SAME logic. Extracted because the anti-no-op
+    /// used to hand-copy a single <c>Contain</c> line and assert that FluentAssertions throws when a string
+    /// lacks a substring: a tautology independent of the enumeration, the filter and the loop, which is
+    /// exactly why it could not see the enum hole in that filter.
+    /// </summary>
+    internal static void AssertComparesEveryAssertionBearingColumn(string body)
+    {
+        var columns = MappedColumns(typeof(ComplianceCheck));
+
+        columns.Should().Contain(NonAssertionCheckColumns,
+            "the exclusion list must still name real columns — a renamed one would otherwise silently "
+            + "excuse a column that no longer exists while leaving its replacement uncompared");
+
+        var assertionBearing = columns.Except(NonAssertionCheckColumns).ToList();
+        assertionBearing.Should().NotBeEmpty(
+            "a census with nothing to census is a no-op — if every ComplianceCheck column is excluded, "
+            + "OutcomeMatches asserts nothing about a check row and #470's check-tuple half is gone");
+
+        foreach (var column in assertionBearing)
+            AssertColumnIsCompared(body, column);
+    }
+
+    /// <summary>The real, current <c>OutcomeMatches</c> body — the census's input, and the anti-no-ops'.</summary>
+    private static string ReadOutcomeMatchesBody() =>
+        SourceScan.ExtractMethodBody(
+            File.ReadAllText(SourceScan.ProductionFile("Services", "ComplianceCheckService.cs")),
+            OutcomeMatchesSignature);
+
     [Fact]
     public void OutcomeMatches_compares_every_assertion_bearing_ComplianceCheck_column()
     {
@@ -240,38 +361,41 @@ public class Adr0030EnforcementTests
         // The codebase's answer to an enumeration that must not drift is a mechanical census (the
         // HarnessSmokeTests shape): adding a column goes RED until somebody decides whether it is part of
         // the assertion, and records that decision in the exclusion list above.
-        var body = SourceScan.ExtractMethodBody(
-            File.ReadAllText(SourceScan.ProductionFile("Services", "ComplianceCheckService.cs")),
-            OutcomeMatchesSignature);
+        var body = ReadOutcomeMatchesBody();
 
         body.Split('\n').Length.Should().BeGreaterOrEqualTo(MinOutcomeMatchesLines,
             $"the extracted OutcomeMatches body is implausibly short ({body.Length} chars) — the extractor "
             + "latched onto the wrong span and this census would pass on an empty read");
 
-        var scalars = typeof(ComplianceCheck)
-            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            // Navigations are the entity graph, not the assertion: ComputeOutcome never populates them and
-            // an EvaluationOutcome carries none.
-            .Where(p => p.PropertyType.Namespace?.StartsWith("CompliDrop", StringComparison.Ordinal) != true)
-            .Select(p => p.Name)
-            .ToList();
+        AssertComparesEveryAssertionBearingColumn(body);
+    }
 
-        scalars.Should().Contain(NonAssertionCheckColumns,
-            "the exclusion list must still name real columns — a renamed one would otherwise silently "
-            + "excuse a column that no longer exists while leaving its replacement uncompared");
+    [Fact]
+    public void The_census_reads_its_columns_off_the_EF_model_so_an_enum_column_counts()
+    {
+        // The half no ComplianceCheck-shaped assertion can reach today, because that entity happens to
+        // carry no enum and no collection navigation. Document carries all three kinds, so it is where the
+        // COLUMN SELECTOR itself is pinned — and both directions matter: the reflection filter this
+        // replaced would have skipped ComplianceStatus (an enum declared under CompliDrop, so it read as a
+        // navigation) and demanded ComplianceChecks (a collection navigation, so it read as a scalar).
+        var columns = MappedColumns(typeof(Document));
 
-        foreach (var column in scalars.Except(NonAssertionCheckColumns))
-            body.Should().Contain($".{column}",
-                $"ComplianceCheck.{column} is part of what a check row ASSERTS, so two evaluations that "
-                + "differ in it are not the same evaluation. Either compare it in OutcomeMatches or add it "
-                + "to NonAssertionCheckColumns with the reason (#470, ADR 0030 Amendment 5)");
+        columns.Should().Contain(nameof(Document.ComplianceStatus),
+            "an enum-typed column IS a column — and it is this codebase's idiom for a graded assertion, so "
+            + "an enum added to ComplianceCheck must be censused rather than silently skipped");
+        columns.Should().NotContain(nameof(Document.Vendor),
+            "a reference navigation is the entity graph, not a column");
+        columns.Should().NotContain(nameof(Document.ComplianceChecks),
+            "and neither is a collection navigation — demanding it in the comparison would be the same "
+            + "error in the other direction");
     }
 
     [Fact]
     public void The_census_rejects_a_comparison_that_dropped_a_column()
     {
-        // The census's own anti-no-op: prove it REJECTS the regression it exists to catch, rather than
-        // passing because every property name happens to appear somewhere in a long method.
+        // The census's own anti-no-op: prove it REJECTS the regression it exists to catch — by running the
+        // REAL census (its enumeration, its column selection, its per-column rule) against a fixture, not
+        // by re-typing one of its assertions.
         const string dropped = """
             class C
             {
@@ -285,7 +409,9 @@ public class Adr0030EnforcementTests
                     foreach (var check in fresh.NewChecks)
                     {
                         if (!appliedByRule.TryGetValue(check.ComplianceRuleId, out var before)) return false;
-                        if (before.IsPassed != check.IsPassed) return false;
+                        if (before.IsPassed != check.IsPassed
+                            || !string.Equals(before.Notes, check.Notes, StringComparison.Ordinal))
+                            return false;
                     }
                     return true;
                 }
@@ -293,11 +419,39 @@ public class Adr0030EnforcementTests
             """;
 
         var body = SourceScan.ExtractMethodBody(dropped, OutcomeMatchesSignature);
-        body.Should().Contain(".IsPassed", "the fixture's remaining comparisons must PASS the census…");
+        // Proven, not assumed: the fixture's SURVIVING comparisons satisfy the census's own per-column
+        // rule, so the rejection below comes from the DROPPED column and not from a fixture the census
+        // could not read at all.
+        AssertColumnIsCompared(body, nameof(ComplianceCheck.IsPassed));
+        AssertColumnIsCompared(body, nameof(ComplianceCheck.Notes));
+        AssertColumnIsCompared(body, nameof(ComplianceCheck.ComplianceRuleId));
 
-        var act = () => body.Should().Contain($".{nameof(ComplianceCheck.ActualValue)}");
+        var act = () => AssertComparesEveryAssertionBearingColumn(body);
         act.Should().Throw<Exception>(
             "…so only the DROPPED column rejects it. A shape like this leaves a check row citing a value "
-            + "the row no longer holds, with the headline verdict unchanged — exactly #470's terminal state");
+            + "the row no longer holds, with the headline verdict unchanged — exactly #470's terminal state")
+            .WithMessage($"*{nameof(ComplianceCheck.ActualValue)}*");
+    }
+
+    [Theory]
+    // The substring collisions: a future column whose name is a PREFIX of one already compared.
+    [InlineData("Note", "check.Notes / before.Notes")]
+    [InlineData("Actual", "check.ActualValue / before.ActualValue")]
+    // The wrong-operand collisions: identifiers already in the method that are not check ROWS.
+    [InlineData("Status", "fresh.Status / applied.Status, which are EvaluationOutcomes")]
+    [InlineData("Count", "NewChecks.Count")]
+    [InlineData("Ordinal", "StringComparison.Ordinal")]
+    public void The_census_is_not_satisfied_by_a_token_that_is_not_the_column(string hypotheticalColumn, string collidesWith)
+    {
+        // Driven against the REAL, CURRENT body: each of these names would be satisfied for free by
+        // something already in it under a bare `Contain($".{column}")`, so a column added to
+        // ComplianceCheck under any of these names would pass the census while being compared nowhere.
+        // The two rules that reject them are the identifier boundary and the operand scoping.
+        var body = ReadOutcomeMatchesBody();
+
+        var act = () => AssertColumnIsCompared(body, hypotheticalColumn);
+        act.Should().Throw<Exception>(
+            $"a ComplianceCheck.{hypotheticalColumn} column is compared NOWHERE, and must not be excused "
+            + $"by {collidesWith}");
     }
 }
