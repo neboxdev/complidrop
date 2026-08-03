@@ -2,10 +2,14 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using CompliDrop.Api.Auth;
+using CompliDrop.Api.Data;
 using CompliDrop.Api.Data.Seed;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace CompliDrop.Api.Tests;
 
@@ -399,4 +403,69 @@ public sealed class HarnessSmokeTests(IntegrationTestFixture fixture) : Integrat
 
         await RegisterAndLoginAsync(email: "iso@example.com");
     }
+
+    [Fact]
+    public async Task The_db_helpers_wire_every_save_interceptor_the_application_wires()
+    {
+        // IntegrationTestBase.CreateSystemDb / CreateAppDb promise a context that behaves like production,
+        // and hundreds of tests seed, assert and drive writers through them. When Program.cs gains a
+        // SaveChanges interceptor and the helpers do not, that promise quietly stops holding and the
+        // divergence is invisible: every existing test stays green while a NEW one written through the
+        // helper exercises different save semantics from the code it is about. That is exactly what #468's
+        // ComplianceCheckDeleteConcurrencyInterceptor did until the review caught it.
+        //
+        // So this compares the sets mechanically rather than naming any one interceptor. Only types from
+        // the APPLICATION assembly are compared: the test host deliberately adds its own interceptors on
+        // top (ConcurrentDocumentWriteInterceptor and friends), and the helper is not meant to carry those.
+        var auth = await RegisterAndLoginAsync();
+        await using var scope = Fixture.Factory.Services.CreateAsyncScope();
+
+        await using var harnessSystemDb = CreateSystemDb();
+        await using var harnessAppDb = CreateAppDb(
+            new FakeCurrentUser { UserId = auth.UserId, OrganizationId = auth.OrgId, Email = auth.Email });
+
+        AssertMirrors(scope.ServiceProvider.GetRequiredService<SystemDbContext>(), harnessSystemDb);
+        AssertMirrors(scope.ServiceProvider.GetRequiredService<AppDbContext>(), harnessAppDb);
+
+        static void AssertMirrors(DbContext application, DbContext harness)
+        {
+            // The reflection seam must actually SEE Program.cs's interceptors, asserted before the two
+            // sides are compared (#468 review S4). Without this the pin passes vacuously in exactly the
+            // case it exists to catch: if ApplicationSaveInterceptorTypes ever returns nothing for the
+            // DI-resolved context — an EF options-shape change, or an interceptor registered as
+            // `services.AddScoped<ISaveChangesInterceptor, X>()`, which EF resolves from the app provider
+            // and never lists in CoreOptionsExtension.Interceptors — both sides become [] and
+            // BeEquivalentTo is satisfied by two empty sets while the harness has genuinely diverged.
+            //
+            // Named types rather than a bare NotBeEmpty: an empty-vs-non-empty check still passes if the
+            // seam finds only ONE of the two, and both must be visible for the comparison to mean
+            // anything. These two are the ones Program.cs wires on both contexts today; a third is
+            // covered by the set comparison below, which is the point of the test.
+            var wired = ApplicationSaveInterceptorTypes(application);
+            wired.Should().Contain(
+                [typeof(AuditSaveChangesInterceptor), typeof(ComplianceCheckDeleteConcurrencyInterceptor)],
+                $"the reflection seam must see Program.cs's own {application.GetType().Name} interceptors — "
+                + "if it sees none, comparing it against the harness compares nothing");
+
+            ApplicationSaveInterceptorTypes(harness).Should().BeEquivalentTo(
+                wired,
+                $"the harness's {harness.GetType().Name} helper must wire the same save-changes "
+                + "interceptors Program.cs does, or a test written through it silently gets different "
+                + "SaveChanges semantics from production");
+        }
+    }
+
+    /// <summary>
+    /// The <see cref="ISaveChangesInterceptor"/> types wired on <paramref name="context"/> that come from
+    /// the application assembly — i.e. excluding the test host's own interceptors, which the harness
+    /// helpers are not meant to carry.
+    /// </summary>
+    private static IReadOnlyList<Type> ApplicationSaveInterceptorTypes(DbContext context) =>
+    [
+        .. (context.GetService<IDbContextOptions>().FindExtension<CoreOptionsExtension>()?.Interceptors ?? [])
+            .OfType<ISaveChangesInterceptor>()
+            .Select(i => i.GetType())
+            .Where(t => t.Assembly == typeof(AppDbContext).Assembly)
+            .Distinct()
+    ];
 }

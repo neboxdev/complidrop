@@ -209,11 +209,26 @@ const COMPLIANCE_CHECK_BASE: Readonly<ComplianceCheckFixture> = {
   checkedAt: "2026-05-26T12:00:00Z",
 };
 
-/** A failed-by-default compliance check; pass `{ isPassed: true }` for a met one. */
+/**
+ * A failed-by-default compliance check; pass `{ isPassed: true }` for a met one.
+ *
+ * A row cites exactly one rule, and one rule normally yields exactly one row — so
+ * two rows with DIFFERENT ids are two different requirements. `complianceRuleId`
+ * is therefore derived from an overridden `id` unless the caller states it, which
+ * keeps that true by default: since #468 the detail page renders one row per
+ * `complianceRuleId`, so a multi-check fixture silently sharing the base rule id
+ * would collapse into a single rendered requirement and assert nothing it means to.
+ * The ADR 0030 duplicate-row residue (two writers, one rule) is spelled out by
+ * passing `complianceRuleId` explicitly.
+ */
 export function makeComplianceCheck(
   overrides: Partial<ComplianceCheckFixture> = {},
 ): ComplianceCheckFixture {
-  return { ...COMPLIANCE_CHECK_BASE, ...overrides };
+  const merged = { ...COMPLIANCE_CHECK_BASE, ...overrides };
+  if (overrides.complianceRuleId === undefined && overrides.id !== undefined) {
+    merged.complianceRuleId = `rule_for_${merged.id}`;
+  }
+  return merged;
 }
 
 export type DocumentDetailFixture = {

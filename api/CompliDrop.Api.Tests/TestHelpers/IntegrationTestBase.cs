@@ -5,6 +5,8 @@ using CompliDrop.Api.Data;
 using CompliDrop.Api.Entities;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CompliDrop.Api.Tests.TestHelpers;
 
@@ -31,14 +33,24 @@ public abstract class IntegrationTestBase(IntegrationTestFixture fixture) : IAsy
         Fixture.Factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
 
     /// <summary>
-    /// Constructs a <see cref="SystemDbContext"/> against the test container with the
-    /// <see cref="AuditSaveChangesInterceptor"/> wired so seeds/reads via the harness see the
-    /// same behavior as production code paths (UpdatedAt auto-set, soft-delete translation,
-    /// audit-log emission when a user is supplied). Passing <c>null</c> for the user skips
-    /// audit-log emission but still applies UpdatedAt — the right semantic for test fixture
-    /// setup.
+    /// Constructs a <see cref="SystemDbContext"/> against the test container with the same
+    /// <see cref="ISaveChangesInterceptor"/>s <c>Program.cs</c> wires, so seeds/reads via the harness see
+    /// the same behavior as production code paths:
+    /// <list type="bullet">
+    /// <item><see cref="AuditSaveChangesInterceptor"/> — UpdatedAt auto-set, soft-delete translation,
+    /// audit-log emission when a user is supplied. Passing <c>null</c> for the user skips audit-log
+    /// emission but still applies UpdatedAt — the right semantic for test fixture setup.</item>
+    /// <item><see cref="ComplianceCheckDeleteConcurrencyInterceptor"/> — a <c>ComplianceCheck</c> DELETE
+    /// that matched nothing is a success rather than a <c>DbUpdateConcurrencyException</c> (#468, ADR 0030
+    /// Amendment 4). Wired here for the reason the list exists at all: a helper that is MOSTLY production
+    /// is worse than one that plainly is not, because a test written through it silently exercises
+    /// different save semantics. Left out, the two scope-checking tests in
+    /// <c>ComplianceCheckDeleteConcurrencyTests</c> would pass identically if the interceptor were deleted
+    /// from <c>Program.cs</c>, and a future reproduction driven through this helper would see the pre-#468
+    /// throw and conclude the bug is still live.</item>
+    /// </list>
     /// <para/>
-    /// Note: because the interceptor is wired, <c>db.Remove(entity)</c> on a soft-deletable
+    /// Note: because the audit interceptor is wired, <c>db.Remove(entity)</c> on a soft-deletable
     /// entity here is translated to a soft delete (UPDATE DeletedAt=now). If a test needs a
     /// genuine hard delete, run it directly against the EF Core context without going through
     /// this helper, or use <c>ExecuteDeleteAsync</c>.
@@ -46,13 +58,20 @@ public abstract class IntegrationTestBase(IntegrationTestFixture fixture) : IAsy
     protected SystemDbContext CreateSystemDb(ICurrentUser? user = null) =>
         new(new DbContextOptionsBuilder<SystemDbContext>()
             .UseNpgsql(Fixture.ConnectionString)
-            .AddInterceptors(new AuditSaveChangesInterceptor(() => user))
+            .AddInterceptors(
+                new AuditSaveChangesInterceptor(() => user),
+                new ComplianceCheckDeleteConcurrencyInterceptor(
+                    NullLogger<ComplianceCheckDeleteConcurrencyInterceptor>.Instance))
             .Options);
 
+    /// <inheritdoc cref="CreateSystemDb"/>
     protected AppDbContext CreateAppDb(ICurrentUser user) =>
         new(new DbContextOptionsBuilder<AppDbContext>()
             .UseNpgsql(Fixture.ConnectionString)
-            .AddInterceptors(new AuditSaveChangesInterceptor(() => user))
+            .AddInterceptors(
+                new AuditSaveChangesInterceptor(() => user),
+                new ComplianceCheckDeleteConcurrencyInterceptor(
+                    NullLogger<ComplianceCheckDeleteConcurrencyInterceptor>.Instance))
             .Options, user);
 
     /// <summary>Registers a fresh org + admin user and returns a cookie-authenticated client.</summary>

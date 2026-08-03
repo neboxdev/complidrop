@@ -2398,6 +2398,103 @@ describe("DocumentDetailPage — non-compliance explainer (#193)", () => {
   });
 });
 
+describe("DocumentDetailPage — the ADR 0030 duplicate check rows are display-only (#468 review)", () => {
+  // ADR 0030 § Consequences / Amendment 4: a concurrent re-grade can leave a
+  // document transiently holding BOTH writers' ComplianceCheck rows — including
+  // two rows citing the SAME rule — and the ADR scopes that residue to DISPLAY.
+  // These two pin that the display it names is honest, on the surface it names.
+  //
+  // The interleave both fixtures model: the org's checklist holds exactly ONE
+  // requirement. The losing writer graded it at 12:05 and committed first; the
+  // winning writer graded it at 12:00 (it read earlier, saved later — which is
+  // WHY its DELETE of the loser's row matched nothing) and its verdict is the one
+  // in `complianceStatus`. So the fresher `checkedAt` belongs to the LOSER, which
+  // is why the page anchors on the verdict and not on the timestamp.
+  const ONE_RULE_TWO_ROWS = (winner: { isPassed: boolean }, complianceStatus: string) =>
+    makeDocumentDetail({
+      id: "d_dup",
+      documentType: "coi",
+      extractionStatus: "Completed",
+      complianceStatus,
+      vendorName: "Beachfront Janitorial",
+      vendorContactEmail: "ops@beachfront.test",
+      complianceChecks: [
+        makeComplianceCheck({
+          id: "chk_winner",
+          complianceRuleId: "rule_gl",
+          ruleFieldName: "general_liability_limit",
+          ruleOperator: "min_value",
+          ruleExpectedValue: "1000000",
+          ruleErrorMessage: "General liability must be at least $1,000,000",
+          actualValue: winner.isPassed ? "2000000" : "500000",
+          isPassed: winner.isPassed,
+          checkedAt: "2026-05-26T12:00:00Z",
+        }),
+        makeComplianceCheck({
+          id: "chk_loser",
+          complianceRuleId: "rule_gl",
+          ruleFieldName: "general_liability_limit",
+          ruleOperator: "min_value",
+          ruleExpectedValue: "1000000",
+          ruleErrorMessage: "General liability must be at least $1,000,000",
+          actualValue: winner.isPassed ? "500000" : "2000000",
+          isPassed: !winner.isPassed,
+          checkedAt: "2026-05-26T12:05:00Z",
+        }),
+      ],
+    });
+
+  it("never contradicts a Compliant badge with a 'why isn't this compliant' card or a vendor mailto", async () => {
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(ONE_RULE_TWO_ROWS({ isPassed: true }, "Compliant")),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_dup" } });
+
+    // The winning verdict's own card renders, so nothing is lost by reconciling.
+    expect(await screen.findByText(/what we checked/i)).toBeInTheDocument();
+    expect(screen.getByTestId("compliance-status")).toHaveTextContent(/compliant/i);
+
+    // …and the loser's stale FAILED row asserts nothing against it.
+    expect(screen.queryByText(/why isn.t this compliant/i)).toBeNull();
+    expect(screen.queryByRole("link", { name: /email .* to fix this/i })).toBeNull();
+    // The mailto body is the sharpest form of the overclaim: an outbound message
+    // to the customer's vendor is not "display".
+    const mailtos = screen
+      .queryAllByRole("link")
+      .map((a) => decodeURIComponent(a.getAttribute("href") ?? ""))
+      .filter((href) => href.startsWith("mailto:"));
+    expect(
+      mailtos.some((href) => href.includes("We can't mark the document you sent as compliant yet")),
+    ).toBe(false);
+  });
+
+  it("counts distinct requirements, not check rows, in the met-count beside a failure", async () => {
+    // The other direction, and the one the count is about: the winning writer
+    // FAILED the single requirement, so the card must render — and must not
+    // announce "1 other requirement met" against a checklist holding one rule it
+    // just said was not met. The stale passing row is the newer of the two, so a
+    // newest-wins de-duplication would instead have hidden the failure entirely.
+    server.use(
+      http.get(url("/api/documents/:id"), () =>
+        jsonOk(ONE_RULE_TWO_ROWS({ isPassed: false }, "NonCompliant")),
+      ),
+    );
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_dup" } });
+
+    await waitFor(() =>
+      expect(screen.getByText(/why isn.t this compliant/i)).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/General liability must be at least \$1,000,000/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/other requirement(s)? met/i)).toBeNull();
+    // One rule → one bullet, however many rows the two writers left behind.
+    expect(screen.getAllByText(/General liability must be at least \$1,000,000/i)).toHaveLength(1);
+  });
+});
+
 describe("DocumentDetailPage — ManualRequired review CTA (#193)", () => {
   it("renders the amber review card, enables Save without edits, and outlines low-confidence fields", async () => {
     server.use(

@@ -555,6 +555,80 @@ public sealed class ExportEndpointsTests(IntegrationTestFixture fixture) : Integ
     }
 
     [Fact]
+    public async Task Csv_RequirementsChecked_counts_the_DISTINCT_rules_a_document_was_measured_against()
+    {
+        // #468 review S3. RequirementsChecked is the ONE surface that PRINTS this number rather than
+        // thresholding it at zero (ADR 0048 §5), and every other assertion on the column anywhere in the
+        // suite is "0" or "1" — so nothing could tell the column apart from a boolean. Replace
+        // CheckCountsAsync's projection with `d.ComplianceChecks.Any() ? 1 : 0` and the whole backend suite
+        // stays green while an auditor's CSV understates a five-rule checklist as one requirement.
+        //
+        // This document is measured against TWO rules and holds THREE rows, so the cell discriminates both
+        // directions at once: a one-if-any collapse prints "1", a raw row count prints "3". The doubled row
+        // is the ADR 0030 residue itself (two writers, one rule), which is why the answer is 2 and not 3.
+        var auth = await RegisterAndLoginAsync();
+        var docId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        var ruleA = Guid.NewGuid();
+        var ruleB = Guid.NewGuid();
+        await using (var db = CreateSystemDb())
+        {
+            var now = DateTime.UtcNow;
+            db.ComplianceTemplates.Add(new ComplianceTemplate
+            {
+                Id = templateId, OrganizationId = auth.OrgId, Name = "Two-rule checklist", CreatedAt = now,
+            });
+            db.ComplianceRules.AddRange(
+                new ComplianceRule
+                {
+                    Id = ruleA, ComplianceTemplateId = templateId, DocumentType = "coi",
+                    FieldName = "general_liability_limit", Operator = "min_value", ExpectedValue = "1000000",
+                    SortOrder = 0,
+                },
+                new ComplianceRule
+                {
+                    Id = ruleB, ComplianceTemplateId = templateId, DocumentType = "coi",
+                    FieldName = "expiration_date", Operator = "required", SortOrder = 1,
+                });
+            db.Documents.Add(new Document
+            {
+                Id = docId,
+                OrganizationId = auth.OrgId,
+                OriginalFileName = "two-rule-coi.pdf",
+                BlobStorageUrl = "memory://tr",
+                FileSizeBytes = 1,
+                ContentType = "application/pdf",
+                DocumentType = "coi",
+                ExtractionStatus = ExtractionStatus.Completed,
+                ComplianceStatus = ComplianceStatus.Compliant,
+                ExpirationDate = DateTime.UtcNow.Date.AddDays(300),
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+            foreach (var ruleId in new[] { ruleA, ruleA, ruleB })
+                db.ComplianceChecks.Add(new ComplianceCheck
+                {
+                    Id = Guid.NewGuid(), DocumentId = docId, ComplianceRuleId = ruleId,
+                    IsPassed = true, CheckedAt = now,
+                });
+            await db.SaveChangesAsync();
+        }
+
+        var csv = await (await auth.Client.GetAsync("/api/export/csv")).Content.ReadAsStringAsync();
+        var lines = csv.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToArray();
+        var header = lines[0].Split(',');
+        var row = lines.Skip(1).Select(l => l.Split(','))
+            .First(f => f[Array.IndexOf(header, "FileName")] == "two-rule-coi.pdf");
+
+        row[Array.IndexOf(header, "RequirementsChecked")].Should().Be("2",
+            "the checklist holds two requirements and both were measured — the third check row is a second "
+            + "writer's copy of one of them, which is evidence about ONE requirement, not a second one");
+        row[Array.IndexOf(header, "Compliance")].Should().Be("Compliant",
+            "…and the count moves no verdict: every other consumer of this map asks DocumentGrading"
+            + ".IsGraded's > 0 question, which distinct-vs-raw cannot change");
+    }
+
+    [Fact]
     public void The_pdf_compliance_cell_annotates_a_never_graded_document()
     {
         // Both PDFs (the audit report's Compliance column and the vendor package's bullet line) go through
