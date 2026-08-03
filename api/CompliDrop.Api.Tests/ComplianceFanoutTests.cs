@@ -329,11 +329,10 @@ public sealed class ComplianceFanoutTests(IntegrationTestFixture fixture) : Inte
             await SeedDocAsync(orgId, vendor, glLimit: 1_000_000m, stored: ComplianceStatus.Compliant);
 
         var user = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = orgId };
-        await using (var appDb = new AppDbContext(
-            new DbContextOptionsBuilder<AppDbContext>()
-                .UseNpgsql(Fixture.ConnectionString)
-                .AddInterceptors(new AuditSaveChangesInterceptor(() => user), new ThrowOnceSaveChangesInterceptor())
-                .Options, user))
+        // Through the harness helper with the fault added on top, NOT a hand-built copy of the production
+        // interceptor list: this one used to omit ComplianceCheckDeleteConcurrencyInterceptor entirely, so a
+        // fan-out driven through it ran with pre-#468 save semantics (ADR 0030 Amendment 4).
+        await using (var appDb = CreateAppDb(user, new ThrowOnceSaveChangesInterceptor()))
         await using (var sysDb = CreateSystemDb())
         {
             var svc = new ComplianceCheckService(
@@ -392,15 +391,7 @@ public sealed class ComplianceFanoutTests(IntegrationTestFixture fixture) : Inte
         var logger = new ListLogger<ComplianceCheckService>();
         RegradeResult result;
         await using (var appDb = CreateAppDb(user))
-        await using (var sysDb = new SystemDbContext(
-            new DbContextOptionsBuilder<SystemDbContext>()
-                .UseNpgsql(Fixture.ConnectionString)
-                .AddInterceptors(
-                    new AuditSaveChangesInterceptor(() => user),
-                    new ComplianceCheckDeleteConcurrencyInterceptor(
-                        NullLogger<ComplianceCheckDeleteConcurrencyInterceptor>.Instance),
-                    fault)
-                .Options))
+        await using (var sysDb = CreateSystemDb(user, fault))
         {
             var svc = new ComplianceCheckService(appDb, sysDb, new FixedTimeProvider(FixedNow), logger);
 
@@ -425,14 +416,276 @@ public sealed class ComplianceFanoutTests(IntegrationTestFixture fixture) : Inte
             "and this tuple — everything re-graded, yet not all succeeded — is REACHABLE, which is what the "
             + "RegradeResult contract had to be amended to say (it previously described one arm only)");
 
+        // The fault lands on the verification's FIRST page load, so NOTHING was confirmed and the whole page
+        // is what the line must name. Naming the ids at all is the point (a bare count is not actionable),
+        // and naming the RIGHT ids is why the unconfirmed set is tracked rather than the page reprinted: had
+        // pass 1 confirmed one of these two before the throw, only the other belongs on this line.
         logger.Entries.Should().Contain(
-            e => e.Message.Contains("verification pass failed for a page", StringComparison.Ordinal),
-            "the failure is logged as well as counted");
+            e => e.Message.Contains("verification pass failed for a page", StringComparison.Ordinal)
+                && e.Message.Contains(failing.ToString(), StringComparison.OrdinalIgnoreCase)
+                && e.Message.Contains(passing.ToString(), StringComparison.OrdinalIgnoreCase),
+            "the failure is logged as well as counted, and it NAMES the documents left unconfirmed — ids "
+            + "only, never an ActualValue or a Notes string, which are document content");
 
         await using var verify = CreateSystemDb();
         (await verify.Documents.SingleAsync(d => d.Id == failing)).ComplianceStatus
             .Should().Be(ComplianceStatus.NonCompliant, "the page's verdicts are committed, not rolled back");
         (await verify.Documents.SingleAsync(d => d.Id == passing)).ComplianceStatus
             .Should().Be(ComplianceStatus.Compliant);
+    }
+
+    [Fact]
+    public async Task A_failed_verification_pass_names_at_most_the_bounded_id_sample()
+    {
+        // The other half of the naming contract: a page is up to DefaultReevaluationPageSize documents and a
+        // log line is not a dump, so the line promises "up to {Max} shown" and must keep that promise. The
+        // COUNT beside the sample is always the complete one — that pair is what makes the line both bounded
+        // and honest, and neither half was asserted anywhere.
+        var orgId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        await SeedOrgWithTemplateAsync(orgId, templateId);
+        var vendor = await SeedVendorAsync(orgId, templateId);
+
+        const int docCount = ComplianceCheckService.LoggedIdSampleSize + 3;
+        for (var i = 0; i < docCount; i++)
+            await SeedDocAsync(orgId, vendor, glLimit: 1_000_000m, stored: ComplianceStatus.Compliant);
+
+        // One page (default size 200 > docCount), so page load 1 is the grade's and load 2 the verification's.
+        var fault = new SystemCommandFaultInterceptor();
+        var pageLoads = 0;
+        fault.ShouldFault = sql =>
+            sql.Contains(PageLoadMarker, StringComparison.Ordinal) && ++pageLoads == 2;
+
+        var user = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = orgId };
+        var logger = new ListLogger<ComplianceCheckService>();
+        RegradeResult result;
+        await using (var appDb = CreateAppDb(user))
+        await using (var sysDb = CreateSystemDb(user, fault))
+        {
+            var svc = new ComplianceCheckService(appDb, sysDb, new FixedTimeProvider(FixedNow), logger);
+            result = await svc.ReevaluateForTemplateForSystemAsync(templateId, default);
+        }
+
+        fault.FaultCount.Should().Be(1, "anti-no-op: the assertions below need a real verification failure");
+        result.FailedPages.Should().Be(1);
+
+        var line = logger.Entries.Should().ContainSingle(
+            e => e.Message.Contains("verification pass failed for a page", StringComparison.Ordinal)).Subject;
+
+        CountGuids(line.Message).Should().Be(ComplianceCheckService.LoggedIdSampleSize,
+            $"the sample is capped at {ComplianceCheckService.LoggedIdSampleSize}, not the whole page — a "
+            + "line that dumped every id of a 200-document page is the thing the bound exists to prevent");
+        line.Message.Should().Contain(docCount.ToString(CultureInfo.InvariantCulture),
+            "…while the COUNT printed beside the sample is the COMPLETE one, or the reader would think the "
+            + "sample was the whole set");
+    }
+
+    /// <summary>How many distinct GUIDs a rendered log line names — the id sample's observable size.</summary>
+    private static int CountGuids(string message) =>
+        System.Text.RegularExpressions.Regex.Matches(
+            message, "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").Count;
+
+    [Fact]
+    public async Task A_failed_verification_pass_names_only_the_documents_still_unconfirmed()
+    {
+        // The naming contract's sharp edge, and the ONLY shape that discriminates it: the failure must name
+        // the documents left UNCONFIRMED, not the whole page. Faulting pass 1 (the two tests above) cannot
+        // see the difference — nothing has been confirmed yet, so the unconfirmed set IS the page. Here pass
+        // 1 confirms the bystander and narrows to the one mover, and only THEN does the read fail. Naming
+        // the page instead would bury the one document that needs attention among documents already proven
+        // fine — and on a real 200-document page the bounded sample would show it with ~10% probability,
+        // which defeats the reason ids are logged at all.
+        var orgId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        await SeedOrgWithTemplateAsync(orgId, templateId);
+        var vendor = await SeedVendorAsync(orgId, templateId);
+        var mover = await SeedDocAsync(orgId, vendor, glLimit: 3_000_000m, stored: ComplianceStatus.Pending);
+        var bystander = await SeedDocAsync(orgId, vendor, glLimit: 3_000_000m, stored: ComplianceStatus.Pending);
+
+        // One competing edit, inside the PAGE's save only, so exactly one document moves.
+        var hook = new ConcurrentSystemWriteInterceptor();
+        var competingWrites = 0;
+        hook.OnSavingChanges = async () =>
+        {
+            if (competingWrites++ > 0) return;
+            await using var edit = CreateSystemDb();
+            await edit.Documents.Where(d => d.Id == mover)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.GeneralLiabilityLimit, (decimal?)1_000_000m));
+        };
+
+        // Page loads: 1 = the grade, 2 = verification pass 1 (confirms the bystander, corrects the mover),
+        // 3 = verification pass 2 — which is the one that fails.
+        var fault = new SystemCommandFaultInterceptor();
+        var pageLoads = 0;
+        fault.ShouldFault = sql =>
+            sql.Contains(PageLoadMarker, StringComparison.Ordinal) && ++pageLoads == 3;
+
+        var user = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = orgId };
+        var logger = new ListLogger<ComplianceCheckService>();
+        RegradeResult result;
+        await using (var appDb = CreateAppDb(user))
+        await using (var sysDb = CreateSystemDb(user, hook, fault))
+        {
+            var svc = new ComplianceCheckService(appDb, sysDb, new FixedTimeProvider(FixedNow), logger);
+            result = await svc.ReevaluateForTemplateForSystemAsync(templateId, default);
+        }
+
+        fault.FaultCount.Should().Be(1, "anti-no-op: the verification really did fail…");
+        logger.Entries.Should().Contain(
+            e => e.Message.Contains("whose inputs changed while the page was being graded", StringComparison.Ordinal),
+            "…and pass 1 really did find a mover first, which is what makes the unconfirmed set a STRICT "
+            + "subset of the page");
+        result.FailedPages.Should().Be(1);
+
+        var line = logger.Entries.Should().ContainSingle(
+            e => e.Message.Contains("verification pass failed for a page", StringComparison.Ordinal)).Subject;
+
+        line.Message.Should().Contain(mover.ToString(),
+            "the document whose correction nobody confirmed is the one worth naming");
+        line.Message.Should().NotContain(bystander.ToString(),
+            "pass 1 read the bystander and found the row saying exactly what this fan-out asserted — it is "
+            + "CONFIRMED, and reporting it as unconfirmed is the noise that hides the mover");
+    }
+
+    [Fact]
+    public async Task A_page_left_unconfirmed_by_a_spent_bound_counts_as_a_failed_page()
+    {
+        // The give-up arm, from the real service and through the ONE entry point that returns a
+        // RegradeResult. Verification can end two ways without confirming — it THREW (the test above) or it
+        // SPENT ITS BOUND on a document whose inputs kept moving — and both leave the identical state:
+        // verdicts committed, nobody re-read them. Only the first used to reach failedPages, so a give-up
+        // answered AllSucceeded == true, ComplianceTemplateSeed advanced RegradedThroughRevision over it
+        // (Data/Seed/ComplianceTemplateSeed.cs — the advance is gated on exactly that flag) and the next boot
+        // skipped the template. Nothing else re-grades it: the nightly sweep does date transitions only.
+        //
+        // The other half of that chain — AllSucceeded == false ⇒ the watermark is HELD BACK and the next boot
+        // re-fires — is pinned by
+        // ComplianceTemplateSeedTests.Interrupted_regrade_leaves_watermark_behind_and_the_next_boot_heals_the_stale_verdict,
+        // which drives the real seed with a RegradeResult whose only relevant property is that same flag.
+        var orgId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        await SeedOrgWithTemplateAsync(orgId, templateId);
+        var vendor = await SeedVendorAsync(orgId, templateId);
+        // Seeded Pending so "the page committed a verdict" is observable rather than assumed.
+        var docId = await SeedDocAsync(orgId, vendor, glLimit: 3_000_000m, stored: ComplianceStatus.Pending);
+
+        // Every save this fan-out makes — the page's and both corrections' — is beaten by a competing edit
+        // that ALTERNATES the limit across the 2M floor, so each following fresh read disagrees with what was
+        // just applied and the verification can never confirm. The edit runs on its own connection and lands
+        // between the interceptor and EF's UPDATE, i.e. inside the window #470 is about.
+        var hook = new ConcurrentSystemWriteInterceptor();
+        var competingWrites = 0;
+        hook.OnSavingChanges = async () =>
+        {
+            var next = competingWrites++ % 2 == 0 ? 1_000_000m : 3_000_000m;
+            await using var edit = CreateSystemDb();
+            await edit.Documents.Where(d => d.Id == docId)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.GeneralLiabilityLimit, (decimal?)next));
+        };
+
+        var user = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = orgId };
+        var logger = new ListLogger<ComplianceCheckService>();
+        RegradeResult result;
+        await using (var appDb = CreateAppDb(user))
+        await using (var sysDb = CreateSystemDb(user, hook))
+        {
+            var svc = new ComplianceCheckService(appDb, sysDb, new FixedTimeProvider(FixedNow), logger);
+            result = await svc.ReevaluateForTemplateForSystemAsync(templateId, default);
+        }
+
+        competingWrites.Should().Be(1 + ComplianceCheckService.MaxVerificationPasses,
+            "anti-no-op AND the bound: the page's save plus one per verification pass, each beaten — without "
+            + "an edit landing inside every one of them nothing would be left unconfirmed and every "
+            + "assertion below would pass on a run that reproduced nothing");
+
+        logger.Entries.Should().Contain(
+            e => e.Message.Contains("Gave up confirming", StringComparison.Ordinal)
+                && e.Message.Contains(docId.ToString(), StringComparison.OrdinalIgnoreCase),
+            "the give-up is disclosed and NAMES the document — an unconfirmed verdict has to be findable");
+
+        result.Targeted.Should().Be(1);
+        result.Regraded.Should().Be(1,
+            "the document WAS re-graded — what is missing is the confirmation, exactly as on the thrown arm");
+        result.FailedPages.Should().Be(1,
+            "a page whose verdicts are committed but unconfirmed is one the next boot must re-fire, however "
+            + "the verification ran out — by exception or by spending its bound (#470, ADR 0030 Amendment 5)");
+        result.AllSucceeded.Should().BeFalse(
+            "which is the whole point: AllSucceeded is the durability signal ComplianceTemplateSeed gates "
+            + "RegradedThroughRevision on. True here would advance the watermark over a document holding a "
+            + "verdict graded from inputs that moved under it, with nothing left to heal it (#416)");
+
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.SingleAsync(d => d.Id == docId)).ComplianceStatus
+            .Should().NotBe(ComplianceStatus.Pending,
+                "the page's verdict is committed and the give-up does NOT degrade it — ADR 0030 Amendment 3 "
+                + "Option I, refuted for a caller that owns no inputs");
+    }
+
+    /// <summary>
+    /// A clock that answers <paramref name="first"/> once and <c>first + advance</c> on every later read, so
+    /// a code path that RE-READS the clock is distinguishable from one that reuses a held reading. A
+    /// <see cref="FixedTimeProvider"/> cannot tell the two apart — which is why swapping the fan-out's held
+    /// <c>nowUtc</c> for a fresh <c>GetUtcNow()</c> inside the verification left the whole suite green.
+    /// </summary>
+    private sealed class AdvancingTimeProvider(DateTimeOffset first, TimeSpan advance) : TimeProvider
+    {
+        private int _reads;
+
+        public int Reads => _reads;
+
+        public override DateTimeOffset GetUtcNow() =>
+            Interlocked.Increment(ref _reads) == 1 ? first : first + advance;
+    }
+
+    [Fact]
+    public async Task The_verification_grades_against_the_fan_outs_OWN_clock_reading()
+    {
+        // ADR 0030 Amendment 5: nowUtc is read ONCE and reused by every verification pass, deliberately. A
+        // fresh reading would turn an expiry boundary crossed mid-fan-out into a "mover" on documents nobody
+        // touched — real writes, an UpdatedAt bump and an audit row per document, done for a non-reason —
+        // and would break the property the whole detection rests on: that a difference means an INPUT moved
+        // and nothing else.
+        var orgId = Guid.NewGuid();
+        var templateId = Guid.NewGuid();
+        await SeedOrgWithTemplateAsync(orgId, templateId);
+        var vendor = await SeedVendorAsync(orgId, templateId);
+
+        // Expires LATE on the fan-out's own day: not expired at the held reading (and inside the 30-day
+        // window, so the rule-passing verdict is ExpiringSoon), expired one day later. Nothing about the
+        // document changes — only which clock the verification asks.
+        var expiresToday = new DateTime(2026, 6, 1, 23, 0, 0, DateTimeKind.Utc);
+        var docId = await SeedDocAsync(orgId, vendor, glLimit: 3_000_000m, stored: ComplianceStatus.Pending);
+        await using (var db = CreateSystemDb())
+            await db.Documents.Where(d => d.Id == docId)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.ExpirationDate, expiresToday));
+
+        var clock = new AdvancingTimeProvider(FixedNow, TimeSpan.FromDays(1));
+        var user = new FakeCurrentUser { UserId = Guid.NewGuid(), OrganizationId = orgId };
+        var logger = new ListLogger<ComplianceCheckService>();
+        await using (var appDb = CreateAppDb(user))
+        await using (var sysDb = CreateSystemDb(user))
+        {
+            var svc = new ComplianceCheckService(appDb, sysDb, clock, logger);
+            await svc.ReevaluateForTemplateAsync(templateId, default);
+        }
+
+        clock.Reads.Should().Be(1,
+            "the fan-out reads its clock ONCE and hands that reading to every pass; a second read is the "
+            + "regression this test exists for");
+
+        await using var verify = CreateSystemDb();
+        (await verify.Documents.SingleAsync(d => d.Id == docId)).ComplianceStatus
+            .Should().Be(ComplianceStatus.ExpiringSoon,
+                "anti-no-op: the fan-out really did grade this document at the HELD instant. Graded a day "
+                + "later it would read Expired, which is exactly the disagreement a fresh clock would invent");
+
+        logger.Entries.Should().NotContain(
+            e => e.Message.Contains("whose inputs changed while the page was being graded", StringComparison.Ordinal),
+            "no INPUT moved, so nothing is a mover — a verification on a fresh clock would call this "
+            + "untouched document one and re-grade it");
+
+        (await verify.AuditLogs.CountAsync(a =>
+            a.EntityType == nameof(Document) && a.EntityId == docId && a.Action == "document.updated"))
+            .Should().Be(1, "…and would write it a second time, for a boundary the document did not cross");
     }
 }

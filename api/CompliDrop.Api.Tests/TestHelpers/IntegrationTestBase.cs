@@ -54,24 +54,34 @@ public abstract class IntegrationTestBase(IntegrationTestFixture fixture) : IAsy
     /// entity here is translated to a soft delete (UPDATE DeletedAt=now). If a test needs a
     /// genuine hard delete, run it directly against the EF Core context without going through
     /// this helper, or use <c>ExecuteDeleteAsync</c>.
+    /// <para/>
+    /// <paramref name="extra"/> is for the TEST-ONLY interceptors a single test arms (a command fault, a
+    /// concurrent-write hook). It exists so those tests do not hand-roll a third copy of the production
+    /// interceptor list: <c>HarnessSmokeTests.The_db_helpers_wire_every_save_interceptor_the_application_wires</c>
+    /// compares the DI-resolved context against THIS helper only, so a fourth interceptor added to
+    /// <c>Program.cs</c> is forced in here and a hand-built copy would diverge invisibly — the same
+    /// "a helper that is MOSTLY production is worse than one that plainly is not" hazard the list above
+    /// exists to close.
     /// </summary>
-    protected SystemDbContext CreateSystemDb(ICurrentUser? user = null) =>
+    protected SystemDbContext CreateSystemDb(ICurrentUser? user = null, params IInterceptor[] extra) =>
         new(new DbContextOptionsBuilder<SystemDbContext>()
             .UseNpgsql(Fixture.ConnectionString)
             .AddInterceptors(
                 new AuditSaveChangesInterceptor(() => user),
                 new ComplianceCheckDeleteConcurrencyInterceptor(
                     NullLogger<ComplianceCheckDeleteConcurrencyInterceptor>.Instance))
+            .AddInterceptors(extra)
             .Options);
 
     /// <inheritdoc cref="CreateSystemDb"/>
-    protected AppDbContext CreateAppDb(ICurrentUser user) =>
+    protected AppDbContext CreateAppDb(ICurrentUser user, params IInterceptor[] extra) =>
         new(new DbContextOptionsBuilder<AppDbContext>()
             .UseNpgsql(Fixture.ConnectionString)
             .AddInterceptors(
                 new AuditSaveChangesInterceptor(() => user),
                 new ComplianceCheckDeleteConcurrencyInterceptor(
                     NullLogger<ComplianceCheckDeleteConcurrencyInterceptor>.Instance))
+            .AddInterceptors(extra)
             .Options, user);
 
     /// <summary>Registers a fresh org + admin user and returns a cookie-authenticated client.</summary>
