@@ -49,7 +49,19 @@ public class Adr0052EnforcementTests
         ["Endpoints/VendorEndpoints.cs"] = "ComputeCoverage — the ONE read surface (ADR 0042 carve-out)",
         ["DTOs/Vendors/VendorDtos.cs"] = "PROSE ONLY — VendorCoverage's contract comment names the "
             + "operand its Status is computed from; it reads and writes nothing",
+        ["Services/DocumentGradingBasis.cs"] = "PROSE ONLY — the basis BOTH of PersistSuccess's "
+            + "conclusions are now computed from (#467 / ADR 0052 Amendment 1); it reads and writes "
+            + "nothing, and the trust write stays in the worker",
     };
+
+    /// <summary>
+    /// The files above whose entitlement is PROSE. A comment naming the column is cheap and useful; a
+    /// LINE of code in one of these is a fifth writer or a second read surface arriving in a file the
+    /// allow-list waves through whole. <see cref="Services_that_merely_TALK_about_trust_never_touch_it"/>
+    /// makes that distinction mechanical rather than a promise in the value strings above.
+    /// </summary>
+    private static readonly string[] ProseOnlyMentions =
+        ["DTOs/Vendors/VendorDtos.cs", "Services/DocumentGradingBasis.cs"];
 
     /// <summary>Below this the walk found the wrong tree and every assertion would be vacuous.</summary>
     private const int MinScannedFiles = 50;
@@ -85,6 +97,28 @@ public class Adr0052EnforcementTests
             + "first (does some other surface already disclose this state beside the compliance badge?), "
             + "and a new WRITER has to answer why the distrust should not survive a re-arm. Extend "
             + "AllowedMentions deliberately — do not delete this assertion");
+    }
+
+    [Fact]
+    public void Services_that_merely_TALK_about_trust_never_touch_it()
+    {
+        // The allow-list above whitelists a file WHOLE, so "PROSE ONLY" in a value string buys nothing on
+        // its own — the same hole the endpoints gate's occurrence count closes for DocumentEndpoints.
+        // `Services/DocumentGradingBasis.cs` is the one that makes this worth enforcing rather than
+        // documenting: it MATERIALIZES a Document (PropertyValues.ToObject), so a future edit assigning or
+        // reading trust on that instance is one line away and would look like tidy prediction — while
+        // being either a fifth writer (ADR 0052 §2 says there are four) or a second read surface (the ADR
+        // 0042 document-level carve-out says there is one). Comments survive; code does not.
+        var sources = ProductionSources();
+        foreach (var relative in ProseOnlyMentions)
+        {
+            var stripped = SourceScan.StripLineComments(
+                sources.Single(s => s.Relative == relative).Text);
+            stripped.Should().NotContain("ExtractionTrust", relative
+                + " is allow-listed for PROSE only: every mention of the column there must be inside a "
+                + "comment. A line of code is a new writer or a new read surface, and both owe ADR 0052 "
+                + "an answer before they are added to this list on their own terms");
+        }
     }
 
     [Fact]

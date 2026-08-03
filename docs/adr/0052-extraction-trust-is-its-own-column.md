@@ -446,6 +446,14 @@ the save withdrew (Amendment 3 path 2 in
   `ComplianceCheckService` reads neither column, and `DocumentFieldReadability` reads only the canonical
   fields. `SetTrust` still forces its column, so the ordering costs the write nothing. Noted on
   `DocumentGradingBasis.AfterPendingCommitAsync` beside the pre-existing `UpdatedAt` exception.
+- **`Services/DocumentGradingBasis.cs` joins the allow-list in `Adr0052EnforcementTests`**, for a
+  comment. § Consequences/Negative's "one more column to keep in lockstep at four writers" is what that
+  gate defends, so a new file naming the column has to be admitted deliberately — and admitted as PROSE
+  ONLY, which is now enforced rather than promised in the allow-list's own value string
+  (`Services_that_merely_TALK_about_trust_never_touch_it` strips comments and requires the identifier to
+  be gone). That distinction earns its keep here specifically: the helper MATERIALIZES a `Document` via
+  `PropertyValues.ToObject()`, so assigning or reading trust on that instance is one line away and would
+  read as tidy prediction while being a fifth writer or a second read surface.
 - **A second consumer now depends on the basis read**, so its failure mode matters twice. It still sits
   inside the degrade guard and still never throws out of `PersistSuccess` — a throw there is the re-paid
   Document AI + LLM run this codebase measures every worker change against — and that placement keeps its

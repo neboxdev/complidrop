@@ -254,7 +254,11 @@ Both are defined in this repo's `.claude/agents/`.
     `Graceful_shutdown_mid_attempt_requeues_without_counting_a_failure` seeds `Distrusted` and asserts
     it survives, plus the member-level source assertion in `Adr0052EnforcementTests`. The whole-file
     source scan exists because no behavioural test can pin "no OTHER surface reads trust" — the ADR
-    0042 document-level carve-out.
+    0042 document-level carve-out. Two files are allow-listed for PROSE ONLY (`DTOs/Vendors/VendorDtos.cs`
+    and, since #467, `Services/DocumentGradingBasis.cs`) and that entitlement is ENFORCED, not asserted
+    in a comment: `Services_that_merely_TALK_about_trust_never_touch_it` strips comments and requires the
+    identifier to be gone. It matters most on the basis helper, which MATERIALIZES a `Document`, so
+    assigning or reading trust on that instance is one line away and would look like tidy prediction.
   - The `IsManuallyVerified` clause is RETIRED from `ComputeCoverage`, which is how Amendment 2's
     recorded stickiness residue closes. The flag STAYS on the entity + detail DTO (a real fact about
     the doc); re-adding it to the coverage predicate re-opens "confirmed once, re-extracted, failed
