@@ -231,13 +231,36 @@ Both are defined in this repo's `.claude/agents/`.
     - The status/trust writes now sit BELOW the grading `try` so they can be decided from the basis,
       which drops those two columns out of the basis's own overlay. Immaterial and recorded:
       `ComplianceCheckService` reads neither. Moving them back above re-opens the bug.
-    - The INVARIANT to test any change here against: on the persisted row, `ExtractionStatus` /
-      `ExtractionTrust` and the read-time `unreadableFields` list must AGREE, so a `ManualRequired`
-      document always names a cause. Pinned by four tests in `ExtractionWorkerStaleBasisTests` sharing
-      `AssertTrustAgreesWithTheRowAsync` (the row + `GET /api/documents/{id}`), covering both interleave
-      directions and the fallback. `A_canonical_value_this_read_leaves_unreadable_still_routes_to_review_and_NAMES_it`
+    - The INVARIANT to test any change here against, and it is SCOPED to the READABILITY trigger: on the
+      persisted row, a `ManualRequired` raised by an unreadable canonical value agrees with the read-time
+      `unreadableFields` list, so THAT document always names a cause. It does NOT generalise. The two
+      confidence gates and `NeedsReprocessing` commit `ManualRequired` + `Distrusted` with an EMPTY list
+      by design — the gates are named by the amber field outline, `NeedsReprocessing` alone names nothing
+      and below-0.9 is the only thing the outline fires on — so **`Distrusted` beside
+      `unreadableFields: []` is a common, legitimate row, not a violation**. Pinned by six tests in
+      `ExtractionWorkerStaleBasisTests` sharing `AssertTrustAgreesWithTheRowAsync` (the row +
+      `GET /api/documents/{id}`), covering both interleave directions, the CLEAR direction, the fallback
+      and a failing GRADE; the biconditional those tests assert is only legitimate because every fixture
+      holds the other three triggers off (0.95 on every field, `NeedsReprocessing: false`).
+      `A_canonical_value_this_read_leaves_unreadable_still_routes_to_review_and_NAMES_it`
       is also the discriminator against "just re-read the row" (ADR 0030 Amendment 2 Option F's mistake
       in a new place): that shape calls the document clean while its committed column is null.
+    - The two RAW copies of a canonical field come along —
+      `ExtractionWorker.ReconcileCanonicalCopiesWithTheRow`, keyed on
+      `CanonicalDocumentFields.SameTypedColumn` (#467 review C1). The `ExtractionFields` mirror and the
+      `DocumentField` rows are rewritten from the response UNCONDITIONALLY while the typed column can be
+      omitted, so without it the row commits the model's unparseable answer into the field editor beside
+      the user's surviving date, under `Completed`/`Trusted` with `unreadableFields: []` — the predicate
+      short-circuits on the non-null column before it ever looks at the copy. Facts:
+      - Typed columns are UNTOUCHED (forcing one is ADR 0030 Amendment 2 Option G, refuted), the worker
+        emits exactly the columns it emitted before, and it now clobbers strictly LESS of a request's
+        value. The model's answer is preserved as `DocumentField.OriginalValue` (the page's *was: …*).
+      - It runs BEFORE `ApplyEvaluationAsync` because the mirror is itself a verdict input
+        (`LookupValue`'s raw-string fallback). Moving it after is a torn pair.
+      - Once it has run the tracked entity and the basis give the SAME readability answer, so
+        `basis ?? doc` is the statement of intent plus the fallback's owner rather than the sole guard.
+        "It is redundant, inline it" misses what is load-bearing: the ORDER. Hoisting the walk back above
+        the reconciliation reddens two tests and restores the ticket's bug.
   - `ResolveManualReview` decides trust from READABILITY on every status; only the escalation back to
     `ManualRequired` is gated on `wasSettled`. That gate exists solely so the escalation cannot
     DE-QUEUE the doc — withdrawing trust de-queues nothing — so re-gating trust on it is the bug, not
