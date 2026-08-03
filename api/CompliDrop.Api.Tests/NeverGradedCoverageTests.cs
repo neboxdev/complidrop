@@ -576,20 +576,35 @@ public sealed class NeverGradedCoverageTests(IntegrationTestFixture fixture) : I
     [Fact]
     public async Task The_SQL_grading_predicate_agrees_with_the_in_memory_one_and_with_the_check_rows()
     {
-        // Exactly TWO forms of "was this graded" ship: the SQL read arms spell it inline as
-        // `d.ComplianceChecks.Any()`, and the in-memory read sites ask DocumentGrading.IsGraded of a
-        // projected count. Both traverse the SAME ComplianceChecks navigation, so comparing them only to
-        // each other pins `Any() == Count > 0` and nothing else — a filter appearing on the navigation
-        // would move them identically and this test would stay green. So the third leg is GROUND TRUTH
-        // read straight from the ComplianceChecks table by DocumentId, which the navigation's filters
-        // cannot reach: if a query filter or a soft-delete column ever lands on ComplianceCheck, the
-        // shipping forms diverge from the rows themselves and it fails HERE rather than as a silent
-        // coverage overclaim.
+        // THREE forms of "was this graded" ship (DocumentGrading's remarks enumerate them): the SQL read
+        // arms spell it inline as `d.ComplianceChecks.Any()`; the list / rollup / detail projections ask
+        // DocumentGrading.IsGraded of a projected `.Count`; and ExportService.CheckCountsAsync asks it of a
+        // projected DISTINCT-RULE count (#468 review — that column PRINTS the number, so it counts
+        // requirements rather than rows). All three traverse the SAME ComplianceChecks navigation, so
+        // comparing them only to each other pins `Any() == Count > 0 == DistinctRules > 0` and nothing
+        // else — a filter appearing on the navigation would move them identically and this test would stay
+        // green. So the last leg is GROUND TRUTH read straight from the ComplianceChecks table by
+        // DocumentId, which the navigation's filters cannot reach: if a query filter or a soft-delete
+        // column ever lands on ComplianceCheck, the shipping forms diverge from the rows themselves and it
+        // fails HERE rather than as a silent coverage overclaim.
         var auth = await RegisterAndLoginAsync();
         var graded = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, FarFuture, graded: true, fileName: "graded.pdf");
         var ungraded = await SeedDocAsync(auth.OrgId, ComplianceStatus.Compliant, FarFuture, fileName: "ungraded.pdf");
 
         await using var db = CreateSystemDb();
+
+        // The distinct leg is only worth anything against a document whose row count and rule count
+        // DIFFER, which is the ADR 0030 residue exactly: a second row citing the rule the first one does.
+        // Without it the two projections are the same number and the export's spelling is untested.
+        var backingRule = await db.ComplianceChecks.Where(c => c.DocumentId == graded)
+            .Select(c => c.ComplianceRuleId).SingleAsync();
+        db.ComplianceChecks.Add(new ComplianceCheck
+        {
+            Id = Guid.NewGuid(), DocumentId = graded, ComplianceRuleId = backingRule,
+            IsPassed = true, CheckedAt = DateTime.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
         var orgDocs = db.Documents.Where(d => d.OrganizationId == auth.OrgId);
 
         // (1) the SQL spelling every read arm uses, inline in a composite predicate.
@@ -599,15 +614,33 @@ public sealed class NeverGradedCoverageTests(IntegrationTestFixture fixture) : I
             .Where(x => DocumentGrading.IsGraded(x.Count))
             .Select(x => x.Id)
             .ToList();
-        // (3) ground truth: the check ROWS, keyed by DocumentId, never through the navigation.
+        // (3) the EXPORT's spelling — the only one that also PRINTS its number, so its agreement with the
+        // others is what keeps the auditor-facing artifact from telling a different story than the
+        // dashboard. It agrees only because ComplianceRuleId is a non-nullable Guid (SQL COUNT(DISTINCT)
+        // drops NULLs); nothing else asserts that, so this leg is where a nullable/synthetic rule id would
+        // surface — as a graded document exporting "RequirementsChecked 0" under ADR 0048's demoted label.
+        var viaDistinctRules = (await orgDocs
+                .Select(d => new { d.Id, Count = d.ComplianceChecks.Select(c => c.ComplianceRuleId).Distinct().Count() })
+                .ToListAsync())
+            .Where(x => DocumentGrading.IsGraded(x.Count))
+            .Select(x => x.Id)
+            .ToList();
+        // (4) ground truth: the check ROWS, keyed by DocumentId, never through the navigation.
         var viaRows = new List<Guid>();
         foreach (var id in await orgDocs.Select(d => d.Id).ToListAsync())
             if (await db.ComplianceChecks.CountAsync(c => c.DocumentId == id) > 0)
                 viaRows.Add(id);
 
-        viaRows.Should().BeEquivalentTo([graded], "one seeded doc carries a check row and one carries none");
+        viaRows.Should().BeEquivalentTo([graded], "one seeded doc carries check rows and one carries none");
+        (await db.ComplianceChecks.CountAsync(c => c.DocumentId == graded)).Should().Be(2,
+            "precondition: the graded doc holds TWO rows for ONE rule, so the distinct leg is a different "
+            + "number from the row leg and cannot pass by coincidence");
         viaSql.Should().BeEquivalentTo(viaRows);
         viaCount.Should().BeEquivalentTo(viaRows);
+        viaDistinctRules.Should().BeEquivalentTo(viaRows,
+            "the export's distinct-rule count is zero exactly when the row count is — the property ADR 0048 "
+            + "§5 asserts at the column, which is what lets it differ from the others in VALUE without ever "
+            + "differing in VERDICT");
         viaSql.Should().NotContain(ungraded);
     }
 }

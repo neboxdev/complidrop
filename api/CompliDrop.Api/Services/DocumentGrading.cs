@@ -30,17 +30,29 @@ namespace CompliDrop.Api.Services;
 /// <para/>
 /// There is deliberately NO EF <c>Expression</c> mirror here. Every SQL read site needs the fact
 /// INSIDE something an <c>Expression&lt;Func&lt;Document, bool&gt;&gt;</c> cannot be invoked in: as a
-/// single clause of a multi-clause lambda (the dashboard's <c>compliant</c> / <c>expiringSoon</c>
-/// counts, the documents-list Compliant / ExpiringSoon arms — and the compliance-rate denominator,
-/// which needs it NEGATED inside a larger composite), or as a projected SCALAR rather than a
-/// predicate at all (the list, vendor-rollup and export projections, which read
-/// <c>d.ComplianceChecks.Count</c> and hand it to <see cref="IsGraded(int)"/>). So each spells it
-/// inline as <c>d.ComplianceChecks.Any()</c> — the same hand-mirroring ADR 0041's future-effective bound
-/// already requires, and covered the same way: by cross-surface tests pinning each SQL arm against
-/// the in-memory deriver, plus <c>NeverGradedCoverageTests</c>'
-/// <c>The_SQL_grading_predicate_agrees_with_the_in_memory_one_and_with_the_check_rows</c>, which
-/// compares both shipping forms against the <c>ComplianceChecks</c> table itself. An
-/// <c>Expression</c> property with no production caller would be a third form nothing exercises.
+/// single clause of a multi-clause lambda, or as a projected SCALAR rather than a predicate at all. So
+/// each spells it inline, and THREE spellings ship — an <c>Expression</c> property with no production
+/// caller would be a fourth that nothing exercises:
+/// <list type="number">
+/// <item><c>d.ComplianceChecks.Any()</c>, the composite-predicate form (the dashboard's
+/// <c>compliant</c> / <c>expiringSoon</c> counts, the documents-list Compliant / ExpiringSoon arms, and
+/// the compliance-rate denominator, which needs it NEGATED inside a larger composite).</item>
+/// <item><c>d.ComplianceChecks.Count</c> projected to a scalar and handed to <see cref="IsGraded(int)"/>
+/// (the list, vendor-rollup and detail projections).</item>
+/// <item><c>d.ComplianceChecks.Select(c =&gt; c.ComplianceRuleId).Distinct().Count()</c>, likewise handed
+/// to <see cref="IsGraded(int)"/> — <c>ExportService.CheckCountsAsync</c> (#468 review). It counts
+/// DISTINCT RULES because the CSV's <c>RequirementsChecked</c> column PRINTS the number instead of
+/// thresholding it, and ADR 0030 § Consequences accepts a document transiently holding both writers'
+/// rows for one rule. It answers the same <c>&gt; 0</c> question here because
+/// <see cref="ComplianceCheck.ComplianceRuleId"/> is a non-nullable <c>Guid</c> — every row contributes
+/// a key, so the distinct count is zero exactly when the row count is. That premise is not free (SQL
+/// <c>COUNT(DISTINCT col)</c> drops NULLs), which is why it is pinned rather than assumed.</item>
+/// </list>
+/// Same hand-mirroring ADR 0041's future-effective bound already requires, and covered the same way: by
+/// cross-surface tests pinning each SQL arm against the in-memory deriver, plus
+/// <c>NeverGradedCoverageTests</c>'
+/// <c>The_SQL_grading_predicate_agrees_with_the_in_memory_one_and_with_the_check_rows</c>, which compares
+/// all three shipping forms against the <c>ComplianceChecks</c> table itself.
 /// <see cref="ComplianceCheck"/> carries no <c>DeletedAt</c> and has no query filter, so
 /// <c>Any()</c> counts exactly the rows <see cref="IsGraded(int)"/> counts. Same shared-predicate
 /// shape as <see cref="DocumentSupersession"/>, <see cref="PlanDocumentScope"/> and
