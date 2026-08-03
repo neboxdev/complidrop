@@ -326,6 +326,8 @@ public class ExportService(SystemDbContext db) : IExportService
         // other document types) — the fact behind its demoted "Awaiting review" verdict. The CSV carries
         // it as its own column rather than as an inline parenthetical on Compliance (the shape the two
         // PDFs use) because Compliance is a machine-filterable cell here, exactly like Superseded beside it.
+        // This is the ONE surface that prints the number rather than thresholding it, which is why
+        // CheckCountsAsync counts distinct RULES and not check rows (#468 review — see it).
         csv.WriteField("RequirementsChecked");
         csv.WriteField("EffectiveDate");
         csv.WriteField("ExpirationDate");
@@ -418,11 +420,25 @@ public class ExportService(SystemDbContext db) : IExportService
     /// keyed by document id — the export's input to <see cref="DocumentGrading.IsGraded(int)"/>. A single
     /// scalar projection rather than <c>Include(d =&gt; d.ComplianceChecks)</c>: an org's check ROWS carry
     /// two varchar(500) columns each and would multiply the export's payload for a number.
+    /// <para/>
+    /// It counts DISTINCT RULES, not check rows, and that difference is load-bearing for the one caller
+    /// that PRINTS the number: the CSV's <c>RequirementsChecked</c> column (#468 review). ADR 0030
+    /// § Consequences accepts that a document can transiently hold BOTH writers' check rows after a
+    /// concurrent re-grade — two rows citing the SAME rule — and that residue is scoped there as a
+    /// detail-page display desync, where the count and the list the user is reading agree. An auditor's CSV
+    /// has no list beside it, so a raw row count would state "2 requirements checked" against a checklist
+    /// holding exactly one rule, which is a claim about the evidence rather than a rendering artifact.
+    /// <para/>
+    /// Every OTHER consumer of this map reads it through <see cref="DocumentGrading.IsGraded(int)"/>, whose
+    /// only question is <c>&gt; 0</c> — and the distinct count is zero exactly when the row count is — so
+    /// the two PDFs' "(no requirements checked)" annotation and the demoted verdict are byte-identical
+    /// either way. The other read surfaces (dashboard, list, vendor rollup) ask the same <c>&gt; 0</c>
+    /// question through <c>d.ComplianceChecks.Any()</c> and are likewise unaffected.
     /// </summary>
     private static async Task<Dictionary<Guid, int>> CheckCountsAsync(
         IQueryable<Entities.Document> documents, CancellationToken ct) =>
         (await documents
-            .Select(d => new { d.Id, Count = d.ComplianceChecks.Count })
+            .Select(d => new { d.Id, Count = d.ComplianceChecks.Select(c => c.ComplianceRuleId).Distinct().Count() })
             .ToListAsync(ct))
         .ToDictionary(x => x.Id, x => x.Count);
 
