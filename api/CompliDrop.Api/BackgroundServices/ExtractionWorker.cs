@@ -398,9 +398,9 @@ public class ExtractionWorker(
     /// This is NOT the ADR 0030 stale-snapshot residual (<see
     /// href="https://github.com/neboxdev/complidrop/issues/460">#460</see>), which is about a writer
     /// grading from verdict INPUTS the row has moved on from and re-asserting them. Nothing is being
-    /// re-asserted here: the value is this read's OWN conclusion, computed from what the model just
-    /// returned, and ADR 0052 §2 says these writers own it. "Last writer wins on the whole tuple" is the
-    /// intended semantics — forcing the column is what makes this writer actually be one.
+    /// re-asserted here: the value is this read's OWN conclusion, and ADR 0052 §2 says these writers own
+    /// it. "Last writer wins on the whole tuple" is the intended semantics — forcing the column is what
+    /// makes this writer actually be one.
     /// <para/>
     /// #460 has since shipped on this very method (ADR 0030 Amendment 2, see <see cref="PersistSuccess"/>),
     /// and the two sit side by side on purpose rather than by oversight — the axis between them is
@@ -410,6 +410,15 @@ public class ExtractionWorker(
     /// forces trust: both are facts THIS read owns, and not writing them would leave someone else's answer
     /// standing. Making the two agree along the wrong axis — unforcing either conclusion, or forcing a
     /// verdict INPUT (ADR 0030 Amendment 2 Option G) — is a defect in whichever direction it goes.
+    /// <para/>
+    /// OWNERSHIP and BASIS are separate questions, and #467 (ADR 0052 Amendment 1) answers the second one
+    /// without touching this. <see cref="PersistSuccess"/>'s readability trigger now reads the #460
+    /// grading basis — the row this commit will LEAVE — instead of the minutes-old tracked snapshot,
+    /// because "is a canonical value unreadable?" is a question about a ROW and the snapshot is not the
+    /// row. That changes what the conclusion is ABOUT; it does not make the conclusion somebody else's,
+    /// so the force below is unchanged and unforcing it would still be the #459 bug. The two moves are
+    /// the same correction ADR 0030 Amendment 2 made for the verdict — grade the right row, then write
+    /// the answer — applied to the other column this writer owns.
     /// </summary>
     private static void SetTrust(SystemDbContext db, Document doc, ExtractionTrust trust)
     {
@@ -646,39 +655,6 @@ public class ExtractionWorker(
         foreach (var f in extraction.Fields.GroupBy(x => x.Name).Select(g => g.Last()))
             CanonicalDocumentFields.ApplyToTypedColumn(doc, f.Name, f.Value);
 
-        // Which fields did the model return NON-BLANK but unparseable (#383, ADR 0040)? Those clear
-        // their typed column, which is indistinguishable downstream from "the certificate has no such
-        // value" — so a real expiration the parser choked on ("12/31/2026 (per endorsement)") would
-        // otherwise leave a high-confidence, no-reprocess-signal document that can never turn Expired
-        // and never triggers a reminder.
-        //
-        // Asked of the DOCUMENT, through the same DocumentFieldReadability predicate the request path
-        // uses (DocumentEndpoints.ResolveManualReview) and the same one the detail DTO reports. This
-        // used to be a second, independent mechanism — a per-field TypedColumnResult accumulated in
-        // this loop — with nothing pinning the two equal, so "is this document in the #383 state?" had
-        // two answers that could drift apart (#383 review round 2, S5). Both inputs it needs are final
-        // AS THIS READ SEES THEM at this point: doc.ExtractionFields was assigned from fieldsDict above
-        // and ApplyToTypedColumn has run for every field the response returned. Last-value-wins now
-        // falls out structurally rather than being something this loop has to remember — the JSON
-        // mirror and the typed columns are both last-wins, and the predicate reads only those.
-        //
-        // "Final as this read sees them" is NOT the same as "what the row will hold", and the
-        // difference is the #460 mechanism one screen below (ADR 0030 Amendment 2 § What stays open).
-        // ApplyToTypedColumn ASSIGNS; a value equal to the minutes-old tracked snapshot leaves the
-        // property unmodified, so EF omits the column and a request that committed inside the window
-        // keeps it. This walk therefore describes THIS READ's own output — which is what ADR 0052 §2
-        // says trust is — and not the row the commit leaves, so the two can disagree (documented case:
-        // a snapshot ExpirationDate of null, an unparseable expiration in the response, and a mid-run
-        // edit committing a valid date lands ManualRequired + Distrusted over a row whose typed column
-        // is fine). Deliberately NOT swapped onto the #460 basis: that would redefine trust from "what
-        // this extraction produced" to "what the row ends up holding", an ADR 0052 decision needing its
-        // own record, not a quiet edit here. Tracked separately; do not change it in passing.
-        //
-        // Field NAMES only in the log, never values: extracted field values are document PII and must
-        // not reach logs/Sentry (CLAUDE.md § frontend error monitoring applies the same rule to the
-        // backend's structured logs).
-        var unreadableFields = DocumentFieldReadability.UnreadableCanonicalFields(doc);
-
         db.DocumentFields.RemoveRange(db.DocumentFields.Where(df => df.DocumentId == doc.Id));
         foreach (var f in extraction.Fields)
         {
@@ -718,28 +694,6 @@ public class ExtractionWorker(
         var hasLowConfidenceVerdictField = extraction.Fields.Any(f =>
             VerdictBearingFields.Contains(f.Name) && f.Confidence < ManualReviewConfidenceThreshold);
 
-        // Four independent signals route a document to ManualRequired, each catching a case the others
-        // miss: low AVERAGE confidence; a low-confidence VERDICT-BEARING field the average hid (#401); the
-        // model's own reprocess signal; and an unreadable canonical value (#383) — a confidently-read
-        // date/amount in a shape we can't parse fires none of the other three yet leaves a
-        // compliance-critical column silently null.
-        var distrusted = avgConf < ManualReviewConfidenceThreshold
-            || hasLowConfidenceVerdictField
-            || extraction.NeedsReprocessing
-            || unreadableFields.Length > 0;
-
-        // ONE boolean, TWO columns (#459 / ADR 0052). Pipeline POSITION and extraction TRUST used to be
-        // the same column, so Reextract's re-arm to Pending erased the distrust and nothing restored it.
-        // This read is what establishes the document's current basis, so it decides BOTH — and it is the
-        // only writer that can restore trust without a human: a clean re-read of a previously-distrusted
-        // document earns Trusted back here, which is what stops the flag being sticky the way
-        // IsManuallyVerified was (ADR 0042 Amendment 2's recorded residue).
-        doc.ExtractionStatus = distrusted ? ExtractionStatus.ManualRequired : ExtractionStatus.Completed;
-        SetTrust(db, doc, distrusted ? ExtractionTrust.Distrusted : ExtractionTrust.Trusted);
-        if (unreadableFields.Length > 0)
-            logger.LogWarning(
-                "Document {DocumentId} returned {Count} canonical field(s) we could not parse ({Fields}); routed to manual review",
-                doc.Id, unreadableFields.Length, string.Join(", ", unreadableFields));
         doc.ExtractionCompletedAt = now;
         doc.ProcessingError = null;
         doc.UpdatedAt = now;
@@ -790,9 +744,14 @@ public class ExtractionWorker(
         // GENUINELY gone — a hard delete; the basis read ignores query filters, so a document soft-deleted
         // mid-run still yields a basis and is still graded as the row this commit leaves. The fallback is
         // therefore defensive rather than a live path: grade the tracked entity, i.e. pre-#460 behaviour.
+        //
+        // `basis` is declared OUTSIDE the try because the trust decision below reads it too (#467 / ADR
+        // 0052 Amendment 1) — and because a grading failure must not cost it: if ApplyEvaluationAsync is
+        // what threw, the basis was already read successfully and is still the right row to judge.
+        Document? basis = null;
         try
         {
-            var basis = await DocumentGradingBasis.AfterPendingCommitAsync(db, doc, ct);
+            basis = await DocumentGradingBasis.AfterPendingCommitAsync(db, doc, ct);
             if (basis is null) await compliance.ApplyEvaluationAsync(db, doc, ct);
             else await compliance.ApplyEvaluationAsync(db, doc, basis, ct);
         }
@@ -801,6 +760,67 @@ public class ExtractionWorker(
             doc.ComplianceStatus = ComplianceStatus.Pending;
             logger.LogError(ex, "Compliance evaluation failed for {DocumentId} during extraction persist; verdict left Pending", doc.Id);
         }
+
+        // Which canonical fields will the ROW carry NON-BLANK but unparseable once this commit lands
+        // (#383, ADR 0040)? Such a value clears its typed column, which is indistinguishable downstream
+        // from "the certificate has no such value" — so a real expiration the parser choked on
+        // ("12/31/2026 (per endorsement)") would otherwise leave a high-confidence, no-reprocess-signal
+        // document that can never turn Expired and never triggers a reminder.
+        //
+        // Asked through the same DocumentFieldReadability predicate the request path uses
+        // (DocumentEndpoints.ResolveManualReview) and the same one the detail DTO reports. It used to be
+        // a second, independent mechanism — a per-field TypedColumnResult accumulated in the typed-column
+        // loop — with nothing pinning the two equal, so "is this document in the #383 state?" had two
+        // answers that could drift apart (#383 review round 2, S5). Last-value-wins falls out
+        // structurally rather than being something a loop has to remember: the JSON mirror and the typed
+        // columns are both last-wins, and the predicate reads only those.
+        //
+        // Asked of the BASIS, not of the tracked entity (#467 / ADR 0052 Amendment 1). The two are
+        // different rows: ApplyToTypedColumn ASSIGNS, and a value equal to the minutes-old snapshot
+        // leaves the property unmodified, so EF omits the column and whatever a request committed inside
+        // the window survives. Judging the pre-run snapshot therefore committed ManualRequired +
+        // Distrusted over a row nothing on which is unreadable — and the read-time unreadableFields list
+        // is re-derived from that row, so the review card had no cause to name. Trust is still THIS
+        // READ's own conclusion and is still FORCED into the UPDATE (SetTrust); what the basis fixes is
+        // WHICH ROW the conclusion is about, exactly as ADR 0030 Amendment 2 did for the verdict. A null
+        // basis (the row is genuinely gone) or a basis read that threw falls back to the tracked entity,
+        // i.e. the pre-#467 answer — a strict SUPERSET of the basis answer, so the fallback is
+        // fail-CLOSED rather than merely "the old behaviour".
+        //
+        // Field NAMES only in the log, never values: extracted field values are document PII and must
+        // not reach logs/Sentry (CLAUDE.md § frontend error monitoring applies the same rule to the
+        // backend's structured logs).
+        var unreadableFields = DocumentFieldReadability.UnreadableCanonicalFields(basis ?? doc);
+
+        // Four independent signals route a document to ManualRequired, each catching a case the others
+        // miss: low AVERAGE confidence; a low-confidence VERDICT-BEARING field the average hid (#401); the
+        // model's own reprocess signal; and an unreadable canonical value (#383) — a confidently-read
+        // date/amount in a shape we can't parse fires none of the other three yet leaves a
+        // compliance-critical column silently null. The first three describe the READING and have no
+        // mirror on the row; the fourth describes the ROW, which is why only it consults the basis.
+        var distrusted = avgConf < ManualReviewConfidenceThreshold
+            || hasLowConfidenceVerdictField
+            || extraction.NeedsReprocessing
+            || unreadableFields.Length > 0;
+
+        // ONE boolean, TWO columns (#459 / ADR 0052). Pipeline POSITION and extraction TRUST used to be
+        // the same column, so Reextract's re-arm to Pending erased the distrust and nothing restored it.
+        // This read is what establishes the document's current basis, so it decides BOTH — and it is the
+        // only writer that can restore trust without a human: a clean re-read of a previously-distrusted
+        // document earns Trusted back here, which is what stops the flag being sticky the way
+        // IsManuallyVerified was (ADR 0042 Amendment 2's recorded residue).
+        //
+        // Both writes sit BELOW the basis read, which is what lets them be decided from it. They fall
+        // out of the basis's own overlay as a result — the basis carries the row's ExtractionStatus /
+        // ExtractionTrust rather than this method's — and that is immaterial by inspection:
+        // ComplianceCheckService reads neither column, so no verdict input moves. SetTrust still forces
+        // its column, so the ordering costs the write nothing.
+        doc.ExtractionStatus = distrusted ? ExtractionStatus.ManualRequired : ExtractionStatus.Completed;
+        SetTrust(db, doc, distrusted ? ExtractionTrust.Distrusted : ExtractionTrust.Trusted);
+        if (unreadableFields.Length > 0)
+            logger.LogWarning(
+                "Document {DocumentId} will carry {Count} canonical field(s) we could not parse ({Fields}); routed to manual review",
+                doc.Id, unreadableFields.Length, string.Join(", ", unreadableFields));
 
         ForceVerdictWrite(db, doc);
 

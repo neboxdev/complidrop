@@ -33,6 +33,15 @@ namespace CompliDrop.Api.Services;
 /// column: that value is the worker's OWN conclusion, which ADR 0052 §2 says it owns, not a verdict input
 /// a request owns.
 /// <para/>
+/// SECOND CONSUMER, same rule (<see href="https://github.com/neboxdev/complidrop/issues/467">#467</see>,
+/// ADR 0052 Amendment 1): <c>PersistSuccess</c> also asks <c>DocumentFieldReadability</c> of this basis,
+/// because "does this document carry a canonical value nothing can parse?" is a question about a ROW and
+/// the pre-run snapshot is not the row. So it inherits every property above — the read is read-only with
+/// respect to the tracked entity, it must stay inside the caller's degrade guard, and the answer it feeds
+/// (<c>ExtractionTrust</c>) is still FORCED into the UPDATE because the CONCLUSION is the worker's even
+/// though the SUBJECT is the row. The basis is therefore not "the grading basis" narrowly but the row
+/// this commit will leave, which every conclusion this writer draws about the document must be about.
+/// <para/>
 /// RESIDUAL, deliberately not closed here: this narrows the stale window from the whole extraction run to
 /// the gap between this read and the caller's commit. It does not remove it. Closing that would need the
 /// commit itself to DETECT a conflicting write, and every detecting shape available (an entity-level
@@ -47,12 +56,20 @@ internal static class DocumentGradingBasis
     /// equal to the row this writer's pending commit will leave behind — for every property the WRITER
     /// itself sets.
     /// <para/>
-    /// One property is outside that scope, and the claim is bounded rather than absolute because of it:
-    /// <c>AuditSaveChangesInterceptor</c> re-stamps <c>UpdatedAt</c> from <c>SavingChanges</c>, i.e. strictly
-    /// AFTER this read has returned, so <c>basis.UpdatedAt</c> holds the caller's value and the row commits
-    /// the interceptor's later one. Immaterial to grading — no verdict input is interceptor-set — and
-    /// deliberately not chased: ADR 0030 Amendment 2's "the basis is READ-ONLY with respect to
-    /// <c>doc</c>" means this helper predicts what the writer writes, it does not model the pipeline.
+    /// The claim is bounded rather than absolute, in two ways, and neither reaches a verdict input or a
+    /// canonical field value:
+    /// <list type="bullet">
+    /// <item><c>AuditSaveChangesInterceptor</c> re-stamps <c>UpdatedAt</c> from <c>SavingChanges</c>, i.e.
+    /// strictly AFTER this read has returned, so <c>basis.UpdatedAt</c> holds the caller's value and the
+    /// row commits the interceptor's later one. Deliberately not chased: ADR 0030 Amendment 2's "the basis
+    /// is READ-ONLY with respect to <c>doc</c>" means this helper predicts what the writer writes, it does
+    /// not model the pipeline.</item>
+    /// <item>Anything the caller assigns AFTER calling this — which for <c>PersistSuccess</c> is exactly
+    /// its own two conclusions, <c>ExtractionStatus</c>/<c>ExtractionTrust</c> (they are DECIDED from this
+    /// basis, so they cannot precede it) and the forced <c>ComplianceStatus</c>. The basis holds the row's
+    /// values for those. Immaterial by inspection: <c>ComplianceCheckService</c> reads none of the three,
+    /// and <c>DocumentFieldReadability</c> reads only the canonical fields.</item>
+    /// </list>
     /// <para/>
     /// Returns <c>null</c> only when the row is GENUINELY GONE — a hard delete. A SOFT delete does NOT
     /// produce a null basis: <c>EntityEntry.GetDatabaseValuesAsync</c>
