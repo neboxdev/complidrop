@@ -968,19 +968,42 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         // check rows, and it is the difference between this test and
         // A_write_that_lands_AFTER_the_basis_read_is_not_clobbered_by_the_persist, whose vendors
         // deliberately share a checklist that governs nothing.
+        //
+        // It boots its own host so the interceptor's own log reaches a sink: every terminal assertion below
+        // holds identically whether the zero-row DELETE happened and was TOLERATED or the interleave never
+        // produced one at all, so without an assertion on the EVENT this test could go green having stopped
+        // covering the ticket (#468 review S3). Two independent discriminators are asserted, one on the
+        // constructed STATE and one on the suppression itself.
+        var sink = new CapturingLogEventSink();
+        await using var host = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        _ = host.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true });
+
         var auth = await RegisterAndLoginAsync();
         var vendorId = await SeedVendorAsync(auth.OrgId, "V", ("coi", "1000000"));
         // Seeded BELOW what the model returns below, so the worker genuinely MODIFIES the column and it is
         // therefore in the persist's UPDATE — otherwise the assertion that the extraction's inputs
         // committed would be measuring the competing edit's value instead (ADR 0030 Amendment 2).
-        var docId = await SeedQueuedDocAsync(auth.OrgId, vendorId, gl: 1_000_000m);
+        var docId = await SeedQueuedDocAsync(auth.OrgId, vendorId, gl: 1_000_000m, host: host.Services);
         // The rows the persist will stage for removal. Without them the clear stages nothing and the
         // interleave below cannot reach the hazard at all.
         await MarkGradedAsync(auth.OrgId, docId);
 
-        var hook = Fixture.Factory.Services.GetRequiredService<ConcurrentSystemWriteInterceptor>();
-        Extraction.Result = Extracted("coi", ("general_liability_limit", "2000000"));
-        Extraction.DuringExtract = () =>
+        async Task<List<Guid>> CheckIdsAsync()
+        {
+            await using var db = CreateSystemDb();
+            return await db.ComplianceChecks.AsNoTracking()
+                .Where(c => c.DocumentId == docId).Select(c => c.Id).ToListAsync();
+        }
+
+        var stagedCheckIds = await CheckIdsAsync();
+        stagedCheckIds.Should().ContainSingle(
+            "precondition: there is exactly one check row for the persist's clear to stage for removal");
+        List<Guid> afterCompetingRegrade = [];
+
+        var hook = host.Services.GetRequiredService<ConcurrentSystemWriteInterceptor>();
+        ExtractionOf(host.Services).Result = Extracted("coi", ("general_liability_limit", "2000000"));
+        ExtractionOf(host.Services).DuringExtract = () =>
         {
             // Armed only now, so it cannot fire on a save that precedes the extraction call. The competing
             // request has to land AFTER ApplyEvaluationAsync read the check rows and BEFORE the persist's
@@ -995,18 +1018,47 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
                 resp.StatusCode.Should().Be(HttpStatusCode.OK,
                     "the competing edit is an ordinary request — and its re-grade is what deletes the rows "
                     + "the persist has staged");
+                // Read INSIDE the window, because it is unobservable afterwards: by the time the persist's
+                // own inserts land, the two writers' rows are indistinguishable from a set the clear never
+                // targeted.
+                afterCompetingRegrade = await CheckIdsAsync();
             };
             return Task.CompletedTask;
         };
 
         try
         {
-            await ClaimAndProcessAsync(docId);
+            await ClaimAndProcessAsync(docId, host.Services);
         }
         finally
         {
             hook.Reset();
         }
+
+        // DISCRIMINATOR 1 — the STATE. The competing re-grade replaced the WHOLE check-row set before the
+        // persist's SaveChanges executed, so the DELETE the persist had staged was aimed at a row that no
+        // longer existed. Drop MarkGradedAsync above (or stop the competing writer clearing) and this is
+        // what goes red, while every terminal assertion below still passes.
+        afterCompetingRegrade.Should().ContainSingle(
+                "the competing re-grade cleared and rewrote the set, so exactly its own row is present")
+            .Which.Should().NotBe(stagedCheckIds[0],
+                "…and it is a DIFFERENT row: the one the persist staged for removal is already gone, which "
+                + "is the zero-row DELETE this ticket is about");
+
+        // DISCRIMINATOR 2 — the EVENT. Proof the tolerance actually fired rather than the hazard having
+        // been dodged. One line per SaveChanges, not per orphaned row (#468 review S2), so the count is
+        // also the pin on that shape.
+        var suppressions = sink.Events
+            .Select(e => e.RenderMessage())
+            .Where(m => m.Contains("treating those deletes as done", StringComparison.Ordinal))
+            .ToList();
+        suppressions.Should().ContainSingle(
+            "the persist's SaveChanges suppressed a check-row concurrency exception, and says so exactly "
+            + "once for the whole unit of work");
+        suppressions[0].Should().Contain("deleted 1 ComplianceCheck row(s)")
+            .And.Contain("across 1 document(s)",
+                "the line carries the AGGREGATE it claims to — one line per save reporting every row it "
+                + "covered, not one line per row reporting a total it can never hold");
 
         // ReadTerminalStateAsync also re-asserts the ADR 0030 invariant itself — the persisted verdict is
         // what the persisted inputs grade to — so the tolerated delete cannot have bought a consistent
@@ -1033,13 +1085,34 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         terminal.Checks.Should().HaveCount(2,
             "one row from the competing edit's re-grade and one from this persist — the transient duplicate "
             + "ADR 0030 § Consequences records, cleared by the document's next evaluation");
+        terminal.Checks.Select(c => c.ComplianceRuleId).Distinct().Should().ContainSingle(
+            "…and both rows cite the SAME single rule — which is why the residue is a DISPLAY desync and "
+            + "not a fact about how many requirements were measured");
+
+        // …and the auditor-facing artifact must say ONE, because the vendor's checklist holds exactly one
+        // requirement (#468 review C1). RequirementsChecked is the only surface that PRINTS this number
+        // rather than thresholding it at zero, and the CSV carries no list of rows beside it for a reader
+        // to reconcile the count against, so a raw row count would state a claim about the EVIDENCE that
+        // the org's own checklist contradicts. ExportService.CheckCountsAsync counts distinct rules.
+        var csv = await (await auth.Client.GetAsync("/api/export/csv")).Content.ReadAsStringAsync();
+        var lines = csv.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToArray();
+        var header = lines[0].Split(',');
+        var row = lines.Skip(1).Select(l => l.Split(','))
+            .First(f => f[Array.IndexOf(header, "FileName")] == "coi.pdf");
+        row[Array.IndexOf(header, "RequirementsChecked")].Should().Be("1",
+            "the document was measured against ONE requirement; it holds two check rows only because two "
+            + "writers each wrote one for that same rule");
+        row[Array.IndexOf(header, "Compliance")].Should().Be("Compliant",
+            "…and the verdict cell is unchanged — the count feeds DocumentGrading.IsGraded's > 0 threshold "
+            + "everywhere else, which distinct-vs-raw cannot move");
 
         // The real form of "no failure path may cost a second OCR + LLM run": drive a SECOND poll cycle and
         // require the queue to have nothing for it.
-        (await BuildWorker().ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+        (await BuildWorker(host.Services).ClaimNextAsync(CancellationToken.None)).Should().BeNull(
             "the document is settled at Completed — neither Pending nor a stale Processing claim — so the "
             + "next poll has nothing to pick up");
-        Extraction.ExtractCallCount.Should().Be(1, "…and the extraction was therefore paid for exactly once");
+        ExtractionOf(host.Services).ExtractCallCount.Should().Be(1,
+            "…and the extraction was therefore paid for exactly once");
     }
 
     /// <summary>
