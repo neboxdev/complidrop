@@ -182,15 +182,86 @@ function buildSupportMailto(doc: DocDetail): string {
   return `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
 
+// The two compliance verdicts that ASSERT coverage — the pair
+// ComplianceStatusDeriver.Effective can demote and ComputeCoverage counts as
+// in force. `doc.complianceStatus` is already the OVERLAID verdict (the backend
+// applies the ADR 0041 / 0042 / 0048 overlays before it ships the payload), so
+// this is literally the fact the badge beside these cards renders.
+const AFFIRMATIVE_COMPLIANCE: ReadonlySet<string> = new Set(["Compliant", "ExpiringSoon"]);
+
+function checkedAtMs(c: ComplianceCheck): number {
+  const parsed = Date.parse(c.checkedAt);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+// Which of two rows citing the SAME rule survives. A FAILING row always outranks
+// a passing one — de-duplication must never be able to HIDE a failure the page
+// holds evidence for — and between two rows of the same verdict the newer
+// measurement wins.
+function outranks(candidate: ComplianceCheck, incumbent: ComplianceCheck): boolean {
+  if (candidate.isPassed !== incumbent.isPassed) return !candidate.isPassed;
+  return checkedAtMs(candidate) > checkedAtMs(incumbent);
+}
+
+// The check rows the verdict cards RENDER: one row per requirement, and never a
+// row that contradicts the verdict printed beside it. (#468 review, ADR 0030
+// Amendment 4)
+//
+// ADR 0030 § Consequences accepts that a concurrent re-grade can leave a document
+// transiently holding BOTH writers' `ComplianceCheck` rows — including two rows
+// citing the SAME rule — and scopes that residue to DISPLAY. Rendering the raw
+// array made this page overstate it in two different ways:
+//
+//   1. COUNTING rows as requirements. `passedCount` was `checks.length -
+//      failed.length`, so a one-rule checklist holding the loser's failing row
+//      plus the winner's passing row printed "Why isn't this compliant? • General
+//      liability must be at least $1,000,000" immediately followed by "1 other
+//      requirement met." — an evidence claim the org's own checklist contradicts,
+//      and with WhatWeCheckedCard suppressed there is no list beside the number to
+//      reconcile it against. Exactly the overclaim ADR 0048 §5 had to correct in
+//      the exported RequirementsChecked column.
+//   2. CONTRADICTING the badge. The cards read `complianceChecks` while the badge
+//      reads `complianceStatus`, so a stale losing-writer FAILED row put "Why
+//      isn't this compliant?" and an "Email {vendor} to fix this" mailto — body:
+//      "We can't mark the document you sent as compliant yet…" — on a document the
+//      standing verdict and standing inputs say IS compliant. An outbound message
+//      to the customer's vendor is not "display", which is the scope the ADR
+//      claims for this residue.
+//
+// The verdict is the anchor rather than `checkedAt`, because `checkedAt` cannot
+// identify the winner: it is stamped at GRADING time, and in this interleave the
+// writer whose verdict lands is the one that graded FIRST and committed LAST — so
+// "keep the newest row" keeps the LOSER, and in the other direction (a stale
+// PASSING row newer than the live failing one) it would hide a real failure. Hence
+// two rules, both fail-closed: drop rows that contradict an affirmative verdict,
+// and prefer the failing row wherever the verdict is not affirmative.
+//
+// This is arithmetic over rows ALREADY on the page plus the verdict the server
+// ALREADY sent — not a re-derivation of a backend-only predicate, so it does not
+// cross the ADR 0040 / 0048 / 0049 line. `unreadableFields`, `vendorHasChecklist`
+// / `vendorChecklistRuleCount` and `fieldValueTruncated` all come from the server
+// precisely because the page CANNOT know them; "how many distinct rules are in
+// this array" it can, from the `complianceRuleId` already on the wire.
+function renderedChecks(doc: DocDetail): ComplianceCheck[] {
+  // Defensive `?? []`: the API always sends complianceChecks, but a payload that
+  // omits it (older cache, a partial mock) must not white-screen the whole detail
+  // page. (#198)
+  const affirmative = AFFIRMATIVE_COMPLIANCE.has(doc.complianceStatus);
+  const perRule = new Map<string, ComplianceCheck>();
+  for (const c of doc.complianceChecks ?? []) {
+    if (affirmative && !c.isPassed) continue;
+    const incumbent = perRule.get(c.complianceRuleId);
+    if (!incumbent || outranks(c, incumbent)) perRule.set(c.complianceRuleId, c);
+  }
+  return [...perRule.values()];
+}
+
 // "Why isn't this compliant?" — lists each failed requirement in plain English
 // with a primary "Email {vendor} to fix this" CTA pre-filled with the reasons.
 // Renders only when there's at least one failed check, so a compliant document
 // shows nothing. (#193)
 function NonComplianceExplainer({ doc }: { doc: DocDetail }) {
-  // Defensive `?? []`: the API always sends complianceChecks, but a payload that
-  // omits it (older cache, a partial mock) must not white-screen the whole detail
-  // page on `.filter`. (#198)
-  const checks = doc.complianceChecks ?? [];
+  const checks = renderedChecks(doc);
   const failed = checks.filter((c) => !c.isPassed);
   if (failed.length === 0) return null;
   const reasons = failed.map(complianceFailureReason);
@@ -264,7 +335,11 @@ function WhatWeCheckedCard({
   doc: DocDetail;
   correctedAdditionalInsuredWording: boolean;
 }) {
-  const checks = doc.complianceChecks ?? [];
+  // Same reconciled rows the explainer reads (see renderedChecks): one per rule,
+  // and — because a Compliant/ExpiringSoon verdict drops contradicting rows there —
+  // a stale losing-writer FAILURE can no longer silently suppress this whole card
+  // on a document whose standing verdict says every requirement was met.
+  const checks = renderedChecks(doc);
   if (checks.length === 0 || checks.some((c) => !c.isPassed)) return null;
   return (
     <Card className="border-emerald-200 bg-emerald-50/50">
