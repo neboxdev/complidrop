@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CompliDrop.Api.Auth;
@@ -791,19 +792,108 @@ public static class DocumentEndpoints
     /// </summary>
     private sealed record AuditFieldSnapshot(string FieldName, string? FieldValue);
 
+    // A human confirmation writes a PAIR — ExtractionTrust beside the ExtractionStatus it was decided
+    // beside — and EF only ever emits the HALF of it that differs from this request's snapshot (#465,
+    // ADR 0052 Amendment 2). On an unsettled row ResolveManualReview deliberately leaves the status
+    // alone (moving Pending would DE-QUEUE the document), so the UPDATE carries trust WITHOUT it, and a
+    // whole-tuple commit from ExtractionWorker.PersistSuccess landing in the load→save window left the
+    // row holding ManualRequired + Trusted: a distrusted extraction rolling up to the vendor as Covered,
+    // the ADR 0042 hole. The mirror, Completed + Distrusted, is the half with no badge and no self-heal.
+    //
+    // So the write is followed by a PAIR CHECK inside its own transaction: after the UPDATE — which
+    // holds the row's write lock for the rest of the transaction — re-read the status the row will
+    // actually commit and compare it against the one this decision assumed. They differ exactly when a
+    // competitor moved a status this request did not write, i.e. exactly when the pair would land
+    // incoherent. On that signal the whole attempt is ROLLED BACK and re-run against a fresh read, which
+    // is cheap and always correct here because PUT /verify carries no request body at all: its answer is
+    // a pure function of the row, so re-deciding loses nothing of the user's.
+    //
+    // Three shapes that look like this one and are not, recorded so they are not re-derived:
+    //
+    //  * FORCING ExtractionStatus into the UPDATE (the ExtractionWorker.SetTrust / ForceVerdictWrite
+    //    shape) is wrong here. That shape is right when the writer's own conclusion is the FRESHER
+    //    value; this request's snapshot status is the OLDER one, so forcing it would overwrite the
+    //    worker's fresh ManualRequired with a stale Pending — trading a torn pair for a lost update, and
+    //    de-queueing a document the worker is mid-flight on.
+    //  * DocumentWriteConcurrency.RunAsync (REPEATABLE READ + 40001) is deliberately NOT taken. It would
+    //    make this writer conflict on any concurrent commit rather than on the one that tears the pair —
+    //    the widening ADR 0030 Amendment 1 scopes to the two partial writers and #461 to the single
+    //    re-grade, pinned against by An_unrelated_document_writer_still_wins_last_without_conflicting.
+    //    READ COMMITTED last-writer-wins is retained; only the (status, trust) pair is made atomic.
+    //  * A conditional ExecuteUpdateAsync (the Reextract shape) would bypass
+    //    AuditSaveChangesInterceptor, so the one action that most wants a real audit trail — a human
+    //    confirmation — would lose its Before/After diff row and keep only the flat document.verified
+    //    event. Writing through the change tracker is what keeps that row intact and inside the
+    //    transaction; ADR 0050 accepted the trade for a re-arm that already had its own explicit row.
     private static async Task<IResult> MarkVerified(
         Guid id,
         AppDbContext db,
         IAuditLogger audit,
+        ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
-        var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
-        if (doc is null) return NotFound();
-        ResolveManualReview(doc);
-        doc.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(ct);
-        await audit.LogAsync("document.verified", nameof(Document), doc.Id);
-        return Results.Ok(new { data = new { message = "Document marked verified." }, error = (object?)null });
+        for (var attempt = 1; attempt <= DocumentConcurrency.MaxAttempts; attempt++)
+        {
+            // READ COMMITTED, stated rather than inherited: the isolation level is NOT what detects the
+            // conflict here (that is the pair check below), and naming it keeps a future reader from
+            // reading this transaction as the REPEATABLE READ guard arriving on a fourth writer.
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct);
+
+            var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
+            if (doc is null) return NotFound();
+
+            ResolveManualReview(doc);
+            doc.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+
+            // The pair check. A scalar projection, so it reads the ROW rather than the tracked entity —
+            // inside this transaction that is our own not-yet-committed UPDATE applied on top of
+            // whatever committed before it, i.e. precisely the status this transaction will LEAVE. Our
+            // UPDATE has already taken the row's write lock, so no further writer can move it between
+            // this read and the commit; the answer is stable rather than merely recent.
+            //
+            // doc.ExtractionStatus is what the trust beside it was decided from — the snapshot's value
+            // when ResolveManualReview left it alone, this request's own value when it moved it. So the
+            // comparison asks the only question that matters: is the status this row ends up holding the
+            // one the trust decision was made beside?
+            var committedStatus = await db.Documents
+                .Where(d => d.Id == id)
+                .Select(d => (ExtractionStatus?)d.ExtractionStatus)
+                .FirstOrDefaultAsync(ct);
+
+            if (committedStatus is null)
+            {
+                // The document was deleted (soft-deleted, so the query filter hides it) inside the
+                // window. Nothing of ours may stand on it, and there is nothing to re-decide.
+                await tx.RollbackAsync(ct);
+                db.ChangeTracker.Clear();
+                return NotFound();
+            }
+
+            if (committedStatus == doc.ExtractionStatus)
+            {
+                await tx.CommitAsync(ct);
+                // After the commit, as before: IAuditLogger writes on its own SystemDbContext connection,
+                // outside this transaction's reach, so an abandoned attempt must not have emitted one.
+                await audit.LogAsync("document.verified", nameof(Document), doc.Id);
+                return Results.Ok(new { data = new { message = "Document marked verified." }, error = (object?)null });
+            }
+
+            // Clearing the tracker is what makes the next attempt a genuine re-read rather than a replay
+            // of the snapshot that just lost — it also discards the AuditLog row the interceptor staged
+            // for the rolled-back attempt, so the audit trail describes only what committed.
+            await tx.RollbackAsync(ct);
+            db.ChangeTracker.Clear();
+            loggerFactory.CreateLogger(typeof(DocumentEndpoints)).LogWarning(
+                "Extraction status on document {DocumentId} moved from {DecidedBeside} to {Committed} while "
+                + "it was being confirmed (attempt {Attempt} of {MaxAttempts}); re-reading and re-deciding",
+                id, doc.ExtractionStatus, committedStatus, attempt, DocumentConcurrency.MaxAttempts);
+        }
+
+        // Exhaustion commits NOTHING and leaves the last writer's own coherent pair standing — the same
+        // answer, for the same reason, that ADR 0030 Amendment 3 gives the pure re-grade: this request
+        // owns no inputs, so there is no half-applied write to complete and no user text to lose.
+        return DocumentWriteConcurrency.Conflict(DocumentWriteConcurrency.VerifyConflictMessage);
     }
 
     private static async Task<IResult> Reextract(
