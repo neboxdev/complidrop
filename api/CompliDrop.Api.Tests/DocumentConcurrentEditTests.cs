@@ -484,6 +484,15 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         // ADR 0030 § Option A, whose entity-wide token would have made ALL of them optimistic (including
         // the extraction worker, where an exception out of SaveChanges costs a re-paid OCR + LLM run).
         // MarkVerified is such a path: a partial writer that touches no verdict, so it cannot tear one.
+        //
+        // #465 (ADR 0052 Amendment 2) gave MarkVerified a conflict guard of its OWN, and this test is the
+        // fence around it rather than a casualty of it. That guard re-runs only when the ONE column the
+        // confirmation omits from its UPDATE — ExtractionStatus, which the de-queue rule makes it leave
+        // alone on an unsettled row — was moved by somebody else. The competing writer below is a field
+        // EDIT, which moves no status, so this request must still commit on its first attempt and the
+        // edit's columns must still survive beside it. Taking DocumentWriteConcurrency's REPEATABLE READ
+        // guard here instead would redden the competingWrites assertion below, which is exactly the point:
+        // widening that guard to all document writes is a finding, not a tidy-up.
         var auth = await RegisterAndLoginAsync();
         var (vendorId, _) = await SeedVendorWithGlRuleAsync(auth.OrgId, minLimit: "2000000");
         var docId = await SeedCoiAsync(auth.OrgId, vendorId, gl: 1_000_000m, holder: "Old Hall");
@@ -508,6 +517,234 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
         terminal.Doc.IsManuallyVerified.Should().BeTrue("this request's own column landed");
         terminal.Doc.GeneralLiabilityLimit.Should().Be(3_000_000m,
             "and the competing edit's columns survived alongside it — unchanged last-writer-wins semantics");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // #465 / ADR 0052 Amendment 2 — the human confirmation's (status, trust) PAIR.
+    //
+    // MarkVerified writes ExtractionTrust beside the ExtractionStatus it was decided beside, and EF emits
+    // only the half that differs from the request's snapshot. On an unsettled row ResolveManualReview
+    // deliberately leaves the status alone (moving Pending would de-queue the document), so the UPDATE
+    // carried trust WITHOUT it — and a whole-tuple commit from ExtractionWorker.PersistSuccess landing in
+    // the load→save window left the two columns disagreeing. Both directions are constructed below
+    // through the same deterministic hook the rest of this suite uses.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>An expiration the parser accepts, so a confirmation genuinely GRANTS trust.</summary>
+    private const string ReadableExpiration = "2027-12-31";
+
+    /// <summary>
+    /// The ADR 0040 shape: non-blank, and nothing can read it. <c>ApplyToTypedColumn</c> refuses it, so the
+    /// typed column is null while the row still carries the raw text — which is what makes
+    /// <c>DocumentFieldReadability</c> call the document unreadable and a confirmation WITHDRAW trust.
+    /// </summary>
+    private const string UnreadableExpiration = "12/31/2027 (per endorsement)";
+
+    /// <summary>
+    /// A certificate sitting in a given <c>(ExtractionStatus, ExtractionTrust)</c> state with one canonical
+    /// value, written to BOTH copies the readability predicate can consult (the typed column, via the same
+    /// helper the worker and the field editor use, and the <c>ExtractionFields</c> mirror) plus the
+    /// <c>DocumentField</c> row the detail page renders. No vendor and no checklist: <c>PUT /verify</c>
+    /// grades nothing, so a template here would only add a verdict nothing under test reads.
+    /// </summary>
+    private async Task<Guid> SeedCertAwaitingConfirmationAsync(
+        Guid orgId, ExtractionStatus status, ExtractionTrust trust, string expiration)
+    {
+        var now = DateTime.UtcNow;
+        var docId = Guid.NewGuid();
+        await using var db = CreateSystemDb();
+        var doc = new Document
+        {
+            Id = docId,
+            OrganizationId = orgId,
+            OriginalFileName = "coi.pdf",
+            BlobStorageUrl = "blob://d",
+            FileSizeBytes = 1,
+            ContentType = "application/pdf",
+            DocumentType = "coi",
+            ExtractionStatus = status,
+            ExtractionTrust = trust,
+            ComplianceStatus = ComplianceStatus.Pending,
+            ExtractionFields = JsonDocument.Parse(
+                $$"""{"expiration_date":{{JsonSerializer.Serialize(expiration)}}}"""),
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+        CanonicalDocumentFields.ApplyToTypedColumn(doc, CanonicalDocumentFields.ExpirationDate, expiration);
+        db.Documents.Add(doc);
+        db.DocumentFields.Add(new DocumentField
+        {
+            Id = Guid.NewGuid(), DocumentId = docId, FieldName = CanonicalDocumentFields.ExpirationDate,
+            FieldValue = expiration, FieldType = "text", Confidence = 0.95
+        });
+        await db.SaveChangesAsync();
+        return docId;
+    }
+
+    /// <summary>
+    /// The competing write in the shape <c>ExtractionWorker.PersistSuccess</c> commits its (status, trust)
+    /// PAIR, minus the OCR and the LLM: ONE unguarded <c>READ COMMITTED</c> unit of work that writes both
+    /// columns TOGETHER — the worker's own conclusion about the read it just performed — over the canonical
+    /// value that conclusion was drawn from. Whichever of the two writers commits last, the row it leaves
+    /// must still be somebody's COHERENT pair.
+    /// </summary>
+    private async Task CommitExtractionPairAsync(
+        Guid docId, ExtractionStatus status, ExtractionTrust trust, string expiration)
+    {
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.Include(d => d.Fields).FirstAsync(d => d.Id == docId);
+        doc.ExtractionStatus = status;
+        doc.ExtractionTrust = trust;
+        doc.ExtractionFields = JsonDocument.Parse(
+            $$"""{"expiration_date":{{JsonSerializer.Serialize(expiration)}}}""");
+        CanonicalDocumentFields.ApplyToTypedColumn(doc, CanonicalDocumentFields.ExpirationDate, expiration);
+        foreach (var field in doc.Fields.Where(f => f.FieldName == CanonicalDocumentFields.ExpirationDate))
+            field.FieldValue = expiration;
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<Document> ReadDocumentAsync(Guid docId)
+    {
+        await using var db = CreateSystemDb();
+        return await db.Documents.AsNoTracking().FirstAsync(d => d.Id == docId);
+    }
+
+    [Fact]
+    public async Task A_confirmation_cannot_leave_a_review_flagged_row_reading_TRUSTED()
+    {
+        // The FAIL-OPEN direction, and the one the ticket reports: ManualRequired + Trusted is a
+        // distrusted extraction rolling up to the vendor as Covered — the ADR 0042 hole.
+        //
+        // The seed is exactly where POST /reextract leaves a re-armed distrusted document: back in the
+        // queue at Pending, still carrying the previous read's dissent (the queue writers never touch
+        // trust), with READABLE values. A user clicks "Mark verified" from a tab whose last payload still
+        // showed the review card; the request reads (Pending, Distrusted), decides Trusted, and leaves the
+        // status alone because moving Pending would de-queue the document.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedCertAwaitingConfirmationAsync(
+            auth.OrgId, ExtractionStatus.Pending, ExtractionTrust.Distrusted, ReadableExpiration);
+
+        var competingWrites = 0;
+        Interleave.OnSavingChanges = async () =>
+        {
+            // Fire ONCE: the re-run must be allowed to succeed, and one conflict is what this scenario is.
+            if (Interlocked.Increment(ref competingWrites) > 1) return;
+            await CommitExtractionPairAsync(
+                docId, ExtractionStatus.ManualRequired, ExtractionTrust.Distrusted, ReadableExpiration);
+        };
+
+        var response = await SendAsync(auth.Client, HttpMethod.Put, $"/api/documents/{docId}/verify");
+        Interleave.Reset();
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK,
+            "the conflicted attempt is re-decided against a fresh read, not surfaced to the user");
+        competingWrites.Should().Be(2,
+            "ANTI-NO-OP: the hook is re-entered by the second attempt, which is what proves the pair check "
+            + "fired at all. Pre-#465 there was exactly ONE SaveChanges and this read 1");
+
+        var doc = await ReadDocumentAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+            "the pair must be COHERENT: pre-#465 this row landed ManualRequired + Trusted — the review flag "
+            + "the worker had just raised, beside the clean bill of health a confirmation decided from a "
+            + "snapshot taken before it, i.e. a distrusted extraction back inside vendor coverage");
+        doc.IsManuallyVerified.Should().BeTrue("the confirmation itself still landed");
+    }
+
+    [Fact]
+    public async Task A_confirmation_cannot_leave_a_cleanly_read_row_reading_DISTRUSTED()
+    {
+        // The MIRROR direction, and the worse half to land in: Completed + Distrusted is excluded from
+        // vendor coverage while the extraction badge reads "Read" and the compliance badge reads
+        // "Compliant" — the one shape with no badge and no self-heal (ADR 0052 § Consequences).
+        //
+        // Reached from the other seed: an in-flight row still carrying an unreadable canonical value, so
+        // the confirmation's own decision is to WITHDRAW trust (ADR 0040 fails closed) while again leaving
+        // the unsettled status alone. A clean re-read lands inside that window.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedCertAwaitingConfirmationAsync(
+            auth.OrgId, ExtractionStatus.Pending, ExtractionTrust.Trusted, UnreadableExpiration);
+
+        var competingWrites = 0;
+        Interleave.OnSavingChanges = async () =>
+        {
+            if (Interlocked.Increment(ref competingWrites) > 1) return;
+            await CommitExtractionPairAsync(
+                docId, ExtractionStatus.Completed, ExtractionTrust.Trusted, ReadableExpiration);
+        };
+
+        var response = await SendAsync(auth.Client, HttpMethod.Put, $"/api/documents/{docId}/verify");
+        Interleave.Reset();
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        competingWrites.Should().Be(2, "ANTI-NO-OP: the second attempt re-entered the hook");
+
+        var doc = await ReadDocumentAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+            "the re-decision reads the value the row now HOLDS, which the clean re-read made readable — "
+            + "pre-#465 this row landed Completed + Distrusted, from a withdrawal decided against text the "
+            + "row no longer carried, and nothing on any surface would have said why the vendor dropped");
+        doc.ExpirationDate.Should().NotBeNull("the competing read's own value survived beside it");
+        doc.IsManuallyVerified.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_confirmation_that_keeps_losing_the_status_answers_409_and_commits_nothing()
+    {
+        // Exhaustion. A competing write moves the status inside EVERY attempt, so no attempt's pair check
+        // can ever agree. The bounded loop must then answer 409 having committed NOTHING — never the
+        // clean bill of health it was about to grant.
+        //
+        // The two states alternate because the confirmation only OMITS the status while the row is
+        // unsettled; both are real writers on that axis (the worker's claim moves Pending → Processing,
+        // and a graceful-shutdown requeue moves it back).
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedCertAwaitingConfirmationAsync(
+            auth.OrgId, ExtractionStatus.Pending, ExtractionTrust.Distrusted, ReadableExpiration);
+
+        var competingWrites = 0;
+        Interleave.OnSavingChanges = async () =>
+        {
+            var attempt = Interlocked.Increment(ref competingWrites);
+            await CommitExtractionPairAsync(
+                docId,
+                attempt % 2 == 1 ? ExtractionStatus.Processing : ExtractionStatus.Pending,
+                ExtractionTrust.Distrusted,
+                ReadableExpiration);
+        };
+
+        var response = await SendAsync(auth.Client, HttpMethod.Put, $"/api/documents/{docId}/verify");
+        Interleave.Reset();
+
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("error").GetProperty("code").GetString()
+            .Should().Be(DocumentWriteConcurrency.ConflictCode,
+                "one code for every document-write conflict — a client cannot act differently on them");
+        body.GetProperty("error").GetProperty("message").GetString()
+            .Should().Be(DocumentWriteConcurrency.VerifyConflictMessage,
+                "and its OWN copy: PUT /verify carries no request body, so the edit copy's \"make your "
+                + "change again\" names a change this caller never submitted");
+        body.GetProperty("data").ValueKind.Should().Be(JsonValueKind.Null);
+        competingWrites.Should().Be(DocumentConcurrency.MaxAttempts,
+            "the confirmation is re-run a BOUNDED number of times — an unbounded loop would spin here "
+            + "against a worker that keeps winning");
+
+        var doc = await ReadDocumentAsync(docId);
+        doc.IsManuallyVerified.Should().BeFalse("an exhausted confirmation commits NOTHING");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "…including the trust it was about to grant — the row is the last competing writer's own "
+            + "coherent pair, exactly as it left it");
+
+        // And nothing claims a confirmation that never happened, in EITHER shape: the explicit
+        // "document.verified" row is written after the commit, so an abandoned request never reaches it,
+        // and the interceptor's "document.updated" row is staged inside the rolled-back SaveChanges on the
+        // same context. The competing writes run on a SystemDbContext with no current user, so they audit
+        // nothing at all — which is what makes an EMPTY log the right assertion here.
+        await using var db = CreateSystemDb();
+        (await db.AuditLogs.Where(a => a.EntityId == docId).Select(a => a.Action).ToListAsync())
+            .Should().BeEmpty("an abandoned attempt's staged audit row rolls back with it");
     }
 
     /// <summary>
