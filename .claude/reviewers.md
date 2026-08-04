@@ -246,7 +246,8 @@ Both are defined in this repo's `.claude/agents/`.
       model's confidence so the outline fires" is ADR 0052 Amendment 1 Option M, refuted; "surface
       reconciled fields on the wire like `unreadableFields`" is Option N, declined on cost. Pinned by
       `A_reconciled_field_that_tripped_the_confidence_gate_names_itself_on_the_row`, which asserts the
-      pair DIRECTLY (it is outside the biconditional by construction). Also pinned by six tests in
+      pair DIRECTLY (it is outside the biconditional by construction). The READABILITY invariant itself
+      — the scoped one this bullet opens with — is pinned by six OTHER tests in
       `ExtractionWorkerStaleBasisTests` sharing `AssertTrustAgreesWithTheRowAsync` (the row +
       `GET /api/documents/{id}`), covering both interleave directions, the CLEAR direction, the fallback
       and a failing GRADE; the biconditional those tests assert is only legitimate because every fixture
