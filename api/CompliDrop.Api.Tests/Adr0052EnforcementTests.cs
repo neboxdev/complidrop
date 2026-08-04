@@ -47,8 +47,47 @@ public class Adr0052EnforcementTests
         ["BackgroundServices/ExtractionWorker.cs"] = "PersistSuccess + the two terminal-failure writers",
         ["Endpoints/DocumentEndpoints.cs"] = "ResolveManualReview — the human confirmation",
         ["Endpoints/VendorEndpoints.cs"] = "ComputeCoverage — the ONE read surface (ADR 0042 carve-out)",
-        ["DTOs/Vendors/VendorDtos.cs"] = "PROSE ONLY — VendorCoverage's contract comment names the "
+        ["DTOs/Vendors/VendorDtos.cs"] = ProseOnlyLabel + " — VendorCoverage's contract comment names the "
             + "operand its Status is computed from; it reads and writes nothing",
+        ["Services/DocumentGradingBasis.cs"] = ProseOnlyLabel + " — the basis BOTH of PersistSuccess's "
+            + "conclusions are now computed from (#467 / ADR 0052 Amendment 1); it reads and writes "
+            + "nothing, and the trust write stays in the worker",
+    };
+
+    /// <summary>The prefix that turns an allow-list entry into a PROSE-ONLY one. The label IS the
+    /// enforcement trigger, so it is a constant both sides read rather than a string typed twice.</summary>
+    private const string ProseOnlyLabel = "PROSE ONLY";
+
+    /// <summary>
+    /// The entries above whose entitlement is PROSE. A comment naming the column is cheap and useful; a
+    /// LINE of code in one of these is a fifth writer or a second read surface arriving in a file the
+    /// allow-list waves through whole. <see cref="Services_that_merely_TALK_about_trust_never_touch_it"/>
+    /// makes that distinction mechanical rather than a promise in the value strings above.
+    /// <para/>
+    /// DERIVED from the label rather than re-listed (#467 review, S3). A second hand-maintained list is
+    /// the same "promise in a value string" hole one level up: a file admitted with a PROSE ONLY label
+    /// but forgotten here would get no mechanical enforcement at all. Same rule the repo applies to ADR
+    /// 0050's <c>ClaimSql</c> (BUILT from <c>ZombieClaimTimeout</c>) and ADR 0046's <c>InputLengths</c>.
+    /// </summary>
+    private static IEnumerable<string> ProseOnlyMentions =>
+        AllowedMentions
+            .Where(kv => kv.Value.StartsWith(ProseOnlyLabel, StringComparison.Ordinal))
+            .Select(kv => kv.Key);
+
+    /// <summary>
+    /// A token that must SURVIVE the comment stripper in each prose-only file — the per-file anti-no-op
+    /// both sibling gates lead with, and which this one shipped without (#467 review, S2). Every anchor
+    /// is CODE, so an over-stripping <see cref="SourceScan.StripLineComments"/> (a shared helper) takes
+    /// the anchor with it and this gate goes RED instead of silently green while claiming to enforce ADR
+    /// 0052's prose-only entitlement.
+    /// <para/>
+    /// A prose-only entry with no anchor here FAILS rather than being waved through, so deriving the set
+    /// from the label above cannot buy an entitlement nothing checks.
+    /// </summary>
+    private static readonly Dictionary<string, string> ProseOnlyAnchors = new()
+    {
+        ["DTOs/Vendors/VendorDtos.cs"] = "record VendorCoverage",
+        ["Services/DocumentGradingBasis.cs"] = "AfterPendingCommitAsync",
     };
 
     /// <summary>Below this the walk found the wrong tree and every assertion would be vacuous.</summary>
@@ -85,6 +124,58 @@ public class Adr0052EnforcementTests
             + "first (does some other surface already disclose this state beside the compliance badge?), "
             + "and a new WRITER has to answer why the distrust should not survive a re-arm. Extend "
             + "AllowedMentions deliberately — do not delete this assertion");
+    }
+
+    [Fact]
+    public void Services_that_merely_TALK_about_trust_never_touch_it()
+    {
+        // The allow-list above whitelists a file WHOLE, so "PROSE ONLY" in a value string buys nothing on
+        // its own — the same hole the endpoints gate's occurrence count closes for DocumentEndpoints.
+        // `Services/DocumentGradingBasis.cs` is the one that makes this worth enforcing rather than
+        // documenting: it MATERIALIZES a Document (PropertyValues.ToObject), so a future edit assigning or
+        // reading trust on that instance is one line away and would look like tidy prediction — while
+        // being either a fifth writer (ADR 0052 §2 says there are four) or a second read surface (the ADR
+        // 0042 document-level carve-out says there is one). Comments survive; code does not.
+        var sources = ProductionSources();
+        sources.Should().HaveCountGreaterThan(MinScannedFiles,
+            "the scan must have found the real production tree, or every assertion below is vacuous");
+
+        var proseOnly = ProseOnlyMentions.ToArray();
+        proseOnly.Should().NotBeEmpty(
+            "anti-no-op: the derivation must still recognise the label the allow-list writes, or this "
+            + "gate enforces the prose-only entitlement over an EMPTY set of files");
+
+        // The REVERSE direction (#467 review round 2, S4), and it is the same "promise in a value
+        // string" hole one level up. ProseOnlyMentions is derived by StartsWith, so an entry whose
+        // label drifted off the START of its value — a reword, an added lead-in like "the #460 basis —
+        // PROSE ONLY — …" — silently leaves the derived set and its whole file goes back to being
+        // waved through by AllowedMentions, while this dictionary still names it as anchored. The
+        // per-entry loop below cannot see that: it only ever visits files the derivation returned.
+        ProseOnlyAnchors.Keys.Should().BeSubsetOf(proseOnly,
+            "every file this class claims to anchor must still BE prose-only. A key here that the "
+            + "derivation no longer returns is a file with a whole-file waiver and no code-level check "
+            + "at all — put " + ProseOnlyLabel + " back at the start of its AllowedMentions value, or "
+            + "delete the anchor deliberately");
+
+        foreach (var relative in proseOnly)
+        {
+            ProseOnlyAnchors.TryGetValue(relative, out var anchor).Should().BeTrue(
+                relative + " is allow-listed " + ProseOnlyLabel + ", so it needs an entry in "
+                + "ProseOnlyAnchors before this gate can claim to enforce anything about it — a label with "
+                + "no anchor is the promise-in-a-value-string hole one level up");
+
+            var stripped = SourceScan.StripLineComments(
+                sources.Single(s => s.Relative == relative).Text);
+            stripped.Should().Contain(anchor!,
+                "anti-no-op (#467 review, S2): the stripper is SHARED, so an over-stripping change to it "
+                + "would leave " + relative + "'s NotContain below trivially satisfied while the sibling "
+                + "gates went red on their own Contain anchors. This anchor is code, so it dies with any "
+                + "text the stripper should have kept");
+            stripped.Should().NotContain("ExtractionTrust", relative
+                + " is allow-listed for PROSE only: every mention of the column there must be inside a "
+                + "comment. A line of code is a new writer or a new read surface, and both owe ADR 0052 "
+                + "an answer before they are added to this list on their own terms");
+        }
     }
 
     [Fact]

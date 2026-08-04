@@ -114,6 +114,33 @@ internal static class CanonicalDocumentFields
     public static bool IsCanonical(string? fieldName) =>
         IsDateField(fieldName) || IsAmountField(fieldName);
 
+    /// <summary>
+    /// True when <paramref name="a"/> and <paramref name="b"/> carry the SAME value in
+    /// <paramref name="fieldName"/>'s typed column. The inverse question to
+    /// <see cref="ApplyToTypedColumn"/> — "did this assignment actually decide the column?" — so it lives
+    /// beside it rather than re-spelling the trio a fourth time somewhere else.
+    ///
+    /// Compared on the TYPED value, never on a rendering: a freshly-parsed <c>2000000m</c> and the
+    /// <c>numeric(18,2)</c> round-trip of the same amount are equal numbers whose
+    /// <see cref="decimal.ToString()"/> differs, so a string comparison would report a disagreement that
+    /// is not one. A non-canonical name has no typed column to disagree about and is trivially the same.
+    ///
+    /// Its one caller is <c>ExtractionWorker.PersistSuccess</c> (#467, ADR 0052 Amendment 1), asking it of
+    /// the tracked entity vs the <see cref="DocumentGradingBasis"/>: unequal means EF is about to OMIT the
+    /// column because the assignment matched the pre-run snapshot, so the row will keep a value this read
+    /// did not produce — and the raw copies this persist writes must not claim otherwise.
+    /// </summary>
+    public static bool SameTypedColumn(Document a, Document b, string? fieldName)
+    {
+        if (string.Equals(fieldName, EffectiveDate, StringComparison.OrdinalIgnoreCase))
+            return a.EffectiveDate == b.EffectiveDate;
+        if (string.Equals(fieldName, ExpirationDate, StringComparison.OrdinalIgnoreCase))
+            return a.ExpirationDate == b.ExpirationDate;
+        if (IsAmountField(fieldName))
+            return a.GeneralLiabilityLimit == b.GeneralLiabilityLimit;
+        return true;
+    }
+
     private static bool IsDateField(string? fieldName) =>
         string.Equals(fieldName, EffectiveDate, StringComparison.OrdinalIgnoreCase)
         || string.Equals(fieldName, ExpirationDate, StringComparison.OrdinalIgnoreCase);

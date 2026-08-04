@@ -72,7 +72,11 @@ outside `EvaluateRule`, so it is closed at the source too, not only behind the g
 
 **3. Both writers route the document to a human.** `ExtractionWorker.PersistSuccess` and
 `DocumentEndpoints.UpdateFields` each degrade the document to `ExtractionStatus.ManualRequired` when
-any canonical field came back `Unreadable`. This is the backstop for the case part 2 cannot reach:
+any canonical field came back `Unreadable`. (Since [ADR 0052](0052-extraction-trust-is-its-own-column.md)
+Amendment 1 / #467, the WORKER asks that of the row its own commit will leave — ADR 0030 Amendment 2's
+grading basis — rather than of the pre-run tracked snapshot it had been holding across OCR + the LLM
+call. Same one predicate, same fail-closed rule; the correction is which row it is a statement about, and
+it is the worker-side twin of Amendment 1 below.) This is the backstop for the case part 2 cannot reach:
 an org whose checklist carries **no rule** on the field would otherwise still grade Compliant with a
 silently-null column. On the extraction path this is a *third* trigger alongside low average
 confidence and the model's own reprocess signal — neither of which fires for a confidently-read date
