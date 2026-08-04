@@ -49,6 +49,18 @@ namespace CompliDrop.Api.Endpoints;
 /// optimistic, and the worker's persist path treats an exception out of its <c>SaveChanges</c> as a
 /// re-payable extraction (see <c>ExtractionWorker.Clamp</c>'s remarks).
 /// <para/>
+/// <c>MarkVerified</c> stays on that list after #465 (ADR 0052 Amendment 2) and the distinction is worth
+/// stating, because it now has a conflict guard of its own. That guard is NOT this one: it commits under
+/// <c>READ COMMITTED</c> and re-runs only when the BASIS its decision is a pure function of moved — the
+/// <c>ExtractionStatus</c> it read, and whether the row still carries an unreadable canonical value —
+/// which it detects by re-reading the row after its own write, while it holds the row lock. That is also
+/// why <c>ExtractionStatus</c> is the one column it keeps OUT of that write and applies afterwards: a
+/// re-read can only see a competitor on a column the same transaction did not write, so a status inside
+/// the UPDATE would make the check answer with this request's own value. An unrelated concurrent commit
+/// still wins last without conflicting there, exactly as this paragraph promises and as
+/// <c>An_unrelated_document_writer_still_wins_last_without_conflicting</c> pins. It shares this class's
+/// 409 envelope and retry bound; it does not share its isolation level.
+/// <para/>
 /// A retry RELOADS and RECOMPUTES: the caller's callback re-reads the document inside the new
 /// transaction and re-applies the request to it, so the winner's committed change is an INPUT to the
 /// retried verdict rather than something the loser overwrites from a stale snapshot.
@@ -74,6 +86,24 @@ internal static class DocumentWriteConcurrency
     /// </summary>
     internal const string RegradeConflictMessage =
         "Someone else changed this document while we were re-checking it. Reload the page and try again.";
+
+    /// <summary>
+    /// The exhausted-retry copy for the human CONFIRMATION (<c>DocumentEndpoints.MarkVerified</c>, #465 /
+    /// ADR 0052 Amendment 2). Same <see cref="ConflictCode"/> and the same envelope as its two siblings —
+    /// one code, because a client cannot act differently on any of them.
+    /// <para/>
+    /// Separate WORDING for the reason <see cref="RegradeConflictMessage"/> is separate: the edit copy
+    /// names a change this caller never submitted (<c>PUT /verify</c> has no request body at all), and the
+    /// re-grade copy names a re-check nobody asked for. What this caller lost is the confirmation itself.
+    /// <para/>
+    /// The message lives HERE rather than in the endpoint even though <c>MarkVerified</c> deliberately does
+    /// NOT take <see cref="RunAsync"/> (its guard is a post-write pair check under <c>READ COMMITTED</c>,
+    /// not this class's <c>REPEATABLE READ</c> — see the endpoint's own remarks): all three copies a
+    /// document-write conflict can answer with belong beside each other, so a fourth is written knowing
+    /// what the other three already say.
+    /// </summary>
+    internal const string VerifyConflictMessage =
+        "Someone else changed this document while you were confirming it. Reload the page and try again.";
 
     /// <summary>
     /// Executes <paramref name="write"/> inside a <c>REPEATABLE READ</c> transaction, retrying the WHOLE

@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CompliDrop.Api.Auth;
@@ -791,19 +792,224 @@ public static class DocumentEndpoints
     /// </summary>
     private sealed record AuditFieldSnapshot(string FieldName, string? FieldValue);
 
+    // A human confirmation writes a PAIR — ExtractionTrust beside the ExtractionStatus it was decided
+    // beside — and EF only ever emits the HALF of it that differs from this request's snapshot (#465,
+    // ADR 0052 Amendment 2). On an unsettled row ResolveManualReview deliberately leaves the status
+    // alone (moving Pending would DE-QUEUE the document), so the UPDATE carried trust WITHOUT it, and a
+    // whole-tuple commit from ExtractionWorker.PersistSuccess landing in the load→save window left the
+    // row holding ManualRequired + Trusted: a distrusted extraction rolling up to the vendor as Covered,
+    // the ADR 0042 hole. The mirror, Completed + Distrusted, is the half with no badge and no self-heal.
+    //
+    // The whole confirmation is a PURE FUNCTION of two things about the row — the status it is at, and
+    // whether a canonical value is unreadable (ManualReviewDecision.For). So the guard is: commit only
+    // if the row this transaction will LEAVE still presents the same two inputs the decision was
+    // computed FROM. Otherwise roll the attempt back and re-run it against a fresh read, bounded, then
+    // 409. Re-deciding is free here because PUT /verify carries no request body at all: nothing of the
+    // user's can be lost by re-reading, and the second answer is strictly better information.
+    //
+    // WHAT MAKES THE CHECK REAL IS WHICH COLUMN THE UPDATE OMITS. A re-read can only see a competitor on
+    // a column this transaction did NOT write — on any column it did write, the read comes back holding
+    // this request's own value and the comparison is a tautology. That was the #465 review's finding
+    // against the first shape of this fix: it re-read ExtractionStatus and compared it against the
+    // status ResolveManualReview had just WRITTEN, so in exactly the two arms where the confirmation
+    // moves the status (ManualRequired + readable → Completed, Completed + unreadable → ManualRequired)
+    // a competitor was invisible — a POST /reextract re-arm committed in the window was overwritten
+    // with Completed, destroying a re-read the user had been told was queued, and a PersistSuccess
+    // commit was overwritten with a clean bill of health decided from values it had just replaced.
+    // So ExtractionStatus is now written AFTER the check instead, and the ORDER is the mechanism:
+    //
+    //   1. SaveChanges writes IsManuallyVerified and ExtractionTrust — this request's own conclusions,
+    //      both FORCED (see ForceConfirmationWrite) — and NOT ExtractionStatus. That UPDATE takes the
+    //      row's write lock for the rest of the transaction.
+    //   2. Holding that lock, re-read the row and re-ask both inputs: the status (which this UPDATE did
+    //      not carry, so the answer is the competitor's if there was one) and the readability predicate
+    //      (asked of the row this commit will leave — the ADR 0030 Amendment 2 / ADR 0052 Amendment 1
+    //      basis shape, through the ONE predicate rather than by enumerating its columns). Nothing can
+    //      commit to the row between this read and our COMMIT, so the answer is stable, not merely
+    //      recent.
+    //   3. Only if both still agree with what the decision assumed, apply the status transition — under
+    //      the lock, so it cannot land on a row that moved after the check.
+    //
+    // Four shapes that look like this one and are not, recorded so they are not re-derived:
+    //
+    //  * FORCING ExtractionStatus into the UPDATE (the ExtractionWorker.SetTrust / ForceVerdictWrite
+    //    shape) is wrong here. That shape is right when the writer's own conclusion is the FRESHER
+    //    value; this request's snapshot status is the OLDER one, so forcing it would overwrite the
+    //    worker's fresh ManualRequired with a stale Pending — trading a torn pair for a lost update, and
+    //    de-queueing a document the worker is mid-flight on. It is also what blinded the first check.
+    //  * DocumentWriteConcurrency.RunAsync (REPEATABLE READ + 40001) is deliberately NOT taken. It would
+    //    make this writer conflict on any concurrent commit rather than on the one that changes an input
+    //    it decided from — the widening ADR 0030 Amendment 1 scopes to the two partial writers and #461
+    //    to the single re-grade, pinned against by
+    //    An_unrelated_document_writer_still_wins_last_without_conflicting. READ COMMITTED
+    //    last-writer-wins is retained; only this decision's own basis is made atomic with it.
+    //  * A PRE-decision row lock (SELECT … FOR NO KEY UPDATE) would be held ACROSS the SaveChanges, so
+    //    every other document writer waits behind a PUT /verify — and the competing edit in that same
+    //    pin can then never commit, turning the test into a HANG (ADR 0052 Amendment 2 Option P).
+    //  * A SECOND tracked SaveChanges for the status (instead of the targeted statement in step 3)
+    //    would keep the interceptor's diff whole, and is refused because it doubles the SaveChanges per
+    //    attempt: the suite's interleave hook fires per SaveChanges, so the same pin above would see two
+    //    competing-write windows for one attempt and could no longer say "it did not retry".
     private static async Task<IResult> MarkVerified(
         Guid id,
         AppDbContext db,
         IAuditLogger audit,
+        ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
-        var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
-        if (doc is null) return NotFound();
-        ResolveManualReview(doc);
-        doc.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(ct);
-        await audit.LogAsync("document.verified", nameof(Document), doc.Id);
-        return Results.Ok(new { data = new { message = "Document marked verified." }, error = (object?)null });
+        for (var attempt = 1; attempt <= DocumentConcurrency.MaxAttempts; attempt++)
+        {
+            // READ COMMITTED, stated rather than inherited: the isolation level is NOT what detects the
+            // conflict here (that is the basis check below), and naming it keeps a future reader from
+            // reading this transaction as the REPEATABLE READ guard arriving on a fourth writer.
+            await using var tx = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct);
+
+            var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
+            if (doc is null) return NotFound();
+
+            // Step 1. What the decision is made FROM, captured before anything is mutated…
+            var basis = ManualReviewBasis.Of(doc);
+            // …and what it decides. The status half is deliberately NOT applied to the entity: see
+            // step 3 below, and applyStatus's own remarks.
+            var decided = ResolveManualReview(doc, applyStatus: false);
+            ForceConfirmationWrite(db, doc);
+            await db.SaveChangesAsync(ct);
+
+            // Step 2. Read the ROW rather than the tracked entity — inside this transaction that is our
+            // own not-yet-committed UPDATE applied on top of whatever committed before it, i.e.
+            // precisely what this transaction will LEAVE. The whole entity, on purpose: the readability
+            // half is asked through DocumentFieldReadability, which OWNS which columns it consults, and
+            // listing them here would be the input ENUMERATION ADR 0030 Amendment 2 Option E refutes.
+            //
+            // It extends the row lock by one round trip and introduces no deadlock: this transaction
+            // acquires exactly ONE contended lock (the Documents row, taken by its own UPDATE) and
+            // acquires nothing after it — the read and the status write below touch the row it already
+            // holds, and the audit row is an INSERT of a brand-new tuple. A transaction that never waits
+            // while holding a contended lock cannot be half of a cycle, which is why this needs no 40P01
+            // handling and changes no lock ACQUISITION order (see DocumentConcurrency's remarks on why a
+            // deadlock here would be a NEW bug rather than something to absorb).
+            var committed = await db.Documents.AsNoTracking().FirstOrDefaultAsync(d => d.Id == id, ct);
+
+            if (committed is null)
+            {
+                // The document was deleted (soft-deleted, so the query filter hides it) inside the
+                // window. Nothing of ours may stand on it, and there is nothing to re-decide.
+                await tx.RollbackAsync(ct);
+                db.ChangeTracker.Clear();
+                return NotFound();
+            }
+
+            var committedBasis = ManualReviewBasis.Of(committed);
+            if (committedBasis == basis)
+            {
+                // Step 3. The basis held, so this decision is the right one for the row that is about to
+                // commit — apply the status half, which was kept out of the UPDATE above so the check
+                // could see past it. A targeted statement rather than the change tracker: a second
+                // SaveChanges is refused for the reason in the remarks above, and this is the one column
+                // whose Before/After the interceptor's row therefore cannot carry — so the explicit
+                // document.verified row carries it instead.
+                if (decided.Status != basis.Status)
+                {
+                    await db.Documents
+                        .Where(d => d.Id == id)
+                        .ExecuteUpdateAsync(set => set.SetProperty(d => d.ExtractionStatus, decided.Status), ct);
+                }
+
+                await tx.CommitAsync(ct);
+                // After the commit, as before: IAuditLogger writes on its own SystemDbContext connection,
+                // outside this transaction's reach, so an abandoned attempt must not have emitted one.
+                await audit.LogAsync("document.verified", nameof(Document), doc.Id,
+                    before: new { ExtractionStatus = basis.Status },
+                    after: new { ExtractionStatus = decided.Status });
+                return Results.Ok(new { data = new { message = "Document marked verified." }, error = (object?)null });
+            }
+
+            // Clearing the tracker is what makes the next attempt a genuine re-read rather than a replay
+            // of the snapshot that just lost — it also discards the AuditLog row the interceptor staged
+            // for the rolled-back attempt, so the audit trail describes only what committed.
+            await tx.RollbackAsync(ct);
+            db.ChangeTracker.Clear();
+            loggerFactory.CreateLogger(typeof(DocumentEndpoints)).LogWarning(
+                "Document {DocumentId} moved from {DecidedFrom} to {Committed} while it was being confirmed "
+                + "(attempt {Attempt} of {MaxAttempts}); re-reading and re-deciding",
+                id, basis, committedBasis, attempt, DocumentConcurrency.MaxAttempts);
+        }
+
+        // Exhaustion commits NOTHING and leaves the last writer's own coherent pair standing — the same
+        // answer, for the same reason, that ADR 0030 Amendment 3 gives the pure re-grade: this request
+        // owns no inputs, so there is no half-applied write to complete and no user text to lose.
+        return DocumentWriteConcurrency.Conflict(DocumentWriteConcurrency.VerifyConflictMessage);
+    }
+
+    /// <summary>
+    /// Everything <see cref="ManualReviewDecision.For"/> reads — the two facts a human confirmation is a
+    /// pure function of. Captured from the request's snapshot before the write and re-asked of the row
+    /// the commit will LEAVE afterwards; the confirmation stands only if the two agree (#465, ADR 0052
+    /// Amendment 2). A record so the comparison is one <c>==</c> that cannot forget a member.
+    /// <para/>
+    /// <see cref="Unreadable"/> rather than the columns behind it: <c>DocumentFieldReadability</c> owns
+    /// which columns readability is a function of, and re-listing them here would be the input
+    /// enumeration ADR 0030 Amendment 2 Option E refutes — it would also start conflicting on edits that
+    /// change a value without changing how it reads, which is not a conflict for this writer.
+    /// </summary>
+    private sealed record ManualReviewBasis(ExtractionStatus Status, bool Unreadable)
+    {
+        internal static ManualReviewBasis Of(Document doc) =>
+            new(doc.ExtractionStatus, DocumentFieldReadability.HasUnreadableCanonicalValue(doc));
+    }
+
+    /// <summary>
+    /// What a human confirmation concludes about a document, as a value: the status it should end at and
+    /// the trust that belongs beside it. <see cref="ResolveManualReview"/> applies it; <c>MarkVerified</c>
+    /// also needs to hold it, because it applies the two halves at different points of its transaction.
+    /// </summary>
+    private readonly record struct ManualReviewDecision(ExtractionStatus Status, ExtractionTrust Trust)
+    {
+        /// <summary>
+        /// The ONE decision, as a pure function of the two facts in <see cref="ManualReviewBasis"/> —
+        /// which is what lets <c>MarkVerified</c> ask whether the row it is about to commit still
+        /// decides the same way, without re-running it against a half-mutated entity.
+        /// </summary>
+        internal static ManualReviewDecision For(ExtractionStatus status, bool unreadable)
+        {
+            var wasSettled = status is ExtractionStatus.Completed or ExtractionStatus.ManualRequired;
+            var resolved = status == ExtractionStatus.ManualRequired ? ExtractionStatus.Completed : status;
+            // The ADR 0040 escalation, measured against the status this document came IN at: Pending and
+            // Processing are the worker's queue states and overwriting Pending would DE-QUEUE the
+            // document, while Failed is its own louder error state.
+            if (wasSettled && unreadable) resolved = ExtractionStatus.ManualRequired;
+            return new ManualReviewDecision(
+                resolved, unreadable ? ExtractionTrust.Distrusted : ExtractionTrust.Trusted);
+        }
+    }
+
+    /// <summary>
+    /// Forces the two columns the confirmation OWNS into the UPDATE, so the statement exists and carries
+    /// this request's conclusions whether or not they differ from the snapshot it read. The
+    /// <c>ExtractionWorker.SetTrust</c> shape (ADR 0052 §2) one writer over, for two reasons that both
+    /// apply only here:
+    /// <list type="bullet">
+    /// <item>The UPDATE is what takes the row's write lock, and every guarantee the basis check makes
+    /// rests on holding it. A confirmation of an ALREADY-verified row whose trust also matches would
+    /// emit no UPDATE at all, and the check would then read a row nothing is holding still.</item>
+    /// <item>This writer commits under <c>READ COMMITTED</c>, so the row CAN have moved under its
+    /// snapshot — and an assignment that matches that snapshot emits no <c>SET</c>, leaving a
+    /// competitor's trust standing where this confirmation's own conclusion belongs. Its sibling caller
+    /// <c>UpdateFields</c> needs no such force: it runs inside <c>DocumentWriteConcurrency</c>'s
+    /// <c>REPEATABLE READ</c> + <c>40001</c> re-run, where a row that moved under the snapshot aborts the
+    /// transaction instead.</item>
+    /// </list>
+    /// Forcing TRUST is sound only because the basis check re-asks readability of the row this commit
+    /// will leave: trust is a pure function of it, so what gets forced is this request's conclusion about
+    /// the values the row ACTUALLY holds, not about the ones it happened to read. Without that check the
+    /// same force would be the fail-OPEN direction — a stale <c>Trusted</c> written over a competitor's
+    /// fresher <c>Distrusted</c> on a value the competitor had just broken.
+    /// </summary>
+    private static void ForceConfirmationWrite(AppDbContext db, Document doc)
+    {
+        var entry = db.Entry(doc);
+        entry.Property(d => d.IsManuallyVerified).IsModified = true;
+        entry.Property(d => d.ExtractionTrust).IsModified = true;
     }
 
     private static async Task<IResult> Reextract(
@@ -993,21 +1199,25 @@ public static class DocumentEndpoints
     // the clean bill of health ADR 0040 requires to fail closed and ADR 0052 says the click can no longer
     // buy. Trust now follows readability on every status; only the escalation back to ManualRequired stays
     // gated.
-    private static void ResolveManualReview(Document doc)
+    /// <param name="applyStatus">
+    /// False only for <c>MarkVerified</c> (#465, ADR 0052 Amendment 2), which applies the status half
+    /// itself AFTER its basis check. The reason is the check rather than the write: that check works by
+    /// re-reading a column this request's own UPDATE did not carry, so a status written here would come
+    /// back holding this request's value and the comparison would be a tautology in exactly the two arms
+    /// where the confirmation moves the status. The decision is returned rather than duplicated, so both
+    /// callers still take it from the ONE resolver.
+    /// </param>
+    private static ManualReviewDecision ResolveManualReview(Document doc, bool applyStatus = true)
     {
-        var wasSettled = doc.ExtractionStatus
-            is ExtractionStatus.Completed or ExtractionStatus.ManualRequired;
         // Asked AFTER the caller has finalized the field mirror and the typed columns, and asked of the
         // DOCUMENT rather than of the field names this request happened to submit (see above).
-        var unreadable = DocumentFieldReadability.HasUnreadableCanonicalValue(doc);
+        var decision = ManualReviewDecision.For(
+            doc.ExtractionStatus, DocumentFieldReadability.HasUnreadableCanonicalValue(doc));
 
         doc.IsManuallyVerified = true;
-        doc.ExtractionTrust = unreadable ? ExtractionTrust.Distrusted : ExtractionTrust.Trusted;
-        if (doc.ExtractionStatus == ExtractionStatus.ManualRequired)
-            doc.ExtractionStatus = ExtractionStatus.Completed;
-
-        if (wasSettled && unreadable)
-            doc.ExtractionStatus = ExtractionStatus.ManualRequired;
+        doc.ExtractionTrust = decision.Trust;
+        if (applyStatus) doc.ExtractionStatus = decision.Status;
+        return decision;
     }
 
 

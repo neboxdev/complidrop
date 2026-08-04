@@ -390,10 +390,20 @@ public class ExtractionWorker(
     /// <para/>
     /// Forcing the column closes this writer's half only. ADR 0052 § Consequences records the OTHER two
     /// paths to the same incoherent pairs, and neither is a deploy overlap alone: the request-side
-    /// <c>MarkVerified</c> is an unforced READ COMMITTED partial write, so a commit from HERE landing
-    /// inside ITS load→save window leaves the pair disagreeing the other way round
+    /// <c>MarkVerified</c> was an unforced READ COMMITTED partial write, so a commit from HERE landing
+    /// inside ITS load→save window left the pair disagreeing the other way round
     /// (<see href="https://github.com/neboxdev/complidrop/issues/465">#465</see>, the ADR 0030
     /// last-writer-wins class). Do not read this comment as "the pairs are otherwise deploy-only".
+    /// <para/>
+    /// #465 has since closed (ADR 0052 Amendment 2) and it did NOT close by giving that writer this
+    /// force — the deploy-overlap pairs remain. The force is right where the writer's own conclusion is
+    /// the FRESHER value, which is this writer's case: it is deciding trust now, from the read it just
+    /// performed. <c>MarkVerified</c>'s snapshot status is the OLDER value, so forcing it there would
+    /// overwrite a live <c>ManualRequired</c> with a stale <c>Pending</c> and DE-QUEUE the extraction that
+    /// was re-deciding trust. It makes its pair atomic by DETECTING the move instead: it re-reads, after
+    /// its own write and under the row lock that write takes, the status the row will actually leave, and
+    /// re-runs the confirmation against a fresh read when somebody moved it. Two writers, one invariant,
+    /// two mechanisms — because only one of them owns the fresher answer.
     /// <para/>
     /// This is NOT the ADR 0030 stale-snapshot residual (<see
     /// href="https://github.com/neboxdev/complidrop/issues/460">#460</see>), which is about a writer

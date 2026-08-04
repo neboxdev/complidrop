@@ -2747,27 +2747,32 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
     }
 
     [Fact]
-    public async Task Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read()
+    public async Task Marking_verified_still_emits_trust_WITHOUT_forcing_the_status_it_read()
     {
-        // #459 review round 2, C1 — the pin behind the THIRD reachability path ADR 0052 § Consequences
-        // now records for an incoherent (status, trust) pair. MarkVerified is an unforced READ-COMMITTED
-        // partial write: it SELECTs the document, and EF then emits only the properties that differ from
-        // that snapshot. On an UNSETTLED row ResolveManualReview leaves ExtractionStatus alone by design
-        // (moving Pending would de-queue the document), so the UPDATE carries trust and NOT status.
+        // #465 / ADR 0052 Amendment 2. This test began life (in the #459 review) pinning the PROPERTY that
+        // made an incoherent (status, trust) pair reachable, as an accepted residue. #465 closed that
+        // residue, so it changes here — deliberately, and to pin the three halves of the shape that closed
+        // it, because ALL are load-bearing and each one alone is a different bug.
         //
-        // That partiality is exactly what makes the pair reachable without any deploy overlap: land
-        // ExtractionWorker.PersistSuccess's whole-tuple commit (ManualRequired + Distrusted) inside this
-        // request's load→save window and the row ends ManualRequired + TRUSTED — a distrusted basis
-        // rolling up as Covered, the ADR 0042 hole. The mirror (Completed + Distrusted) comes from the
-        // other seed. This is the ADR 0030 last-writer-wins class, the same family as #460 / #461 — #460
-        // has since closed (ADR 0030 Amendment 2) and its grading basis does not reach here, because this
-        // is two columns a partial write left disagreeing, not a verdict computed from the wrong inputs.
+        //  1. The UPDATE is STILL partial: it carries ExtractionTrust and NOT ExtractionStatus. Forcing
+        //     the status in (the ExtractionWorker.SetTrust / ForceVerdictWrite shape) is the obvious
+        //     "make it a whole-tuple writer" fix and it is WRONG here — that shape is right only when the
+        //     writer's own conclusion is the FRESHER value, and this request's snapshot status is the
+        //     OLDER one. Forcing it would overwrite a worker's fresh ManualRequired with a stale Pending:
+        //     a lost update, and a de-queued document (ExtractionWorker claims on Pending).
+        //  2. What makes that partiality SAFE is the basis check after the write, taken while this
+        //     transaction holds the row's write lock: it re-reads the ROW — the status, and the columns
+        //     DocumentFieldReadability consults — and re-runs the decision's inputs against it. A
+        //     disagreement rolls the attempt back and re-decides against a fresh read.
+        //  3. And the status write, when the decision moves it, lands AFTER that check. This is the half
+        //     the #465 review added (round 2, C2): a status inside the UPDATE at (1) does not merely risk
+        //     a lost update, it BLINDS the check at (2) — the re-read comes back holding this request's
+        //     own value, so in exactly the two arms where the confirmation moves the status no competitor
+        //     could ever be seen. Both arms are exercised below, one document each.
         //
-        // The interleave itself has no seam to construct through — one HTTP request, no injection point —
-        // so what is pinned is the PROPERTY that makes it reachable rather than the race. If this writer
-        // is ever made whole-tuple (the conditional-ExecuteUpdateAsync shape ADR 0052 weighs and declines,
-        // because it would drop the AuditSaveChangesInterceptor row on a human confirmation), this test is
-        // the one that must be updated deliberately, together with the residue bullet it backs.
+        // Dropping any half leaves the suite green on a real defect. The BEHAVIOUR is pinned by
+        // DocumentConcurrentEditTests' six A_confirmation_… interleaves; what only this test can see is
+        // which statement carried which column, and in what order.
         //
         // Read off the host's EF command log through a Serilog sink — the shape
         // The_reextract_guard_compares_against_the_DATABASE_clock uses, for the same reason: no
@@ -2814,17 +2819,92 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
                 "…and really did leave the status alone, which is the de-queue guard doing its job");
         }
 
-        var update = sink.LastMessageContaining("UPDATE \"Documents\"", "\"IsManuallyVerified\"");
-        update.Should().NotBeNull(
+        AssertConfirmationStatementShape(sink, movesTheStatus: false);
+
+        // The SECOND arm, and the one the review's C2 was about: a settled row with readable values, so
+        // the confirmation's decision MOVES the status (ManualRequired -> Completed). Same host, same
+        // sink; asserted after the first so FindLastIndex reads this request's statements.
+        var movingId = await SeedExtractionStateAsync(orgId, ExtractionStatus.ManualRequired, claimAge: null);
+        await using (var seed = CreateSystemDb())
+        {
+            var doc0 = await seed.Documents.FirstAsync(d => d.Id == movingId);
+            doc0.ExtractionTrust = ExtractionTrust.Distrusted;
+            await seed.SaveChangesAsync();
+        }
+
+        (await client.PutAsync($"/api/documents/{movingId}/verify", content: null))
+            .StatusCode.Should().Be(HttpStatusCode.OK);
+
+        await using (var verify = CreateSystemDb())
+        {
+            var doc = await verify.Documents.AsNoTracking().FirstAsync(d => d.Id == movingId);
+            doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+                "precondition: this arm really does move the status, so the statement order below is not "
+                + "being read off a request that had nothing to move");
+        }
+
+        AssertConfirmationStatementShape(sink, movesTheStatus: true);
+    }
+
+    /// <summary>
+    /// The three halves of <see cref="Marking_verified_still_emits_trust_WITHOUT_forcing_the_status_it_read"/>,
+    /// read off the host's EF command log for the LAST confirmation in it. Shared by the two arms
+    /// (status unchanged / status moved) because the first two halves must hold identically in both — the
+    /// arm is exactly what half 3 turns on.
+    /// </summary>
+    private static void AssertConfirmationStatementShape(CapturingLogEventSink sink, bool movesTheStatus)
+    {
+        var messages = sink.Events
+            .Select(e => e.RenderMessage().Replace("\\\"", "\"", StringComparison.Ordinal))
+            .ToList();
+
+        var updateIndex = messages.FindLastIndex(m =>
+            m.Contains("UPDATE \"Documents\"", StringComparison.Ordinal)
+            && m.Contains("\"IsManuallyVerified\"", StringComparison.Ordinal));
+        updateIndex.Should().BeGreaterOrEqualTo(0,
             "the confirmation's UPDATE must appear in the host's EF command log — if it does not, this "
             + "test is a no-op and proves nothing about which columns the write carried");
+
+        var update = messages[updateIndex];
         update.Should().Contain("\"ExtractionTrust\" =",
-            "anti-no-op: the statement we are reading must be the one that writes trust");
+            "anti-no-op: the statement we are reading must be the one that writes trust — and it carries "
+            + "trust in BOTH arms because the confirmation FORCES its own conclusion into the UPDATE "
+            + "rather than leaving it to EF's diff against a snapshot the row may have moved past");
         update.Should().NotContain("\"ExtractionStatus\" =",
-            "the write is PARTIAL — trust without the status it was decided beside — so a worker commit "
-            + "landing between this request's SELECT and this UPDATE leaves the two columns disagreeing. "
-            + "Recorded as an accepted residue in ADR 0052 § Consequences (the ADR 0030 last-writer-wins "
-            + "class, family of #461 and of the now-closed #460), NOT closed by widening "
-            + "DocumentWriteConcurrency's REPEATABLE READ guard to this writer");
+            "half 1 — the write stays PARTIAL. Forcing the status in would write the OLDER value over a "
+            + "worker's fresher one and de-queue a live extraction (the worker claims on Pending), which "
+            + "trades #465's torn pair for a lost update. ADR 0052 Amendment 2; ADR 0030 Amendment 2 "
+            + "Option G is the same refusal for a verdict INPUT");
+
+        var checkIndex = messages.FindIndex(updateIndex + 1, m =>
+            m.Contains("SELECT ", StringComparison.Ordinal)
+            && m.Contains("d.\"ExtractionStatus\"", StringComparison.Ordinal)
+            && m.Contains("d.\"ExtractionFields\"", StringComparison.Ordinal));
+        checkIndex.Should().BeGreaterOrEqualTo(0,
+            "half 2 — the basis check must run AFTER that UPDATE, which is the whole reason the "
+            + "partiality above is safe. It re-reads the ROW this transaction will actually commit (our "
+            + "own UPDATE already holds the row's write lock, so the answer cannot move again): the "
+            + "status, AND the columns readability is a function of — ExtractionFields is the one this "
+            + "assertion names, because a status-only projection is what let a competing read replace the "
+            + "values under a confirmation that then vouched for them. Read BEFORE the write it would be "
+            + "a plain reload that closes nothing; dropped entirely, #465 is back");
+
+        var statusWrite = messages.FindIndex(checkIndex + 1, m =>
+            m.Contains("UPDATE \"Documents\"", StringComparison.Ordinal)
+            && m.Contains("\"ExtractionStatus\" =", StringComparison.Ordinal));
+        if (movesTheStatus)
+        {
+            statusWrite.Should().BeGreaterOrEqualTo(0,
+                "half 3 — when the decision moves the status, that write lands AFTER the check, under the "
+                + "row lock the UPDATE above already holds. Moving it back into that UPDATE is not a "
+                + "tidy-up: the check at half 2 would then re-read this request's OWN value and could "
+                + "never fail in this arm, which is exactly the tautology #465's review found (C2)");
+        }
+        else
+        {
+            statusWrite.Should().Be(-1,
+                "…and on an unsettled row there is no status write at all: moving Pending would DE-QUEUE "
+                + "the document (the worker claims on ExtractionStatus == Pending)");
+        }
     }
 }
