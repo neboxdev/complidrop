@@ -208,6 +208,20 @@ public class Adr0052EnforcementTests
             + "in this file is a fifth writer overall — most dangerously one that grants Trusted without "
             + "asking DocumentFieldReadability, which is how a document with an unreadable canonical value "
             + "gets back into vendor coverage");
+
+        // The THIRD shape, which neither assertion above can see (#465 review round 2). MarkVerified
+        // FORCES its trust write into the UPDATE — the SetTrust argument one writer over, because it
+        // commits under READ COMMITTED where the row can have moved under its snapshot. `IsModified = true`
+        // is neither an assignment nor a SetProperty, so it passes both counts, and it is only SOUND
+        // beside the basis check that re-asks readability of the row the commit will leave: forced without
+        // it, a stale Trusted lands over a competitor's fresher Distrusted on a value that competitor had
+        // just broken. Counted, not located, so a second force arriving anywhere in this file — most
+        // plausibly bolted onto UpdateFields, which needs none (REPEATABLE READ aborts instead) — has to
+        // answer for itself here.
+        Regex.Matches(endpoints, @"Property\(d => d\.ExtractionTrust\)").Count.Should().Be(1,
+            "exactly one request-side writer forces trust: MarkVerified, whose check earns it (ADR 0052 "
+            + "Amendment 2). Deleting that force is the other direction — a confirmation whose conclusion "
+            + "matches its own snapshot would then leave a competitor's judgment standing in its place");
     }
 
     [Fact]
