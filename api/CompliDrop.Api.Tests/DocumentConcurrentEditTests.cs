@@ -649,6 +649,240 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
             + "the worker had just raised, beside the clean bill of health a confirmation decided from a "
             + "snapshot taken before it, i.e. a distrusted extraction back inside vendor coverage");
         doc.IsManuallyVerified.Should().BeTrue("the confirmation itself still landed");
+
+        // …and the abandoned attempt contributed NEITHER audit row (#465 review round 2, S3). The
+        // competing writes run on a SystemDbContext with no current user, so every row here belongs to
+        // the confirmation: exactly one interceptor diff from the attempt that committed, and exactly one
+        // explicit event. Two of either would mean a rolled-back attempt left a row behind it.
+        await using var db = CreateSystemDb();
+        var rows = await db.AuditLogs
+            .Where(a => a.EntityId == docId)
+            .GroupBy(a => a.Action)
+            .Select(g => new { Action = g.Key, Count = g.Count() })
+            .ToListAsync();
+        rows.Should().BeEquivalentTo(new[]
+        {
+            new { Action = "document.updated", Count = 1 },
+            new { Action = "document.verified", Count = 1 },
+        }, "only the attempt that COMMITTED may be audited, and it is audited exactly once");
+    }
+
+    [Fact]
+    public async Task A_confirmation_cannot_overwrite_a_re_arm_committed_inside_its_window()
+    {
+        // #465 review round 2, C2 — the finding against the FIRST shape of this fix, and the harm that
+        // makes it a bug rather than a tidiness point.
+        //
+        // The first pair check re-read ExtractionStatus and compared it against the status
+        // ResolveManualReview had just WRITTEN, so in the two arms where the confirmation MOVES the
+        // status the comparison read back its own value and could never fail. This is one of those arms
+        // (ManualRequired + readable -> Completed), and the competitor is the one whose loss is loudest:
+        // POST /reextract commits Pending — the queue re-arm — and answers the user "Re-extraction
+        // queued.". The confirmation then wrote Completed straight over it. Nothing re-queues a Completed
+        // row (ExtractionWorker claims on ExtractionStatus == Pending), so the re-read the user asked for
+        // never happened, with a 200 telling them it would.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedCertAwaitingConfirmationAsync(
+            auth.OrgId, ExtractionStatus.ManualRequired, ExtractionTrust.Distrusted, ReadableExpiration);
+        var second = await LoginAsync(auth.Email);
+
+        var competingWrites = 0;
+        Interleave.OnSavingChanges = async () =>
+        {
+            if (Interlocked.Increment(ref competingWrites) > 1) return;
+            var resp = await SendAsync(second.Client, HttpMethod.Post, $"/api/documents/{docId}/reextract");
+            resp.StatusCode.Should().Be(HttpStatusCode.OK, "the re-arm must really have committed");
+        };
+
+        var response = await SendAsync(auth.Client, HttpMethod.Put, $"/api/documents/{docId}/verify");
+        Interleave.Reset();
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK,
+            "the conflicted attempt is re-decided against a fresh read, not surfaced to the user");
+        competingWrites.Should().Be(2,
+            "ANTI-NO-OP: the second attempt re-entered the hook, which is what proves the check fired at "
+            + "all. With the status back inside the confirmation's own UPDATE this reads 1");
+
+        var doc = await ReadDocumentAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending,
+            "the re-arm must SURVIVE: the document is still queued, so the re-read the user was told was "
+            + "queued still happens. Overwriting it with Completed strands the document — nothing else "
+            + "ever moves a Completed row back into the queue");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+            "and the confirmation still lands its OWN conclusion beside it — the values re-read on attempt "
+            + "2 are readable, so a human confirming them grants trust (ADR 0052 §2's human exit)");
+        doc.IsManuallyVerified.Should().BeTrue("the confirmation itself still landed");
+
+        await using var db = CreateSystemDb();
+        (await db.AuditLogs.CountAsync(a => a.EntityId == docId && a.Action == "document.reextract_queued"))
+            .Should().Be(1, "anti-no-op: the competing re-extract really was recorded as having happened");
+    }
+
+    [Fact]
+    public async Task A_confirmation_cannot_vouch_for_values_a_re_read_replaced_inside_its_window()
+    {
+        // #465 review round 2, C2's second harm — the same blind arm, reached by the competitor the
+        // ticket is actually about. ExtractionWorker.PersistSuccess commits a whole tuple; here it lands
+        // on a row ALREADY at ManualRequired + Distrusted and leaves that pair exactly where it found it,
+        // while replacing the canonical value with one nothing can read.
+        //
+        // So the pair moved not at all and only the BASIS moved — which is why the fix cannot be a
+        // (status, trust) comparison: it has to re-ask the question the decision is a function of, of the
+        // row this commit will leave. Without that, the confirmation commits Completed + Trusted over an
+        // unreadable expiration: an ADR 0040 fail-OPEN row, with no badge (ManualReviewCard needs
+        // ManualRequired) and no self-heal.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedCertAwaitingConfirmationAsync(
+            auth.OrgId, ExtractionStatus.ManualRequired, ExtractionTrust.Distrusted, ReadableExpiration);
+
+        var competingWrites = 0;
+        Interleave.OnSavingChanges = async () =>
+        {
+            if (Interlocked.Increment(ref competingWrites) > 1) return;
+            await CommitExtractionPairAsync(
+                docId, ExtractionStatus.ManualRequired, ExtractionTrust.Distrusted, UnreadableExpiration);
+        };
+
+        var response = await SendAsync(auth.Client, HttpMethod.Put, $"/api/documents/{docId}/verify");
+        Interleave.Reset();
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        competingWrites.Should().Be(2, "ANTI-NO-OP: the second attempt re-entered the hook");
+
+        var doc = await ReadDocumentAsync(docId);
+        doc.ExpirationDate.Should().BeNull(
+            "precondition: the competing read's value is the one on the row, and it is the ADR 0040 shape "
+            + "— non-blank, and ApplyToTypedColumn refused it");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "a confirmation may not vouch for a value nothing can read. The trust granted on attempt 1 was "
+            + "a conclusion about text the row no longer carries — ADR 0040 fails CLOSED, and this is the "
+            + "fail-OPEN landing that made the first pair check insufficient");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
+            "…and the review flag stays raised, so the detail page can still say why");
+        doc.IsManuallyVerified.Should().BeTrue("the confirmation itself still landed");
+    }
+
+    [Fact]
+    public async Task A_confirmation_cannot_raise_a_review_flag_beside_a_trust_a_repair_just_granted()
+    {
+        // #465 review round 2, the PLAUSIBLE finding — the same defect on the OTHER column, and the one
+        // interleave that lands squarely on the fail-OPEN pair the amendment says it has closed.
+        //
+        // The seed is the recorded deploy-overlap residue (Completed + Distrusted, no self-heal) carrying
+        // an unreadable value. The confirmation therefore decides Distrusted — which EQUALS the row's
+        // trust, so EF emitted no SET for it — and moves the status Completed -> ManualRequired, which is
+        // the second blind arm. A concurrent PUT /fields then FIXES the value and commits its own
+        // coherent Completed + Trusted inside the window. The confirmation's UPDATE carried the status
+        // only, its read-back returned that same status, and the row landed ManualRequired + Trusted: a
+        // review-flagged document inside vendor coverage.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedCertAwaitingConfirmationAsync(
+            auth.OrgId, ExtractionStatus.Completed, ExtractionTrust.Distrusted, UnreadableExpiration);
+        var second = await LoginAsync(auth.Email);
+
+        var competingWrites = 0;
+        Interleave.OnSavingChanges = async () =>
+        {
+            if (Interlocked.Increment(ref competingWrites) > 1) return;
+            var resp = await EditFieldAsync(
+                second.Client, docId, CanonicalDocumentFields.ExpirationDate, ReadableExpiration);
+            resp.StatusCode.Should().Be(HttpStatusCode.OK, "the repair must really have committed");
+        };
+
+        var response = await SendAsync(auth.Client, HttpMethod.Put, $"/api/documents/{docId}/verify");
+        Interleave.Reset();
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        competingWrites.Should().Be(2, "ANTI-NO-OP: the second attempt re-entered the hook");
+
+        var doc = await ReadDocumentAsync(docId);
+        doc.ExpirationDate.Should().NotBeNull("precondition: the repair really did make the value readable");
+        (doc.ExtractionStatus, doc.ExtractionTrust).Should().Be(
+            (ExtractionStatus.Completed, ExtractionTrust.Trusted),
+            "the row must hold ONE writer's coherent pair. Pre-fix it landed ManualRequired + Trusted — a "
+            + "review flag raised over text the repair had already replaced, beside the trust that repair "
+            + "granted: the fail-OPEN pair ADR 0042 exists to keep out of vendor coverage");
+        doc.IsManuallyVerified.Should().BeTrue("the confirmation itself still landed");
+    }
+
+    [Fact]
+    public async Task A_confirmation_whose_document_is_DELETED_inside_its_window_audits_nothing()
+    {
+        // #465 review round 2, S2. The basis check re-reads through the tenant query filter, so a soft
+        // delete committed inside the window comes back as ABSENCE rather than as a moved basis — a
+        // different answer (404, no re-run) for a different fact. Without a test, deleting that branch
+        // changes no outcome: the mismatch would fall through to a retry whose own read returns null and
+        // 404s anyway, so nothing would notice if its rollback were ever weakened.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedCertAwaitingConfirmationAsync(
+            auth.OrgId, ExtractionStatus.Pending, ExtractionTrust.Distrusted, ReadableExpiration);
+        var second = await LoginAsync(auth.Email);
+
+        var competingWrites = 0;
+        Interleave.OnSavingChanges = async () =>
+        {
+            if (Interlocked.Increment(ref competingWrites) > 1) return;
+            var resp = await SendAsync(second.Client, HttpMethod.Delete, $"/api/documents/{docId}");
+            resp.StatusCode.Should().Be(HttpStatusCode.OK, "the delete must really have committed");
+        };
+
+        var response = await SendAsync(auth.Client, HttpMethod.Put, $"/api/documents/{docId}/verify");
+        Interleave.Reset();
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound,
+            "there is nothing left to confirm, and nothing to re-decide either");
+        competingWrites.Should().Be(1, "the absence is terminal — it must NOT be re-run as if it were a conflict");
+
+        await using var db = CreateSystemDb();
+        var doc = await db.Documents.IgnoreQueryFilters().AsNoTracking().FirstAsync(d => d.Id == docId);
+        doc.IsManuallyVerified.Should().BeFalse("nothing of ours may stand on a row that was deleted");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted,
+            "…including the trust it was about to grant");
+
+        var actions = await db.AuditLogs.Where(a => a.EntityId == docId).Select(a => a.Action).ToListAsync();
+        actions.Should().BeEquivalentTo(["document.deleted"],
+            "only the delete happened: the abandoned confirmation's interceptor row rolls back with its "
+            + "transaction, and the explicit document.verified row is never reached");
+    }
+
+    [Fact]
+    public async Task A_confirmation_that_loses_at_its_COMMIT_leaves_no_audit_row_behind_it()
+    {
+        // #465 review round 2, S3. The confirmation now has an explicit COMMIT that can fail AFTER a
+        // successful SaveChanges — a step it did not have before — and the explicit document.verified row
+        // is written on IAuditLogger's own connection, where a rollback cannot reach it. So the ORDER of
+        // those two is load-bearing and nothing pinned it: the exhaustion test's empty-log assertion
+        // never runs the success branch, and RecentActivityFeedTests only covers the uncontended path.
+        //
+        // Move audit.LogAsync above tx.CommitAsync and every other test still passes, while a confirmation
+        // whose commit failed is recorded in the customer's audit export as having happened. This is the
+        // pin that catches it — the sibling of An_attempt_that_loses_at_COMMIT_leaves_no_audit_row_behind_it.
+        var auth = await RegisterAndLoginAsync();
+        var docId = await SeedCertAwaitingConfirmationAsync(
+            auth.OrgId, ExtractionStatus.ManualRequired, ExtractionTrust.Distrusted, ReadableExpiration);
+
+        var commits = 0;
+        CommitFault.OnCommitting = ordinal =>
+        {
+            Interlocked.Exchange(ref commits, ordinal);
+            return Task.FromResult(true);
+        };
+
+        var response = await SendAsync(auth.Client, HttpMethod.Put, $"/api/documents/{docId}/verify");
+        CommitFault.Reset();
+
+        commits.Should().Be(1, "the confirmation must have reached its COMMIT — otherwise nothing is under test");
+        response.IsSuccessStatusCode.Should().BeFalse(
+            "a confirmation whose transaction never committed did not happen");
+
+        await using var db = CreateSystemDb();
+        (await db.AuditLogs.Where(a => a.EntityId == docId).Select(a => a.Action).ToListAsync())
+            .Should().BeEmpty("neither the interceptor's diff nor the explicit event may survive the rollback");
+
+        var doc = await ReadDocumentAsync(docId);
+        doc.IsManuallyVerified.Should().BeFalse("and the row is exactly as the failed attempt found it");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired);
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Distrusted);
     }
 
     [Fact]
