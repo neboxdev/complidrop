@@ -437,6 +437,50 @@ public class ExtractionWorker(
     }
 
     /// <summary>
+    /// Withdraws the human confirmation a successful read invalidates (<see
+    /// href="https://github.com/neboxdev/complidrop/issues/464">#464</see>, ADR 0052 Amendment 3).
+    /// <para/>
+    /// <see cref="Document.IsManuallyVerified"/> means <i>a person confirmed these fields</i> — that is
+    /// literally what the detail page says over the green shield — and <see cref="PersistSuccess"/> is the
+    /// one event that replaces them with machine-written values nobody has seen: it
+    /// <c>RemoveRange</c>s every <see cref="DocumentField"/> row, rewrites the
+    /// <see cref="Document.ExtractionFields"/> mirror wholesale and re-maps the typed columns. Whatever a
+    /// human vouched for is gone by construction, so the confirmation goes with it. Until #464 nothing
+    /// cleared the flag at all: confirm, click "Read again", and a clean re-read left the page asserting a
+    /// person had confirmed values that no person ever saw (ADR 0042 Amendment 2's recorded stickiness,
+    /// whose coverage half ADR 0052 already closed by retiring the flag from <c>ComputeCoverage</c> — this
+    /// closes the display half).
+    /// <para/>
+    /// FORCED for the same reason <see cref="SetTrust"/> is, and it is the same OWNERSHIP axis: <c>doc</c>
+    /// is the snapshot <see cref="ProcessDocumentAsync"/> loaded before OCR + the LLM call, minutes ago, and
+    /// EF emits only properties that differ from it. A plain <c>= false</c> therefore emits no <c>SET</c>
+    /// in precisely the case that matters — a <c>PUT /verify</c> or <c>PUT /fields</c> committing
+    /// <c>true</c> inside the window — and that confirmation was of the PRE-run values, which this commit
+    /// is about to replace. "No human has confirmed the fields this commit leaves" is this read's own
+    /// conclusion and the fresher fact, so it must land whether or not it differs from what the snapshot
+    /// held. It is NOT the shape ADR 0052 Amendment 2 refuses for <c>MarkVerified</c>'s status (forcing a
+    /// value the request read EARLIER over a competitor's later one); nothing about the row is being
+    /// re-asserted from a stale read.
+    /// <para/>
+    /// Needs no basis (ADR 0052 Amendment 1) and asks none: this is a fact about the EVENT — a new reading
+    /// happened — not a question about which values the row ends up holding, so there is no row to judge.
+    /// The per-field markers keep the narrower truth where it survives: a mid-run correction the row still
+    /// agrees with keeps its <c>✎ Manually edited</c> + <c>was: …</c> through
+    /// <see cref="ReconcileCanonicalCopiesWithTheRow"/>.
+    /// <para/>
+    /// Scoped to THIS writer, exactly like trust's absence from the queue path. <see cref="MarkFailed"/>,
+    /// <see cref="RecordFailedAttempt"/> and <c>Reextract</c>'s re-arm write no field values, so the values
+    /// a human confirmed are still the ones on the row and clearing there would erase a live, true claim.
+    /// That also closes ADR 0042 Amendment 2's own scenario (confirm → <i>successful</i> re-extract → fail
+    /// again): the middle event clears it, so the failure finds nothing left to be stale.
+    /// </summary>
+    private static void WithdrawConfirmation(SystemDbContext db, Document doc)
+    {
+        doc.IsManuallyVerified = false;
+        db.Entry(doc).Property(d => d.IsManuallyVerified).IsModified = true;
+    }
+
+    /// <summary>
     /// Records one genuine failure against the retry budget: increments <see cref="Document.FailedAttempts"/>
     /// and either marks the document <c>Failed</c> (budget spent) or returns it to <c>Pending</c> for
     /// another attempt. Does not save — the caller owns the unit of work. Takes the context only so the
@@ -838,6 +882,13 @@ public class ExtractionWorker(
         // its column, so the ordering costs the write nothing.
         doc.ExtractionStatus = distrusted ? ExtractionStatus.ManualRequired : ExtractionStatus.Completed;
         SetTrust(db, doc, distrusted ? ExtractionTrust.Distrusted : ExtractionTrust.Trusted);
+        // THIRD column this read decides, and the last of ADR 0042 Amendment 2's sticky-flag residue
+        // (#464 / ADR 0052 Amendment 3). Trust answers "should we believe this reading?"; the confirmation
+        // answers "did a person vouch for these field values?" — and this method just replaced them all,
+        // so the honest answer is no, whatever it was a moment ago. Unconditional: a re-read is a new basis
+        // whether it lands Completed or ManualRequired. See WithdrawConfirmation for why it is FORCED and
+        // why it belongs to this writer alone.
+        WithdrawConfirmation(db, doc);
         if (unreadableFields.Length > 0)
             logger.LogWarning(
                 "Document {DocumentId} will carry {Count} canonical field(s) we could not parse ({Fields}); routed to manual review",
