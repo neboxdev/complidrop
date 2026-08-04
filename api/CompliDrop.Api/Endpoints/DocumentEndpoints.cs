@@ -856,6 +856,14 @@ public static class DocumentEndpoints
             // when ResolveManualReview left it alone, this request's own value when it moved it. So the
             // comparison asks the only question that matters: is the status this row ends up holding the
             // one the trust decision was made beside?
+            //
+            // It extends the row lock by one round trip and introduces no deadlock: this transaction
+            // acquires exactly ONE contended lock (the Documents row, taken by its own UPDATE) and
+            // acquires nothing after it — the read below touches the row it already holds, and the audit
+            // row is an INSERT of a brand-new tuple. A transaction that never waits while holding a
+            // contended lock cannot be half of a cycle, which is why this needs no 40P01 handling and
+            // changes no lock ACQUISITION order (see DocumentConcurrency's remarks on why a deadlock
+            // here would be a NEW bug rather than something to absorb).
             var committedStatus = await db.Documents
                 .Where(d => d.Id == id)
                 .Select(d => (ExtractionStatus?)d.ExtractionStatus)

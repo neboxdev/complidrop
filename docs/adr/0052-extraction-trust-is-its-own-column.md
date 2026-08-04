@@ -735,6 +735,13 @@ design against.
   any other `Document` writer moves — the extraction worker in particular keeps its `READ COMMITTED`
   persist, where an exception out of `SaveChanges` is the re-paid Document AI + LLM run this project
   measures every concurrency change against.
+- **It does not introduce a deadlock, and that is an argument rather than a hope.** The transaction
+  acquires exactly ONE contended lock — the `Documents` row, taken by its own UPDATE — and acquires
+  nothing after it: the pair check reads the row it already holds, and the audit row is an INSERT of a
+  brand-new tuple. A transaction that never WAITS while holding a contended lock cannot be half of a
+  cycle. So no lock ACQUISITION order changes, which is the same premise that lets
+  `DocumentConcurrency.IsConcurrentUpdateConflict` keep refusing to match `40P01`: a deadlock on this
+  path would be a new bug that must surface loudly rather than be absorbed.
 
 ### What stays open
 
