@@ -299,8 +299,25 @@ until it is re-read or confirmed. Not closable by the column default (the expose
 not an `INSERT`); bounded by the health-check overlap; pinned by a test so it is known rather than
 surprising.
 
+## Amendment 4 (2026-08-04) — the sticky flag's DISPLAY half closes too
+
+Amendment 3 closed *"The flag is STICKY"* (Amendment 2, § The exit) on the axis this ADR owns: coverage. It
+then said the flag *"itself stays on the entity and the detail DTO"* — and the residue that survived was
+sitting on exactly that DTO. The detail page renders `IsManuallyVerified` as a green shield hinted **"A
+person confirmed these fields."**, a present-tense claim about the values on screen, over a flag nothing
+ever cleared. So the sentence Amendment 2 accepted as a coverage answer was still being *printed* verbatim:
+confirm → *Read again* → a clean machine re-read → human verification asserted over machine output.
+
+`ExtractionWorker.PersistSuccess` now withdraws the flag, forced, on the one event that replaces the field
+values — the full decision, its scope, the ownership argument for the force, and four rejected shapes are
+[ADR 0052 Amendment 3](0052-extraction-trust-is-its-own-column.md#amendment-3-2026-08-04--the-confirmation-flag-is-withdrawn-by-the-read-that-replaces-its-subject)
+(#464). Nothing in *this* ADR changes: the flag has been out of `ComputeCoverage` since Amendment 3, so the
+withdrawal moves no compliance surface. Amendment 2's own scenario — *confirmed once, successfully
+re-extracted, then failed again reads as confirmed* — is now unreachable rather than merely harmless: the
+successful re-extraction in the middle clears the flag, so the failure finds nothing left to be stale.
+
 ## References
 
-- Tickets: [#401](https://github.com/neboxdev/complidrop/issues/401), [#443](https://github.com/neboxdev/complidrop/issues/443) (Amendment 1), [#365](https://github.com/neboxdev/complidrop/issues/365) (Amendment 2), [#459](https://github.com/neboxdev/complidrop/issues/459) (Amendment 3), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
+- Tickets: [#401](https://github.com/neboxdev/complidrop/issues/401), [#443](https://github.com/neboxdev/complidrop/issues/443) (Amendment 1), [#365](https://github.com/neboxdev/complidrop/issues/365) (Amendment 2), [#459](https://github.com/neboxdev/complidrop/issues/459) (Amendment 3), [#464](https://github.com/neboxdev/complidrop/issues/464) (Amendment 4), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic)
 - ADRs: [0040](0040-unreadable-canonical-value-fails-closed.md) (the unreadable-value trigger this dovetails with — both raise `ManualRequired`), [0041](0041-future-effective-not-yet-in-force-reads-pending.md) (the read-only-overlay pattern and the vendor-rollup in-force test this extends), [0030](0030-compliance-verdict-combined-unit-of-work.md) (the single unit of work the gate stays inside), [0052](0052-extraction-trust-is-its-own-column.md) (Amendment 3 — the distrust signal's own column)
 - Code: `Services/VerdictBearingFields.cs` (the verdict-bearing set), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `ManualReviewConfidenceThreshold`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo` + both projections), `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview` — the exit; `IsManuallyVerified` until Amendment 3, `ExtractionTrust` after it)

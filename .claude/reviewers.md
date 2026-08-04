@@ -316,6 +316,45 @@ Both are defined in this repo's `.claude/agents/`.
     directions stay pinned by the same two tests
     (`A_FAILED_extraction_a_human_confirmed_reads_Covered_again`,
     `A_vendor_whose_only_cert_is_a_FAILED_extraction_reads_ActionNeeded_not_Covered`).
+  - The flag's DISPLAY half is Amendment 3 / #464, and it is the OTHER direction of the same sentence.
+    `ComputeCoverage` retiring the clause left the flag on the detail DTO, where the page renders it as a
+    green shield hinted "A person confirmed these fields." — present tense, about the values on screen —
+    while NOTHING cleared it. `ExtractionWorker.PersistSuccess` now WITHDRAWS it through
+    `WithdrawConfirmation`. Facts a review must not re-litigate:
+    - The clear is FORCED (`Property(d => d.IsManuallyVerified).IsModified = true`) for the identical
+      reason `SetTrust` is: the snapshot is minutes old and usually says `false` already, so a plain
+      assignment emits no `SET` in exactly the case that matters — a `PUT /verify` committing `true`
+      inside the read window. "It already equals false, drop the force" is the bug.
+    - It is NOT the shape ADR 0052 Amendment 2 refuses for `MarkVerified`'s status. Same ownership axis,
+      opposite side of it: the worker's `false` is the FRESHER fact (it just replaced the values), while
+      that request's status was the STALER one.
+    - It needs NO grading basis and asking one is a category error: this is a question about an EVENT (a
+      new reading happened), not about which values the row ends up holding. Do not "make it consistent"
+      with Amendment 1's readability trigger.
+    - `MarkFailed`, `RecordFailedAttempt` (BOTH arms) and `Reextract`'s re-arm deliberately leave it
+      alone — they replace no field values, so the confirmed values are still on the row and the claim is
+      still TRUE; clearing there deletes live data and, on the terminal arm, nothing could restore it.
+      That ABSENCE is the same rule as trust's and is pinned the same way
+      (`Adr0052EnforcementTests.The_confirmation_flag_has_ONE_setter_and_ONE_clearer_and_the_clear_is_FORCED`
+      counts one assignment + one force per file and rejects every `SetProperty` form).
+    - The clear is UNCONDITIONAL within `PersistSuccess`. "Only clear when a value actually changed" is
+      Option W, refuted — the per-column enumeration ADR 0030 Amendment 2 Option E / Amendment 5 Option S
+      already refuse, plus a person confirms a READING, not a set of strings.
+    - The withdrawal is LAST-WRITER-WINS on the flag, not a total order, and the boundary is recorded (do
+      NOT re-report it as the bug reopening). The force settles the ordering it exists for — a confirmation
+      that COMMITS BEFORE the persist loses. One that commits AFTER re-asserts `true`, because Amendment 2's
+      re-run re-decides against the row it will LEAVE; the reachable path is `PUT /fields` (Save is not
+      gated on `isProcessing`), whose re-run re-applies the user's OWN submitted values. Refusing instead
+      would 409 an ordinary edit that straddled a landing re-extract and make the user retype, to remove a
+      display sentence that reaches no verdict. Pinned by
+      `DocumentConcurrentEditTests.A_confirmation_cannot_vouch_for_values_a_re_read_replaced_inside_its_window`,
+      whose `IsManuallyVerified.Should().BeTrue` reason names it.
+    - Recorded residues, do NOT re-report: pre-deploy rows (confirmed AND re-extracted before the deploy)
+      keep a stale `true` until their next successful read — NOT backfilled, because the only candidate
+      predicate (no `IsManuallyEdited` row) erases confirmations made through the empty-fields `Save` and
+      through `PUT /verify` (Option X); and the deploy-overlap window, the same class the trust residues
+      above already carry. "Render it as a dated past event instead" is Option V, refuted on measurement
+      (no `VerifiedAt` exists — it costs MORE schema than this, and leaves the datum stale).
   - `Pending`/`Processing` are still not excluded BY STATUS — the clause cannot see the status. An
     in-flight doc is excluded exactly when it is `Distrusted`, and TWO paths reach that (round 2 of the
     #459 review corrected this bullet: the second one used to be unreachable, so the record said the

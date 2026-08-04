@@ -112,6 +112,23 @@ public class Document
         : null;
 
     public string? UploadedBy { get; set; }
+
+    /// <summary>
+    /// A person confirmed the field values THIS ROW CURRENTLY HOLDS — which is what the detail page's
+    /// "Verified" cell asserts over its green shield. Present tense, deliberately: two writers keep it
+    /// that way, and both are about the basis rather than about a date.
+    /// <list type="bullet">
+    /// <item><c>DocumentEndpoints.ResolveManualReview</c> SETS it — the one request-side writer, reached
+    /// by <c>PUT /fields</c> and <c>PUT /verify</c>.</item>
+    /// <item><c>ExtractionWorker.PersistSuccess</c> CLEARS it (#464 / ADR 0052 Amendment 3), because a
+    /// successful read replaces every field value with one no human has seen. Nothing cleared it before,
+    /// so confirm → "Read again" → a clean re-read left the page claiming a person had confirmed machine
+    /// output — ADR 0042 Amendment 2's recorded stickiness, whose COVERAGE half ADR 0052 closed by
+    /// retiring this flag from <c>ComputeCoverage</c>.</item>
+    /// </list>
+    /// A failed or requeued attempt writes no field values and therefore leaves it alone. It is
+    /// display-only since ADR 0052 — no verdict, count, badge or export reads it.
+    /// </summary>
     public bool IsManuallyVerified { get; set; } = false;
 
     /// <summary>

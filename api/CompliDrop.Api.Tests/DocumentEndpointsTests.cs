@@ -1870,8 +1870,9 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         // ADR 0052). For a Failed row the status can NEVER be the exit — ResolveManualReview deliberately
         // refuses to move one ("Failed is its own louder error state"), and the detail page's manual-entry
         // affordance exists precisely for that case — so before #459 the exclusion had to gate on
-        // IsManuallyVerified, a flag nothing ever cleared. The trust column is the same exit without the
-        // stickiness: a later extraction re-decides it.
+        // IsManuallyVerified, a flag nothing then cleared. The trust column is the same exit without the
+        // stickiness: a later extraction re-decides it. (#464 has since made the flag re-decidable as well,
+        // by the same event; the clause still asks trust because trust is the BASIS question.)
         var auth = await RegisterAndLoginAsync();
         var docId = await SeedExtractionStateAsync(auth.OrgId, ExtractionStatus.Failed, claimAge: null);
         await using (var seed = CreateSystemDb())

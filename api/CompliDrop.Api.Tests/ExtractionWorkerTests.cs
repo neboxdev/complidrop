@@ -854,6 +854,12 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
                 ? ExtractionStatus.Completed
                 : ExtractionStatus.ManualRequired,
             "the two columns stay in lockstep at the writer — one boolean, two columns");
+        doc.IsManuallyVerified.Should().BeFalse(
+            "and the THIRD column this read decides comes with them (#464 / ADR 0052 Amendment 3). The "
+            + "0.60 case is the one that matters: CommitTrustMidExtract committed a confirmation mid-read, "
+            + "and this persist lands ManualRequired — so a withdrawal written as `if (!distrusted)` would "
+            + "leave the detail page's green shield and \"A person confirmed these fields\" standing over "
+            + "values this read replaced. The clear is UNCONDITIONAL within PersistSuccess");
     }
 
     [Theory]

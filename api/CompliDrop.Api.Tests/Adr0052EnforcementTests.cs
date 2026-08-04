@@ -267,4 +267,86 @@ public class Adr0052EnforcementTests
             "the claim moves PIPELINE POSITION only. Adding trust to its SET list would re-arm the "
             + "distrust away on every claim — the original bug, one layer lower than Reextract");
     }
+
+    [Fact]
+    public void The_confirmation_flag_has_ONE_setter_and_ONE_clearer_and_the_clear_is_FORCED()
+    {
+        // ADR 0052 Amendment 3 (#464). IsManuallyVerified is a PRESENT-TENSE claim — the detail page
+        // renders it as "A person confirmed these fields." — so it has exactly two writers, and each owns
+        // one direction of that claim: ResolveManualReview SETS it (the human vouching), PersistSuccess
+        // CLEARS it (the one event that replaces every field value with machine output). Until #464 the
+        // second half did not exist and the flag was write-once, which is why the sentence survived a
+        // clean re-read and asserted human verification over values nobody had seen.
+        //
+        // Counted rather than located, exactly like the trust gates above, because the plausible
+        // regressions arrive somewhere nobody would think to look — a "tidy" clear in Reextract's re-arm
+        // or in RequeueInterruptedAsync (which already resets the rest of the queue tuple), or a second
+        // setter bolted onto UpdateDocument.
+        var endpoints = SourceScan.StripLineComments(ProductionSources()
+            .Single(s => s.Relative == "Endpoints/DocumentEndpoints.cs").Text);
+        var worker = SourceScan.StripLineComments(ProductionSources()
+            .Single(s => s.Relative == "BackgroundServices/ExtractionWorker.cs").Text);
+
+        endpoints.Should().Contain("ResolveManualReview",
+            "anti-no-op: the file we read must be the one that owns the setter");
+        worker.Should().Contain("private static void WithdrawConfirmation(",
+            "anti-no-op, and the funnel BY NAME: a renamed or deleted clearer must fail here rather than "
+            + "let the counts below describe a member that no longer exists");
+
+        Regex.Matches(endpoints, @"\.IsManuallyVerified\s*=[^=]").Count.Should().Be(1,
+            "ResolveManualReview is the ONE request-side writer, and it only ever writes TRUE. A second "
+            + "assignment in this file is either a second way to claim human verification or a clear on a "
+            + "path that replaced no values — both of which make the page's sentence stop tracking the row");
+
+        Regex.Matches(worker, @"\.IsManuallyVerified\s*=[^=]").Count.Should().Be(1,
+            "the worker clears it in exactly ONE place, WithdrawConfirmation, called from PersistSuccess. "
+            + "A second assignment means a failure or requeue writer took the decision too — and those "
+            + "replace no field values, so they would erase a claim that is still true (and on the "
+            + "terminal arm nothing would ever put it back)");
+
+        Regex.Matches(worker, @"Property\(d => d\.IsManuallyVerified\)").Count.Should().Be(1,
+            "and that ONE clear is FORCED into the UPDATE. ProcessDocumentAsync holds a minutes-old "
+            + "snapshot and EF emits only what differs from it, so a plain `= false` writes NOTHING in "
+            + "exactly the case that matters — a PUT /verify committed inside the read window, over the "
+            + "values this persist is about to replace (ADR 0052 §2's SetTrust argument, one column over)");
+
+        Regex.Matches(endpoints, @"Property\(d => d\.IsManuallyVerified\)").Count.Should().Be(1,
+            "the request side forces it too, and for its own reason: ForceConfirmationWrite's UPDATE is "
+            + "what takes the row lock the Amendment 2 basis check rests on, so a confirmation of an "
+            + "already-verified row must still emit a statement");
+
+        foreach (var (relative, text) in ProductionSources())
+            text.Should().NotContain("SetProperty(d => d.IsManuallyVerified",
+                $"no ExecuteUpdateAsync may write the confirmation flag ({relative}). Reextract's re-arm "
+                + "is where this looks like tidy bookkeeping and is precisely where it must NOT be: the "
+                + "re-arm replaces no values, so the claim is still true while the read is merely queued");
+
+        ExtractionWorker.ClaimSql.Should().NotContain("IsManuallyVerified",
+            "the claim moves PIPELINE POSITION only — same rule as trust, one column over");
+
+        // The premise the whole amendment rests on: this flag is DISPLAY-ONLY. That is what makes changing
+        // its semantics safe without a migration, a flag or a verdict re-grade, and — like the ADR 0042
+        // carve-out above it — nothing behavioural can pin it, because a new read site would just be a new,
+        // green feature. Two files mention it in PROSE and touch it nowhere (the rollup and its DTO, whose
+        // comments explain why the coverage predicate stopped reading it), so the stripper runs first.
+        var flagSites = ProductionSources()
+            .Where(s => SourceScan.StripLineComments(s.Text).Contains("IsManuallyVerified", StringComparison.Ordinal))
+            .Select(s => s.Relative)
+            .OrderBy(r => r, StringComparer.Ordinal)
+            .ToArray();
+        flagSites.Should().BeEquivalentTo(
+            new[]
+            {
+                "BackgroundServices/ExtractionWorker.cs",  // WithdrawConfirmation — the clearer
+                "DTOs/Documents/DocumentDtos.cs",          // the wire field the detail page renders
+                "Endpoints/DocumentEndpoints.cs",          // ResolveManualReview + the detail projection
+                "Entities/Document.cs",                    // the property itself
+            },
+            "the flag reaches no verdict, count, badge, reminder or export — it is one sentence on one "
+            + "page. A fifth file is either a new READ surface (which inherits the pre-deploy and "
+            + "deploy-overlap residues ADR 0052 Amendment 3 records as acceptable only BECAUSE the "
+            + "exposure is display-only) or a third writer; VendorEndpoints.cs and VendorDtos.cs are the "
+            + "prose-only pair and must stay comment-only, since re-adding this flag to the coverage "
+            + "predicate is the exact regression #459 removed");
+    }
 }

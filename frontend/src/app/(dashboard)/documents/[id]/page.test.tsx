@@ -691,6 +691,47 @@ describe("DocumentDetailPage — what we checked (#239)", () => {
     expect(await screen.findByText(/optional: confirm the read fields look right/i)).toBeInTheDocument();
     expect(screen.getByText(/^not yet$/i)).toBeInTheDocument();
   });
+
+  // #464 / ADR 0052 Amendment 3. "A person confirmed these fields." is a PRESENT-TENSE claim about
+  // the values on screen, so it may be bound to `isManuallyVerified` and to nothing else. The backend
+  // now clears that flag in ExtractionWorker.PersistSuccess — the one event that replaces every field
+  // value with machine output — so the confirm → "Read again" → clean-read sequence arrives here as a
+  // payload whose flag has gone false, carrying values no person has seen. Re-deriving the claim from
+  // anything a clean re-read leaves behind (a Completed status, a high extractionConfidence, an
+  // unedited field) would put the sentence straight back over machine values.
+  it("binds the Verified claim to the flag, so a re-read that clears it clears the claim (#464)", async () => {
+    const machineRead = (isManuallyVerified: boolean) =>
+      makeDocumentDetail({
+        id: "d_reread",
+        extractionStatus: "Completed",
+        extractionConfidence: 0.98,
+        complianceStatus: "Compliant",
+        isManuallyVerified,
+        fields: [
+          {
+            id: "f1",
+            fieldName: "policy_number",
+            fieldValue: "POL-SECOND",
+            fieldType: "string",
+            confidence: 0.98,
+            isManuallyEdited: false,
+            originalValue: null,
+          },
+        ],
+      });
+
+    // Before: the person has confirmed the values the row currently holds.
+    server.use(http.get(url("/api/documents/:id"), () => jsonOk(machineRead(true))));
+    const first = renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_reread" } });
+    expect(await screen.findByText(/a person confirmed these fields/i)).toBeInTheDocument();
+    first.unmount();
+
+    // After the re-read: same Completed/high-confidence/unedited payload, flag withdrawn.
+    server.use(http.get(url("/api/documents/:id"), () => jsonOk(machineRead(false))));
+    renderWithProviders(<DocumentDetailPage />, { auth: authedMe, params: { id: "d_reread" } });
+    expect(await screen.findByText(/optional: confirm the read fields look right/i)).toBeInTheDocument();
+    expect(screen.queryByText(/a person confirmed these fields/i)).toBeNull();
+  });
 });
 
 describe("DocumentDetailPage — sample banner (#238)", () => {
