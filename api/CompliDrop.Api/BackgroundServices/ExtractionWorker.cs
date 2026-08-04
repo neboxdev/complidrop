@@ -873,13 +873,15 @@ public class ExtractionWorker(
         // This read is what establishes the document's current basis, so it decides BOTH — and it is the
         // only writer that can restore trust without a human: a clean re-read of a previously-distrusted
         // document earns Trusted back here, which is what stops the flag being sticky the way
-        // IsManuallyVerified was (ADR 0042 Amendment 2's recorded residue).
+        // IsManuallyVerified was until #464 — the residue ADR 0042 Amendment 2 recorded, whose display
+        // half WithdrawConfirmation closes three lines below.
         //
-        // Both writes sit BELOW the basis read, which is what lets them be decided from it. They fall
-        // out of the basis's own overlay as a result — the basis carries the row's ExtractionStatus /
-        // ExtractionTrust rather than this method's — and that is immaterial by inspection:
-        // ComplianceCheckService reads neither column, so no verdict input moves. SetTrust still forces
-        // its column, so the ordering costs the write nothing.
+        // These writes sit BELOW the basis read, which is what lets the first two be decided from it.
+        // All THREE fall out of the basis's own overlay as a result — the basis carries the row's
+        // ExtractionStatus / ExtractionTrust / IsManuallyVerified rather than this method's — and that is
+        // immaterial by inspection: ComplianceCheckService reads none of them, so no verdict input moves,
+        // and DocumentFieldReadability reads only the canonical values. Both SetTrust and
+        // WithdrawConfirmation force their own column, so the ordering costs neither write anything.
         doc.ExtractionStatus = distrusted ? ExtractionStatus.ManualRequired : ExtractionStatus.Completed;
         SetTrust(db, doc, distrusted ? ExtractionTrust.Distrusted : ExtractionTrust.Trusted);
         // THIRD column this read decides, and the last of ADR 0042 Amendment 2's sticky-flag residue
