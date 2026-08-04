@@ -358,23 +358,62 @@ Both are defined in this repo's `.claude/agents/`.
       REMEDY is user-reachable and is the exclusion's normal exit: any new-container writer rewrites
       trust, i.e. a re-extract that lands cleanly, or one `Mark verified`. Pinned (remedy included) by
       `A_Completed_row_the_boot_backfill_distrusted_reads_ActionNeeded_with_nothing_disclosing_why`.
-    - A THIRD path reaches BOTH pairs with no deploy overlap, corrected in round 2 of the #459 review and
-      ticketed as [#465](https://github.com/neboxdev/complidrop/issues/465) — the record used to say
-      "neither shape is reachable through the NEW writers", which is true of any ONE writer and false of
-      two INTERLEAVED. `MarkVerified` is an unforced READ COMMITTED partial write (SELECT, then EF emits
-      only what differs from that snapshot), and on an unsettled row `ResolveManualReview` leaves the
-      status alone — so the UPDATE carries trust WITHOUT it, and a `PersistSuccess` commit landing in that
-      window leaves `ManualRequired` + `Trusted`. ADR 0030 last-writer-wins class, same family as
-      #460 (closed by ADR 0030 Amendment 2, whose grading basis does not reach this — a status/trust pair
-      is not a verdict basis) and #461; `UpdateFields` is exempt (REPEATABLE READ + 40001
-      re-run). #461 HAS since shipped (ADR 0030 Amendment 3) and did NOT absorb it — the earlier
-      "plausibly absorbed by #461's shape" reading is retired: Amendment 3 took the RR guard for the
-      single-document RE-GRADE only, one named call site, and left every other writer on READ COMMITTED
-      by decision. ACCEPTED, not overlooked: widening the RR guard to `MarkVerified` is itself a finding (see
-      the ADR 0030 block), and the conditional-`ExecuteUpdateAsync` alternative drops the
-      `AuditSaveChangesInterceptor` diff row on a human confirmation while still grading from the stale
-      snapshot. Pinned by
-      `Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read` (EF command log).
+    - A THIRD path used to reach BOTH pairs with no deploy overlap — [#465](https://github.com/neboxdev/complidrop/issues/465),
+      **CLOSED by ADR 0052 Amendment 2**. `MarkVerified` was an unforced READ COMMITTED partial write
+      (SELECT, then EF emits only what differs from that snapshot), and on an unsettled row
+      `ResolveManualReview` leaves the status alone — so the UPDATE carried trust WITHOUT it, and a
+      `PersistSuccess` commit landing in that window left `ManualRequired` + `Trusted`. The DEPLOY-overlap
+      routes above are NOT closed by it and still must not be re-reported.
+      - What shipped, and the three shapes it deliberately is not: the confirmation runs its load →
+        decide → `SaveChanges` in its OWN `READ COMMITTED` transaction and then re-reads the
+        `ExtractionStatus` the row will actually leave, comparing it against the one the trust decision
+        assumed; a disagreement rolls the attempt back and re-runs it against a fresh read, bounded at
+        `DocumentConcurrency.MaxAttempts`, then `409 document.concurrent_update` having committed nothing.
+      - **The UPDATE is still PARTIAL, and "make it whole-tuple by forcing `ExtractionStatus`" is a
+        finding, not the fix.** That is the `SetTrust` / `ForceVerdictWrite` shape, and it is right only
+        where the writer's own conclusion is the FRESHER value. This request's snapshot status is the
+        OLDER one, so forcing it overwrites a live `ManualRequired` with a stale `Pending` — a lost update
+        AND a de-queued extraction (the worker claims on `Pending`). Same ownership axis as ADR 0030
+        Amendment 2 Option G.
+      - **It is NOT `DocumentWriteConcurrency.RunAsync`.** No REPEATABLE READ, no 40001, no widening —
+        widening that guard to all document writes is still a finding (see the ADR 0030 block) and
+        `An_unrelated_document_writer_still_wins_last_without_conflicting` is still the pin. It borrows
+        the 409 envelope and the retry bound only; the copy is its own
+        (`DocumentWriteConcurrency.VerifyConflictMessage` — `PUT /verify` has no body, so the edit copy's
+        "make your change again" names a change nobody submitted).
+      - **The tracked `SaveChanges` is load-bearing**: it is what keeps `AuditSaveChangesInterceptor`'s
+        Before/After row for a HUMAN CONFIRMATION intact and inside the transaction. Swapping it for a
+        conditional `ExecuteUpdateAsync` is the alternative ADR 0052 § Consequences refuses, and
+        hand-building a replacement audit row re-derives the interceptor's redaction/skip rules at a
+        second site with nothing pinning them equal (Amendment 2 Option Q).
+      - **A pre-decision row lock (`FOR UPDATE` / `FOR NO KEY UPDATE`) is refuted on a concrete
+        outcome**, not on ADR 0030 Option B's lock-order argument (which does not transfer — this writer
+        touches no `ComplianceCheck` rows): the lock would be held ACROSS the `SaveChanges`, so every
+        other document writer's UPDATE waits behind a `PUT /verify`, and the competing edit inside
+        `An_unrelated_document_writer_still_wins_last_without_conflicting` can never commit — that test
+        HANGS. Amendment 2 Option P.
+      - **A server-side `CASE` on the status** (coherent pair, no retry, no lock) is Option R, refuted:
+        it makes the status fresh while the trust beside it is still the snapshot's, i.e. ADR 0052
+        Amendment 1's own bug on the request side.
+      - NO frontend change, and "where does this 409 land?" is answered rather than missing: `PUT
+        /verify` has no caller in `frontend/` at all. The dashboard's confirmation affordance is the
+        detail page's **Save changes** (`PUT /fields`), which reaches `ResolveManualReview` inside ADR
+        0030 Amendment 1's REPEATABLE READ + 40001 re-run, so the pair was never tearable there.
+      - KNOWN residue of the closure, recorded in Amendment 2 § What stays open — do not report it as new:
+        a competing write that changes READABILITY without moving the status leaves the (coherent) pair
+        decided one commit late. Narrow by construction (`PersistSuccess` always moves the status;
+        `UpdateFields` commits its own `ResolveManualReview` in the same unit of work), and closing it
+        means predicating on the readability INPUTS — the column enumeration ADR 0030 Amendment 2 Option E
+        / Amendment 5 Option S refute — which would also make an unrelated field edit conflict.
+      - Pinned by three constructed interleaves in `DocumentConcurrentEditTests`
+        (`A_confirmation_cannot_leave_a_review_flagged_row_reading_TRUSTED`,
+        `A_confirmation_cannot_leave_a_cleanly_read_row_reading_DISTRUSTED`,
+        `A_confirmation_that_keeps_losing_the_status_answers_409_and_commits_nothing`; the
+        `competingWrites == 2` assertion is the ANTI-NO-OP, since pre-#465 there was exactly ONE
+        `SaveChanges`) plus the deliberately-rewritten command-log pin
+        `Marking_verified_still_emits_trust_WITHOUT_forcing_the_status_it_read`, which asserts the absence
+        of `"ExtractionStatus" =` AND the `SELECT d."ExtractionStatus"` that follows the UPDATE. Dropping
+        either half of that test leaves a real defect green.
   - KNOWN in-flight disclosure gap, also ADR 0052 § Consequences — do not re-report: a re-armed
     DISTRUSTED doc (`Pending`/`Processing` + `Distrusted`) makes the vendor read ActionNeeded while the
     extraction badge reads `Reading…` rather than `Needs your review`. Bounded by one poll,
@@ -768,6 +807,12 @@ Both are defined in this repo's `.claude/agents/`.
     fan-outs, nightly sweep — keeps `READ COMMITTED` last-writer-wins ON PURPOSE. A change that widens
     the guard to "all document writes" IS a real finding, and it is pinned:
     `An_unrelated_document_writer_still_wins_last_without_conflicting`.
+    - `MarkVerified` stays on that list after #465 / ADR 0052 Amendment 2 even though it now HAS a
+      conflict guard, and the distinction is the one to check any change against: that guard is `READ
+      COMMITTED`, it detects only a move of the ONE column that writer omits from its UPDATE
+      (`ExtractionStatus`) by re-reading it AFTER its own write, and an unrelated commit still wins last
+      without conflicting there — which is exactly what the pin above asserts. It borrows this class's
+      409 envelope and `MaxAttempts` and nothing else. See the ADR 0052 block for the shapes it refutes.
   - The retry RELOADS and RECOMPUTES — the whole callback re-runs against a fresh read, so the winner's
     committed change is an INPUT to the retried verdict. A version that re-applies the losing snapshot
     (or retries inside the SAME transaction, whose snapshot is exactly what lost) fixes nothing. Both
@@ -820,7 +865,8 @@ Both are defined in this repo's `.claude/agents/`.
       not the "widen the guard to all document writes" finding above — it is one named request-path
       writer that co-writes a verdict, and the floor pin
       (`An_unrelated_document_writer_still_wins_last_without_conflicting`, on `MarkVerified`) is
-      untouched. The worker, delete, sweep and BATCHED fan-outs all keep `READ COMMITTED`.
+      untouched, including after that endpoint got its own `READ COMMITTED` pair check in #465. The
+      worker, delete, sweep and BATCHED fan-outs all keep `READ COMMITTED`.
     - Exhaustion answers `409` and LEAVES THE PREVIOUS VERDICT ALONE. Not a violation of the
       degrade-to-`Pending` rule and not an oversight: the re-grade owns no inputs, so the row it walks
       away from is already the winner's own atomic `(inputs, verdict)` pair. "Degrade it to `Pending`

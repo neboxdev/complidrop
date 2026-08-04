@@ -77,7 +77,14 @@ clean re-read that no-ops and strands the document at ActionNeeded. Forcing the 
 writer's half of that pair only; § Consequences records the two remaining paths to it, and neither is a
 deploy overlap alone — the request-side `MarkVerified` is an unforced partial write, so a commit from
 *here* landing inside *its* window produces the same shapes
-([#465](https://github.com/neboxdev/complidrop/issues/465)).
+([#465](https://github.com/neboxdev/complidrop/issues/465)). **#465 has since closed, as
+[Amendment 2](#amendment-2-2026-08-04--the-human-confirmation-commits-the-pair-coherently) — and it did
+NOT close by giving that writer this one's force.** The force is right where the writer's own conclusion
+is the FRESHER value, which is the worker's case and not the request's: `MarkVerified`'s snapshot status
+is the OLDER one, so forcing it there would overwrite a live `ManualRequired` with a stale `Pending` and
+de-queue the very extraction that was re-deciding trust. Amendment 2 makes that writer's pair atomic by
+DETECTING the move instead. Reading either half as a reason to change the other is the wrong-axis merge
+this section already warns about, in one more direction.
 
 This is **not** the [ADR 0030](0030-compliance-verdict-combined-unit-of-work.md) stale-snapshot residual
 ([#460](https://github.com/neboxdev/complidrop/issues/460)) and must not be filed under it. That residual is
@@ -207,7 +214,9 @@ throw on materialization.
     deliverable.
 
 - **A THIRD path to both of those pairs, with no deploy overlap involved**
-  ([#465](https://github.com/neboxdev/complidrop/issues/465), round 2 of the #459 review). No single new
+  ([#465](https://github.com/neboxdev/complidrop/issues/465), round 2 of the #459 review). **No longer a
+  residue — CLOSED by Amendment 2, and kept in full because the closure's shape is an answer to this
+  analysis rather than a departure from it.** No single new
   writer produces an incoherent pair — `PersistSuccess` pairs `Completed` with `Trusted`, and
   `ResolveManualReview` only withdraws trust on a row whose status it simultaneously raises to
   `ManualRequired`, or cannot move at all. But two of them **interleaved** do, because
@@ -236,6 +245,18 @@ throw on materialization.
   PROPERTY that makes the interleave reachable is pinned instead, by
   `Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read`, which reads the host's EF
   command log: closing #465 means changing that test deliberately.
+
+  **CLOSED by [Amendment 2](#amendment-2-2026-08-04--the-human-confirmation-commits-the-pair-coherently)**,
+  and both refusals above survive it rather than being overturned — which is why the closure took a third
+  shape. The guard is NOT widened (the writer stays `READ COMMITTED` and still wins last against an
+  unrelated commit) and the write still goes through the change tracker (so the interceptor's Before/After
+  row is intact and inside the transaction). What was missing from the analysis above is that the third
+  objection — *refuse-then-reload-and-retry is `DocumentWriteConcurrency` under another name* — is an
+  objection to NOVELTY rather than to correctness, and the reload is the one thing that DOES make the
+  decision fresh. It is also unusually cheap here: `PUT /verify` carries no request body at all, so its
+  answer is a pure function of the row and re-deciding loses nothing of the user's. The pinned test
+  changed deliberately, as this paragraph required, and is now
+  `Marking_verified_still_emits_trust_WITHOUT_forcing_the_status_it_read`.
 
 - **A bounded in-flight window where the rollup demotes and the extraction badge does not say why.**
   Distinct from the deploy residue above and a consequence of Amendment 3 itself: a document at
@@ -619,9 +640,168 @@ Three consequences worth recording rather than rediscovering:
   works — `Save changes` clears the review, because nothing is unreadable. Recorded here so a future
   reader can see the option was weighed rather than missed.
 
+## Amendment 2 (2026-08-04) — the human confirmation commits the PAIR coherently
+
+§ Consequences recorded a third path to an incoherent `(status, trust)` pair, reachable in ordinary
+operation with no deploy overlap, and accepted it because both narrow closures it could see cost
+something [#459](https://github.com/neboxdev/complidrop/issues/459) was not able to pay. This closes it,
+and it pays neither of those costs — because the shape it takes is a third one.
+[#465](https://github.com/neboxdev/complidrop/issues/465).
+
+**The mechanism, restated as the invariant it breaks.** `DocumentEndpoints.MarkVerified` writes a PAIR:
+`ExtractionTrust` beside the `ExtractionStatus` it was decided beside. `ResolveManualReview` decides both
+from one predicate, and the two are coherent *as it leaves them* — §3's `wasSettled` gate only ever
+withholds the STATUS write, and it withholds it exactly where the status is one this writer must not
+touch. But EF emits only the properties that DIFFER from the request's snapshot, so on an unsettled row
+the UPDATE carried trust **without** the status, and a whole-tuple commit from
+`ExtractionWorker.PersistSuccess` landing inside the load→save window left the two disagreeing:
+`ManualRequired` + `Trusted` (fail-OPEN — a distrusted extraction rolling up to the vendor as Covered,
+the [ADR 0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) hole) from a re-armed
+distrusted row, or its mirror `Completed` + `Distrusted` (the half with no badge and no self-heal) from a
+row carrying an unreadable canonical value at `Pending` + `Trusted`.
+
+### Decision
+
+**`MarkVerified` runs its load → decide → `SaveChanges` inside its OWN `READ COMMITTED` transaction, and
+then CHECKS THE PAIR: it re-reads the `ExtractionStatus` the row will actually commit and compares it
+against the one the trust decision assumed. A disagreement rolls the whole attempt back and re-runs it
+against a fresh read**, bounded at `Services/DocumentConcurrency.MaxAttempts` (3), after which it answers
+`409 document.concurrent_update` having committed nothing.
+
+Four properties are the decision, and each one is a refusal of a shape that looks like it:
+
+- **The write is still PARTIAL, and forcing the status in is REFUSED.** That is §2's `SetTrust` /
+  [ADR 0030](0030-compliance-verdict-combined-unit-of-work.md) Amendment 2 `ForceVerdictWrite` shape, and
+  it is right precisely when the writer's own conclusion is the FRESHER value. Here it is the older one:
+  this request's snapshot status predates the worker's commit, so forcing it would overwrite a live
+  `ManualRequired` with a stale `Pending` — trading a torn pair for a LOST UPDATE, and de-queueing the
+  extraction that was re-deciding trust (`ExtractionWorker` claims on `ExtractionStatus == Pending`). The
+  axis is the same one §2 and ADR 0030 Amendment 2 Option G already draw, applied one writer over.
+- **The detection is a READ-BACK, not a predicate on the write.** The comparison happens AFTER the
+  UPDATE, which is what makes it stable rather than merely recent: the UPDATE has taken the row's write
+  lock, so no further writer can move the status between the check and the `COMMIT`. A scalar projection
+  reads the ROW rather than the tracked entity, and inside this transaction that is our own
+  not-yet-committed write applied on top of whatever committed before it — i.e. precisely the status this
+  transaction will LEAVE. This is [ADR 0030](0030-compliance-verdict-combined-unit-of-work.md)
+  Amendment 5's verification shape (`VerifyPageAsync`) at one document's scale, with the difference that
+  matters here: inside the transaction the answer to a disagreement is to ABANDON rather than to correct.
+- **It detects the ONE column this writer omits, and that is a scope rather than an enumeration.** The
+  question is not "did anything about this document change?" but "is the status this row ends up holding
+  the one the trust decision was made beside?". A competing commit that moves no status — a field edit,
+  a vendor reassignment, a re-grade — is not a conflict here and must not become one: that is what keeps
+  `MarkVerified` on `READ COMMITTED` last-writer-wins, and it is pinned by
+  `An_unrelated_document_writer_still_wins_last_without_conflicting`.
+- **The tracked `SaveChanges` is kept, so the audit row is untouched.** `AuditSaveChangesInterceptor`
+  emits the human confirmation's `document.updated` Before/After row exactly as before, staged on the
+  same context and INSIDE the transaction — so an abandoned attempt's row rolls back with it, and the
+  explicit `document.verified` row stays after the commit where `IAuditLogger`'s separate connection
+  cannot be reached by the rollback. This is the cost § Consequences said the conditional
+  `ExecuteUpdateAsync` could not avoid, and it is avoided by not using one.
+
+**Re-deciding is cheap here in a way it is not for the other writers, and that is why the re-run is the
+remedy.** `PUT /verify` has no request body at all: its answer is a pure function of the row. So a
+re-run loses nothing of the user's, needs no `onAttemptAbandoned` twin for state kept outside the change
+tracker, and — unlike the two partial writers — cannot re-apply a stale edit, because there is no edit.
+The re-decision is also strictly BETTER information than the first attempt's: it judges readability
+against the values the row now holds, which is the same correction Amendment 1 made for the worker.
+
+**Exhaustion answers `409` and leaves the last writer's own coherent pair standing**, which is
+ADR 0030 Amendment 3's answer for the pure re-grade and reaches it the same way: this request owns no
+inputs, so there is no half-applied write to complete, and rolling back leaves a tuple somebody else
+committed whole. `DocumentWriteConcurrency.VerifyConflictMessage` is its own copy beside the edit and
+re-grade ones — the edit copy's *"make your change again"* names a change this caller never submitted —
+and the code and envelope are shared, because a client cannot act differently on the three.
+
+**No frontend change, and the reason is worth recording rather than rediscovering.** `PUT /verify` has
+NO caller in `frontend/` — the dashboard's confirmation affordance is the detail page's **Save changes**
+button, which is `PUT /fields` (`UpdateFields`), and that writer reaches `ResolveManualReview` inside ADR
+0030 Amendment 1's `REPEATABLE READ` + `40001` re-run, so the pair this amendment is about was never
+tearable there. This endpoint is an API-surface route today, and its 409 is the honest answer a client
+gets rather than copy any current screen renders. That also means the exhaustion path costs no user
+anything today; it is built to the same standard anyway, because "no caller yet" is not a property to
+design against.
+
+### What this is NOT
+
+- **It is not `DocumentWriteConcurrency.RunAsync` arriving on a fourth writer.** No `REPEATABLE READ`, no
+  `40001`, no widening — the isolation level is stated explicitly at the `BeginTransaction` so a reader
+  cannot mistake it. `.claude/reviewers.md` records widening that guard to all document writes as a real
+  finding, and the test that pins it stays green. The two do share the 409 envelope and the retry bound,
+  which is deliberate: one code, one place the copy lives, one number.
+- **It is not a row lock taken ahead of the decision.** `SELECT … FOR UPDATE` / `FOR NO KEY UPDATE`
+  before the read would be the textbook serialization and it is REJECTED — see Option P below. It also
+  turns out to be observably wrong for this codebase rather than merely heavier.
+- **It does not make trust or status a concurrency token.** No schema change, no `xmin`, nothing about
+  any other `Document` writer moves — the extraction worker in particular keeps its `READ COMMITTED`
+  persist, where an exception out of `SaveChanges` is the re-paid Document AI + LLM run this project
+  measures every concurrency change against.
+
+### What stays open
+
+**A competing write that changes READABILITY without changing the status still leaves this writer's trust
+decision judged against values the row has moved on from.** The pair it commits is COHERENT — that is
+what this amendment buys — but the readability behind it can be one commit old. The population is narrow
+by construction: `PersistSuccess` writes the status whenever it lands (`Completed` or `ManualRequired`,
+from `Processing`), and `UpdateFields` — the other writer of canonical values — commits its OWN
+`ResolveManualReview` decision in the same unit of work, so what survives is plain ADR 0017
+last-writer-wins between two writers that each left a coherent row. Closing it would mean predicating on
+the readability INPUTS (the three typed columns plus the `ExtractionFields` mirror), which is exactly the
+column ENUMERATION ADR 0030 Amendment 2 Option E and Amendment 5 Option S refute, and it would make an
+unrelated field edit conflict with a confirmation — the widening this amendment exists not to do.
+Recorded here rather than ticketed: it is a strictly smaller residual than the one being closed, in the
+same last-writer-wins family, and every detecting shape available to it is already refuted.
+
+**Both deploy-overlap directions in § Consequences are unchanged**, and so is the in-flight disclosure
+gap. They are about an OLD container that does not know the column exists, and about a demotion the
+extraction badge does not yet explain; neither is a pair two new writers tore.
+
+### Alternatives considered (Amendment 2)
+
+- **Option P — take the row's write lock BEFORE deciding** (`SELECT … FOR NO KEY UPDATE`, or an
+  `ExecuteUpdateAsync` used as a lock), so the decision is made beside a status nobody can move. The
+  cleanest statement of the fix on paper: no retry, no 409, no new error path, and the decision is FRESH
+  rather than merely re-taken. **Rejected, and the disqualifying reason is not the one that comes to mind
+  first.** ADR 0030 Option B's lock-order-inversion refutation does not transfer as-is (this writer
+  touches no `ComplianceCheck` rows, so it would acquire exactly one contended lock and acquire it
+  first), and ADR 0050 Option B's *"it buys nothing"* is about contending with the CLAIM rather than with
+  the persist. What disqualifies it is that the lock would be held ACROSS this writer's `SaveChanges`,
+  and every other document writer's UPDATE then waits behind a `PUT /verify` for the duration of its
+  transaction. That is a new blocking relationship on the request path, and it is not hypothetical: it
+  turns `An_unrelated_document_writer_still_wins_last_without_conflicting` — the pin that keeps this
+  writer's semantics honest — from a passing test into a HANG, because the field edit it drives inside
+  the confirmation's window can no longer commit. A fix whose first casualty is the test that fences its
+  own scope is the wrong fix.
+- **Option Q — a conditional `ExecuteUpdateAsync` predicated on the status it read** (the `Reextract`
+  shape), with an explicit `IAuditLogger` row hand-built to replace the interceptor's. § Consequences
+  refuted the plain version; this is the variant that tries to pay the audit cost back. **Rejected on
+  the substitute rather than on the idea:** the interceptor serializes EVERY scalar property of the
+  entity through its own redaction and large-payload rules, so an equivalent row means re-deriving those
+  rules at a second site with nothing pinning the two equal — the "second mechanism" shape this codebase
+  refuses elsewhere — and the substitute would land on `IAuditLogger`'s own connection, OUTSIDE the
+  write's transaction, where today's row is inside it. A thinner row presented as equivalent is worse
+  than an honest one.
+- **Option R — write the status in the same statement as a server-side `CASE` over its current value**,
+  so the pair is coherent without any lock, retry or read-back. Genuinely closes the (status, trust)
+  pair, and it was the most attractive shape considered. **Rejected because it re-introduces
+  Amendment 1's own bug on the request side:** the `CASE` makes the STATUS fresh while the trust value it
+  is paired with is still computed from the request's snapshot, so a confirmation would clear a review
+  the worker had just raised over values the human never saw — a conclusion about a row that no longer
+  exists, which is precisely what Amendment 1 decided a trust write may not be. It also needs
+  `ExecuteUpdateAsync`, so it pays Option Q's audit cost too.
+- **Option S — accept the residue, now that #461 has landed.** § Consequences allowed that the pair
+  might be "absorbed by whatever shape #461 lands", and this outcome stays legitimately available.
+  **Rejected on the measurement rather than on principle:** #461 shipped as ADR 0030 Amendment 3, which
+  took the `REPEATABLE READ` guard for ONE named call site and left every other writer where it was, so
+  nothing about it reaches this writer. Meanwhile the collider is the extraction worker rather than a
+  second human — an org with one portal upload in flight reaches the window without anybody else
+  existing — and the fail-OPEN landing is a distrusted extraction inside vendor coverage, which this
+  project's severity anchors call blocker-class, with no self-heal on the mirror side.
+
 ## References
 
-- Tickets: [#459](https://github.com/neboxdev/complidrop/issues/459), [#467](https://github.com/neboxdev/complidrop/issues/467) (Amendment 1), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic); the read-time predecessors [#401](https://github.com/neboxdev/complidrop/issues/401) and [#365](https://github.com/neboxdev/complidrop/issues/365)
+- Tickets: [#459](https://github.com/neboxdev/complidrop/issues/459), [#467](https://github.com/neboxdev/complidrop/issues/467) (Amendment 1), [#465](https://github.com/neboxdev/complidrop/issues/465) (Amendment 2), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic); the read-time predecessors [#401](https://github.com/neboxdev/complidrop/issues/401) and [#365](https://github.com/neboxdev/complidrop/issues/365)
 - ADRs: [0042](0042-distrusted-extraction-per-field-gate-and-coverage-exclusion.md) (the distrust signal and the coverage exclusion this makes durable — Amendment 3 records the reversal of its in-flight carve-out), [0040](0040-unreadable-canonical-value-fails-closed.md) (the unreadable-value escalation `ResolveManualReview` re-raises, and the walk Amendment 1 re-points at the basis), [0048](0048-never-graded-document-asserts-no-affirmative-verdict.md) (the OTHER axis that withholds an unread document from coverage), [0050](0050-reextract-refuses-a-live-extraction-claim.md) (the re-arm this must survive), [0016](0016-apply-ef-migrations-on-startup.md) (auto-migrate on boot — why the migration is additive and cheap), [0030](0030-compliance-verdict-combined-unit-of-work.md) (the unit of work `PersistSuccess` writes both columns inside; Amendment 2 is the grading basis Amendment 1 here borrows, and its § What stays open is where #467 was recorded)
-- Code: `Entities/Document.cs` (`ExtractionTrust`), `Data/ModelConfiguration.cs` (mapping + store default), `Migrations/20260802080136_AddDocumentExtractionTrust.cs` (the additive migration + seed), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `MarkFailed`, `RecordFailedAttempt`), `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview`, `Reextract`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo`), `DTOs/Vendors/VendorDtos.cs` (`VendorCoverage`'s contract comment), `frontend/src/app/(dashboard)/documents/[id]/page.tsx` (the one frontend change — `ManualReviewCard`'s gate), `CompliDrop.Api.Tests/Adr0052EnforcementTests.cs` (the read-surface / writer-set gate), `CompliDrop.Api.Tests/TestHelpers/SourceScan.cs` (the shared scanner the gates use); for Amendment 1 `Services/DocumentGradingBasis.cs` (the basis, now read by both of this writer's conclusions), `Services/DocumentFieldReadability.cs` (the one predicate, unchanged — only its SUBJECT moved) and, for § *The raw copies come too*, `BackgroundServices/ExtractionWorker.cs` (`ReconcileCanonicalCopiesWithTheRow`) + `Services/CanonicalDocumentFields.cs` (`SameTypedColumn`, the typed comparison it keys on) + `Entities/Document.cs` (`DocumentField.ApplyCorrection`, the ONE owner of the corrected-row shape, shared with `DocumentEndpoints.UpdateFields`)
+- Code: `Entities/Document.cs` (`ExtractionTrust`), `Data/ModelConfiguration.cs` (mapping + store default), `Migrations/20260802080136_AddDocumentExtractionTrust.cs` (the additive migration + seed), `BackgroundServices/ExtractionWorker.cs` (`PersistSuccess`, `MarkFailed`, `RecordFailedAttempt`), `Endpoints/DocumentEndpoints.cs` (`ResolveManualReview`, `Reextract`), `Endpoints/VendorEndpoints.cs` (`ComputeCoverage`, `DocCoverageInfo`), `DTOs/Vendors/VendorDtos.cs` (`VendorCoverage`'s contract comment), `frontend/src/app/(dashboard)/documents/[id]/page.tsx` (the one frontend change — `ManualReviewCard`'s gate), `CompliDrop.Api.Tests/Adr0052EnforcementTests.cs` (the read-surface / writer-set gate), `CompliDrop.Api.Tests/TestHelpers/SourceScan.cs` (the shared scanner the gates use); for Amendment 1 `Services/DocumentGradingBasis.cs` (the basis, now read by both of this writer's conclusions), `Services/DocumentFieldReadability.cs` (the one predicate, unchanged — only its SUBJECT moved) and, for § *The raw copies come too*, `BackgroundServices/ExtractionWorker.cs` (`ReconcileCanonicalCopiesWithTheRow`) + `Services/CanonicalDocumentFields.cs` (`SameTypedColumn`, the typed comparison it keys on) + `Entities/Document.cs` (`DocumentField.ApplyCorrection`, the ONE owner of the corrected-row shape, shared with `DocumentEndpoints.UpdateFields`); for Amendment 2 `Endpoints/DocumentEndpoints.cs` again (`MarkVerified` — the transaction, the post-write pair check and the bounded re-run) + `Endpoints/DocumentWriteConcurrency.cs` (`VerifyConflictMessage` and the 409 envelope it shares, plus the class remark that scopes this writer OUT of the `REPEATABLE READ` guard) + `Services/DocumentConcurrency.cs` (`MaxAttempts`, the shared bound)
 - Tests (Amendment 1): `CompliDrop.Api.Tests/ExtractionWorkerStaleBasisTests.cs` — six pins sharing `AssertTrustAgreesWithTheRowAsync`, which reads the persisted row AND `GET /api/documents/{id}` and requires the committed trust/status pair and the wire `unreadableFields` list to agree. The biconditional is only legitimate because every fixture holds the other three triggers off (0.95 on every field, `NeedsReprocessing: false`), so readability is the sole trigger — it is NOT the general invariant (see § The invariant this buys). The raw-copy half is asserted through `ReadRenderedFieldAsync`, which reads the `fields[]` row value, the `extractionFields` mirror entry and `originalValue` off the same wire response the detail page renders from; `A_mid_run_CLEAR_the_read_did_not_overwrite_leaves_no_field_value_claiming_otherwise` is its fail-OPEN direction, and `A_failing_GRADE_still_leaves_the_trust_decision_judging_the_basis_it_already_read` covers the arm where the basis read SUCCEEDS and the recompute throws. `A_canonical_value_a_mid_run_edit_FIXED_leaves_no_review_with_nothing_to_name` is the ticket's interleave and the one that goes red on the pre-fix code; `A_canonical_value_this_read_leaves_unreadable_still_routes_to_review_and_NAMES_it` pins fail-CLOSED and doubles as the discriminator against a readability walk over a plain re-read of the row (ADR 0030 Amendment 2 Option F's mistake in a new place — that shape would call the document clean while its committed column is null); `A_mid_run_edit_that_BREAKS_a_value_the_read_replaces_does_not_strand_the_document` is the inverse direction, with an in-window probe asserting the save really withdrew trust first so the restoration is not vacuous; and `A_failing_basis_read_falls_back_to_what_this_read_produced_and_still_withdraws_trust` pins the fallback arm, the degrade, and that the failure still costs no second OCR + LLM run. Review round 2 adds four that are deliberately NOT under the biconditional: `One_canonical_field_answered_TWICE_still_keeps_each_rows_own_answer` (the ordinal-vs-ignore-case double demotion), `A_reconciled_field_that_tripped_the_confidence_gate_names_itself_on_the_row` (the per-field gate arm every other fixture holds off, via the per-field-confidence `ExtractedAt` helper — it asserts the `ManualRequired` + `Distrusted` + empty-list + nothing-outlined shape directly, and goes red under Option M), `A_reconciled_AMOUNT_takes_the_columns_own_rendering_and_keeps_the_models_answer` (the money branch of `SameTypedColumn`, and the `numeric(18,2)` rendering the reconciliation lands in the field editor) and `A_field_whose_column_the_row_AGREES_on_is_left_exactly_as_the_model_read_it` (an ordinary re-extraction the reconciliation must NOT touch — the integration half of the typed-not-a-rendering property, whose pure half is `CanonicalDocumentFieldsTests.An_amount_compares_on_the_NUMBER_not_on_its_rendering`)
+
+- Tests (Amendment 2): `CompliDrop.Api.Tests/DocumentConcurrentEditTests.cs` — three constructed interleaves driven through the suite's own `SaveChanges` hook with a competing writer in `PersistSuccess`'s whole-tuple shape: `A_confirmation_cannot_leave_a_review_flagged_row_reading_TRUSTED` (fail-OPEN, the ticket's own repro), `A_confirmation_cannot_leave_a_cleanly_read_row_reading_DISTRUSTED` (the mirror, from the unreadable seed) and `A_confirmation_that_keeps_losing_the_status_answers_409_and_commits_nothing` (the bound, the copy, and an EMPTY audit log — an abandoned attempt's interceptor row rolls back with it). Each carries the same anti-no-op discriminator, `competingWrites`: the hook is re-entered by the second attempt, which is what proves the pair check fired rather than the interleave having missed it. `An_unrelated_document_writer_still_wins_last_without_conflicting` is unchanged and is the FENCE around the guard's scope — a competing FIELD EDIT moves no status, so this writer must still commit on its first attempt. `DocumentEndpointsTests.Marking_verified_still_emits_trust_WITHOUT_forcing_the_status_it_read` is the deliberate rewrite of the residue's old pin: it reads the host's EF command log and asserts BOTH halves — the UPDATE still carries `"ExtractionTrust"` and NOT `"ExtractionStatus"` (forcing it is the lost update above), and a `SELECT d."ExtractionStatus"` runs AFTER that UPDATE (the pair check, which is what makes the partiality safe). All four go red against the pre-#465 endpoint.

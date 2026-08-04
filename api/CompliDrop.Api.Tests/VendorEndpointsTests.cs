@@ -593,11 +593,13 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         // Unreachable through any ONE of the new writers, which is why the deploy overlap is where it
         // comes from: PersistSuccess pairs Completed with Trusted, and ResolveManualReview only ever
         // withdraws trust on a row whose status it simultaneously moves to ManualRequired (or cannot move
-        // at all — Pending/Processing/Failed). NOT unreachable through two of them INTERLEAVED, though —
-        // MarkVerified is an unforced READ COMMITTED partial write, so a PersistSuccess commit inside its
-        // load→save window reaches this pair with no deploy involved (#465, ADR 0052 § Consequences' third
-        // path, pinned by Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read).
-        // Same shape either way, so the same remedy applies and this test covers both.
+        // at all — Pending/Processing/Failed). It used to be reachable through two of them INTERLEAVED as
+        // well, because MarkVerified was an unforced READ COMMITTED partial write — that was #465, and it
+        // is CLOSED (ADR 0052 Amendment 2): the confirmation now re-reads, after its own write, the status
+        // the row will actually leave and re-runs itself when somebody moved it, so it can no longer
+        // commit trust beside a status it never saw. The DEPLOY-overlap route to this same shape survives
+        // untouched — the old container does not know the column exists — so this test is unchanged, and
+        // the remedy it asserts (any new-container writer rewrites trust) is unchanged with it.
         var auth = await RegisterAndLoginAsync();
         var template = await CreateTemplateAsync(auth.Client, "Caterer");
         (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
