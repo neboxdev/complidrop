@@ -1,3 +1,4 @@
+using System.Globalization;
 using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using FluentAssertions;
@@ -301,5 +302,84 @@ public class CanonicalDocumentFieldsTests
 
         CanonicalDocumentFields.SameTypedColumn(a, b, "policy_number").Should().BeTrue();
         CanonicalDocumentFields.SameTypedColumn(a, b, null).Should().BeTrue();
+    }
+
+    // ---- TypedColumnValue renders on the INVARIANT calendar (#467 review) ----
+
+    [Theory]
+    [InlineData("th-TH")]   // Thai Buddhist calendar: 2026 -> 2569
+    [InlineData("ar-SA")]   // Umm al-Qura calendar: 2026-12-31 -> 1448-07-22
+    public void A_canonical_date_renders_Gregorian_ISO_under_a_non_Gregorian_culture(string cultureName)
+    {
+        // The mirror image of Slash_format_dates_parse_month_first_under_invariant_culture, on the
+        // RENDER side. `yyyy` is the year in the format provider's CALENDAR, and a provider-less
+        // ToString takes CultureInfo.CurrentCulture's — which is Gregorian on a US/invariant host and
+        // is NOT on a Thai or Saudi one. DocumentFieldReadability.TypedColumnValue is not a display
+        // helper: ComplianceCheckService.LookupValue returns it as the canonical field's value (every
+        // rule comparison, ComplianceCheck.ActualValue) and ExtractionWorker.ReconcileCanonicalCopies-
+        // WithTheRow persists it into Document.ExtractionFields and DocumentField.FieldValue.
+        //
+        // It fails OPEN, which is why it is worth a test rather than a code comment: the wrong-calendar
+        // string still PARSES (asserted below), as a Gregorian date centuries away, so no readability
+        // check flags it and nothing routes the document to a human.
+        var doc = new Document
+        {
+            ExpirationDate = new DateTime(2026, 12, 31, 0, 0, 0, DateTimeKind.Utc),
+            EffectiveDate = new DateTime(2026, 1, 15, 0, 0, 0, DateTimeKind.Utc),
+        };
+
+        var original = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo(cultureName);
+
+            // Anti-vacuity, asserted rather than assumed: if this host's globalization data made the
+            // culture Gregorian (an ICU/NLS difference, or InvariantGlobalization switched on for the
+            // test host), the test below could not discriminate and would pass no matter what
+            // TypedColumnValue does. Fail LOUDLY here instead of going quietly green.
+            doc.ExpirationDate!.Value.ToString("yyyy-MM-dd").Should().NotBe("2026-12-31",
+                $"this test only discriminates if {cultureName}'s ambient calendar is non-Gregorian on "
+                + "this host — a provider-less render must differ from the ISO one");
+
+            DocumentFieldReadability.TypedColumnValue(doc, "expiration_date").Should().Be("2026-12-31");
+            DocumentFieldReadability.TypedColumnValue(doc, "effective_date").Should().Be("2026-01-15");
+
+            // Persisted and re-read: the rendering the reconciliation leaves in the mirror must parse
+            // back to the very instant the typed column holds. This is the assertion the ambient-culture
+            // rendering fails SILENTLY — "2569-12-31" parses fine, just to the wrong year.
+            var roundTrip = new Document();
+            CanonicalDocumentFields.ApplyToTypedColumn(
+                roundTrip, "expiration_date", DocumentFieldReadability.TypedColumnValue(doc, "expiration_date"))
+                .Should().Be(TypedColumnResult.Parsed);
+            roundTrip.ExpirationDate.Should().Be(doc.ExpirationDate);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = original;
+        }
+    }
+
+    [Fact]
+    public void A_canonical_amount_renders_invariantly_too()
+    {
+        // The arm that was already explicit, pinned so a later tidy-up cannot drop the argument from
+        // all three at once. de-DE swaps the decimal separator, which would break both the money
+        // comparison in min_value and the mirror copy the field editor shows.
+        var doc = new Document { GeneralLiabilityLimit = 2_000_000.50m };
+
+        var original = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("de-DE");
+            doc.GeneralLiabilityLimit!.Value.ToString().Should().NotBe("2000000.50",
+                "anti-vacuity: de-DE must actually render the decimal separator differently here");
+
+            DocumentFieldReadability.TypedColumnValue(doc, "general_liability_limit")
+                .Should().Be("2000000.50");
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = original;
+        }
     }
 }
