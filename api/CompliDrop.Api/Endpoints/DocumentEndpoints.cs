@@ -867,7 +867,7 @@ public static class DocumentEndpoints
             var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == id, ct);
             if (doc is null) return NotFound();
 
-            // What the decision is made FROM, captured before anything is mutated…
+            // Step 1. What the decision is made FROM, captured before anything is mutated…
             var basis = ManualReviewBasis.Of(doc);
             // …and what it decides. The status half is deliberately NOT applied to the entity: see
             // step 3 below, and applyStatus's own remarks.
@@ -919,8 +919,8 @@ public static class DocumentEndpoints
                 // After the commit, as before: IAuditLogger writes on its own SystemDbContext connection,
                 // outside this transaction's reach, so an abandoned attempt must not have emitted one.
                 await audit.LogAsync("document.verified", nameof(Document), doc.Id,
-                    before: new { basis.Status },
-                    after: new { decided.Status });
+                    before: new { ExtractionStatus = basis.Status },
+                    after: new { ExtractionStatus = decided.Status });
                 return Results.Ok(new { data = new { message = "Document marked verified." }, error = (object?)null });
             }
 
