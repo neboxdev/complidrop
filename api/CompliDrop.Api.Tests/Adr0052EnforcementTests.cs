@@ -323,5 +323,30 @@ public class Adr0052EnforcementTests
 
         ExtractionWorker.ClaimSql.Should().NotContain("IsManuallyVerified",
             "the claim moves PIPELINE POSITION only — same rule as trust, one column over");
+
+        // The premise the whole amendment rests on: this flag is DISPLAY-ONLY. That is what makes changing
+        // its semantics safe without a migration, a flag or a verdict re-grade, and — like the ADR 0042
+        // carve-out above it — nothing behavioural can pin it, because a new read site would just be a new,
+        // green feature. Two files mention it in PROSE and touch it nowhere (the rollup and its DTO, whose
+        // comments explain why the coverage predicate stopped reading it), so the stripper runs first.
+        var flagSites = ProductionSources()
+            .Where(s => SourceScan.StripLineComments(s.Text).Contains("IsManuallyVerified", StringComparison.Ordinal))
+            .Select(s => s.Relative)
+            .OrderBy(r => r, StringComparer.Ordinal)
+            .ToArray();
+        flagSites.Should().BeEquivalentTo(
+            new[]
+            {
+                "BackgroundServices/ExtractionWorker.cs",  // WithdrawConfirmation — the clearer
+                "DTOs/Documents/DocumentDtos.cs",          // the wire field the detail page renders
+                "Endpoints/DocumentEndpoints.cs",          // ResolveManualReview + the detail projection
+                "Entities/Document.cs",                    // the property itself
+            },
+            "the flag reaches no verdict, count, badge, reminder or export — it is one sentence on one "
+            + "page. A fifth file is either a new READ surface (which inherits the pre-deploy and "
+            + "deploy-overlap residues ADR 0052 Amendment 3 records as acceptable only BECAUSE the "
+            + "exposure is display-only) or a third writer; VendorEndpoints.cs and VendorDtos.cs are the "
+            + "prose-only pair and must stay comment-only, since re-adding this flag to the coverage "
+            + "predicate is the exact regression #459 removed");
     }
 }

@@ -64,11 +64,13 @@ internal static class DocumentGradingBasis
     /// row commits the interceptor's later one. Deliberately not chased: ADR 0030 Amendment 2's "the basis
     /// is READ-ONLY with respect to <c>doc</c>" means this helper predicts what the writer writes, it does
     /// not model the pipeline.</item>
-    /// <item>Anything the caller assigns AFTER calling this — which for <c>PersistSuccess</c> is exactly
-    /// its own two conclusions, <c>ExtractionStatus</c>/<c>ExtractionTrust</c> (they are DECIDED from this
-    /// basis, so they cannot precede it) and the forced <c>ComplianceStatus</c>. The basis holds the row's
-    /// values for those. Immaterial by inspection: <c>ComplianceCheckService</c> reads none of the three,
-    /// and <c>DocumentFieldReadability</c> reads only the canonical fields.</item>
+    /// <item>Anything the caller assigns AFTER calling this — which for <c>PersistSuccess</c> is its own
+    /// two conclusions, <c>ExtractionStatus</c>/<c>ExtractionTrust</c> (they are DECIDED from this basis,
+    /// so they cannot precede it), the forced <c>ComplianceStatus</c>, and since #464 the withdrawn
+    /// <c>IsManuallyVerified</c> (which is NOT decided from the basis — it is a fact about the EVENT, that
+    /// a new reading replaced the values, so it merely sits with its two neighbours). The basis holds the
+    /// row's values for all four. Immaterial by inspection: <c>ComplianceCheckService</c> reads none of
+    /// them, and <c>DocumentFieldReadability</c> reads only the canonical fields.</item>
     /// </list>
     /// <para/>
     /// Returns <c>null</c> only when the row is GENUINELY GONE — a hard delete. A SOFT delete does NOT

@@ -964,10 +964,21 @@ change by construction, which is also why it can be made without a migration or 
   during a Railway rollout the OLD container's `PersistSuccess` does not clear the flag, because it does
   not know it should. Self-heals on the next successful read by a new-container worker, and the exposure
   is one display sentence.
-- **A mid-run confirmation is always discarded**, including the case where the user was confirming a value
-  the landing read happens to agree with. Accepted: they confirmed a page the re-read has replaced
-  wholesale, the withdrawal is the fail-honest direction, and re-confirming is one click on values that are
-  now actually on screen.
+- **The withdrawal is last-writer-wins on the flag, not a total order** — and the boundary is worth stating
+  precisely, because the first draft of this section claimed a mid-run confirmation is *always* discarded
+  and that is stronger than the code guarantees. The force settles the ordering it exists for: a
+  confirmation that COMMITS BEFORE this persist is discarded, even though the worker's snapshot and its
+  conclusion agree. A confirmation that commits AFTER it re-asserts `true` — and does so *by design of*
+  Amendment 2, whose re-run re-decides against the row it will LEAVE, on a row whose values the persist has
+  just replaced. The reachable path is `PUT /fields` (the page's Save is not gated on `isProcessing`, and a
+  re-extract takes minutes), which re-runs under `DocumentWriteConcurrency`'s `REPEATABLE READ` + `40001`
+  and re-applies the user's own submitted values — so the fields they authored really are on the row they
+  end up vouching for; the ones they did not submit are the machine's, which is the ordinary state of every
+  confirmation. **Refusing instead of re-running is the wrong trade**: it would answer `409` to an ordinary
+  edit that happened to straddle a landing re-extract, making the user retype work, to remove a display
+  sentence that reaches no verdict. Pinned as a boundary rather than left as prose —
+  `DocumentConcurrentEditTests.A_confirmation_cannot_vouch_for_values_a_re_read_replaced_inside_its_window`
+  asserts this landing and names it.
 
 ### Alternatives considered
 

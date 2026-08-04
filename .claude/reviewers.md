@@ -340,6 +340,15 @@ Both are defined in this repo's `.claude/agents/`.
     - The clear is UNCONDITIONAL within `PersistSuccess`. "Only clear when a value actually changed" is
       Option W, refuted — the per-column enumeration ADR 0030 Amendment 2 Option E / Amendment 5 Option S
       already refuse, plus a person confirms a READING, not a set of strings.
+    - The withdrawal is LAST-WRITER-WINS on the flag, not a total order, and the boundary is recorded (do
+      NOT re-report it as the bug reopening). The force settles the ordering it exists for — a confirmation
+      that COMMITS BEFORE the persist loses. One that commits AFTER re-asserts `true`, because Amendment 2's
+      re-run re-decides against the row it will LEAVE; the reachable path is `PUT /fields` (Save is not
+      gated on `isProcessing`), whose re-run re-applies the user's OWN submitted values. Refusing instead
+      would 409 an ordinary edit that straddled a landing re-extract and make the user retype, to remove a
+      display sentence that reaches no verdict. Pinned by
+      `DocumentConcurrentEditTests.A_confirmation_cannot_vouch_for_values_a_re_read_replaced_inside_its_window`,
+      whose `IsManuallyVerified.Should().BeTrue` reason names it.
     - Recorded residues, do NOT re-report: pre-deploy rows (confirmed AND re-extracted before the deploy)
       keep a stale `true` until their next successful read — NOT backfilled, because the only candidate
       predicate (no `IsManuallyEdited` row) erases confirmations made through the empty-fields `Save` and

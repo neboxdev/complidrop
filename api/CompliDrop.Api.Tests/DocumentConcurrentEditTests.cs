@@ -759,7 +759,14 @@ public sealed class DocumentConcurrentEditTests(IntegrationTestFixture fixture) 
             + "fail-OPEN landing that made the first pair check insufficient");
         doc.ExtractionStatus.Should().Be(ExtractionStatus.ManualRequired,
             "…and the review flag stays raised, so the detail page can still say why");
-        doc.IsManuallyVerified.Should().BeTrue("the confirmation itself still landed");
+        doc.IsManuallyVerified.Should().BeTrue(
+            "the confirmation itself still landed — and since #464 this line is also the BOUNDARY of the "
+            + "withdrawal (ADR 0052 Amendment 3 § Consequences). PersistSuccess forces IsManuallyVerified "
+            + "false, so it wins over a confirmation that committed BEFORE it; a confirmation that commits "
+            + "AFTER it re-asserts true, because Amendment 2's re-run is doing exactly its job — it "
+            + "re-decides against the row it will LEAVE. The withdrawal is last-writer-wins on that column, "
+            + "not a total order, and making this attempt REFUSE instead would make an ordinary re-extract "
+            + "landing mid-edit throw away a user's typed values");
     }
 
     [Fact]

@@ -133,11 +133,32 @@ public sealed class DocumentConfirmationFreshnessTests(IntegrationTestFixture fi
         return null;
     }
 
-    [Fact]
-    public async Task A_clean_re_read_withdraws_the_confirmation_whose_values_it_replaced()
+    /// <summary>The `fields[]` row id the detail payload carries for <paramref name="name"/>.</summary>
+    private static string? FieldRowId(JsonElement detail, string name)
+    {
+        foreach (var field in detail.GetProperty("fields").EnumerateArray())
+            if (field.GetProperty("fieldName").GetString() == name)
+                return field.GetProperty("id").GetString();
+        return null;
+    }
+
+    [Theory]
+    // What the SECOND read answers. Both arms must withdraw, because the withdrawal is UNCONDITIONAL:
+    [InlineData("POL-SECOND")] // a different value — the ticket's own shape
+    [InlineData("POL-FIRST")]  // the SAME value — Option W's refusal (ADR 0052 Amendment 3)
+    public async Task A_clean_re_read_withdraws_the_confirmation_whose_values_it_replaced(string reReadValue)
     {
         // The ticket's sequence, driven through the real endpoints and asserted on the real payload:
         // read → confirm → "Read again" → a clean machine re-read that replaces every value.
+        //
+        // The second arm is the one that pins the decision rather than the symptom. "Only clear when a
+        // value actually changed" (Option W) is the shape a future reader will reach for as a precision
+        // improvement, and it is refuted twice over: it is the per-column enumeration ADR 0030 Amendment 2
+        // Option E already refuses, and it misreads what was confirmed — a person confirms a READING, and
+        // PersistSuccess deletes and re-inserts every DocumentField row regardless, so "the same string
+        // came back" does not make their confirmation of THIS reading a thing that happened. The row-id
+        // assertion below is what keeps that arm honest: with no value to compare, a fresh id is the proof
+        // the read really landed and really replaced the rows.
         var auth = await RegisterAndLoginAsync();
         var docId = await SeedQueuedDocAsync(auth.OrgId);
 
@@ -151,6 +172,7 @@ public sealed class DocumentConfirmationFreshnessTests(IntegrationTestFixture fi
             "precondition: the page is showing the green shield over the values this person just read");
         FieldValue(confirmed, "policy_number").Should().Be("POL-FIRST",
             "precondition: and these are the values they confirmed");
+        var confirmedRowId = FieldRowId(confirmed, "policy_number");
 
         var reextract = await auth.Client.PostAsync($"/api/documents/{docId}/reextract", content: null);
         reextract.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -159,12 +181,16 @@ public sealed class DocumentConfirmationFreshnessTests(IntegrationTestFixture fi
                 "the re-arm itself replaces nothing — the row still holds the confirmed values, so the "
                 + "claim is still true while the read is merely queued (ADR 0052 §2's scoping, mirrored)");
 
-        Extraction.Result = CleanRead(("policy_number", "POL-SECOND"));
+        Extraction.Result = CleanRead(("policy_number", reReadValue));
         await ClaimAndProcessAsync(docId);
 
         var afterReRead = await ReadDetailAsync(auth.Client, docId);
-        FieldValue(afterReRead, "policy_number").Should().Be("POL-SECOND",
-            "precondition: the machine re-read really did replace the value the human confirmed");
+        FieldValue(afterReRead, "policy_number").Should().Be(reReadValue,
+            "precondition: the machine re-read landed and this is what it answered");
+        FieldRowId(afterReRead, "policy_number").Should().NotBe(confirmedRowId,
+            "ANTI-NO-OP, and the whole point of the same-value arm: PersistSuccess RemoveRanges every "
+            + "DocumentField row and re-inserts, so a fresh id proves the rows the person confirmed are "
+            + "GONE even where the string that came back is identical");
         afterReRead.GetProperty("isManuallyVerified").GetBoolean().Should().BeFalse(
             "the detail page renders this as \"A person confirmed these fields.\" beside a green shield — "
             + "and no person has seen THESE fields. Pre-#464 the flag was write-once, so the sentence "

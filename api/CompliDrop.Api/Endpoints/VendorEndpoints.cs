@@ -165,10 +165,13 @@ public static class VendorEndpoints
             // detail page offers manual entry for exactly that case ("We couldn't pull the details from this
             // file automatically. Enter the key details below"), whose Save is a REAL grade: UpdateFields
             // mirrors the typed values into the canonical inputs and folds ApplyEvaluationAsync into its own
-            // unit of work. Unlike IsManuallyVerified the trust flag is NOT sticky: a later extraction
-            // re-decides it, so a document confirmed once, successfully re-read, then failed again is
-            // distrusted again rather than reading as confirmed on values no human ever saw (the residue
-            // ADR 0042 Amendment 2 recorded and this closes).
+            // unit of work. The trust flag is NOT sticky the way IsManuallyVerified was when this clause
+            // was written: a later extraction re-decides it, so a document confirmed once, successfully
+            // re-read, then failed again is distrusted again rather than reading as confirmed on values no
+            // human ever saw (the residue ADR 0042 Amendment 2 recorded and this closes). #464 / ADR 0052
+            // Amendment 3 has since made that flag re-decidable too — PersistSuccess withdraws it on the
+            // same event — so the contrast is now historical: what this clause asks trust for is that trust
+            // is the BASIS question, not that it is the only column a re-read can move.
             //
             // Pending/Processing are still not excluded BY THEIR STATUS -- the clause cannot see the status
             // at all. An in-flight document is excluded exactly when it is Distrusted, and there are TWO

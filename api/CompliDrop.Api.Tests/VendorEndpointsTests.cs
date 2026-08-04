@@ -499,14 +499,22 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
     public async Task A_confirmed_cert_re_extracted_cleanly_and_then_failed_again_reads_ActionNeeded()
     {
         // THE residue #459 owes: ADR 0042 Amendment 2 gated the Failed exclusion on IsManuallyVerified,
-        // which nothing ever clears. So a document confirmed once, then SUCCESSFULLY re-extracted (which
-        // overwrites the fields with machine values no human has seen), then failed again, read as
-        // "a human confirmed this" on a basis nobody vouched for — recorded as deliberately accepted
-        // because the status could not carry the distinction.
+        // which at the time nothing ever cleared. So a document confirmed once, then SUCCESSFULLY
+        // re-extracted (which overwrites the fields with machine values no human has seen), then failed
+        // again, read as "a human confirmed this" on a basis nobody vouched for — recorded as deliberately
+        // accepted because the status could not carry the distinction.
         //
         // ExtractionTrust is re-decided by every extraction, so the clean re-read supersedes the human's
         // confirmation (correctly — the values changed) and the later terminal failure distrusts the row.
         // Revert to the IsManuallyVerified clause and the last assertion flips to "Covered".
+        //
+        // The FLAG is no longer sticky either since #464 / ADR 0052 Amendment 3 — PersistSuccess withdraws
+        // it on the same event that replaces the values — so step 2 below clears it BY HAND, because that
+        // step hand-writes the columns rather than running the real writer. The hand-write is kept (rather
+        // than driving the worker) because this suite's subject is the ROLLUP and seeding the step keeps
+        // the final assertion measuring the trust column alone; DocumentConfirmationFreshnessTests is what
+        // pins the real writer. Leaving the flag true here would have made the fixture assert, in present
+        // tense, a state production can no longer reach.
         var auth = await RegisterAndLoginAsync();
         var template = await CreateTemplateAsync(auth.Client, "Caterer");
         (await AddRuleAsync(auth.Client, template, "coi", "general_liability_limit", "required")).EnsureSuccessStatusCode();
@@ -521,17 +529,20 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             .StatusCode.Should().Be(HttpStatusCode.OK);
         (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered", "the human exit works");
 
-        // 2. A later extraction succeeds cleanly: PersistSuccess rewrites the fields and re-decides trust.
+        // 2. A later extraction succeeds cleanly: PersistSuccess rewrites the fields, re-decides trust AND
+        //    withdraws the confirmation (#464) — all three, so the hand-write leaves the row where the real
+        //    writer would.
         await using (var db = CreateSystemDb())
         {
             var doc = await db.Documents.SingleAsync(d => d.Id == docId);
             doc.ExtractionStatus = ExtractionStatus.Completed;
             doc.ExtractionTrust = ExtractionTrust.Trusted;
+            doc.IsManuallyVerified = false;
             await db.SaveChangesAsync();
         }
 
         // 3. …and the NEXT read fails terminally. The values on the row are now the machine's, from step 2,
-        //    and no human has ever looked at them — but IsManuallyVerified still says true.
+        //    and no human has ever looked at them.
         await using (var db = CreateSystemDb())
         {
             var doc = await db.Documents.SingleAsync(d => d.Id == docId);
@@ -544,8 +555,11 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
         await using (var verify = CreateSystemDb())
         {
             (await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId))
-                .IsManuallyVerified.Should().BeTrue(
-                    "the flag is still sticky — which is exactly why the rollup no longer reads it");
+                .IsManuallyVerified.Should().BeFalse(
+                    "step 2 models the real writer, which since #464 withdraws the confirmation on the "
+                    + "same event that replaces the values. The rollup below reads neither this column "
+                    + "(#459) nor the status — its answer comes from the trust column alone — so this "
+                    + "assertion is here to keep the FIXTURE honest about the row production would leave");
         }
 
         (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("ActionNeeded",
@@ -668,8 +682,10 @@ public sealed class VendorEndpointsTests(IntegrationTestFixture fixture) : Integ
             doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed,
                 "ResolveManualReview deliberately does not move a Failed row — so the status can't be the exit");
             doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
-                "…so the exit is the trust column the same helper writes (#459 / ADR 0052), which — unlike "
-                + "the IsManuallyVerified flag it replaces — a later extraction can take back");
+                "…so the exit is the trust column the same helper writes (#459 / ADR 0052) — which a later "
+                + "extraction can take back, unlike the IsManuallyVerified flag it replaced, whose "
+                + "stickiness was the point of moving the clause (#464 has since made that flag "
+                + "re-decidable too, but the rollup asks trust because trust is the BASIS question)");
         }
 
         (await CoverageStatusAsync(auth.Client, vendorId)).Should().Be("Covered",
