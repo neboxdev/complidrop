@@ -364,17 +364,33 @@ Both are defined in this repo's `.claude/agents/`.
       `ResolveManualReview` leaves the status alone — so the UPDATE carried trust WITHOUT it, and a
       `PersistSuccess` commit landing in that window left `ManualRequired` + `Trusted`. The DEPLOY-overlap
       routes above are NOT closed by it and still must not be re-reported.
-      - What shipped, and the three shapes it deliberately is not: the confirmation runs its load →
-        decide → `SaveChanges` in its OWN `READ COMMITTED` transaction and then re-reads the
-        `ExtractionStatus` the row will actually leave, comparing it against the one the trust decision
-        assumed; a disagreement rolls the attempt back and re-runs it against a fresh read, bounded at
-        `DocumentConcurrency.MaxAttempts`, then `409 document.concurrent_update` having committed nothing.
-      - **The UPDATE is still PARTIAL, and "make it whole-tuple by forcing `ExtractionStatus`" is a
-        finding, not the fix.** That is the `SetTrust` / `ForceVerdictWrite` shape, and it is right only
-        where the writer's own conclusion is the FRESHER value. This request's snapshot status is the
-        OLDER one, so forcing it overwrites a live `ManualRequired` with a stale `Pending` — a lost update
-        AND a de-queued extraction (the worker claims on `Pending`). Same ownership axis as ADR 0030
-        Amendment 2 Option G.
+      - What shipped, and the shapes it deliberately is not: the confirmation runs in its OWN
+        `READ COMMITTED` transaction and, after its write has taken the row lock, re-reads the row and
+        requires the two facts its decision is a pure function of — the `ExtractionStatus` it read, and
+        `DocumentFieldReadability`'s verdict on the row this commit will LEAVE — to still be the ones it
+        decided from; a disagreement rolls the attempt back and re-runs it against a fresh read, bounded
+        at `DocumentConcurrency.MaxAttempts`, then `409 document.concurrent_update` having committed
+        nothing.
+      - **A read-back only sees a column the same transaction did NOT write.** This is the rule the fix
+        turns on, and round 2 of the #465 review is where it was learned: the first shipped shape compared
+        the re-read against the status `ResolveManualReview` had just WRITTEN, so in the two arms where
+        the confirmation moves the status (`ManualRequired` + readable → `Completed`, `Completed` +
+        unreadable → `ManualRequired`) it read its own value and could never fail. `ExtractionStatus` is
+        therefore written AFTER the check, by a targeted statement under the row lock — putting it back
+        inside the tracked UPDATE is a blocker-class regression, not a tidy-up.
+      - **"Make it whole-tuple by forcing `ExtractionStatus`" is still a finding, not the fix.** That is
+        the `SetTrust` / `ForceVerdictWrite` shape, and it is right only where the writer's own conclusion
+        is the FRESHER value. This request's snapshot status is the OLDER one, so forcing it overwrites a
+        live `ManualRequired` with a stale `Pending` — a lost update AND a de-queued extraction (the
+        worker claims on `Pending`). Same ownership axis as ADR 0030 Amendment 2 Option G.
+      - **`ExtractionTrust` IS forced, and that is the same axis rather than an exception**
+        (`ForceConfirmationWrite`, beside `IsManuallyVerified`): trust is this writer's OWN conclusion, so
+        an assignment that matches the snapshot must not leave a competitor's judgment standing — §2's
+        `SetTrust` argument, which applies here because this writer is `READ COMMITTED` (its sibling
+        `UpdateFields` is under `REPEATABLE READ`, where a moved row aborts instead). It is sound only
+        because the check re-asks READABILITY, which trust is a function of. Trust is deliberately NOT
+        read back: a forced column answers with our own value, i.e. the tautology above in a new place
+        (ADR 0052 Amendment 2 Option U).
       - **It is NOT `DocumentWriteConcurrency.RunAsync`.** No REPEATABLE READ, no 40001, no widening —
         widening that guard to all document writes is still a finding (see the ADR 0030 block) and
         `An_unrelated_document_writer_still_wins_last_without_conflicting` is still the pin. It borrows
@@ -382,10 +398,15 @@ Both are defined in this repo's `.claude/agents/`.
         (`DocumentWriteConcurrency.VerifyConflictMessage` — `PUT /verify` has no body, so the edit copy's
         "make your change again" names a change nobody submitted).
       - **The tracked `SaveChanges` is load-bearing**: it is what keeps `AuditSaveChangesInterceptor`'s
-        Before/After row for a HUMAN CONFIRMATION intact and inside the transaction. Swapping it for a
-        conditional `ExecuteUpdateAsync` is the alternative ADR 0052 § Consequences refuses, and
-        hand-building a replacement audit row re-derives the interceptor's redaction/skip rules at a
-        second site with nothing pinning them equal (Amendment 2 Option Q).
+        Before/After row for a HUMAN CONFIRMATION intact and inside the transaction. Swapping the WHOLE
+        write for a conditional `ExecuteUpdateAsync` is the alternative ADR 0052 § Consequences refuses,
+        and hand-building a replacement audit row re-derives the interceptor's redaction/skip rules at a
+        second site with nothing pinning them equal (Amendment 2 Option Q). The STATUS transition is the
+        one exception and it is DISCLOSED rather than silent: it lands outside the interceptor's reach,
+        so the interceptor's snapshot shows that column unmoved and the explicit `document.verified` row
+        carries its Before/After instead. A SECOND tracked `SaveChanges` to buy the column back is
+        Option T, refused — the interleave hook fires per `SaveChanges`, so it would break
+        `An_unrelated_document_writer_still_wins_last_without_conflicting`'s `competingWrites == 1`.
       - **A pre-decision row lock (`FOR UPDATE` / `FOR NO KEY UPDATE`) is refuted on a concrete
         outcome**, not on ADR 0030 Option B's lock-order argument (which does not transfer — this writer
         touches no `ComplianceCheck` rows): the lock would be held ACROSS the `SaveChanges`, so every
@@ -399,21 +420,35 @@ Both are defined in this repo's `.claude/agents/`.
         /verify` has no caller in `frontend/` at all. The dashboard's confirmation affordance is the
         detail page's **Save changes** (`PUT /fields`), which reaches `ResolveManualReview` inside ADR
         0030 Amendment 1's REPEATABLE READ + 40001 re-run, so the pair was never tearable there.
+      - TWO CLAIMS THIS BLOCK USED TO MAKE ARE STRUCK, and knowing they were struck is what stops them
+        being re-derived: *"`PersistSuccess` always moves the status"* (it moves it from `Processing`, so
+        a commit landing on a row already at `ManualRequired` + `Distrusted` moves nothing the check could
+        see) and *"the pair it commits is coherent"* (true only in the arms where the confirmation writes
+        no status). The readability half of the basis check is what closes both.
       - KNOWN residue of the closure, recorded in Amendment 2 § What stays open — do not report it as new:
-        a competing write that changes READABILITY without moving the status leaves the (coherent) pair
-        decided one commit late. Narrow by construction (`PersistSuccess` always moves the status;
-        `UpdateFields` commits its own `ResolveManualReview` in the same unit of work), and closing it
-        means predicating on the readability INPUTS — the column enumeration ADR 0030 Amendment 2 Option E
-        / Amendment 5 Option S refute — which would also make an unrelated field edit conflict.
-      - Pinned by three constructed interleaves in `DocumentConcurrentEditTests`
-        (`A_confirmation_cannot_leave_a_review_flagged_row_reading_TRUSTED`,
+        a competitor that changes NEITHER input — new canonical values that read the same way, distrusted
+        for a reason readability does not carry (the confidence gate / reprocess signal) — while leaving
+        the status where it already was. Needs the worker to CLAIM and COMPLETE inside one request's
+        transaction, and the confirmation would be granting §2's human exit over a low-confidence read
+        anyway. Closing it means predicating on the VALUES — the column enumeration ADR 0030 Amendment 2
+        Option E / Amendment 5 Option S refute — which would also make an unrelated field edit conflict.
+      - Pinned by SIX constructed interleaves in `DocumentConcurrentEditTests` — the three from the
+        ticket (`A_confirmation_cannot_leave_a_review_flagged_row_reading_TRUSTED`,
         `A_confirmation_cannot_leave_a_cleanly_read_row_reading_DISTRUSTED`,
-        `A_confirmation_that_keeps_losing_the_status_answers_409_and_commits_nothing`; the
-        `competingWrites == 2` assertion is the ANTI-NO-OP, since pre-#465 there was exactly ONE
-        `SaveChanges`) plus the deliberately-rewritten command-log pin
-        `Marking_verified_still_emits_trust_WITHOUT_forcing_the_status_it_read`, which asserts the absence
-        of `"ExtractionStatus" =` AND the `SELECT d."ExtractionStatus"` that follows the UPDATE. Dropping
-        either half of that test leaves a real defect green.
+        `A_confirmation_that_keeps_losing_the_status_answers_409_and_commits_nothing`) and the three from
+        round 2, one per blind arm (`A_confirmation_cannot_overwrite_a_re_arm_committed_inside_its_window`
+        — the document must still be QUEUED afterwards;
+        `A_confirmation_cannot_vouch_for_values_a_re_read_replaced_inside_its_window` — the pair does not
+        move, only the basis does; `A_confirmation_cannot_raise_a_review_flag_beside_a_trust_a_repair_just_granted`
+        — the fail-OPEN pair on the trust column). The `competingWrites == 2` assertion is the ANTI-NO-OP
+        throughout. Two more cover the transaction's edges
+        (`A_confirmation_whose_document_is_DELETED_inside_its_window_audits_nothing`,
+        `A_confirmation_that_loses_at_its_COMMIT_leaves_no_audit_row_behind_it`), and the
+        deliberately-rewritten command-log pin
+        `Marking_verified_still_emits_trust_WITHOUT_forcing_the_status_it_read` reads BOTH arms and
+        asserts three halves: the tracked UPDATE carries `"ExtractionTrust"` and NOT `"ExtractionStatus"`,
+        a whole-row `SELECT` naming `d."ExtractionStatus"` and `d."ExtractionFields"` follows it, and the
+        status write lands after that SELECT. Dropping any half leaves a real defect green.
   - KNOWN in-flight disclosure gap, also ADR 0052 § Consequences — do not re-report: a re-armed
     DISTRUSTED doc (`Pending`/`Processing` + `Distrusted`) makes the vendor read ActionNeeded while the
     extraction badge reads `Reading…` rather than `Needs your review`. Bounded by one poll,
@@ -809,10 +844,12 @@ Both are defined in this repo's `.claude/agents/`.
     `An_unrelated_document_writer_still_wins_last_without_conflicting`.
     - `MarkVerified` stays on that list after #465 / ADR 0052 Amendment 2 even though it now HAS a
       conflict guard, and the distinction is the one to check any change against: that guard is `READ
-      COMMITTED`, it detects only a move of the ONE column that writer omits from its UPDATE
-      (`ExtractionStatus`) by re-reading it AFTER its own write, and an unrelated commit still wins last
-      without conflicting there — which is exactly what the pin above asserts. It borrows this class's
-      409 envelope and `MaxAttempts` and nothing else. See the ADR 0052 block for the shapes it refutes.
+      COMMITTED`, and it detects only a move of the two facts that writer's decision is a pure FUNCTION
+      of — the `ExtractionStatus` it read (which it therefore keeps OUT of its own UPDATE, so the
+      re-read can see past it) and `DocumentFieldReadability`'s verdict on the row the commit will
+      leave. An unrelated commit still wins last without conflicting there — which is exactly what the
+      pin above asserts. It borrows this class's 409 envelope and `MaxAttempts` and nothing else. See
+      the ADR 0052 block for the shapes it refutes.
   - The retry RELOADS and RECOMPUTES — the whole callback re-runs against a fresh read, so the winner's
     committed change is an INPUT to the retried verdict. A version that re-applies the losing snapshot
     (or retries inside the SAME transaction, whose snapshot is exactly what lost) fixes nothing. Both
@@ -865,7 +902,7 @@ Both are defined in this repo's `.claude/agents/`.
       not the "widen the guard to all document writes" finding above — it is one named request-path
       writer that co-writes a verdict, and the floor pin
       (`An_unrelated_document_writer_still_wins_last_without_conflicting`, on `MarkVerified`) is
-      untouched, including after that endpoint got its own `READ COMMITTED` pair check in #465. The
+      untouched, including after that endpoint got its own `READ COMMITTED` basis check in #465. The
       worker, delete, sweep and BATCHED fan-outs all keep `READ COMMITTED`.
     - Exhaustion answers `409` and LEAVES THE PREVIOUS VERDICT ALONE. Not a violation of the
       degrade-to-`Pending` rule and not an oversight: the re-grade owns no inputs, so the row it walks
@@ -1038,7 +1075,7 @@ Both are defined in this repo's `.claude/agents/`.
       BEFORE the basis read, where an assign-back writes the value the row already holds and every
       assertion still passes. `The_persist_emits_what_it_extracted_and_no_verdict_input_it_only_read`
       reads the persist's `UPDATE "Documents"` SET clause off the host's EF command log (the
-      `Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read` shape) and requires
+      `Marking_verified_still_emits_trust_WITHOUT_forcing_the_status_it_read` shape) and requires
       `"VendorId" =` / `"DocumentType" =` / `"GeneralLiabilityLimit" =` absent with `"ExtractionStatus" =`
       present as the anti-no-op. The statement it reads is picked by `"ExtractionCompletedAt"`, a column
       only the SUCCESS path writes — with `"ExtractionStatus"` as the picker, `RecordFailedAttempt` /

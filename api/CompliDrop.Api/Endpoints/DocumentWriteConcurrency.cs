@@ -51,11 +51,13 @@ namespace CompliDrop.Api.Endpoints;
 /// <para/>
 /// <c>MarkVerified</c> stays on that list after #465 (ADR 0052 Amendment 2) and the distinction is worth
 /// stating, because it now has a conflict guard of its own. That guard is NOT this one: it commits under
-/// <c>READ COMMITTED</c> and re-runs only when the ONE column it omits from its UPDATE —
-/// <c>ExtractionStatus</c>, the half of the <c>(status, trust)</c> pair a de-queue guard makes it leave
-/// alone — was moved by somebody else, which it detects by re-reading that column after its own write
-/// while it holds the row lock. An unrelated concurrent commit still wins last without conflicting there,
-/// exactly as this paragraph promises and as
+/// <c>READ COMMITTED</c> and re-runs only when the BASIS its decision is a pure function of moved — the
+/// <c>ExtractionStatus</c> it read, and whether the row still carries an unreadable canonical value —
+/// which it detects by re-reading the row after its own write, while it holds the row lock. That is also
+/// why <c>ExtractionStatus</c> is the one column it keeps OUT of that write and applies afterwards: a
+/// re-read can only see a competitor on a column the same transaction did not write, so a status inside
+/// the UPDATE would make the check answer with this request's own value. An unrelated concurrent commit
+/// still wins last without conflicting there, exactly as this paragraph promises and as
 /// <c>An_unrelated_document_writer_still_wins_last_without_conflicting</c> pins. It shares this class's
 /// 409 envelope and retry bound; it does not share its isolation level.
 /// <para/>

@@ -12,7 +12,7 @@ namespace CompliDrop.Api.Tests.TestHelpers;
 /// <para/>
 /// Shared rather than hand-copied per suite: three suites read this log, two of them for the same
 /// "which columns did that write emit" pin that reviewers.md names in two places (the ADR 0052
-/// <c>Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_status_it_read</c> bullet and the ADR
+/// <c>Marking_verified_still_emits_trust_WITHOUT_forcing_the_status_it_read</c> bullet and the ADR
 /// 0030 Amendment 2 <c>The_persist_emits_what_it_extracted_...</c> one). One implementation keeps those
 /// pins reading the log the same way (#460 review round 2, S4).
 /// </summary>

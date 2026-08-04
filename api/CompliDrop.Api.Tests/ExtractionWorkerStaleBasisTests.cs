@@ -644,7 +644,7 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         // exactly the columns it emitted before". No value assertion can see it: the shipped code and an
         // assign-back leave the SAME row whenever the competing write committed before the basis read, so
         // what has to be pinned is the STATEMENT. Read off the host's EF command log through a Serilog
-        // sink — the DocumentEndpointsTests.Marking_verified_on_an_unsettled_row_emits_trust_WITHOUT_the_
+        // sink — the DocumentEndpointsTests.Marking_verified_still_emits_trust_WITHOUT_forcing_the_
         // status_it_read shape, for the same reason.
         //
         // The interleave matters here too, and not as decoration: the three columns asserted absent are
