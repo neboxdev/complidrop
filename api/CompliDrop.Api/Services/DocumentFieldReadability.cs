@@ -28,10 +28,29 @@ internal static class DocumentFieldReadability
     /// <summary>The canonical field's typed column rendered as the string a rule compares, or null when unset.</summary>
     internal static string? TypedColumnValue(Document doc, string fieldName)
     {
+        // Every arm pins CultureInfo.InvariantCulture, the DATES included (#467 review). A custom
+        // format's `yyyy` is the year in the FORMAT PROVIDER's calendar, and a provider-less ToString
+        // takes CultureInfo.CurrentCulture's — which is not Gregorian everywhere: an expiration of
+        // 2026-12-31 renders "2569-12-31" under th-TH (Thai Buddhist), "1448-07-22" under ar-SA
+        // (Umm al-Qura).
+        //
+        // That is not a display detail here, because this rendering is COMPARED and PERSISTED rather
+        // than shown: ComplianceCheckService.LookupValue returns it as the canonical field's value, so
+        // it drives every rule comparison and lands in ComplianceCheck.ActualValue — and since #467
+        // ExtractionWorker.ReconcileCanonicalCopiesWithTheRow also writes it into the
+        // Document.ExtractionFields mirror and DocumentField.FieldValue, where it is the value the row
+        // then carries and the field editor shows. It would fail OPEN, not loudly: "2569-12-31"
+        // re-parses cleanly through CanonicalDocumentFields.ParseUtcDate (invariant, Gregorian) as the
+        // year 2569, so IsUnreadable never flags it and nothing routes the document to a human — the row
+        // just quietly carries an expiration 543 years out and can never turn Expired.
+        //
+        // Latent rather than live — the Linux containers run the invariant culture (no LANG set) — and
+        // the amount arm was already explicit; this makes the three arms agree. Discrimination is pinned
+        // by CanonicalDocumentFieldsTests.A_canonical_date_renders_Gregorian_ISO_under_a_non_Gregorian_culture.
         if (string.Equals(fieldName, CanonicalDocumentFields.ExpirationDate, StringComparison.OrdinalIgnoreCase))
-            return doc.ExpirationDate?.ToString("yyyy-MM-dd");
+            return doc.ExpirationDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         if (string.Equals(fieldName, CanonicalDocumentFields.EffectiveDate, StringComparison.OrdinalIgnoreCase))
-            return doc.EffectiveDate?.ToString("yyyy-MM-dd");
+            return doc.EffectiveDate?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         if (string.Equals(fieldName, CanonicalDocumentFields.GeneralLiabilityLimit, StringComparison.OrdinalIgnoreCase))
             return doc.GeneralLiabilityLimit?.ToString(CultureInfo.InvariantCulture);
         return null;
