@@ -182,21 +182,47 @@ public static class BillingEndpoints
         SystemDbContext db,
         IStripeService stripe,
         IOptions<StripeSettings> settings,
+        ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         using var reader = new StreamReader(http.Request.Body);
         var raw = await reader.ReadToEndAsync(ct);
         var signature = http.Request.Headers["Stripe-Signature"].FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(settings.Value.WebhookSecret) || string.IsNullOrWhiteSpace(signature))
+
+        // Every rejection below says WHY, mirroring the Resend webhook (ReminderEndpoints.ResendWebhook)
+        // — these 400s used to be silent (#390). The failure that motivates it: the signing secret is
+        // rotated in the Stripe dashboard but not in Railway, so every checkout.session.completed 400s,
+        // paid orgs never leave the free cap, and nothing on our side records a single rejection. Never
+        // logs the secret, the Stripe-Signature header, or the body — only the reason.
+        var logger = loggerFactory.CreateLogger("StripeWebhook");
+
+        // Split from the missing-header branch on purpose: one is OUR misconfiguration (every delivery
+        // fails until an env var is fixed), the other is a caller that isn't Stripe (routine noise).
+        // Collapsed into one 400 they are indistinguishable in the logs, which is the whole problem.
+        if (string.IsNullOrWhiteSpace(settings.Value.WebhookSecret))
+        {
+            logger.LogWarning("Stripe webhook rejected: Stripe:WebhookSecret is not configured.");
             return Results.BadRequest();
+        }
+
+        if (string.IsNullOrWhiteSpace(signature))
+        {
+            logger.LogWarning("Stripe webhook rejected: no Stripe-Signature header.");
+            return Results.BadRequest();
+        }
 
         Event ev;
         try
         {
             ev = EventUtility.ConstructEvent(raw, signature, settings.Value.WebhookSecret);
         }
-        catch (StripeException)
+        catch (StripeException ex)
         {
+            // ex.Message is one of Stripe.net's own fixed verification diagnostics ("no signatures found
+            // matching…", "timestamp outside the tolerance zone", an API-version mismatch). It carries
+            // neither the payload nor the header, and it is what separates a rotated secret from a
+            // replayed/stale delivery.
+            logger.LogWarning("Stripe webhook rejected: signature verification failed ({Reason}).", ex.Message);
             return Results.BadRequest();
         }
 
