@@ -18,8 +18,9 @@ A round-2 observability review (#390 item 1) found that the external uptime moni
 `/health` — the static one — and that a proper readiness probe already existed one line above it,
 used by nothing. The failure that motivates the ticket is the #226 shape: a process that is up while
 every query fails. `/health` is green throughout it, so the monitor stays silent: product down, no
-alert. The endpoint's own comment ("kept for UptimeRobot compatibility") is the only record that the
-monitor is on the DB-blind one, and it does not say that this is a problem.
+alert. The endpoint's own comment — "kept for UptimeRobot compatibility", the wording this PR
+replaced — was the only record that the monitor is on the DB-blind one, and it did not say that this
+is a problem.
 
 The ticket offered two fixes: repoint the monitor at `/health/ready`, **or** fold `CanConnectAsync`
 into `/health`. The second is the one a repo-side change can actually perform, and it is the
@@ -104,7 +105,12 @@ telemetry actually say when something goes wrong".
    `Logging:LogLevel:Microsoft.AspNetCore = Warning` is MEL config and `UseSerilog` bypasses MEL
    filtering. **Adding the conventional `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` entry
    would delete the only trace of the 499**, so `ClientAbortLoggingTests` asserts that Information
-   line positively (an emptiness assertion alone cannot tell "demoted" from "disappeared").
+   line positively (an emptiness assertion alone cannot tell "demoted" from "disappeared"). That
+   guard reaches config in this repo and code only: an override set as a deploy-time env var
+   (`Serilog__MinimumLevel__Override__Microsoft.AspNetCore`) deletes the line with the suite green,
+   which is why the prohibition is written down for Railway too (`docs/dev-environment.md` § Backend
+   log level) rather than left to the test. Closing it fully would mean asserting on the resolved
+   configuration of a deployed process, which nothing in this repo can see.
    Raising either Debug trace to Information is the wrong repair for the same reason as above: it
    would reprint Serilog's hard-coded 500. Both Debug traces are off in prod by default and
    switchable at deploy time with `Serilog__MinimumLevel__Default=Debug` — `ReadFrom.Configuration`
@@ -133,7 +139,12 @@ telemetry actually say when something goes wrong".
 
 ### Neutral
 
-- Nothing about the response bodies changes, so a keyword-matching monitor rule keeps working.
+- The READY (200) body is unchanged — `{ status = "ready", at }`, and both liveness bodies likewise —
+  so a keyword-matching monitor rule keeps working. The FAILURE body does change: the 503 branch drops
+  its `{ status = "not_ready", error = ex.Message }` payload and answers bare (Decision 4), which is
+  the point of that decision rather than a side effect. A monitor rule keying on `not_ready` matches
+  nothing after this PR — nothing external is known to, and the string appears nowhere else in the
+  repo, but it is the one contract this change breaks and it is recorded here rather than discovered.
 - Once the monitor is on `/health/ready`, `/health` can be retired — that removal is safe only when
   we can confirm nothing else polls it (Railway's dashboard setting included).
 
@@ -144,9 +155,13 @@ telemetry actually say when something goes wrong".
 The ticket's own second suggestion, and the only one implementable from the repo. Rejected: see
 Context. Without knowing Railway's healthcheck path we would be changing the semantics of an
 endpoint that may gate container restarts, in a repo where merge deploys unattended, and the failure
-mode (blip → restart → fail-fast boot abort) is worse than the bug. The QA plan's own smoke step
-polls `/health/live` and expects "not a database-disconnected response", which is a second consumer
-whose expectation this option would break.
+mode (blip → restart → fail-fast boot abort) is worse than the bug. It also contradicts a contract
+already written down for the liveness FAMILY rather than for one endpoint: the QA smoke step now
+reads "This one is LIVENESS and never touches the database — a database-disconnected response would
+be a bug" (`docs/qa/manual-testing-plan.md` § 1.3, rewritten in this PR). That step polls
+`/health/live`, which Option A does not touch — but `/health` is its twin, kept only because a
+monitor is on it, so a database check on either half leaves the pair disagreeing about what a
+liveness probe means.
 
 ### Option B — Make `/health` DB-aware but tolerant (cache the result, fail only after N consecutive failures)
 

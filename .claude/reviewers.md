@@ -1520,7 +1520,12 @@ Both are defined in this repo's `.claude/agents/`.
   `HealthProbeTests` pins both halves. `/health` duplicating `/health/live` is also deliberate
   (an external monitor polls it) — collapsing them is a change to a URL we cannot enumerate the
   consumers of. Repointing UptimeRobot is the FOUNDER's external action, tracked in the QA launch
-  checklist, and is deliberately NOT attempted from code.
+  checklist, and is deliberately NOT attempted from code. `/health/ready`'s 503 is BARE (public,
+  unauthenticated) and its reason goes to the log — but BOTH log branches are gated on
+  `ct.IsCancellationRequested`, the catch by its `when` and the not-reachable branch by an `if`. That
+  asymmetry between "always 503" and "sometimes silent" is deliberate (round-2 review): an unfinished
+  probe establishes nothing about the database, and "the database is not reachable" in the outage log
+  is the one sentence that could make this endpoint a source of false outages.
 - A lost CONNECTION is not a server error (#390 / ADR 0053's sibling half). `ExceptionHandlingMiddleware`
   answers 499 with NO envelope and a Debug line, and `UseSerilogRequestLogging`'s `GetLevel` demotes
   the same case — both gated on `ex is OperationCanceledException && RequestAborted.IsCancellationRequested`.
@@ -1542,7 +1547,11 @@ Both are defined in this repo's `.claude/agents/`.
     `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` (Serilog's conventional duplicate-suppression
     override): it would delete the record. `Logging:LogLevel:Microsoft.AspNetCore = Warning` in
     appsettings does NOT suppress it — that is MEL config and `UseSerilog` bypasses MEL filtering.
-    `ClientAbortLoggingTests` pins the line. Raising either Debug trace to Information is also wrong:
+    `ClientAbortLoggingTests` pins the line — but only against config in this repo and code; the same
+    override set as a Railway ENV VAR is invisible to it, which is why the prohibition is also written
+    into `docs/dev-environment.md`. "The test does not catch the env-var form" is TRUE, is recorded in
+    ADR 0053 § Sibling decision, and is not a finding. Raising either Debug trace to Information is
+    also wrong:
     Serilog's `RequestLoggingMiddleware` hard-codes `statusCode: 500` on its exception path, so it
     would reprint the false 500 this ticket removed. "The Debug lines are inert in prod" is TRUE and
     is not a finding — they are switchable with `Serilog__MinimumLevel__Default=Debug` today, no code

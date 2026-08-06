@@ -424,8 +424,11 @@ else
 // Microsoft.AspNetCore.Hosting.Diagnostics. appsettings.json's
 // `Logging:LogLevel:Microsoft.AspNetCore = Warning` does not reach it — that is MEL config and
 // UseSerilog bypasses MEL filtering — but a Serilog override would, and would delete the record
-// silently. ClientAbortLoggingTests asserts that Information line, so the trap fails a test rather
-// than shipping. To see the middleware's own Debug trace instead, set
+// silently. ClientAbortLoggingTests asserts that Information line, so the trap fails a test when it is
+// added HERE or to appsettings.json. That guard is partial by construction: the same override set as a
+// deploy-time env var (Serilog__MinimumLevel__Override__Microsoft.AspNetCore) is invisible to a test
+// reading repo-resident config, so it must not be set in Railway either — see docs/dev-environment.md
+// § Backend log level. To see the middleware's own Debug trace instead, set
 // `Serilog__MinimumLevel__Default=Debug` as an env var — ReadFrom.Configuration already binds it, no
 // code change needed.
 app.UseSerilogRequestLogging(opts => opts.GetLevel = (ctx, _, ex) =>

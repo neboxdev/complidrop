@@ -71,8 +71,11 @@ public sealed class ClientAbortLoggingTests(IntegrationTestFixture fixture) : In
         // config, and UseSerilog bypasses MEL filtering, so with no
         // `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` this line runs at Information. Adding that
         // conventional override — which Serilog's own docs recommend alongside UseSerilogRequestLogging —
-        // would delete it. This assertion is what fails when someone does; see the note beside
-        // UseSerilogRequestLogging in Program.cs.
+        // would delete it. This assertion is what fails when someone adds it to appsettings.json or in
+        // code. It CANNOT fail for the deploy-time env-var form of the same override
+        // (Serilog__MinimumLevel__Override__Microsoft.AspNetCore), which this host never sees — that half
+        // is a written prohibition (docs/dev-environment.md § Backend log level), not a guard. See the
+        // note beside UseSerilogRequestLogging in Program.cs.
         //
         // Serilog's own request line cannot serve as the trace: it is registered INSIDE the exception
         // middleware and hard-codes "responded 500" on its exception path, so it is demoted to Debug

@@ -123,8 +123,13 @@ Do **not** add a `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` entry, in 
 It is the convention Serilog's docs recommend alongside `UseSerilogRequestLogging`, and here it would
 delete the framework request-completion line that is the only production record of an aborted
 request's 499. `appsettings.json`'s `Logging:LogLevel:Microsoft.AspNetCore = Warning` does not reach
-that line — it is MEL config, and `UseSerilog` bypasses MEL filtering. `ClientAbortLoggingTests` fails
-if the line goes away.
+that line — it is MEL config, and `UseSerilog` bypasses MEL filtering.
+
+`ClientAbortLoggingTests` fails if the override is added to `appsettings.json` or in code, because
+that is all a test can see. **The guard is partial**: the same override set as a deploy-time
+environment variable — `Serilog__MinimumLevel__Override__Microsoft.AspNetCore=Warning`, the exact
+mechanism the paragraph above teaches for `MinimumLevel__Default` — deletes the line with every test
+still green. So never set it in Railway either; there is nothing in this repo that would notice.
 
 ### Frontend env vars (set in the build/host environment; `NEXT_PUBLIC_*` are baked into the client bundle at build time)
 
