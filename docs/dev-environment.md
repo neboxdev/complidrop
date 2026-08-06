@@ -57,13 +57,24 @@ hourly `ReminderBackgroundService` would mail them the moment a cloned document 
 window. Leaving `Resend:ApiKey` unset makes `ResendEmailService.IsEnabled` false, so every send is
 skipped with a warning instead of delivered. **Do not add a Resend key to dev secrets.**
 
-### Frontend telemetry is silent in dev too
+### Telemetry is silent in dev too — both ends
 
 The frontend's Sentry error monitoring ([ADR 0037](adr/0037-frontend-sentry-pii-scrubbing-and-gating.md))
 follows the same isolated-by-default posture: it is a no-op unless `NEXT_PUBLIC_SENTRY_DSN` is set
 **and** `NODE_ENV=production`. Leave `NEXT_PUBLIC_SENTRY_DSN` unset in dev (the `next dev` server is
 `development` anyway, so even a stray DSN captures nothing). PostHog is likewise gated on
 `NEXT_PUBLIC_POSTHOG_KEY` being present. **Do not add a Sentry DSN or PostHog key to your dev env.**
+
+The backend now matches it ([ADR 0053](adr/0053-backend-error-events-via-a-serilog-sentry-sink.md) /
+[#386](https://github.com/neboxdev/complidrop/issues/386)): since backend `LogError` lines became real
+Sentry events, `Sentry:Dsn` alone is no longer enough to switch reporting on — the environment must
+also not be `Development`. That gate exists because a DSN *was* found in the local user-secrets store,
+which the integration-test host reads too (it shares the API's `UserSecretsId` and boots Development).
+Since **the dev database is a clone of prod data**, an exception naming a real vendor would otherwise
+have been uploaded to the production Sentry project by nothing more than running the test suite.
+`Sentry:Dsn` is a **production-only** secret; a leftover one in dev user-secrets is now inert, but
+`dotnet user-secrets remove "Sentry:Dsn"` is still the tidy state. To exercise Sentry locally on
+purpose, run with `ASPNETCORE_ENVIRONMENT=Staging` and a **separate** DSN — never the prod project's.
 
 ## The boot banner (how you know which environment you're in)
 
@@ -109,7 +120,7 @@ sure the choice is never accidental.
 
 ### Backend secrets (user-secrets in Development, env vars in prod)
 
-`ConnectionStrings:Database`, `Jwt:Secret`, `Frontend:BaseUrl` (public site origin, `https://www.complidrop.com` — REQUIRED in prod: portal links, email-borne URLs (verify/reset), and Stripe checkout + billing-portal return URLs are minted from it and silently fall back to `http://localhost:3000` when unset, see [#250](https://github.com/neboxdev/complidrop/issues/250)), `AzureStorage:ConnectionString`, `AzureStorage:ContainerName`, `Sentry:Dsn`, `DocumentAi:ProjectId`, `DocumentAi:Location`, `DocumentAi:ProcessorId`, `DocumentAi:CredentialsPath` (or `CredentialsJson`), `Gemini:ApiKey` (when Endpoint=aistudio), `Anthropic:ApiKey` (optional), `Stripe:SecretKey`, `Stripe:PublishableKey`, `Stripe:WebhookSecret`, `Stripe:MonthlyPriceId`, `Stripe:AnnualPriceId`, `Stripe:FoundingPriceId`, `Resend:ApiKey`, `Resend:FromEmail`, `Resend:WebhookSecret` (Svix `whsec_…` signing secret for the inbound delivery-status webhook; if unset the webhook is rejected in production and allowed-with-warning only in Development).
+`ConnectionStrings:Database`, `Jwt:Secret`, `Frontend:BaseUrl` (public site origin, `https://www.complidrop.com` — REQUIRED in prod: portal links, email-borne URLs (verify/reset), and Stripe checkout + billing-portal return URLs are minted from it and silently fall back to `http://localhost:3000` when unset, see [#250](https://github.com/neboxdev/complidrop/issues/250)), `AzureStorage:ConnectionString`, `AzureStorage:ContainerName`, `Sentry:Dsn` (**production-only** — a DSN in Development is ignored outright, see the telemetry section above), `Sentry:TracesSampleRate` (default `0.1`), `DocumentAi:ProjectId`, `DocumentAi:Location`, `DocumentAi:ProcessorId`, `DocumentAi:CredentialsPath` (or `CredentialsJson`), `Gemini:ApiKey` (when Endpoint=aistudio), `Anthropic:ApiKey` (optional), `Stripe:SecretKey`, `Stripe:PublishableKey`, `Stripe:WebhookSecret`, `Stripe:MonthlyPriceId`, `Stripe:AnnualPriceId`, `Stripe:FoundingPriceId`, `Resend:ApiKey`, `Resend:FromEmail`, `Resend:WebhookSecret` (Svix `whsec_…` signing secret for the inbound delivery-status webhook; if unset the webhook is rejected in production and allowed-with-warning only in Development).
 
 ### Frontend env vars (set in the build/host environment; `NEXT_PUBLIC_*` are baked into the client bundle at build time)
 

@@ -1342,8 +1342,35 @@ Both are defined in this repo's `.claude/agents/`.
     un-redacted Sentry `correlation_id` tag (ADR 0037). Widening it is a real finding.
   - The echoed response header, `HttpContext.Items`, the log scope and the stored column must
     always agree — a version that clamps or rewrites one of them independently IS a real finding.
+    The log-scope property NAME is `CorrelationIdMiddleware.LogPropertyName`, referenced (never
+    re-spelled) by the ADR 0053 tag promotion; a renamed property that leaves the constant behind
+    silently untags every backend event, which looks exactly like "no error happened".
   - The SYSTEMIC sweep over the upload / register / waitlist / idempotency-key paths landed in
     [#389](https://github.com/neboxdev/complidrop/issues/389) — see ADR 0046 below.
+- BACKEND error monitoring is ADR 0053 (#386); the facts that follow are pointers into it.
+  - It is ONE gate, `BackendSentry.IsEnabled(configuration, environment)`, asked by the SDK AND by
+    the Serilog sink: a non-blank DSN **and** a non-Development environment. Both halves are
+    load-bearing and neither is decoration — the real prod DSN was found in local user-secrets,
+    which the integration-test host reads too (shared `UserSecretsId`, Development), and the dev DB
+    is a CLONE OF PROD DATA. "Simplify to a DSN check" is the bug, not the fix. It is spelled
+    NOT-Development rather than IS-Production on purpose (unset `ASPNETCORE_ENVIRONMENT` already
+    means Production; going dark over an environment-name spelling is the failure #386 closed).
+  - The Serilog sink is the ONLY path from a log event to a Sentry event — `UseSerilog` bypasses
+    the MEL providers, so Sentry's own logger provider never fires. Deleting
+    `.AddSentryErrorEvents(...)` from the `UseSerilog` lambda takes the whole backend dark again
+    and is caught by the source-scan gate in `BackendSentryTests`.
+  - `MinimumBreadcrumbLevel = Fatal` means NO breadcrumbs, and that is deliberate until
+    [#378](https://github.com/neboxdev/complidrop/issues/378) closes: breadcrumbs would export the
+    `Information`/`Warning` stream (which still embeds end-user emails) and `SentryEvent.Breadcrumbs`
+    is read-only, so the scrubber cannot reach them. Lowering it is a real finding.
+  - `SentryScrub.Scrub` is `BeforeSend` and must NEVER return null — dropping an event is the
+    failure the ticket existed to end. Its portal-token net is a deterministic PATH replacement,
+    not an entropy heuristic (same choice ADR 0037 made); GUIDs and route shapes deliberately
+    survive so events stay triageable. The `correlation_id` tag is deliberately UN-redacted and is
+    safe only because the promotion re-asks `CorrelationIdMiddleware.IsUsableTraceId` — dropping
+    that re-check, or redacting the tag, are both real findings in opposite directions.
+  - Two events per 500 (the exception line plus `UseSerilogRequestLogging`'s Error-level completion
+    line) is RECORDED, not an oversight — see ADR 0053 § Consequences. Do not flag it.
 - Request strings bound before a bounded column is ADR 0046 (#389); the review-time facts that
   follow are pointers into it, not a second copy of the rationale.
   - Reject-vs-clamp is PER-FIELD by design, and the axis is who authored the value. User-TYPED
@@ -1522,7 +1549,8 @@ Both are defined in this repo's `.claude/agents/`.
 - **Vendor portal**: `/api/portal/*` (public, untrusted input)
 - **Blob storage**: Azure Blob access, SAS scoping
 - **Audit**: `AuditSaveChangesInterceptor`, `IAuditLogger`
-- **PII**: extraction fields, exports, email contents
+- **PII**: extraction fields, exports, email contents, anything shipped to Sentry
+  (`BackendSentry` / `SentryScrub`, ADR 0053; `frontend/src/lib/sentry/*`, ADR 0037)
 - **Compliance-verdict semantics**: `ComplianceStatus`, `IComplianceCheckService`,
   the supersession predicate, checklist/template requirements
 
