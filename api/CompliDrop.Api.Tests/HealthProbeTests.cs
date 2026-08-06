@@ -189,28 +189,46 @@ public sealed class HealthProbeTests(IntegrationTestFixture fixture) : Integrati
         recovery.Should().Contain("Results.StatusCode(503)",
             "a bare status — anything with a body is a body we would have to audit for what it names");
 
-        // 2. The caught exception may be read in exactly one place: handed WHOLE to the logger as its
+        // 2. There is exactly ONE recovery path, because everything below reads the FIRST `catch (` and
+        //    nothing else. C# would permit a second, later clause here: the CS0160 "already caught by an
+        //    earlier clause" check skips clauses carrying an exception filter, and this one carries
+        //    `when (!ct.IsCancellationRequested)`. A second recovery path declaring its own identifier
+        //    would then be invisible to both enumerations — its body outside `recovery`, its exception
+        //    outside `name` (#390 review round 2, S3). So the gate refuses to run against a handler it
+        //    can only half-see: audit the new clause and widen this pin, rather than let the scan read
+        //    past it.
+        SourceScan.Count(handler, "catch (").Should().Be(1,
+            "a second catch clause is a second recovery path, and this pin inspects the first one only");
+
+        // 3. The caught exception may be read in exactly one place: handed WHOLE to the logger as its
         //    exception argument. Every other mention is a candidate response payload — formatted into a
         //    string, projected into an anonymous object, unwrapped through InnerException. Keyed on the
         //    name the catch clause actually declares, so renaming `ex` cannot slip past.
         var caught = Regex.Match(handler, @"catch\s*\(\s*\w[\w.<>]*\s+(?<name>\w+)\s*\)");
         caught.Success.Should().BeTrue(
             "the recovery path must name its exception for this pin to be able to follow it");
-        var name = caught.Groups["name"].Value;
+        var name = Regex.Escape(caught.Groups["name"].Value);
 
-        var mentions = handler.Split('\n')
-            .Select(line => line.Trim())
-            .Where(line => Regex.IsMatch(line, $@"\b{Regex.Escape(name)}\b"))
+        // Classified per STATEMENT, not per physical line (#390 review round 2, S1). A line-based split
+        // makes the verdict depend on WRAPPING: the safe and correct
+        // `logger.LogError(` / `ex,` / `"Readiness probe failed.");` across three lines yields a fragment
+        // of `ex,` that begins with neither `catch (` nor `logger.Log`, so the gate reddens on a pure
+        // reformat — and a gate that fires on reformatting is one that gets edited rather than obeyed.
+        // Whitespace is collapsed first and the text is then cut at statement and block boundaries, so
+        // how a call is wrapped cannot change which fragment a mention lands in. Cutting on `{`/`}` as
+        // well as `;` is what keeps `catch (…) { logger.LogError(…)` from arriving as one fragment.
+        var mentions = Regex.Split(Regex.Replace(handler, @"\s+", " "), "[;{}]")
+            .Select(fragment => fragment.Trim())
+            .Where(fragment => Regex.IsMatch(fragment, $@"\b{name}\b"))
             .ToList();
 
         mentions.Should().OnlyContain(
-            line => line.StartsWith("catch (", StringComparison.Ordinal)
-                || (line.StartsWith("logger.Log", StringComparison.Ordinal)
-                    && line.Contains($"({name},", StringComparison.Ordinal)),
+            fragment => fragment.StartsWith("catch (", StringComparison.Ordinal)
+                || Regex.IsMatch(fragment, $@"^logger\.Log\w*\(\s*{name}\s*,"),
             "the exception may be declared and handed to the logger, and nothing else — every other "
             + "mention is a value that could end up in a body served to an unauthenticated caller");
 
-        // 3. …and it does have to reach the logger: a bare 503 that records nothing is the silence this
+        // 4. …and it does have to reach the logger: a bare 503 that records nothing is the silence this
         //    ticket is about, on the branch where we know the most.
         handler.Should().Contain("logger.Log",
             "the cause has to go somewhere — a bare 503 that logs nothing is the silence this ticket is about");
