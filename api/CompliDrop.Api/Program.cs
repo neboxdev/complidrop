@@ -391,6 +391,14 @@ builder.Services.AddOpenApi();
 // ============================================================
 var app = builder.Build();
 
+// #386 / ADR 0053. Bring the Sentry hub up before anything below can fail. The sink emits through the
+// static SentrySdk (InitializeSdk = false), and that hub is otherwise created only when Sentry's own
+// startup filter resolves IHub as the request pipeline is built — i.e. inside app.Run(). Everything
+// logged in the startup scope below (migrations, the template seed) would go to a DISABLED hub, which
+// is precisely the boot-time incident class this ticket exists to make visible. No-op when reporting
+// is off. See BackendSentry.EnsureHubInitialized.
+BackendSentry.EnsureHubInitialized(app.Services, app.Configuration, app.Environment);
+
 app.UseForwardedHeaders();
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseMiddleware<ExceptionHandlingMiddleware>();

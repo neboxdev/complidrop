@@ -93,6 +93,31 @@ public static class BackendSentry
     }
 
     /// <summary>
+    /// Brings the Sentry hub up NOW, so the startup block — migrations, the rule-catalog resolve, the
+    /// system-template seed — is inside the reporting window rather than outside it.
+    /// <para/>
+    /// Without this the boot window is dark. The sink emits through <c>HubAdapter.Instance</c> (it runs
+    /// with <c>InitializeSdk = false</c>), i.e. through the static <c>SentrySdk</c>, and that hub is only
+    /// created when something first resolves <see cref="IHub"/> — which, with the MEL provider pipeline
+    /// replaced by Serilog, means Sentry's own <c>IStartupFilter</c> as the request pipeline is built,
+    /// during <c>app.Run()</c>. Every <c>Error</c> line raised before that was handed to a DISABLED hub
+    /// and dropped. That window is load-bearing, not theoretical: EF migrations auto-apply at startup
+    /// (ADR 0016) and the seed's failure is explicitly caught-and-logged, so a Neon hiccup or a malformed
+    /// system rule is exactly the prod incident class #386 exists to make visible — and it was the one
+    /// class the fix still missed.
+    /// <para/>
+    /// Resolving is the whole mechanism: the SDK's DI registration is what initialises the hub, so asking
+    /// for it early is asking for it to exist early. Gated on the same <see cref="IsEnabled"/> as
+    /// everything else, so a Development boot still resolves nothing and initialises nothing.
+    /// </summary>
+    public static void EnsureHubInitialized(
+        IServiceProvider services, IConfiguration configuration, IHostEnvironment environment)
+    {
+        if (!IsEnabled(configuration, environment)) return;
+        _ = services.GetRequiredService<IHub>();
+    }
+
+    /// <summary>
     /// Registers the Serilog → Sentry sink, and only when <see cref="IsEnabled"/>. <c>InitializeSdk</c>
     /// is false because <c>UseSentry</c> already initialised the SDK from the same DSN — the sink
     /// piggybacks on that hub, so one process has one Sentry client and the options above (the

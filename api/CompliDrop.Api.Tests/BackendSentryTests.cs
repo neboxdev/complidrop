@@ -4,6 +4,8 @@ using System.Text.Json;
 using CompliDrop.Api.Middleware;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -616,6 +618,66 @@ public sealed class BackendSentryTests
         SourceScan.Count(program, "BackendSentry.IsEnabled(builder.Configuration, builder.Environment)")
             .Should().Be(1,
                 "one gate for the SDK and the sink, or the two can disagree about whether this reports");
+
+        // Position, not just presence: the hub must be live BEFORE the startup scope, which is the only
+        // reason the call exists. Anchored on the scope's own opening statement.
+        var hubCall = program.IndexOf(
+            "BackendSentry.EnsureHubInitialized(app.Services, app.Configuration, app.Environment)",
+            StringComparison.Ordinal);
+        var startupScope = program.IndexOf("using (var scope = app.Services.CreateScope())", StringComparison.Ordinal);
+        hubCall.Should().BeGreaterThan(0, "the boot window reports nothing until the hub exists");
+        startupScope.Should().BeGreaterThan(hubCall,
+            "migrations and the template seed log their failures inside that scope — after it, the call "
+            + "would be decoration");
+    }
+
+    [Fact]
+    public async Task An_error_in_the_startup_scope_is_reported()
+    {
+        // The last dark window (#386 review). The sink emits through the static SentrySdk
+        // (InitializeSdk = false), and with the MEL providers replaced by Serilog the ONLY thing that
+        // creates that hub is Sentry's own startup filter resolving IHub while the request pipeline is
+        // built — inside app.Run(). So a seed or migration failure, logged before app.Run(), was handed
+        // to a DISABLED hub. This composes a host the way Program.cs does and logs the seed's real line.
+        var transport = new CapturingSentryTransport();
+        var builder = WebApplication.CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            [BackendSentry.DsnKey] = SentryHarness.FakeDsn,
+        });
+        builder.Host.UseSerilog((ctx, _, config) => config
+            .MinimumLevel.Verbose()
+            .Enrich.FromLogContext()
+            .AddSentryErrorEvents(ctx.Configuration, ctx.HostingEnvironment));
+        builder.WebHost.UseSentry(opts =>
+        {
+            BackendSentry.ConfigureOptions(opts, builder.Configuration, builder.Environment);
+            opts.Transport = transport;
+            opts.AutoSessionTracking = false;
+            opts.SendClientReports = false;
+        });
+
+        await using var app = builder.Build();
+        try
+        {
+            BackendSentry.EnsureHubInitialized(app.Services, app.Configuration, app.Environment);
+
+            SentrySdk.IsEnabled.Should().BeTrue("the boot window reports nothing until the hub exists");
+
+            // ExceptionHandlingMiddleware's peer at boot: Program.cs catches the seed failure and logs it.
+            app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Program").LogError(
+                new InvalidOperationException("relation \"ComplianceTemplates\" does not exist"),
+                "Seed: failed to ensure system compliance templates.");
+
+            await SentrySdk.FlushAsync(TimeSpan.FromSeconds(20));
+
+            transport.Payloads.Should().ContainSingle();
+            transport.Payloads[0].Should().Contain("Seed: failed to ensure system compliance templates.");
+        }
+        finally
+        {
+            SentrySdk.Close();
+        }
     }
 
     // ------------------------------------------------------------------
