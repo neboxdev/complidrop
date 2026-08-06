@@ -169,9 +169,18 @@ public static class ReminderEndpoints
         {
             doc = System.Text.Json.JsonDocument.Parse(raw);
         }
-        catch (System.Text.Json.JsonException)
+        catch (System.Text.Json.JsonException ex)
         {
-            // Signed (or dev-skipped) but unparseable body — nothing actionable.
+            // Signed (or dev-skipped) but unparseable body. The LAST silent 400 on this handler until
+            // #390 — every branch above already said why, and a rejection nobody records is
+            // indistinguishable from "Resend never delivered anything", which is the failure shape the
+            // whole ticket is about. The position comes from JsonException's own structural properties
+            // (line / byte offset), never `ex.Message`: that one quotes the offending character back out
+            // of the payload, and a webhook body is not ours to reprint. Never the body, the svix
+            // headers, or the secret.
+            logger.LogWarning(
+                "Resend webhook rejected: the signed body is not valid JSON (line {Line}, byte {BytePosition}).",
+                ex.LineNumber, ex.BytePositionInLine);
             return Results.BadRequest();
         }
         using var _ = doc;

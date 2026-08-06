@@ -6,8 +6,11 @@ using CompliDrop.Api.Entities;
 using CompliDrop.Api.Services;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Serilog.Core;
+using Serilog.Events;
 using Stripe;
 using Subscription = CompliDrop.Api.Entities.Subscription;
 
@@ -370,6 +373,94 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         (await ReloadAsync(subId)).Status.Should().Be("active");
+    }
+
+    // ───────────────── Rejections say WHY (#390 item 3) ─────────────────
+    // A rejected delivery used to be a bare 400 with nothing logged. The failure that motivates this:
+    // the signing secret is rotated in the Stripe dashboard but not in Railway, so every
+    // checkout.session.completed 400s, paid orgs never leave the free document cap, and the only
+    // evidence lives in a third-party dashboard. Mirrors the Resend webhook's per-reason warnings.
+
+    /// <summary>
+    /// Posts a webhook through a one-off host whose Serilog output the test can read, optionally with a
+    /// different <c>Stripe:WebhookSecret</c>. The status is materialized before the host is disposed.
+    /// </summary>
+    private async Task<(HttpStatusCode Status, CapturingLogEventSink Sink)> PostWebhookCapturingLogsAsync(
+        string payload, string? signature, IReadOnlyDictionary<string, string?>? configOverrides = null)
+    {
+        var sink = new CapturingLogEventSink();
+        await using var factory = new CustomWebApplicationFactory(Fixture.ConnectionString, configOverrides)
+            .WithWebHostBuilder(b => b.ConfigureTestServices(s => s.AddSingleton<ILogEventSink>(sink)));
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/billing/webhook")
+        {
+            Content = new StringContent(payload, Encoding.UTF8, "application/json")
+        };
+        if (signature is not null) req.Headers.TryAddWithoutValidation("Stripe-Signature", signature);
+
+        var resp = await factory.CreateClient().SendAsync(req);
+        return (resp.StatusCode, sink);
+    }
+
+    private static IEnumerable<string> Warnings(CapturingLogEventSink sink) => sink.Events
+        .Where(e => e.Level >= LogEventLevel.Warning)
+        .Select(e => e.RenderMessage());
+
+    [Fact]
+    public async Task An_unconfigured_webhook_secret_is_logged_as_the_misconfiguration_it_is()
+    {
+        // The rotated-secret-not-in-Railway shape: nothing is wrong with the delivery, everything is
+        // wrong with us. Distinct from the missing-header branch below on purpose — collapsed into one
+        // 400 they read identically in the logs, and only one of them is an incident.
+        var payload = DeletedEvent($"evt_{Guid.NewGuid():N}", "sub_whatever");
+
+        var (status, sink) = await PostWebhookCapturingLogsAsync(
+            payload,
+            SignatureFor(payload),
+            new Dictionary<string, string?> { ["Stripe:WebhookSecret"] = "" });
+
+        status.Should().Be(HttpStatusCode.BadRequest);
+        Warnings(sink).Should().Contain(m => m.Contains("Stripe webhook rejected")
+            && m.Contains("Stripe:WebhookSecret is not configured"));
+    }
+
+    [Fact]
+    public async Task A_missing_header_and_a_bad_signature_are_logged_as_different_reasons()
+    {
+        var subId = await SeedSubscriptionAsync(status: "active");
+        var payload = DeletedEvent($"evt_{Guid.NewGuid():N}", subId);
+        var valid = SignatureFor(payload);
+        var corrupted = valid[..^1] + (valid[^1] == '0' ? '1' : '0');
+
+        var (missing, missingSink) = await PostWebhookCapturingLogsAsync(payload, signature: null);
+        var (bad, badSink) = await PostWebhookCapturingLogsAsync(payload, corrupted);
+
+        missing.Should().Be(HttpStatusCode.BadRequest);
+        bad.Should().Be(HttpStatusCode.BadRequest);
+        Warnings(missingSink).Should().Contain(m => m.Contains("Stripe webhook rejected")
+            && m.Contains("no Stripe-Signature header"));
+
+        // The construct-event branch's HEADLINE says only what the branch covers, and the reason
+        // discriminates. It deliberately does NOT say "signature verification failed": an API-version
+        // mismatch raises StripeException here too, and a headline naming the signature would send the
+        // operator to check the signing secret for an incident that has nothing to do with it — the same
+        // wrong-diagnosis shape this ticket exists to remove (#390 review, S5).
+        Warnings(badSink).Should().Contain(m => m.Contains("Stripe webhook rejected")
+            && m.Contains("could not construct the event")
+            && m.Contains("The expected signature was not found in the Stripe-Signature header"),
+            "the headline names the branch; the reason names the incident — and it is the rotated-secret "
+            + "reason specifically, which is the failure #390 was filed about");
+        Warnings(badSink).Should().NotContain(m => m.Contains("signature verification failed"),
+            "that headline claims more than the branch knows");
+
+        // Whatever the reason says, it may never be the material an attacker (or a log reader) could
+        // replay: not the signing secret, not the header, not the body. Stripe.net's diagnostics for
+        // this branch are fixed literals plus at most an API-version string, but the guarantee is the
+        // one we owe, so it is asserted rather than assumed.
+        Warnings(badSink).Should().NotContain(m => m.Contains(WebhookSecret) || m.Contains(corrupted));
+        Warnings(badSink).Should().NotContain(m => m.Contains(subId));
+        Warnings(badSink).Should().NotContain(m => m.Contains(payload));
+        (await ReloadAsync(subId)).Status.Should().Be("active", "a rejected delivery mutates nothing");
     }
 
     [Fact]

@@ -15,6 +15,7 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Serilog;
+using Serilog.Events;
 using Serilog.Formatting.Json;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -72,6 +73,12 @@ builder.Services.AddOptions<ComplianceClaimsSettings>().Bind(builder.Configurati
 // ============================================================
 // Logging — Serilog JSON sink
 // ============================================================
+// No MinimumLevel in code or in appsettings, so Serilog's own default (Information) governs, and it is
+// overridable at deploy time through ReadFrom.Configuration — `Serilog__MinimumLevel__Default=Debug`
+// turns on the Debug traces (e.g. the client-abort line in ExceptionHandlingMiddleware) with no code
+// change. What must NOT be added is a `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` entry: see
+// the note beside UseSerilogRequestLogging below — it would delete the only production record of an
+// aborted request's 499 (#390).
 builder.Host.UseSerilog((ctx, services, config) =>
 {
     config
@@ -402,7 +409,34 @@ else
     app.UseHttpsRedirection();
 }
 
-app.UseSerilogRequestLogging();
+// Serilog's request log sits INSIDE ExceptionHandlingMiddleware, and its catch hard-codes "responded
+// 500" at Error for any exception passing through it. So a client abort printed an Error line here too
+// — the louder of the two, since it names a status the request never had (#390). Only that one case
+// moves; everything else keeps Serilog's own default mapping, restated inline because the default is a
+// private static. The discrimination is the middleware's: cancellation ONLY counts as an abort when
+// RequestAborted is the token that fired.
+//
+// DO NOT add `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` (the convention Serilog's own docs
+// recommend next to UseSerilogRequestLogging, to silence the framework's duplicate request log). This
+// app never suppresses that duplicate, and the 499 above depends on it: the abort's Serilog line is
+// demoted to Debug (below the default Information minimum, so it is off in prod), and the only
+// remaining trace of the status is the FRAMEWORK's own completion line from
+// Microsoft.AspNetCore.Hosting.Diagnostics. appsettings.json's
+// `Logging:LogLevel:Microsoft.AspNetCore = Warning` does not reach it — that is MEL config and
+// UseSerilog bypasses MEL filtering — but a Serilog override would, and would delete the record
+// silently. ClientAbortLoggingTests asserts that Information line, so the trap fails a test when it is
+// added HERE or to appsettings.json. That guard is partial by construction: the same override set as a
+// deploy-time env var (Serilog__MinimumLevel__Override__Microsoft.AspNetCore) is invisible to a test
+// reading repo-resident config, so it must not be set in Railway either — see docs/dev-environment.md
+// § Backend log level. To see the middleware's own Debug trace instead, set
+// `Serilog__MinimumLevel__Default=Debug` as an env var — ReadFrom.Configuration already binds it, no
+// code change needed.
+app.UseSerilogRequestLogging(opts => opts.GetLevel = (ctx, _, ex) =>
+    ex is OperationCanceledException && ctx.RequestAborted.IsCancellationRequested
+        ? LogEventLevel.Debug
+        : ex is not null || ctx.Response.StatusCode > 499
+            ? LogEventLevel.Error
+            : LogEventLevel.Information);
 app.UseRouting();
 app.UseCors();
 // Gate behind config so integration tests (which have no client IP to partition on) can
@@ -417,26 +451,60 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 // ============================================================
-// Health endpoints
+// Health endpoints — LIVENESS vs READINESS (ADR 0053)
 // ============================================================
+// Two different questions, and which probe a given consumer points at is a real operational choice:
+//
+//   /health, /health/live  →  LIVENESS.  "This process is up." DB-BLIND on purpose. This is what a
+//                             restart/deploy healthcheck belongs on: Railway's healthcheck path is
+//                             configured OUTSIDE this repo (dashboard setting — there is no
+//                             railway.json here), so a DB-touching liveness probe would let a
+//                             transient Neon blip kill a healthy container, and the restart re-enters
+//                             ADR 0016's fail-fast boot, which ABORTS while the DB is still blipping.
+//                             A 30-second blip becomes a hard outage. Do not "improve" these by
+//                             adding a database check — that is the trade, not an oversight.
+//   /health/ready          →  READINESS. "This process can serve." The ONLY probe that touches the
+//                             database, and therefore the one an UPTIME MONITOR / alert belongs on:
+//                             the #226 shape (process up, every query failing) is green on the two
+//                             liveness probes BY DESIGN and 503 here.
+//
+// Repointing UptimeRobot at /health/ready is an EXTERNAL action (its dashboard), tracked in the QA
+// launch checklist — nothing in this repo can do it. See ADR 0053 and README § Health probes.
 app.MapGet("/health/live", () => Results.Ok(new { status = "live", at = DateTime.UtcNow }));
 
-app.MapGet("/health/ready", async (SystemDbContext db, CancellationToken ct) =>
+app.MapGet("/health/ready", async (SystemDbContext db, ILogger<Program> logger, CancellationToken ct) =>
 {
     try
     {
-        var ok = await db.Database.CanConnectAsync(ct);
-        return ok
-            ? Results.Ok(new { status = "ready", at = DateTime.UtcNow })
-            : Results.StatusCode(503);
+        if (await db.Database.CanConnectAsync(ct))
+            return Results.Ok(new { status = "ready", at = DateTime.UtcNow });
+
+        // The branch a real DB incident lands on: EF swallows connection/auth failures and answers
+        // false. It used to answer a silent 503 — the outage left no trace on OUR side at all.
+        //
+        // …unless the CLIENT left, which is the same carve-out as the catch's `when` below, applied to
+        // the branch that actually fires. A monitor hanging up mid-probe is not a readiness failure,
+        // and saying "the database is not reachable" about a probe we never finished mints a FALSE
+        // outage line in the very log this endpoint added for outage detection (#390 review round 2).
+        // The 503 itself stays unconditional — only the CLAIM is dropped, because an abandoned probe
+        // establishes nothing about the database either way.
+        if (!ct.IsCancellationRequested)
+            logger.LogWarning("Readiness probe failed: the database is not reachable.");
+        return Results.StatusCode(503);
     }
-    catch (Exception ex)
+    catch (Exception ex) when (!ct.IsCancellationRequested)
     {
-        return Results.Json(new { status = "not_ready", error = ex.Message }, statusCode: 503);
+        // Whatever CanConnectAsync did NOT swallow. The cause goes to the logs; the response stays a
+        // bare 503, because this endpoint is public and unauthenticated and an exception message is
+        // the one thing here that could name our infrastructure (#390). The `when` keeps a client
+        // abort out: a monitor hanging up mid-probe is not a readiness failure, and the abort carve-out
+        // in ExceptionHandlingMiddleware already answers it correctly.
+        logger.LogError(ex, "Readiness probe failed.");
+        return Results.StatusCode(503);
     }
 });
 
-// Legacy health endpoint — kept for UptimeRobot compatibility
+// Liveness twin of /health/live, kept because UptimeRobot points here today (see the block above).
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
 
 app.MapWaitlistEndpoints();

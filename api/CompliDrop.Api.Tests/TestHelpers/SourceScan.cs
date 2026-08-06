@@ -69,6 +69,12 @@ internal static class SourceScan
     /// read as the call itself). Throws when the signature is absent or its braces never balance, so a
     /// renamed method or a botched read fails the gate instead of silently emptying it.
     /// <para/>
+    /// The stripping happens BEFORE the anchor lookup, not only on the result (#390 review): a gate's
+    /// anchor is itself a code shape, and the prose around it routinely quotes that shape — a comment
+    /// containing <c>app.MapGet("/health/ready"</c> would otherwise re-anchor the scan onto the prose and
+    /// leave the gate inspecting whatever braces happened to follow. It also means a signature that exists
+    /// ONLY in a comment throws "not found" rather than matching.
+    /// <para/>
     /// Brace-matching, not a parser: it spans from the first <c>{</c> after the signature to its match, so
     /// a target method must be BLOCK-bodied. Against an expression body the first brace it finds belongs
     /// to whatever object or lambda the expression opens with, and the gate would then inspect that
@@ -77,20 +83,21 @@ internal static class SourceScan
     /// </summary>
     internal static string ExtractMethodBody(string source, string signature)
     {
-        var start = source.IndexOf(signature, StringComparison.Ordinal);
+        var code = StripLineComments(source);
+        var start = code.IndexOf(signature, StringComparison.Ordinal);
         if (start < 0)
             throw new InvalidOperationException($"Method signature not found: {signature}");
 
-        var open = source.IndexOf('{', start);
+        var open = code.IndexOf('{', start);
         if (open < 0)
             throw new InvalidOperationException($"No opening brace after: {signature}");
 
         var depth = 0;
-        for (var i = open; i < source.Length; i++)
+        for (var i = open; i < code.Length; i++)
         {
-            if (source[i] == '{') depth++;
-            else if (source[i] == '}' && --depth == 0)
-                return StripLineComments(source[(open + 1)..i]);
+            if (code[i] == '{') depth++;
+            else if (code[i] == '}' && --depth == 0)
+                return code[(open + 1)..i];
         }
         throw new InvalidOperationException($"Unbalanced braces in the body of: {signature}");
     }

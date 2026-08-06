@@ -1,0 +1,135 @@
+using System.Net;
+using CompliDrop.Api.Tests.TestHelpers;
+using FluentAssertions;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Serilog.Core;
+using Serilog.Events;
+using static CompliDrop.Api.Tests.TestHelpers.UploadFixtures;
+
+namespace CompliDrop.Api.Tests;
+
+/// <summary>
+/// The wiring half of #390 item 2 (<see cref="ExceptionHandlingMiddlewareTests"/> owns the
+/// discrimination): a real request through the real pipeline, aborted mid-handler, must leave NO
+/// error-level trace behind — and exactly one Information-level one, carrying the 499. Both halves
+/// matter: without the second, the first passes just as well on a host that logged nothing at all.
+/// <para/>
+/// It takes both fixes to pass, which is the point of asserting on the log rather than on the status
+/// code. A client abort produced TWO error lines: Serilog's request log (which sits INSIDE the
+/// exception middleware and hard-codes "responded 500" at Error for anything that throws past it) and
+/// then the middleware's own <c>LogError</c>. Reverting either one alone turns this red.
+/// <para/>
+/// The route is the PUBLIC portal upload — no auth to arrange on the second host, and a vendor
+/// uploading from a phone is the likeliest client in the product to disappear mid-request.
+/// </summary>
+public sealed class ClientAbortLoggingTests(IntegrationTestFixture fixture) : IntegrationTestBase(fixture)
+{
+    [Fact]
+    public async Task An_aborted_request_is_logged_as_neither_an_error_nor_a_500()
+    {
+        var sink = new CapturingLogEventSink();
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        var link = await SeedLinkAsync();
+
+        var req = new HttpRequestMessage(HttpMethod.Post, $"/api/portal/{link.Token}/upload")
+        {
+            Content = UploadForm(PdfBytes(), "coi.pdf", "application/pdf"),
+        };
+        req.Headers.Add(ClientAbortStartupFilter.HeaderName, "1");
+        var resp = await factory.CreateClient().SendAsync(req);
+
+        // 499 "client closed request" — unreadable by the client that left, but it keeps the request log
+        // honest. The default 200 would file an abandoned upload as a success; the old 500 filed a
+        // server fault that never happened.
+        ((int)resp.StatusCode).Should().Be(499,
+            "the abort must reach the handler (a guard refusing the request earlier would answer 4xx and "
+            + "this test would prove nothing about aborts)");
+
+        var errors = sink.Events
+            .Where(e => e.Level >= LogEventLevel.Error)
+            .Where(e => e.Exception is OperationCanceledException
+                || e.RenderMessage().Contains(link.Token, StringComparison.Ordinal)
+                || e.RenderMessage().Contains("Unhandled exception", StringComparison.Ordinal))
+            .Select(e => $"{e.Level}: {e.RenderMessage()}")
+            .ToList();
+
+        errors.Should().BeEmpty(
+            "a closed tab is not a server error: an Error line per abandoned request is noise the "
+            + "operator cannot act on, and becomes a phantom Sentry event once the backend DSN is live");
+
+        // POSITIVE CONTROL for the emptiness above, and the pin under the 499 (#390 review). "No error
+        // line" is also what a host that logged NOTHING would produce, so the assertion has to be able to
+        // tell DEMOTED from DISAPPEARED. It can, because exactly one line still carries the status: the
+        // framework's own request-completion event, which is emitted by
+        // Microsoft.AspNetCore.Hosting.Diagnostics OUTSIDE ExceptionHandlingMiddleware and reads
+        // Response.StatusCode after the pipeline has unwound — so it sees the 499 the middleware set.
+        //
+        // It is also the ONLY in-process trace of the 499 in production, and it survives on an accident
+        // worth pinning: appsettings.json's `Logging:LogLevel:Microsoft.AspNetCore = Warning` is MEL
+        // config, and UseSerilog bypasses MEL filtering, so with no
+        // `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` this line runs at Information. Adding that
+        // conventional override — which Serilog's own docs recommend alongside UseSerilogRequestLogging —
+        // would delete it. This assertion is what fails when someone adds it to appsettings.json or in
+        // code. It CANNOT fail for the deploy-time env-var form of the same override
+        // (Serilog__MinimumLevel__Override__Microsoft.AspNetCore), which this host never sees — that half
+        // is a written prohibition (docs/dev-environment.md § Backend log level), not a guard. See the
+        // note beside UseSerilogRequestLogging in Program.cs.
+        //
+        // Serilog's own request line cannot serve as the trace: it is registered INSIDE the exception
+        // middleware and hard-codes "responded 500" on its exception path, so it is demoted to Debug
+        // rather than corrected (and is absent from this sink for exactly that reason).
+        sink.Events.Should().Contain(
+            e => e.Level == LogEventLevel.Information
+                && CapturingLogEventSink.Scalar(e, "SourceContext") == "Microsoft.AspNetCore.Hosting.Diagnostics"
+                && CapturingLogEventSink.Scalar(e, "StatusCode") == "499",
+            "the 499 is only worth setting if something records it — an aborted request must leave an "
+            + "Information-level completion line carrying that status, not silence");
+    }
+
+    [Fact]
+    public async Task The_request_log_keeps_Serilogs_own_levels_for_everything_that_is_not_an_abort()
+    {
+        // The carve-out replaced Serilog's DEFAULT GetLevel with an inline lambda, and it governs the
+        // level of EVERY request this API serves — but only the demoted arm was pinned. The other two
+        // are restated by hand, "because the default is a private static", so an edit that dropped or
+        // inverted either would ship green while every 500 in production quietly became Information
+        // (#390 review round 2, S2). Both are asserted from one host, one request each.
+        var sink = new CapturingLogEventSink();
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        var link = await SeedLinkAsync();
+        var client = factory.CreateClient();
+
+        var ok = await client.GetAsync("/health/live");
+
+        // An ORDINARY exception: not a cancellation of any kind, so it must not take the abort branch.
+        // The connection hook is the cheapest unhandled throw available on a route that needs no auth —
+        // and this arm is the load-bearing one, because Serilog's request log sits INSIDE the exception
+        // middleware and therefore still reads Response.StatusCode as 200 while the exception unwinds.
+        // Without `ex is not null` there is nothing left to raise the level.
+        var connections = factory.Services.GetRequiredService<SystemConnectionFaultInterceptor>();
+        HttpResponseMessage threw;
+        connections.Armed = true;
+        try
+        {
+            threw = await client.GetAsync($"/api/portal/{link.Token}");
+        }
+        finally
+        {
+            connections.Reset();
+        }
+
+        ok.StatusCode.Should().Be(HttpStatusCode.OK);
+        threw.StatusCode.Should().Be(HttpStatusCode.InternalServerError,
+            "precondition: the request has to have thrown PAST Serilog's request log for that line's "
+            + "level to mean anything");
+
+        sink.SerilogRequestLevel("/health/live").Should().Be(LogEventLevel.Information,
+            "the carve-out moves ONE case; an ordinary 200 keeps Serilog's own mapping");
+        sink.SerilogRequestLevel($"/api/portal/{link.Token}").Should().Be(LogEventLevel.Error,
+            "a request that threw for a reason of OURS is a server error and must stay loud — that is "
+            + "the whole distinction #390 item 2 draws against a client hanging up");
+    }
+}

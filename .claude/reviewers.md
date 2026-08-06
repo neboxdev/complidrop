@@ -1511,6 +1511,52 @@ Both are defined in this repo's `.claude/agents/`.
     portability dump of the account's own data back to its owner: raw JSON, no masthead, bare
     numeric enum codes, no rendered verdict label). The Decision line is scoped "every export a
     customer hands to a third party" for exactly that reason — do not read it as "every export".
+- Health probes (#390 / ADR 0053): `/health` and `/health/live` answer 200 WITHOUT touching the
+  database, deliberately. "The liveness probe doesn't verify the DB" is not a finding — Railway's
+  healthcheck path is configured OUTSIDE this repo (no `railway.json`, no `HEALTHCHECK` in the
+  Dockerfile), so a DB-touching liveness probe lets a transient Neon blip restart a healthy
+  container into ADR 0016's fail-fast boot, turning a 30-second blip into a hard outage. The
+  DB-touching probe is `/health/ready`, and it is the one an uptime monitor belongs on;
+  `HealthProbeTests` pins both halves. `/health` duplicating `/health/live` is also deliberate
+  (an external monitor polls it) — collapsing them is a change to a URL we cannot enumerate the
+  consumers of. Repointing UptimeRobot is the FOUNDER's external action, tracked in the QA launch
+  checklist, and is deliberately NOT attempted from code. `/health/ready`'s 503 is BARE (public,
+  unauthenticated) and its reason goes to the log — but BOTH log branches are gated on
+  `ct.IsCancellationRequested`, the catch by its `when` and the not-reachable branch by an `if`. That
+  asymmetry between "always 503" and "sometimes silent" is deliberate (round-2 review): an unfinished
+  probe establishes nothing about the database, and "the database is not reachable" in the outage log
+  is the one sentence that could make this endpoint a source of false outages.
+- A lost CONNECTION is not a server error (#390 / ADR 0053's sibling half). `ExceptionHandlingMiddleware`
+  answers 499 with NO envelope and a Debug line, and `UseSerilogRequestLogging`'s `GetLevel` demotes
+  the same case — both gated on `ex is OperationCanceledException && RequestAborted.IsCancellationRequested`.
+  That gate keys on WHOSE TOKEN fired, not on why:
+  - It MUST NOT be simplified to a bare `catch (OperationCanceledException)`. A cancellation on
+    somebody else's token is a real 500 — an HttpClient's own timeout is a `TaskCanceledException` on
+    ITS token, an app-owned linked CTS (`PostCommitRegrade`'s ceiling) is ours (the same distinction
+    `BlobStorageService.UploadAsync` and `AuthEndpoints.DeleteAccount` already make). Writing no body
+    on that path is the point, not an omission.
+  - It DOES cover a forced-shutdown abort, and that is deliberate: Kestrel cancels `RequestAborted`
+    itself when it tears down connections still running at the end of the drain, so a request
+    truncated by a deploy takes the same branch. "The comment says shutdown stays a 500" was the bug
+    (round-2 review) — merge = prod deploy here, so those are routine and an Error each is alert
+    fatigue. `IHostApplicationLifetime.ApplicationStopping` is how the codebase asks the shutdown
+    question when it needs the answer (`PostCommitRegrade`); this site deliberately does not ask.
+  - The 499's only in-process trace in prod is the FRAMEWORK's request-completion line
+    (`Microsoft.AspNetCore.Hosting.Diagnostics`, Information) — Serilog's own request line hard-codes
+    "responded 500" inside this middleware and is demoted to Debug. So do NOT propose adding
+    `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` (Serilog's conventional duplicate-suppression
+    override): it would delete the record. `Logging:LogLevel:Microsoft.AspNetCore = Warning` in
+    appsettings does NOT suppress it — that is MEL config and `UseSerilog` bypasses MEL filtering.
+    `ClientAbortLoggingTests` pins the line — but only against config in this repo and code; the same
+    override set as a Railway ENV VAR is invisible to it, which is why the prohibition is also written
+    into `docs/dev-environment.md`. "The test does not catch the env-var form" is TRUE, is recorded in
+    ADR 0053 § Sibling decision, and is not a finding. Raising either Debug trace to Information is
+    also wrong:
+    Serilog's `RequestLoggingMiddleware` hard-codes `statusCode: 500` on its exception path, so it
+    would reprint the false 500 this ticket removed. "The Debug lines are inert in prod" is TRUE and
+    is not a finding — they are switchable with `Serilog__MinimumLevel__Default=Debug` today, no code
+    and no config change (`ReadFrom.Configuration` already binds it); Debug is what the ticket
+    prescribes and noise removal is its stated purpose.
 
 ## Sensitive areas (`careful-review` label ⇒ merge needs a two-reviewer clearance)
 

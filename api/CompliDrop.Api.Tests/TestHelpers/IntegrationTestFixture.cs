@@ -108,13 +108,16 @@ public sealed class IntegrationTestFixture : IAsyncLifetime
         if (Factory.Services.GetService<IStripeService>() is FakeStripeService stripe)
             stripe.Reset();
 
-        // Same for the two #366 hooks and the #460 SystemDbContext one: each is a host singleton holding a
-        // test-supplied callback, so one a test forgot to clear would fire a competing write — or fail a
-        // commit — inside the next.
+        // Same for the two #366 hooks, the #460 SystemDbContext one and the #390 connection one: each is
+        // a host singleton holding test-supplied state (a callback, or an Armed flag), so one a test
+        // forgot to clear would fire a competing write — or fail a commit, or refuse every connection —
+        // inside the next. The connection hook has the largest blast radius of the five: left armed, it
+        // fails EVERY SystemDbContext open for the rest of the run.
         Factory.Services.GetService<ConcurrentDocumentWriteInterceptor>()?.Reset();
         Factory.Services.GetService<ConcurrentSystemWriteInterceptor>()?.Reset();
         Factory.Services.GetService<CommitFaultInterceptor>()?.Reset();
         Factory.Services.GetService<SystemCommandFaultInterceptor>()?.Reset();
+        Factory.Services.GetService<SystemConnectionFaultInterceptor>()?.Reset();
     }
 
     public async Task DisposeAsync()

@@ -469,9 +469,11 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
         req.Headers.Add(ClientAbortStartupFilter.HeaderName, "1");
         var resp = await auth.Client.SendAsync(req);
 
-        // The abort surfaces as the generic 500 envelope — proof the request reached the handler and
-        // unwound through the cleanup, rather than being refused by a guard before any blob existed.
-        resp.StatusCode.Should().Be(HttpStatusCode.InternalServerError);
+        // The abort surfaces as 499 "client closed request" — proof the request reached the handler and
+        // unwound through the cleanup, rather than being refused by a guard before any blob existed. It
+        // was the generic 500 envelope until #390: an abort is not a server fault, and nobody is left to
+        // read an envelope (see ClientAbortLoggingTests).
+        ((int)resp.StatusCode).Should().Be(499);
         await using var db = CreateSystemDb();
         (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId)).Should().Be(0);
         Blobs.BlobCount.Should().Be(0,
@@ -494,7 +496,7 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
         req.Headers.Add(ClientAbortStartupFilter.HeaderName, "1");
         var resp = await CreateClient().SendAsync(req);
 
-        resp.StatusCode.Should().Be(HttpStatusCode.InternalServerError);
+        ((int)resp.StatusCode).Should().Be(499); // 500 until #390 — see the dashboard twin above
         await using var db = CreateSystemDb();
         (await db.Documents.CountAsync(d => d.OrganizationId == link.OrgId)).Should().Be(0);
         // The permit is rolled back with the transaction — an upload that left nothing behind must not
@@ -517,7 +519,7 @@ public sealed class RequestInputLengthTests(IntegrationTestFixture fixture) : In
         req.Headers.Add(ClientAbortStartupFilter.HeaderName, "1");
         var resp = await auth.Client.SendAsync(req);
 
-        resp.StatusCode.Should().Be(HttpStatusCode.InternalServerError);
+        ((int)resp.StatusCode).Should().Be(499); // 500 until #390 — see the dashboard twin above
         await using var db = CreateSystemDb();
         (await db.Documents.CountAsync(d => d.OrganizationId == auth.OrgId)).Should().Be(0);
         Blobs.BlobCount.Should().Be(0,

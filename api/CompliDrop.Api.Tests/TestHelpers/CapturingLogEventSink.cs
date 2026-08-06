@@ -24,6 +24,30 @@ public sealed class CapturingLogEventSink : ILogEventSink
 
     public IReadOnlyCollection<LogEvent> Events => _events.ToArray();
 
+    /// <summary>The scalar value of one Serilog property, unquoted, or null when it is absent.</summary>
+    public static string? Scalar(LogEvent e, string property) =>
+        e.Properties.TryGetValue(property, out var value) && value is ScalarValue { Value: { } v }
+            ? v.ToString()
+            : null;
+
+    /// <summary>
+    /// The level of SERILOG's own request-completion line for <paramref name="path"/> — the one
+    /// <c>UseSerilogRequestLogging</c> emits — or null when there is none. Deliberately keyed on
+    /// <c>SourceContext</c>: the FRAMEWORK emits a second completion line for the same request
+    /// (<c>Microsoft.AspNetCore.Hosting.Diagnostics</c>) at its own level, and #390's whole point is that
+    /// the two are different records with different fates (<c>ClientAbortLoggingTests</c>).
+    /// <para/>
+    /// Exists because <c>Program.cs</c> replaces Serilog's default <c>GetLevel</c> with an inline lambda
+    /// to demote ONE case (a client abort), and the two arms it restates by hand — "an exception or a
+    /// 5xx is Error, everything else Information" — govern the level of every request the API serves.
+    /// A hand-copied default is a default that can be lost.
+    /// </summary>
+    public LogEventLevel? SerilogRequestLevel(string path) => _events
+        .Where(e => Scalar(e, "SourceContext") == "Serilog.AspNetCore.RequestLoggingMiddleware"
+            && Scalar(e, "RequestPath") == path)
+        .Select(e => (LogEventLevel?)e.Level)
+        .LastOrDefault();
+
     /// <summary>
     /// The most recently logged message containing every one of <paramref name="fragments"/>, or null when
     /// there is none. Serilog renders the command text as a quoted string, so the SQL's own quotes arrive
