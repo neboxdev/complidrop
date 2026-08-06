@@ -126,11 +126,23 @@ public sealed class ExceptionHandlingMiddlewareTests
         await abort.CancelAsync();
         var logger = new ListLogger<ExceptionHandlingMiddleware>();
 
-        var act = async () => await InvokeAsync(context, body, logger, new OperationCanceledException(abort.Token));
+        var payload = "(never invoked)";
+        Func<Task> act = async () =>
+            payload = await InvokeAsync(context, body, logger, new OperationCanceledException(abort.Token));
 
-        await act.Should().NotThrowAsync();
-        context.Response.StatusCode.Should().Be(StatusCodes.Status200OK, "the status was already on the wire");
+        await act.Should().NotThrowAsync(
+            "the abort branch must survive a response it cannot restatus — throwing out of the exception "
+            + "handler lands back in the Error line this carve-out exists to remove");
+        payload.Should().BeEmpty(
+            "the other half of this test's name, unasserted until #390 round 2: a response already on "
+            + "the wire must not get an error envelope appended to it, or the client receives a valid "
+            + "body followed by JSON");
         logger.Entries.Should().NotContain(e => e.Level >= LogLevel.Error);
+
+        // The STATUS is deliberately not asserted. StartedResponseFeature's getter hard-codes 200, so an
+        // assertion on it reads the test's own fake and cannot fail whatever the middleware does. What is
+        // decidable here is that the SETTER was refused and the refusal did not escape — which is what
+        // NotThrowAsync above measures.
     }
 
     /// <summary>
