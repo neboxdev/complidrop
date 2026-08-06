@@ -181,6 +181,28 @@ public sealed class BackendSentryTests
     }
 
     [Fact]
+    public async Task Secrets_inside_the_exception_itself_are_redacted()
+    {
+        const string token = "Xy3kQp7ZmA0bCdEfGhIjKlMn";
+        using var harness = new SentryHarness(dsnConfiguredForSink: true);
+
+        // The broadest vector: ExceptionHandlingMiddleware logs whatever was thrown, and an exception
+        // raised anywhere can embed user content in its Message. The exception VALUES are a separate
+        // place on the event from the log message, so they need their own proof.
+        await RunThroughMiddlewareAsync(
+            harness,
+            UsableTraceId,
+            new InvalidOperationException(
+                $"no vendor for pat@gardenhall.example at /api/portal/{token}"));
+
+        var payloads = await harness.CapturedPayloadsAsync();
+
+        payloads.Should().ContainSingle();
+        payloads[0].Should().NotContain("pat@gardenhall.example").And.NotContain(token);
+        payloads[0].Should().Contain("InvalidOperationException", "the exception TYPE still groups the event");
+    }
+
+    [Fact]
     public async Task An_email_address_inside_a_third_party_error_body_is_redacted()
     {
         using var harness = new SentryHarness(dsnConfiguredForSink: true);

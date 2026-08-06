@@ -134,9 +134,17 @@ public static partial class SentryScrub
             };
         }
 
+        // Materialised and reassigned, not mutated in place through the property. The SDK builds this
+        // collection with LINQ; if a future version leaves it deferred, mutating what a foreach yields
+        // would edit throwaway instances and the redaction would silently not reach the wire — the
+        // quietest way for this whole net to stop working.
         if (evt.SentryExceptions is { } exceptions)
-            foreach (var exception in exceptions)
+        {
+            var scrubbed = exceptions.ToList();
+            foreach (var exception in scrubbed)
                 exception.Value = Redact(exception.Value);
+            evt.SentryExceptions = scrubbed;
+        }
 
         // Materialise before mutating — SetExtra/SetTag write to the dictionary being enumerated.
         foreach (var (key, value) in evt.Extra.ToArray())
