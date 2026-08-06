@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using CompliDrop.Api.Middleware;
@@ -9,13 +8,11 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Sentry.AspNetCore;
 using Sentry.Extensibility;
 using Serilog;
-using Serilog.Extensions.Logging;
 
 namespace CompliDrop.Api.Tests;
 
