@@ -21,7 +21,7 @@ const FAQ_ITEMS: readonly FaqItem[] = [
   {
     question: "What is CompliDrop?",
     answer:
-      "CompliDrop is COI tracking software for small businesses. You upload a certificate of insurance, license, or permit; it reads the dates and coverage, checks them against your requirements, and reminds you — and your vendor — before anything expires. It replaces the spreadsheet and the calendar reminders you're keeping by hand.",
+      "CompliDrop is COI tracking software for small businesses. You upload a certificate of insurance, license, or permit; it reads the dates and coverage, checks them against your requirements, and sends reminders — to you and your vendor — ahead of the expiration date. It replaces the spreadsheet and the calendar reminders you're keeping by hand.",
   },
   {
     question: "What does it cost?",
@@ -30,7 +30,7 @@ const FAQ_ITEMS: readonly FaqItem[] = [
   {
     question: "How is this different from tracking COIs in a spreadsheet?",
     answer:
-      "A spreadsheet stores what you type; it doesn't read the document, it doesn't know a policy expired, and it never chases the vendor for a renewal. CompliDrop extracts the data for you, flags coverage that falls short of your requirements, and sends the reminders automatically — so a missed expiration can't slip through a row you forgot to check.",
+      "A spreadsheet stores what you type; it doesn't read the document, it doesn't know a policy expired, and it never chases the vendor for a renewal. CompliDrop extracts the data for you, flags coverage that falls short of your requirements, and sends the reminders automatically — so the expiration buried in a row you forgot to check won't slip through unnoticed.",
   },
   {
     question: "Do my vendors need an account to send their documents?",
@@ -55,7 +55,7 @@ const FAQ_ITEMS: readonly FaqItem[] = [
   {
     question: "Is my data secure?",
     answer:
-      "Your documents are transmitted over an encrypted connection and stored privately. Each account's data is isolated from every other account, and every change is written to an audit log. We don't sell or share your data.",
+      "Your documents are transmitted over an encrypted connection and stored privately. Each account's data is isolated from every other account, and every change is written to an audit log. We don't sell your data, and we share it only with the service providers listed in our Privacy Policy or where the law requires it.",
   },
 ];
 

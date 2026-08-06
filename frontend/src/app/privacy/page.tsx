@@ -21,7 +21,7 @@ export const metadata: Metadata = pageMetadata({
 
 // Fixed effective date — a legal document's "last updated" must not change on
 // every render/build (so never `new Date()` here). Bump by hand on real edits.
-const EFFECTIVE_DATE = "June 4, 2026";
+const EFFECTIVE_DATE = "August 6, 2026";
 
 export default function PrivacyPolicyPage() {
   return (
@@ -146,7 +146,8 @@ export default function PrivacyPolicyPage() {
           Depending on where you live, you may have additional rights — to know what
           we collect, to access or correct it, to delete it, and to opt out of any
           &quot;sale&quot; or &quot;sharing&quot; of personal information (we don&apos;t
-          sell or share it). We honor these rights as required by applicable law and
+          sell personal information, and we don&apos;t share it for targeted
+          advertising). We honor these rights as required by applicable law and
           aim to respond within 30 days.
         </p>
         <p>

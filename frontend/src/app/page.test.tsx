@@ -167,6 +167,51 @@ describe("Landing page — product preview, social proof, nav, de-jargon (#195)"
   });
 });
 
+describe("Landing page claims vs. the Terms (#403)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockUseMe.mockReturnValue({ data: null });
+  });
+
+  it("describes what the product does instead of guaranteeing a warning before every expiry", () => {
+    const { container } = render(<Home />);
+    // The Terms disclaim reminder delivery ("treat reminders as a helpful
+    // nudge, not a guaranteed notice"), so the hero can't promise the outcome.
+    // `container.textContent` covers the visible copy AND the JSON-LD payload.
+    const text = container.textContent ?? "";
+    expect(text).not.toMatch(/before anything expires/i);
+    expect(text).not.toMatch(/warns you/i);
+    expect(screen.getByText(/ahead of the expiration date/i)).toBeInTheDocument();
+  });
+
+  it("drops the 'Enterprise accuracy' pricing headline the Terms disclaim", () => {
+    render(<Home />);
+    // Terms: "we do not guarantee that every extracted value or compliance
+    // result is accurate or complete" — so the page can't headline accuracy.
+    expect(screen.queryByText(/enterprise accuracy/i)).toBeNull();
+    expect(
+      screen.getByRole("heading", { name: /enterprise-grade tracking/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the softened claim in the SoftwareApplication JSON-LD description too", () => {
+    const { container } = render(<Home />);
+    const software = Array.from(
+      container.querySelectorAll('script[type="application/ld+json"]'),
+    )
+      .map((el) => JSON.parse(el.textContent ?? "{}") as Record<string, unknown>)
+      .find((node) => node["@type"] === "SoftwareApplication");
+    expect(software, "homepage must render SoftwareApplication JSON-LD").toBeTruthy();
+    // SITE_DESCRIPTION is the site-wide <meta name="description"> AND the
+    // Organization/SoftwareApplication schema description — the machine-quoted
+    // copy of the same sentence, so it has to be softened in lockstep.
+    expect(String(software!.description)).not.toMatch(/before anything expires/i);
+    expect(String(software!.description)).toMatch(
+      /sends reminders ahead of the expiration date/i,
+    );
+  });
+});
+
 describe("Homepage structured data (#176)", () => {
   beforeEach(() => {
     vi.clearAllMocks();

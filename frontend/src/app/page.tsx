@@ -282,8 +282,8 @@ export default function Home() {
             <p className="mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-muted-foreground sm:text-xl">
               CompliDrop is COI tracking software for small businesses. Upload a
               certificate of insurance, license, or permit and it reads the
-              dates, checks the coverage, and warns you&nbsp;&mdash; and your
-              vendor&nbsp;&mdash; before anything expires. {PLANS.pro.monthlyPriceLabel}/month. No demo,
+              dates, checks the coverage, and sends reminders&nbsp;&mdash; to you
+              and your vendor&nbsp;&mdash; ahead of the expiration date. {PLANS.pro.monthlyPriceLabel}/month. No demo,
               no contract.
             </p>
 
@@ -385,7 +385,7 @@ export default function Home() {
           <div className="mx-auto max-w-6xl px-4 sm:px-6">
             <SectionLabel>Pricing</SectionLabel>
             <h2 className="mt-3 text-center text-3xl font-bold tracking-tight text-foreground sm:text-4xl">
-              Enterprise accuracy. Small-business pricing.
+              Enterprise-grade tracking. Small-business pricing.
             </h2>
             <p className="mx-auto mt-4 max-w-2xl text-center text-lg text-muted-foreground">
               No annual contracts. No minimums. No sales calls. Cancel anytime.

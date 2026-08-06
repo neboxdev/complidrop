@@ -79,6 +79,46 @@ describe("FAQ page", () => {
       expect(screen.getByText(answer)).toBeInTheDocument();
     }
   });
+
+  // The FAQ answers are emitted as FAQPage JSON-LD — the exact strings search
+  // engines and AI assistants quote — so a claim that contradicts our own
+  // Privacy Policy is a machine-amplified one. (#403)
+  it("qualifies the data-sharing answer instead of claiming we don't share (#403)", () => {
+    const { container } = render(<FaqPage />);
+    const answers = faqPairs(container).map((pair) => pair.answer);
+    expect(answers.length).toBeGreaterThan(0);
+    const joined = answers.join(" ");
+
+    // "We don't sell or share your data" contradicts the policy's own
+    // "Service providers we share data with" section — seven vendors, with
+    // document contents going to Google to be read.
+    expect(joined).not.toMatch(/sell or share/i);
+    expect(joined).not.toMatch(/(don[’']t|do not|never) share your data/i);
+
+    // What must survive: the no-sale promise, qualified by where the sharing
+    // that DOES happen is disclosed.
+    const security = answers.find((answer) => /sell your data/i.test(answer));
+    expect(security, "an answer must still carry the no-sale promise").toBeTruthy();
+    expect(security!).toMatch(
+      /we share it only with the service providers listed in our Privacy Policy/i,
+    );
+    // …and the visible answer is the same string the schema carries.
+    expect(screen.getByText(security!)).toBeInTheDocument();
+  });
+
+  it("describes what the product does instead of guaranteeing an outcome the Terms disclaim (#403)", () => {
+    const { container } = render(<FaqPage />);
+    const joined = faqPairs(container)
+      .map((pair) => pair.answer)
+      .join(" ");
+
+    // The Terms disclaim extraction accuracy AND reminder delivery ("not a
+    // guaranteed notice"), so no answer may promise that nothing gets past us.
+    expect(joined).not.toMatch(/can[’']t slip through/i);
+    expect(joined).not.toMatch(/before anything expires/i);
+    expect(joined).toMatch(/won[’']t slip through unnoticed/i);
+    expect(joined).toMatch(/sends reminders/i);
+  });
 });
 
 describe("Glossary index", () => {
@@ -195,6 +235,26 @@ describe("Legal + contact pages (#194)", () => {
     expect(screen.getByText(new RegExp(LEGAL_ADDRESS))).toBeInTheDocument();
     const main = within(screen.getByRole("main"));
     expect(main.getAllByRole("link").map((l) => l.getAttribute("href"))).toContain("/contact");
+  });
+
+  it("Privacy Policy backs the FAQ's qualified sharing claim, and makes no unqualified one of its own (#403)", () => {
+    const { container } = render(<PrivacyPolicyPage />);
+    // The FAQ now routes readers here with "the service providers listed in our
+    // Privacy Policy" — that sentence is only true while this page actually
+    // lists them under a heading a reader can find.
+    expect(
+      screen.getByRole("heading", { name: /service providers we share data with/i }),
+    ).toBeInTheDocument();
+    // The one that matters most: full document contents go to Google to be read.
+    expect(screen.getByText(/Document AI/i)).toBeInTheDocument();
+
+    const text = container.textContent ?? "";
+    // The policy must not contradict itself either — an unqualified "we don't
+    // sell or share it" sat in the same document as that seven-vendor list.
+    // CCPA "sharing" is a term of art (targeted advertising), so say that.
+    expect(text).not.toMatch(/sell or share/i);
+    expect(text).toMatch(/we do not sell your data/i);
+    expect(text).toMatch(/share it for targeted advertising/i);
   });
 
   it("Terms of Service renders the not-advice disclaimer + cancellation terms (Stripe requirement)", () => {
