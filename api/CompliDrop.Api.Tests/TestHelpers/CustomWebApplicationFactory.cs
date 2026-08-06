@@ -58,6 +58,14 @@ public sealed class CustomWebApplicationFactory(
                 //     legacy set mid-suite (the flag is reversible by design) and corrupt every
                 //     later seed-dependent test. Only override this against an isolated database.
                 ["TemplateCorrections:Enabled"] = "true",
+                // Backend error monitoring (#386, ADR 0053) OFF in the test host, for the same
+                // user-secret-leakage reason as Stripe:SecretKey below — this project shares the API's
+                // UserSecretsId and boots Development, and a developer with the real Sentry:Dsn in
+                // user-secrets (the #386 finding) would otherwise have every test-run LogError uploaded
+                // to the PRODUCTION Sentry project. BackendSentry.IsEnabled also refuses Development
+                // outright; this is the second, explicit lock, and it is what lets a test opt IN by
+                // overriding the key rather than inheriting whatever the machine happens to hold.
+                ["Sentry:Dsn"] = "",
                 // Stripe webhook signature verification + plan resolution. SecretKey is
                 // explicitly emptied — without this, a developer with `Stripe:SecretKey` in
                 // user-secrets would have it leak into the test host (configuration ordering:
