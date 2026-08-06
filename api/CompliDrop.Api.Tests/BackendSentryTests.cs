@@ -462,6 +462,8 @@ public sealed class BackendSentryTests
         evt.SetTag("route", $"/api/portal/{token}");
         evt.Request.Url = $"https://api.complidrop.com/api/portal/{token}";
         evt.Request.QueryString = "email=pat@gardenhall.example";
+        evt.Request.Cookies = "cd_session=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP";
+        evt.Request.Data = """{"vendorName":"Acme","contactEmail":"pat@gardenhall.example"}""";
         evt.Request.Headers["X-Portal-Token"] = token + "@x.example";
         evt.Request.Headers["User-Agent"] = "probe/1.0 pat@gardenhall.example";
 
@@ -481,6 +483,10 @@ public sealed class BackendSentryTests
         // stronger than the redaction this used to assert, and the reason is that the four nets cannot
         // recognise everything a header carries — a client IP being the case that forced it (#386 review).
         evt.Request.Headers.Should().NotContainKey("X-Portal-Token");
+        // "no cookies, never a request body" is enforced HERE, not only by two SDK settings three
+        // files away that a future edit could flip without connecting them to the claim.
+        evt.Request.Cookies.Should().BeNull();
+        evt.Request.Data.Should().BeNull();
         evt.Request.Headers["User-Agent"].Should().Be("probe/1.0 [email redacted]",
             "an allowlisted header still passes the nets");
     }

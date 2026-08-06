@@ -25,8 +25,9 @@ namespace CompliDrop.Api;
 /// entropy heuristic.</item>
 /// <item><b>Email addresses.</b> A third-party error body echoed into a log line (Resend rejecting a
 /// recipient is the live example) can name the person being mailed.</item>
-/// <item><b>Session/refresh JWTs.</b> Cookies are not attached (<c>SendDefaultPii</c> is off), but a
-/// token embedded in free text by some future log line would be.</item>
+/// <item><b>Session/refresh JWTs.</b> The <c>Cookie</c> header and the request body are dropped here
+/// outright — structurally, not because two SDK settings happen to say so — but a token embedded in
+/// free text by some future log line would still be shipped, so the JWT net covers that.</item>
 /// </list>
 /// <para/>
 /// Deliberately NARROW. This is a net for values that have a recognisable SHAPE, not a filter that can
@@ -278,6 +279,14 @@ public static partial class SentryScrub
     {
         request.Url = Redact(request.Url);
         request.QueryString = Redact(request.QueryString);
+
+        // The other two slots the ASP.NET integration can fill. Both are already empty under the
+        // options we set (SendDefaultPii off, MaxRequestBodySize None), and both are cleared anyway so
+        // "no cookies, never a request body" is a property of this code rather than of two settings a
+        // future edit could flip without anyone connecting it to a claim made three files away. A body
+        // on this product is a certificate of insurance; a cookie is a session JWT.
+        request.Cookies = null;
+        request.Data = null;
 
         foreach (var key in request.Headers.Keys.ToArray())
         {

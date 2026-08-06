@@ -143,8 +143,13 @@ enumerate proxy headers vendor by vendor — a list that goes stale silently —
 diagnostic headers (`User-Agent`, `Referer`, `Content-Type`, `X-Trace-Id`, each still passed through
 the nets) and drops the rest, which makes "no IP" structurally true. `SentryUser.IpAddress` is cleared
 for the same reason: the SDK stamps `{{auto}}` — an instruction to Sentry's ingest to fill the address
-in from the connecting socket — onto transactions even with `SendDefaultPii` off. `SentryUser.Id`
-deliberately survives: it is the SDK's *installation* id, one value per running container.
+in from the connecting socket — onto transactions even with `SendDefaultPii` off. `SentryRequest.Cookies`
+and `SentryRequest.Data` (the body) are nulled on the same principle: both are already empty under the
+options above, and clearing them anyway makes "no cookies, never a request body" a property of this
+code rather than of two settings three files away that a future edit could flip without connecting
+them to a claim made here. **The one residue is `SentryUser.Id`**, which deliberately survives: it is
+the SDK's *installation* id, one value per running container and never a person, and it is the only
+thing distinguishing two replicas in a side-by-side deploy.
 
 **Structured values are walked, not just strings.** A log property that is an object, an array or a
 dictionary is serialized to the wire as-is, so a net that only touched `string` values would miss

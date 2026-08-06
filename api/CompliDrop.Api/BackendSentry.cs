@@ -67,8 +67,11 @@ public static class BackendSentry
         options.Environment = environment.EnvironmentName;
         options.TracesSampleRate = configuration.GetValue(TracesSampleRateKey, DefaultTracesSampleRate);
 
-        // No user identity, no IP, no cookies — and never a request body, which on this product is a
-        // certificate of insurance or a vendor's contact details.
+        // No end-user identity, no IP, no cookies — and never a request body, which on this product is
+        // a certificate of insurance or a vendor's contact details. Each of those four is enforced by
+        // SentryScrub as well, not by these two settings alone; the ONE residue is `user.id`, the SDK's
+        // own installation id — one value per running container, never a person — which is kept because
+        // it is the only thing distinguishing two replicas mid-deploy. See ADR 0053 §PII.
         options.SendDefaultPii = false;
         options.MaxRequestBodySize = RequestSize.None;
 
