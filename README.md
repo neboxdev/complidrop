@@ -69,6 +69,29 @@ a half-applied schema. See [ADR 0016](docs/adr/0016-apply-ef-migrations-on-start
 and [#226](https://github.com/neboxdev/complidrop/issues/226) (the outage that
 prompted this).
 
+### Health probes and monitoring
+
+Three endpoints, two questions — see
+[ADR 0053](docs/adr/0053-liveness-and-readiness-are-separate-probes.md):
+
+| Path | Question | Touches the DB | Poll it from |
+|---|---|---|---|
+| `/health`, `/health/live` | Is the process up? | **no** | Railway's deploy/restart healthcheck |
+| `/health/ready` | Can it serve? | **yes** | UptimeRobot / alerting |
+
+**The uptime monitor belongs on `/health/ready`.** The liveness endpoints stay green when the
+process is up but every query is failing (the [#226](https://github.com/neboxdev/complidrop/issues/226)
+shape) — that is what makes them safe for a container healthcheck and useless as an outage alarm.
+A monitor's consecutive-failure threshold absorbs a transient Neon blip; a container healthcheck
+does not, and a restart re-enters the fail-fast boot above.
+
+Do **not** add a database check to `/health` or `/health/live`. Railway's healthcheck path is a
+dashboard setting rather than a file in this repo, so a DB-aware liveness probe can restart a
+healthy container during a blip that would otherwise pass unnoticed.
+
+> **Operator action, outside this repo:** point the UptimeRobot monitor at
+> `https://<api-host>/health/ready` (it is still on `/health`). Tracked in the QA launch checklist.
+
 If you ever prefer to run migrations as an external release step instead
 (`dotnet ef database update --context AppDbContext` before the container takes
 traffic), set `Database__AutoMigrate=false` — the boot-time **drift guard** still

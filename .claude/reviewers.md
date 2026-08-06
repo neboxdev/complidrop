@@ -1511,6 +1511,23 @@ Both are defined in this repo's `.claude/agents/`.
     portability dump of the account's own data back to its owner: raw JSON, no masthead, bare
     numeric enum codes, no rendered verdict label). The Decision line is scoped "every export a
     customer hands to a third party" for exactly that reason — do not read it as "every export".
+- Health probes (#390 / ADR 0053): `/health` and `/health/live` answer 200 WITHOUT touching the
+  database, deliberately. "The liveness probe doesn't verify the DB" is not a finding — Railway's
+  healthcheck path is configured OUTSIDE this repo (no `railway.json`, no `HEALTHCHECK` in the
+  Dockerfile), so a DB-touching liveness probe lets a transient Neon blip restart a healthy
+  container into ADR 0016's fail-fast boot, turning a 30-second blip into a hard outage. The
+  DB-touching probe is `/health/ready`, and it is the one an uptime monitor belongs on;
+  `HealthProbeTests` pins both halves. `/health` duplicating `/health/live` is also deliberate
+  (an external monitor polls it) — collapsing them is a change to a URL we cannot enumerate the
+  consumers of. Repointing UptimeRobot is the FOUNDER's external action, tracked in the QA launch
+  checklist, and is deliberately NOT attempted from code.
+- A CLIENT abort is not a server error (#390 / ADR 0053's sibling half). `ExceptionHandlingMiddleware`
+  answers 499 with NO envelope and a Debug line, and `UseSerilogRequestLogging`'s `GetLevel` demotes
+  the same case — both gated on `ex is OperationCanceledException && RequestAborted.IsCancellationRequested`.
+  That `when` is load-bearing and MUST NOT be simplified to a bare `catch (OperationCanceledException)`:
+  an HttpClient's own timeout is a `TaskCanceledException` on ITS token and is a real 500 (the same
+  distinction `BlobStorageService.UploadAsync` and `AuthEndpoints.DeleteAccount` already make).
+  Writing no body on that path is the point, not an omission.
 
 ## Sensitive areas (`careful-review` label ⇒ merge needs a two-reviewer clearance)
 

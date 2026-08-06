@@ -102,7 +102,7 @@ Before diving in, prove the app is alive.
 
 - [ ] **1.1 Landing page loads.** Browser A → `http://localhost:3000/` (or staging URL). **Expect:** the marketing landing with headline **"Stop chasing certificates of insurance."** / **"Start dropping docs."** renders within 3 seconds. **Don't expect:** a 404, a blank white page, the old "Stop Chasing Paper." headline, or a Tailwind purge regression (unstyled HTML).
 - [ ] **1.2 Header nav (logged out).** Top right shows **"Log in"** + orange **"Get started"**. On desktop (≥ md) a secondary nav row also shows **"Pricing" / "Event venues" / "FAQ" / "Glossary" / "Support"**. **Don't expect:** "Go to dashboard" — that's the logged-in variant.
-- [ ] **1.3 Backend healthcheck.** In a new tab: `http://localhost:5292/health/live`. **Expect:** `200 OK`, JSON body with `status: "Healthy"`. **Don't expect:** a 500 or a database-disconnected response.
+- [ ] **1.3 Backend healthcheck.** In a new tab: `http://localhost:5292/health/live`. **Expect:** `200 OK`, JSON body with `status: "live"`. **Don't expect:** a 500. (This one is LIVENESS and never touches the database — a database-disconnected response would be a bug, ADR 0053. Then check `http://localhost:5292/health/ready`: `200 OK` with `status: "ready"` — that is the readiness probe, and the one the uptime monitor polls.)
 - [ ] **1.4 API CORS.** From the DevTools console on the landing page: `await fetch('http://localhost:5292/api/auth/me', {credentials:'include'})`. **Expect:** a 401 response (not a CORS block). **Don't expect:** a red CORS error in console — that means the API isn't allowing `localhost:3000`.
 - [ ] **1.5 Register and login URLs exist.** Click **"Log in"** → `/login` loads. Back. Click **"Get started"** → `/register` loads.
 - [ ] **1.6 How-it-works anchor.** On the landing, click **"See how it works ↓"** — page should scroll to the `#how-it-works` section smoothly (no jump-cut). Then scroll down manually to the pricing section (`#pricing`).
@@ -1124,7 +1124,7 @@ You're done when this entire table is filled in.
 - [ ] [`README.md`](../../README.md) and marketing landing are up to date with any copy changes uncovered during QA.
 - [ ] §16 known limitations are accepted (consciously, not by default) as launch-acceptable.
 - [ ] Stripe is in **live** mode (was test during QA; flip before launch).
-- [ ] Sentry, UptimeRobot, Resend domain auth (SPF/DKIM/DMARC) are live in production.
+- [ ] Sentry, UptimeRobot, Resend domain auth (SPF/DKIM/DMARC) are live in production. **The UptimeRobot monitor must poll `/health/ready`, not `/health`** — the liveness endpoints stay green while every query fails (#226 shape), so a monitor on `/health` cannot see an outage (#390, [ADR 0053](../adr/0053-liveness-and-readiness-are-separate-probes.md)).
 - [ ] Production env vars set, `ValidateOnStart()` boots cleanly, and the startup auto-migration applied cleanly (check boot logs).
 
 ### Post-QA cleanup
