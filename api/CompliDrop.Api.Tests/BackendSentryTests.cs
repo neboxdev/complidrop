@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using CompliDrop.Api.Middleware;
 using CompliDrop.Api.Tests.TestHelpers;
@@ -280,6 +281,56 @@ public sealed class BackendSentryTests
 
         redacted.Should().HaveLength(SentryScrub.MaxValueLength + SentryScrub.TruncationMarker.Length);
         redacted.Should().EndWith(SentryScrub.TruncationMarker);
+    }
+
+    [Fact]
+    public void The_cap_drops_a_secret_that_sits_past_it()
+    {
+        // The cap is a REDACTION mechanism in its own right, not just a regex-cost bound: anything
+        // past it never leaves the process, including the shapes no net matches. Asserted with an
+        // opaque blob (matched by none of the four nets) so removing the cap would fail this — an
+        // email past the cap would be caught by the email net either way and prove nothing.
+        var value = new string('x', SentryScrub.MaxValueLength)
+                    + " OPAQUE-BEARER-9f2c4d6a pat@gardenhall.example";
+
+        var redacted = SentryScrub.Redact(value)!;
+
+        redacted.Should().NotContain("OPAQUE-BEARER-9f2c4d6a").And.NotContain("pat@gardenhall.example");
+        redacted.Should().EndWith(SentryScrub.TruncationMarker);
+    }
+
+    [Fact]
+    public void The_cap_never_splits_a_surrogate_pair()
+    {
+        // An emoji straddling the cut is TWO code units. A fixed code-unit cut lands between them
+        // and emits a LONE HIGH SURROGATE — an invalid UTF-16 string that a strict UTF-8 encoder
+        // (Utf8JsonWriter's, during envelope serialization) refuses, so the event silently fails to
+        // serialize: exactly the loss #386 exists to end. Services/ColumnClamp.To is this codebase's
+        // ONE surrogate-safe truncation (ADR 0044) and this reuses it.
+        var value = new string('x', SentryScrub.MaxValueLength - 1) + "\U0001F642";
+
+        var redacted = SentryScrub.Redact(value)!;
+
+        UnpairedSurrogateCount(redacted).Should().Be(0);
+        // The proof that matters: a strict encoder accepts it. This is the operation that throws on
+        // the wire, so the assertion is on the operation, not on a proxy for it.
+        redacted.Invoking(text => new UTF8Encoding(false, throwOnInvalidBytes: true).GetBytes(text))
+            .Should().NotThrow();
+    }
+
+    private static int UnpairedSurrogateCount(string text)
+    {
+        var unpaired = 0;
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (char.IsHighSurrogate(text[i]))
+            {
+                if (i + 1 >= text.Length || !char.IsLowSurrogate(text[i + 1])) unpaired++;
+                else i++;
+            }
+            else if (char.IsLowSurrogate(text[i])) unpaired++;
+        }
+        return unpaired;
     }
 
     [Theory]

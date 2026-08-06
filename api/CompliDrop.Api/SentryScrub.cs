@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using CompliDrop.Api.Middleware;
+using CompliDrop.Api.Services;
 
 namespace CompliDrop.Api;
 
@@ -97,13 +98,21 @@ public static partial class SentryScrub
     /// <summary>
     /// Redacts one free-text value. Length cap FIRST (see the class remarks), then the four nets, in an
     /// order chosen so an earlier replacement cannot manufacture a later match.
+    /// <para/>
+    /// The cap goes through <see cref="ColumnClamp.To"/> — this codebase's ONE surrogate-safe truncation
+    /// (ADR 0044) — rather than a raw slice. A fixed code-unit cut can land between the halves of a
+    /// surrogate pair (an emoji straddling the boundary) and emit a LONE HIGH SURROGATE; the strict
+    /// UTF-8 encoder behind <c>Utf8JsonWriter</c> refuses that, so the envelope fails to serialize and
+    /// the error event is silently lost — the exact loss #386 exists to end. <c>ColumnClamp</c>'s
+    /// contract is a WIDTH, not a database column, so reusing it here keeps one truncation rule instead
+    /// of a second, subtly different one.
     /// </summary>
     internal static string? Redact(string? value)
     {
         if (string.IsNullOrEmpty(value)) return value;
 
         var text = value.Length > MaxValueLength
-            ? string.Concat(value.AsSpan(0, MaxValueLength), TruncationMarker)
+            ? ColumnClamp.To(value, MaxValueLength) + TruncationMarker
             : value;
 
         text = PortalTokenPath().Replace(text, "$1" + Redacted);
