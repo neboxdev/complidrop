@@ -73,8 +73,23 @@ public static class BackendSentry
         options.MaxRequestBodySize = RequestSize.None;
 
         // Everything that survives the two settings above still passes the scrubber (ADR 0053 §PII):
-        // the portal capability token lives in the URL, which is attached regardless of SendDefaultPii.
+        // the portal capability token lives in the URL, which is attached regardless of SendDefaultPii,
+        // and the request HEADERS are attached too (SendDefaultPii suppresses only the SDK's OWN
+        // user/IP/cookie attachment) — so the proxy's X-Forwarded-For would otherwise carry the caller's
+        // IP out. SentryScrub reduces the headers to a diagnostic allowlist for that reason.
+        //
+        // BOTH hooks. Events and performance TRANSACTIONS are separate envelope types leaving through
+        // separate hooks, and a transaction carries its own Request (url / query string / headers) from
+        // the same ASP.NET scope. Scrubbing only events left ~TracesSampleRate of portal requests
+        // uploading the vendor's bearer token (#386 review). Same net on both, like ADR 0037's frontend.
         options.SetBeforeSend(static (evt, _) => SentryScrub.Scrub(evt));
+        options.SetBeforeSendTransaction(static (transaction, _) => SentryScrub.ScrubTransaction(transaction));
+
+        // The one thing BeforeSendTransaction cannot repair: a transaction's Name is read-only by then
+        // (and is copied into the envelope's dynamic-sampling header, which no hook rewrites). When
+        // routing yields no name the SDK falls back to the raw path — token and all — so the name is
+        // decided HERE, before the transaction exists. See SentryScrub.TransactionName.
+        options.TransactionNameProvider = SentryScrub.TransactionName;
     }
 
     /// <summary>

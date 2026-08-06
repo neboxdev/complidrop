@@ -1,3 +1,5 @@
+using System.Collections;
+using System.Globalization;
 using System.Text.RegularExpressions;
 using CompliDrop.Api.Middleware;
 using CompliDrop.Api.Services;
@@ -139,7 +141,9 @@ public static partial class SentryScrub
             {
                 Message = Redact(message.Message),
                 Formatted = Redact(message.Formatted),
-                Params = message.Params?.Select(p => p is string s ? (object)Redact(s)! : p).ToArray(),
+                // `!` is sound: RedactValue returns null only for a null input, and Params' element
+                // type is non-nullable object.
+                Params = message.Params?.Select(p => RedactValue(p)!).ToArray(),
             };
         }
 
@@ -155,23 +159,192 @@ public static partial class SentryScrub
             evt.SentryExceptions = scrubbed;
         }
 
-        // Materialise before mutating — SetExtra/SetTag write to the dictionary being enumerated.
-        foreach (var (key, value) in evt.Extra.ToArray())
-            if (value is string text)
-                evt.SetExtra(key, Redact(text));
-
-        foreach (var (key, value) in evt.Tags.ToArray())
-            evt.SetTag(key, Redact(value) ?? string.Empty);
-
-        var request = evt.Request;
-        request.Url = Redact(request.Url);
-        request.QueryString = Redact(request.QueryString);
-        foreach (var (key, value) in request.Headers.ToArray())
-            request.Headers[key] = Redact(value) ?? string.Empty;
-
+        ScrubEventLike(evt);
         PromoteCorrelationId(evt);
         return evt;
     }
+
+    /// <summary>
+    /// The <c>BeforeSendTransaction</c> hook — the SECOND envelope type this process uploads, and the
+    /// one the #386 review found uncovered.
+    /// <para/>
+    /// Performance transactions are auto-instrumented by <c>Sentry.AspNetCore</c> for a sampled share of
+    /// EVERY request (<c>Sentry:TracesSampleRate</c>, 0.1 in production) and carry their own
+    /// <see cref="SentryRequest"/> — url, query string, headers — copied from the same ASP.NET scope an
+    /// event's does. They leave through a SEPARATE hook, so a scrubber installed only on
+    /// <c>BeforeSend</c> left roughly a tenth of <c>/api/portal/{token}/…</c> requests uploading the
+    /// vendor's bearer credential. Same net, both hooks — the shape ADR 0037's frontend half already
+    /// uses (one <c>scrub</c> serving <c>beforeSend</c> and <c>beforeSendTransaction</c>).
+    /// <para/>
+    /// Spans come along: <c>SentryHttpMessageHandler</c> instruments every <c>IHttpClientFactory</c>
+    /// client this process owns, and one of those URLs carries the Gemini API key as a query parameter
+    /// (<c>?key=…</c>, <c>GeminiExtractionClient</c>) — which the credential-parameter net covers only
+    /// if something actually runs over the span description.
+    /// <para/>
+    /// Never drops a transaction, for the same reason <see cref="Scrub"/> never drops an event.
+    /// </summary>
+    public static SentryTransaction ScrubTransaction(SentryTransaction transaction)
+    {
+        ScrubEventLike(transaction);
+
+        foreach (var span in transaction.Spans)
+        {
+            span.Description = Redact(span.Description);
+            foreach (var (key, value) in span.Tags.ToArray())
+                span.SetTag(key, Redact(value) ?? string.Empty);
+            foreach (var (key, value) in span.Extra.ToArray())
+                span.SetExtra(key, RedactValue(value));
+        }
+
+        return transaction;
+    }
+
+    /// <summary>
+    /// The name a transaction gets when <c>Sentry.AspNetCore</c> cannot derive one from routing.
+    /// <para/>
+    /// A route-named transaction spells the PATTERN (<c>POST /api/portal/{token}/upload</c> — the literal
+    /// placeholder, no credential). When routing yields nothing — a 404 on a portal path is the live case
+    /// — the SDK falls back to the raw path, which spells the real token. <see cref="ScrubTransaction"/>
+    /// cannot repair that: <c>SentryTransaction.Name</c> is READ-ONLY by the time <c>BeforeSendTransaction</c>
+    /// runs (the same shape as <c>SentryEvent.Breadcrumbs</c>, ADR 0053), and the name is also copied into
+    /// the envelope's dynamic-sampling header, which no hook can rewrite. So the name is fixed where it is
+    /// CHOSEN instead — this hook, running before the transaction exists.
+    /// </summary>
+    public static string TransactionName(HttpContext context) =>
+        Redact($"{context.Request.Method} {context.Request.Path}") ?? string.Empty;
+
+    /// <summary>
+    /// Everything an event and a transaction have in common (<see cref="IEventLike"/>): tags, extras and
+    /// the request. ONE implementation deliberately — the #386 review found the backend scrubbing events
+    /// only, and two divergent copies is how that recurs.
+    /// </summary>
+    private static void ScrubEventLike(IEventLike target)
+    {
+        // Materialise before mutating — SetExtra/SetTag write to the dictionary being enumerated.
+        foreach (var (key, value) in target.Extra.ToArray())
+            target.SetExtra(key, RedactValue(value));
+
+        foreach (var (key, value) in target.Tags.ToArray())
+            target.SetTag(key, Redact(value) ?? string.Empty);
+
+        ScrubRequest(target.Request);
+        ScrubUser(target.User);
+    }
+
+    /// <summary>
+    /// Makes "no user identity, no IP" true on the WIRE rather than true-by-option.
+    /// <para/>
+    /// <c>SendDefaultPii = false</c> is supposed to keep the SDK from attaching an address, but the .NET
+    /// SDK stamps <c>ip_address: "{{auto}}"</c> — a server-side instruction telling Sentry's ingest to
+    /// fill the address in from the connecting socket — onto transactions regardless (observed on the
+    /// serialized envelope in <c>BackendSentryTests</c>). Behind Railway that socket is our own egress,
+    /// not a customer, so the leak is small; the reason it goes anyway is that an option we do not
+    /// control must not be the only thing standing between this product and an address.
+    /// <para/>
+    /// <c>Id</c> deliberately survives: it is the SDK's INSTALLATION id — one value per running
+    /// container, not per person — and it is the only thing distinguishing two replicas in a
+    /// side-by-side deploy. <c>Email</c> / <c>Username</c> / <c>Other</c> are never set by this codebase
+    /// and pass the nets in case that ever changes.
+    /// </summary>
+    private static void ScrubUser(SentryUser user)
+    {
+        user.IpAddress = null;
+        user.Email = Redact(user.Email);
+        user.Username = Redact(user.Username);
+        user.Segment = Redact(user.Segment);
+        foreach (var (key, value) in user.Other.ToArray())
+            user.Other[key] = Redact(value) ?? string.Empty;
+    }
+
+    /// <summary>
+    /// Headers this event may carry OUT. An ALLOWLIST, not a denylist, and that is the whole point:
+    /// <c>SendDefaultPii = false</c> suppresses only the SDK's OWN user/IP/cookie attachment, while
+    /// <c>Sentry.AspNetCore</c> still attaches every request header except <c>Cookie</c> and
+    /// <c>Authorization</c>. Behind Railway's ingress the end user's — or the portal vendor's — IP
+    /// arrives in one of those headers (<c>X-Forwarded-For</c>, and <c>X-Real-Ip</c> /
+    /// <c>CF-Connecting-IP</c> / <c>X-Envoy-External-Address</c>, which <c>ForwardedHeadersMiddleware</c>
+    /// never consumes), and NONE of the four nets matches an IP literal. Enumerating proxy headers
+    /// vendor by vendor is a list that goes stale silently; keeping four diagnostic headers and dropping
+    /// the rest makes "no IP" structurally true instead of dependent on proxy behaviour.
+    /// <para/>
+    /// The frontend half already takes the strong route (<c>scrub.ts</c> deletes sensitive headers);
+    /// this is the same posture spelled as an allowlist because the backend sits behind a proxy the
+    /// frontend does not.
+    /// </summary>
+    private static readonly HashSet<string> DiagnosticHeaders =
+        new(StringComparer.OrdinalIgnoreCase) { "User-Agent", "Referer", "Content-Type", "X-Trace-Id" };
+
+    private static void ScrubRequest(SentryRequest request)
+    {
+        request.Url = Redact(request.Url);
+        request.QueryString = Redact(request.QueryString);
+
+        foreach (var key in request.Headers.Keys.ToArray())
+        {
+            if (!DiagnosticHeaders.Contains(key)) request.Headers.Remove(key);
+            else request.Headers[key] = Redact(request.Headers[key]) ?? string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// How deep <see cref="RedactValue"/> walks a structured value before it stops recursing and renders
+    /// the rest as one string. A bound, not a tuning knob: a self-referencing object graph handed to a
+    /// structured log property would otherwise stack-overflow the capturing thread.
+    /// </summary>
+    private const int MaxValueDepth = 8;
+
+    /// <summary>
+    /// Redacts one structured value — a log property, a message parameter, a span extra.
+    /// <para/>
+    /// The nets used to touch only values that were ALREADY <c>string</c>, so a property that is an
+    /// object, an array or a dictionary was serialized to the wire verbatim, bypassing redaction
+    /// entirely. Nothing leaks from today's call sites (the #386 audit walked all 23 <c>Error</c>-level
+    /// templates; every one passes ids, counts and codes), but this scrubber is documented as reaching
+    /// "every string the SDK is about to transmit", and one future <c>logger.LogError("… {@Vendor}",
+    /// vendor)</c> would quietly falsify that.
+    /// <para/>
+    /// Scalars whose rendering cannot embed user content pass through AS THEIR OWN TYPE, so an event
+    /// keeps typed counts and status codes rather than becoming a wall of strings. Anything else is
+    /// walked; a leaf that no net changes is returned unchanged, so the common case costs nothing but a
+    /// comparison.
+    /// </summary>
+    private static object? RedactValue(object? value) => RedactValue(value, 0);
+
+    private static object? RedactValue(object? value, int depth) => value switch
+    {
+        null => null,
+        string text => Redact(text),
+        bool or char or sbyte or byte or short or ushort or int or uint or long or ulong
+            or float or double or decimal or Guid or DateTime or DateTimeOffset or TimeSpan
+            or Enum => value,
+        _ when depth >= MaxValueDepth => Redact(Render(value)),
+        IDictionary dictionary => RedactDictionary(dictionary, depth),
+        IEnumerable sequence => sequence.Cast<object?>().Select(item => RedactValue(item, depth + 1)).ToList(),
+        _ => RedactRendered(value),
+    };
+
+    private static Dictionary<string, object?> RedactDictionary(IDictionary dictionary, int depth)
+    {
+        var redacted = new Dictionary<string, object?>();
+        foreach (DictionaryEntry entry in dictionary)
+            redacted[Redact(Render(entry.Key)) ?? string.Empty] = RedactValue(entry.Value, depth + 1);
+        return redacted;
+    }
+
+    /// <summary>
+    /// Renders an arbitrary object and redacts the rendering — but hands the ORIGINAL back when nothing
+    /// was redacted, so a value the SDK would have serialized structurally keeps its structure unless it
+    /// actually carried something we had to remove.
+    /// </summary>
+    private static object? RedactRendered(object value)
+    {
+        var rendered = Render(value);
+        var redacted = Redact(rendered);
+        return string.Equals(rendered, redacted, StringComparison.Ordinal) ? value : redacted;
+    }
+
+    private static string Render(object? value) =>
+        Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
 
     /// <summary>
     /// Copies the request's correlation id from the structured log property

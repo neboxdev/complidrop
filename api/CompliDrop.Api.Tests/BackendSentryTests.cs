@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using CompliDrop.Api.Middleware;
@@ -182,6 +183,107 @@ public sealed class BackendSentryTests
     }
 
     [Fact]
+    public async Task A_performance_transaction_carries_no_portal_token_either()
+    {
+        const string token = "Xy3kQp7ZmA0bCdEfGhIjKlMn";
+        const string geminiKey = "AIzaSyFAKE0123456789abcdefFAKE0123456789";
+        using var harness = new SentryHarness(dsnConfiguredForSink: true, tracesSampleRate: 1.0);
+
+        // Transactions are the SECOND envelope type this process uploads. Sentry.AspNetCore
+        // auto-instruments a sampled share of EVERY request (0.1 in prod) and copies the request —
+        // url, query string, headers — from the same ASP.NET scope an event's Request comes from. They
+        // leave through BeforeSendTransaction, a different hook, so a scrubber installed on BeforeSend
+        // alone let ~a tenth of portal requests upload the vendor's bearer credential.
+        SentrySdk.ConfigureScope(scope =>
+        {
+            scope.Request.Url = $"https://api.complidrop.com/api/portal/{token}/upload";
+            scope.Request.QueryString = "email=pat@gardenhall.example";
+            scope.Request.Headers["X-Forwarded-For"] = "203.0.113.9";
+        });
+
+        // Route-sourced name: the PATTERN, not the URL — that is what Sentry.AspNetCore produces for a
+        // matched endpoint, and it carries no credential. The unmatched case (raw path, token and all)
+        // is closed at a different seam because Name is read-only here — see the name-provider test.
+        var transaction = SentrySdk.StartTransaction(
+            "POST /api/portal/{token}/upload", "http.server");
+        // SentryHttpMessageHandler instruments every IHttpClientFactory client this process owns, and
+        // GeminiExtractionClient's URL carries the API key as a query parameter.
+        var span = transaction.StartChild(
+            "http.client",
+            $"POST https://generativelanguage.googleapis.com/v1beta/models/x:generateContent?key={geminiKey}");
+        span.Finish(SpanStatus.Ok);
+        transaction.Finish(SpanStatus.Ok);
+
+        var transactions = (await harness.CapturedPayloadsAsync())
+            .Where(p => p.Contains("\"type\":\"transaction\"", StringComparison.Ordinal))
+            .ToList();
+
+        transactions.Should().ContainSingle("this harness samples every trace");
+        transactions[0].Should().NotContain(token, "the portal token is a capability, not diagnostics");
+        transactions[0].Should().NotContain("pat@gardenhall.example");
+        transactions[0].Should().NotContain("203.0.113.9", "a proxy-supplied client address is PII");
+        transactions[0].Should().NotContain(geminiKey, "an instrumented span description carries the key");
+        transactions[0].Should().NotContain("{{auto}}",
+            "the SDK stamps ip_address:{{auto}} on a transaction even with SendDefaultPii off — an "
+            + "instruction to Sentry's ingest to fill the address in from the connecting socket");
+        transactions[0].Should().Contain("/api/portal/", "the route must stay recognisable to be triageable");
+    }
+
+    [Fact]
+    public void An_unroutable_request_gets_a_redacted_transaction_name()
+    {
+        const string token = "Xy3kQp7ZmA0bCdEfGhIjKlMn";
+        var options = new SentryAspNetCoreOptions();
+
+        BackendSentry.ConfigureOptions(options, Configuration(SentryHarness.FakeDsn), Env("Production"));
+
+        // The gap BeforeSendTransaction cannot close: SentryTransaction.Name is READ-ONLY there (like
+        // SentryEvent.Breadcrumbs) and is copied into the envelope's dynamic-sampling header besides. So
+        // the name must be right where it is CHOSEN. Without a provider the SDK falls back to the raw
+        // path for any request routing cannot name — a 404 on a portal path being the live case.
+        var context = new DefaultHttpContext();
+        context.Request.Method = "POST";
+        context.Request.Path = $"/api/portal/{token}/upload";
+
+        options.TransactionNameProvider.Should().NotBeNull();
+        var name = options.TransactionNameProvider!(context);
+
+        name.Should().NotContain(token).And.Be("POST /api/portal/[redacted]/upload");
+    }
+
+    [Fact]
+    public async Task A_proxy_supplied_client_address_never_reaches_the_wire()
+    {
+        using var harness = new SentryHarness(dsnConfiguredForSink: true);
+
+        // SendDefaultPii = false suppresses only the SDK's OWN user/IP/cookie attachment; the ASP.NET
+        // integration still attaches every request header except Cookie and Authorization. Behind
+        // Railway's ingress the caller's IP arrives in exactly those headers, and ForwardedHeaders
+        // (ForwardLimit = 1) consumes at most one of them — so the residue plus the vendor-specific
+        // ones reach Sentry unless something drops them. None of the four nets matches an IP literal.
+        SentrySdk.ConfigureScope(scope =>
+        {
+            scope.Request.Url = "https://api.complidrop.com/api/documents";
+            scope.Request.Headers["X-Forwarded-For"] = "203.0.113.9";
+            scope.Request.Headers["X-Real-Ip"] = "198.51.100.7";
+            scope.Request.Headers["CF-Connecting-IP"] = "192.0.2.44";
+            scope.Request.Headers["X-Envoy-External-Address"] = "203.0.113.77";
+            scope.Request.Headers["User-Agent"] = "Mozilla/5.0 (compatible)";
+        });
+
+        harness.Logger("ExtractionWorker").LogError(
+            new InvalidOperationException("boom"), "ExtractionWorker process failed.");
+
+        var payloads = await harness.CapturedPayloadsAsync();
+
+        payloads.Should().ContainSingle();
+        payloads[0].Should().NotContain("203.0.113.9").And.NotContain("198.51.100.7")
+            .And.NotContain("192.0.2.44").And.NotContain("203.0.113.77");
+        payloads[0].Should().Contain("Mozilla/5.0",
+            "the allowlisted diagnostic headers survive — this is not 'drop all headers'");
+    }
+
+    [Fact]
     public async Task Secrets_inside_the_exception_itself_are_redacted()
     {
         const string token = "Xy3kQp7ZmA0bCdEfGhIjKlMn";
@@ -360,19 +462,63 @@ public sealed class BackendSentryTests
         evt.Request.Url = $"https://api.complidrop.com/api/portal/{token}";
         evt.Request.QueryString = "email=pat@gardenhall.example";
         evt.Request.Headers["X-Portal-Token"] = token + "@x.example";
+        evt.Request.Headers["User-Agent"] = "probe/1.0 pat@gardenhall.example";
 
         SentryScrub.Scrub(evt);
 
         evt.Message!.Formatted.Should().NotContain(token);
         evt.Message.Params!.Cast<object>().Single().Should().Be("/api/portal/[redacted]");
         evt.Extra["RequestPath"].Should().Be("/api/portal/[redacted]");
-        evt.Extra["Attempt"].Should().Be(3, "a non-string extra is left alone");
+        evt.Extra["Attempt"].Should().Be(3,
+            "a scalar whose rendering cannot embed user content keeps its own type");
         evt.Tags["route"].Should().Be("/api/portal/[redacted]");
         evt.Request.Url.Should().NotContain(token);
         evt.Request.QueryString.Should().Be("email=[redacted]",
             "SentryRequest.QueryString is BARE — the leading ? is stripped, so the first parameter must "
             + "still be reachable by the credential-parameter net");
-        evt.Request.Headers["X-Portal-Token"].Should().Be("[email redacted]");
+        // Headers are an ALLOWLIST: a header nobody vouched for is DROPPED, not redacted. Strictly
+        // stronger than the redaction this used to assert, and the reason is that the four nets cannot
+        // recognise everything a header carries — a client IP being the case that forced it (#386 review).
+        evt.Request.Headers.Should().NotContainKey("X-Portal-Token");
+        evt.Request.Headers["User-Agent"].Should().Be("probe/1.0 [email redacted]",
+            "an allowlisted header still passes the nets");
+    }
+
+    [Fact]
+    public void A_structured_value_that_is_not_a_string_is_redacted_too()
+    {
+        // The nets used to touch values that were ALREADY string, so an object / array / dictionary
+        // property was serialized to the wire verbatim. Nothing leaks from today's 23 Error-level call
+        // sites, but the scrubber is documented as reaching every string the SDK transmits, and one
+        // future `logger.LogError("… {@Vendor}", vendor)` would quietly falsify that.
+        var evt = new SentryEvent();
+        evt.SetExtra("Vendor", new { Email = "pat@gardenhall.example" });
+        evt.SetExtra("Recipients", new[] { "pat@gardenhall.example", "sam@gardenhall.example" });
+        evt.SetExtra("ByOrg", new Dictionary<string, object?> { ["acme"] = "pat@gardenhall.example" });
+        evt.SetExtra("Attempt", 3);
+        evt.SetExtra("DocumentId", Guid.Parse("6f1b0c1e-0000-0000-0000-000000000001"));
+
+        SentryScrub.Scrub(evt);
+
+        JsonSerializer.Serialize(evt.Extra).Should().NotContain("pat@gardenhall.example")
+            .And.NotContain("sam@gardenhall.example");
+        evt.Extra["Attempt"].Should().Be(3, "a typed count must stay a typed count");
+        evt.Extra["DocumentId"].Should().Be(Guid.Parse("6f1b0c1e-0000-0000-0000-000000000001"),
+            "ids are what make an event triageable — the same trade ADR 0037 makes");
+    }
+
+    [Fact]
+    public async Task A_destructured_log_property_is_redacted_on_the_wire()
+    {
+        using var harness = new SentryHarness(dsnConfiguredForSink: true);
+
+        harness.Logger("VendorEndpoints").LogError(
+            "Vendor notify failed {@Vendor}", new { Email = "pat@gardenhall.example", Attempts = 3 });
+
+        var payloads = await harness.CapturedPayloadsAsync();
+
+        payloads.Should().ContainSingle();
+        payloads[0].Should().NotContain("pat@gardenhall.example");
     }
 
     [Fact]
@@ -476,9 +622,13 @@ public sealed class BackendSentryTests
     // Harness
     // ------------------------------------------------------------------
 
-    private static IConfiguration Configuration(string? dsn) =>
+    private static IConfiguration Configuration(string? dsn, string? tracesSampleRate = null) =>
         new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?> { [BackendSentry.DsnKey] = dsn })
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [BackendSentry.DsnKey] = dsn,
+                [BackendSentry.TracesSampleRateKey] = tracesSampleRate,
+            })
             .Build();
 
     private static IHostEnvironment Env(string environmentName) => new FakeHostEnvironment(environmentName);
@@ -526,10 +676,19 @@ public sealed class BackendSentryTests
         private readonly CapturingSentryTransport _transport = new();
         private readonly Serilog.Core.Logger _serilog;
 
-        public SentryHarness(bool dsnConfiguredForSink, string sinkEnvironment = "Production")
+        public SentryHarness(
+            bool dsnConfiguredForSink, string sinkEnvironment = "Production", double? tracesSampleRate = null)
         {
             var options = new SentryAspNetCoreOptions();
-            BackendSentry.ConfigureOptions(options, Configuration(FakeDsn), Env("Production"));
+            // The SDK half is configured from the REAL helper; only the trace sample rate is pinned,
+            // and only through the same configuration key production reads — a transaction test that
+            // set options.TracesSampleRate afterwards would be asserting on a path prod never takes.
+            BackendSentry.ConfigureOptions(
+                options,
+                tracesSampleRate is { } rate
+                    ? Configuration(FakeDsn, rate.ToString(CultureInfo.InvariantCulture))
+                    : Configuration(FakeDsn),
+                Env("Production"));
             options.Transport = _transport;
             options.AutoSessionTracking = false;
             options.SendClientReports = false;
