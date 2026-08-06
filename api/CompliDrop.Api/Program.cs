@@ -73,6 +73,12 @@ builder.Services.AddOptions<ComplianceClaimsSettings>().Bind(builder.Configurati
 // ============================================================
 // Logging — Serilog JSON sink
 // ============================================================
+// No MinimumLevel in code or in appsettings, so Serilog's own default (Information) governs, and it is
+// overridable at deploy time through ReadFrom.Configuration — `Serilog__MinimumLevel__Default=Debug`
+// turns on the Debug traces (e.g. the client-abort line in ExceptionHandlingMiddleware) with no code
+// change. What must NOT be added is a `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` entry: see
+// the note beside UseSerilogRequestLogging below — it would delete the only production record of an
+// aborted request's 499 (#390).
 builder.Host.UseSerilog((ctx, services, config) =>
 {
     config
@@ -409,6 +415,19 @@ else
 // moves; everything else keeps Serilog's own default mapping, restated inline because the default is a
 // private static. The discrimination is the middleware's: cancellation ONLY counts as an abort when
 // RequestAborted is the token that fired.
+//
+// DO NOT add `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` (the convention Serilog's own docs
+// recommend next to UseSerilogRequestLogging, to silence the framework's duplicate request log). This
+// app never suppresses that duplicate, and the 499 above depends on it: the abort's Serilog line is
+// demoted to Debug (below the default Information minimum, so it is off in prod), and the only
+// remaining trace of the status is the FRAMEWORK's own completion line from
+// Microsoft.AspNetCore.Hosting.Diagnostics. appsettings.json's
+// `Logging:LogLevel:Microsoft.AspNetCore = Warning` does not reach it — that is MEL config and
+// UseSerilog bypasses MEL filtering — but a Serilog override would, and would delete the record
+// silently. ClientAbortLoggingTests asserts that Information line, so the trap fails a test rather
+// than shipping. To see the middleware's own Debug trace instead, set
+// `Serilog__MinimumLevel__Default=Debug` as an env var — ReadFrom.Configuration already binds it, no
+// code change needed.
 app.UseSerilogRequestLogging(opts => opts.GetLevel = (ctx, _, ex) =>
     ex is OperationCanceledException && ctx.RequestAborted.IsCancellationRequested
         ? LogEventLevel.Debug

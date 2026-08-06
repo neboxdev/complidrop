@@ -65,6 +65,46 @@ Net invariant: **the probe that a monitor polls is the one that answers a questi
 product; the probe that an orchestrator polls answers a question about the process — and neither
 one may quietly become the other.**
 
+### Sibling decision — a lost connection is not a server error (#390 item 2)
+
+The same ticket's noise half, recorded here because it is the other half of "what does our own
+telemetry actually say when something goes wrong".
+
+5. `ExceptionHandlingMiddleware` and `UseSerilogRequestLogging`'s `GetLevel` both carve out
+   `OperationCanceledException` **when `RequestAborted` is the token that fired**: Debug, 499, no
+   envelope. The gate keys on **whose token fired, not on why**, and both consequences are
+   deliberate:
+   - It **also covers a forced-shutdown abort.** Kestrel cancels `RequestAborted` itself when it
+     tears down connections still running at the end of the shutdown drain, so a request truncated
+     by a Railway deploy takes this branch. Merge = prod deploy here, so those are routine; an Error
+     each would mint a Sentry event per deploy once #386 lands — exactly the alert fatigue item 2
+     exists to remove. The response is unreadable either way, so the two cases differ only in blame.
+     `IHostApplicationLifetime.ApplicationStopping` is how the codebase asks the shutdown question
+     when the answer matters (`PostCommitRegrade`'s ceiling); this site deliberately does not ask.
+     (The first draft of the middleware comment claimed the opposite — that shutdown stayed Error +
+     500. Corrected in the same PR, round-2 review.)
+   - A cancellation on **somebody else's** token stays Error + 500: an `HttpClient`'s own timeout is
+     a `TaskCanceledException` on its internal token, and an app-owned linked CTS is ours. A bare
+     `catch (OperationCanceledException)` would swallow both. `ExceptionHandlingMiddlewareTests`
+     pins that side by throwing the same exception TYPE on both sides of the `when`; the
+     shutdown case is not reachable from a unit test (it is Kestrel's teardown) and is recorded
+     rather than pinned.
+6. **Who reads the 499.** Not the client, and not Serilog's request log — `UseSerilogRequestLogging`
+   is registered INSIDE the exception middleware and hard-codes `statusCode: 500` on its exception
+   path, which is why that line is demoted to Debug rather than corrected. The in-process record is
+   the **framework's own** request-completion line (`Microsoft.AspNetCore.Hosting.Diagnostics`, at
+   Information), which sits outside the middleware and reads `Response.StatusCode` after the
+   pipeline unwinds; plus the edge/proxy access log. That line survives because this app has no
+   `Serilog:MinimumLevel` configuration at all — `appsettings.json`'s
+   `Logging:LogLevel:Microsoft.AspNetCore = Warning` is MEL config and `UseSerilog` bypasses MEL
+   filtering. **Adding the conventional `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` entry
+   would delete the only trace of the 499**, so `ClientAbortLoggingTests` asserts that Information
+   line positively (an emptiness assertion alone cannot tell "demoted" from "disappeared").
+   Raising either Debug trace to Information is the wrong repair for the same reason as above: it
+   would reprint Serilog's hard-coded 500. Both Debug traces are off in prod by default and
+   switchable at deploy time with `Serilog__MinimumLevel__Default=Debug` — `ReadFrom.Configuration`
+   already binds it, no code change.
+
 ## Consequences
 
 ### Positive
@@ -129,8 +169,12 @@ nothing today and costs a database round trip on every poll.
   same blindness)
 - ADRs: [0016](0016-apply-ef-migrations-on-startup.md) (fail-fast boot + the drift guard, and the
   Option B that first named "the existing UptimeRobot/Railway probe")
-- Code: `api/CompliDrop.Api/Program.cs` (§ Health endpoints),
+- Code: `api/CompliDrop.Api/Program.cs` (§ Health endpoints, and the Serilog setup +
+  `UseSerilogRequestLogging` notes for the sibling decision),
+  `api/CompliDrop.Api/Middleware/ExceptionHandlingMiddleware.cs`,
   `api/CompliDrop.Api.Tests/HealthProbeTests.cs`,
+  `api/CompliDrop.Api.Tests/ClientAbortLoggingTests.cs`,
+  `api/CompliDrop.Api.Tests/ExceptionHandlingMiddlewareTests.cs`,
   `api/CompliDrop.Api.Tests/TestHelpers/SystemConnectionFaultInterceptor.cs`
 - Docs: `README.md` § Health probes and monitoring, `docs/qa/manual-testing-plan.md` (launch
   decision — the external repoint)

@@ -1521,13 +1521,30 @@ Both are defined in this repo's `.claude/agents/`.
   (an external monitor polls it) — collapsing them is a change to a URL we cannot enumerate the
   consumers of. Repointing UptimeRobot is the FOUNDER's external action, tracked in the QA launch
   checklist, and is deliberately NOT attempted from code.
-- A CLIENT abort is not a server error (#390 / ADR 0053's sibling half). `ExceptionHandlingMiddleware`
+- A lost CONNECTION is not a server error (#390 / ADR 0053's sibling half). `ExceptionHandlingMiddleware`
   answers 499 with NO envelope and a Debug line, and `UseSerilogRequestLogging`'s `GetLevel` demotes
   the same case — both gated on `ex is OperationCanceledException && RequestAborted.IsCancellationRequested`.
-  That `when` is load-bearing and MUST NOT be simplified to a bare `catch (OperationCanceledException)`:
-  an HttpClient's own timeout is a `TaskCanceledException` on ITS token and is a real 500 (the same
-  distinction `BlobStorageService.UploadAsync` and `AuthEndpoints.DeleteAccount` already make).
-  Writing no body on that path is the point, not an omission.
+  That gate keys on WHOSE TOKEN fired, not on why:
+  - It MUST NOT be simplified to a bare `catch (OperationCanceledException)`. A cancellation on
+    somebody else's token is a real 500 — an HttpClient's own timeout is a `TaskCanceledException` on
+    ITS token, an app-owned linked CTS (`PostCommitRegrade`'s ceiling) is ours (the same distinction
+    `BlobStorageService.UploadAsync` and `AuthEndpoints.DeleteAccount` already make). Writing no body
+    on that path is the point, not an omission.
+  - It DOES cover a forced-shutdown abort, and that is deliberate: Kestrel cancels `RequestAborted`
+    itself when it tears down connections still running at the end of the drain, so a request
+    truncated by a deploy takes the same branch. "The comment says shutdown stays a 500" was the bug
+    (round-2 review) — merge = prod deploy here, so those are routine and an Error each is alert
+    fatigue. `IHostApplicationLifetime.ApplicationStopping` is how the codebase asks the shutdown
+    question when it needs the answer (`PostCommitRegrade`); this site deliberately does not ask.
+  - The 499's only in-process trace in prod is the FRAMEWORK's request-completion line
+    (`Microsoft.AspNetCore.Hosting.Diagnostics`, Information) — Serilog's own request line hard-codes
+    "responded 500" inside this middleware and is demoted to Debug. So do NOT propose adding
+    `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` (Serilog's conventional duplicate-suppression
+    override): it would delete the record. `Logging:LogLevel:Microsoft.AspNetCore = Warning` in
+    appsettings does NOT suppress it — that is MEL config and `UseSerilog` bypasses MEL filtering.
+    `ClientAbortLoggingTests` pins the line. Raising either Debug trace to Information is also wrong:
+    Serilog's `RequestLoggingMiddleware` hard-codes `statusCode: 500` on its exception path, so it
+    would reprint the false 500 this ticket removed.
 
 ## Sensitive areas (`careful-review` label ⇒ merge needs a two-reviewer clearance)
 

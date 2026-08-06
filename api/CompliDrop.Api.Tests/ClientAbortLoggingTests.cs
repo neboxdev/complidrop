@@ -11,7 +11,8 @@ namespace CompliDrop.Api.Tests;
 /// <summary>
 /// The wiring half of #390 item 2 (<see cref="ExceptionHandlingMiddlewareTests"/> owns the
 /// discrimination): a real request through the real pipeline, aborted mid-handler, must leave NO
-/// error-level trace behind.
+/// error-level trace behind — and exactly one Information-level one, carrying the 499. Both halves
+/// matter: without the second, the first passes just as well on a host that logged nothing at all.
 /// <para/>
 /// It takes both fixes to pass, which is the point of asserting on the log rather than on the status
 /// code. A client abort produced TWO error lines: Serilog's request log (which sits INSIDE the
@@ -56,5 +57,36 @@ public sealed class ClientAbortLoggingTests(IntegrationTestFixture fixture) : In
         errors.Should().BeEmpty(
             "a closed tab is not a server error: an Error line per abandoned request is noise the "
             + "operator cannot act on, and becomes a phantom Sentry event once the backend DSN is live");
+
+        // POSITIVE CONTROL for the emptiness above, and the pin under the 499 (#390 review). "No error
+        // line" is also what a host that logged NOTHING would produce, so the assertion has to be able to
+        // tell DEMOTED from DISAPPEARED. It can, because exactly one line still carries the status: the
+        // framework's own request-completion event, which is emitted by
+        // Microsoft.AspNetCore.Hosting.Diagnostics OUTSIDE ExceptionHandlingMiddleware and reads
+        // Response.StatusCode after the pipeline has unwound — so it sees the 499 the middleware set.
+        //
+        // It is also the ONLY in-process trace of the 499 in production, and it survives on an accident
+        // worth pinning: appsettings.json's `Logging:LogLevel:Microsoft.AspNetCore = Warning` is MEL
+        // config, and UseSerilog bypasses MEL filtering, so with no
+        // `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` this line runs at Information. Adding that
+        // conventional override — which Serilog's own docs recommend alongside UseSerilogRequestLogging —
+        // would delete it. This assertion is what fails when someone does; see the note beside
+        // UseSerilogRequestLogging in Program.cs.
+        //
+        // Serilog's own request line cannot serve as the trace: it is registered INSIDE the exception
+        // middleware and hard-codes "responded 500" on its exception path, so it is demoted to Debug
+        // rather than corrected (and is absent from this sink for exactly that reason).
+        sink.Events.Should().Contain(
+            e => e.Level == LogEventLevel.Information
+                && Scalar(e, "SourceContext") == "Microsoft.AspNetCore.Hosting.Diagnostics"
+                && Scalar(e, "StatusCode") == "499",
+            "the 499 is only worth setting if something records it — an aborted request must leave an "
+            + "Information-level completion line carrying that status, not silence");
     }
+
+    /// <summary>The scalar value of one Serilog property, unquoted, or null when it is absent.</summary>
+    private static string? Scalar(LogEvent e, string property) =>
+        e.Properties.TryGetValue(property, out var value) && value is ScalarValue { Value: { } v }
+            ? v.ToString()
+            : null;
 }

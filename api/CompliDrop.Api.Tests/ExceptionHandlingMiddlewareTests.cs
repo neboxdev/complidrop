@@ -19,7 +19,16 @@ namespace CompliDrop.Api.Tests;
 /// to prove the clause DISCRIMINATES is to throw the same exception TYPE on both sides of it. An
 /// integration test can construct the client-abort side (<see cref="ClientAbortLoggingTests"/> does) but
 /// not the other one, where a cancellation belongs to somebody else's token — an <c>HttpClient</c>'s own
-/// 30s timeout, a shutdown token — and must still be a loud 500.
+/// 30s timeout, an app-owned linked CTS such as <c>PostCommitRegrade</c>'s ceiling — and must still be a
+/// loud 500.
+/// <para/>
+/// What these tests deliberately do NOT cover, so the boundary is on the record: a FORCED SHUTDOWN abort.
+/// Kestrel cancels <c>RequestAborted</c> itself when it tears down connections still running at the end
+/// of the drain, so a request truncated by a deploy takes the client-abort branch — same token, same
+/// unreadable socket, same Debug + 499. That is the intended behaviour (merge = prod deploy here, so
+/// deploy-truncated requests are routine and an Error each would be alert fatigue), but it is not
+/// reachable from a unit test: it is Kestrel's own teardown, not something a caller can hand the
+/// middleware. The half these tests DO pin is the one that discriminates — somebody else's token.
 /// </summary>
 public sealed class ExceptionHandlingMiddlewareTests
 {
@@ -69,6 +78,9 @@ public sealed class ExceptionHandlingMiddlewareTests
         // gets a silent 499 for a failure that is entirely ours, and the log says nothing. The same
         // distinction the codebase already draws at BlobStorageService.UploadAsync (#248) and
         // VendorEndpoints' invite send (#249).
+        //
+        // It does NOT — and cannot — cover a forced-shutdown abort. Kestrel cancels RequestAborted for
+        // that one, so it takes the abort branch by design (class doc; ADR 0053 § Sibling decision).
         var (context, body) = NewContext();
         context.RequestAborted.IsCancellationRequested.Should().BeFalse("precondition: the client is still here");
         var logger = new ListLogger<ExceptionHandlingMiddleware>();
