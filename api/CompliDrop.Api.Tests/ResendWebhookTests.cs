@@ -6,7 +6,11 @@ using CompliDrop.Api.Entities;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Serilog.Core;
+using Serilog.Events;
 
 namespace CompliDrop.Api.Tests;
 
@@ -321,6 +325,41 @@ public sealed class ResendWebhookTests(IntegrationTestFixture fixture) : Integra
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         (await StatusOf(messageId)).Should().Be("sent");
+    }
+
+    [Fact]
+    public async Task Signed_but_unparseable_body_says_why_it_was_rejected()
+    {
+        // The last SILENT rejection on this handler (#390 round-2 review). Every other arm above
+        // already logs a reason, CLAUDE.md now states the invariant unqualified — "webhook rejections
+        // always say why" — and #390 item 3 made the Stripe webhook mirror "the Resend webhook, which
+        // logs a Warning per reject reason". All three were false while this one arm answered a bare
+        // 400: a rejection nobody records is indistinguishable from a delivery that never arrived,
+        // which is the exact blindness the ticket exists to remove.
+        var messageId = await SeedReminderLogAsync(status: "sent");
+        const string body = "not json: unparseable-sentinel-4f21"; // signed verbatim so verification passes
+
+        var sink = new CapturingLogEventSink();
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        var resp = await factory.CreateClient().SendAsync(BuildRequest(body, Sign(body)));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await StatusOf(messageId)).Should().Be("sent", "a rejected delivery mutates nothing");
+
+        var warnings = sink.Events
+            .Where(e => e.Level >= LogEventLevel.Warning)
+            .Select(e => e.RenderMessage())
+            .ToList();
+        warnings.Should().Contain(
+            m => m.Contains("Resend webhook rejected") && m.Contains("not valid JSON"),
+            "the reason has to name THIS arm — a 400 that says nothing sends the operator to look for "
+            + "a delivery Resend did make");
+
+        // A rejection reason is never made of the material that was rejected. `System.Text.Json`'s own
+        // message quotes the offending character straight out of the payload, which is why the position
+        // is logged from the exception's structural properties instead.
+        warnings.Should().NotContain(m => m.Contains(body) || m.Contains(SecretBase64));
     }
 
     [Fact]
