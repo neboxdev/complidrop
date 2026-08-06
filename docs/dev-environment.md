@@ -111,6 +111,21 @@ sure the choice is never accidental.
 
 `ConnectionStrings:Database`, `Jwt:Secret`, `Frontend:BaseUrl` (public site origin, `https://www.complidrop.com` — REQUIRED in prod: portal links, email-borne URLs (verify/reset), and Stripe checkout + billing-portal return URLs are minted from it and silently fall back to `http://localhost:3000` when unset, see [#250](https://github.com/neboxdev/complidrop/issues/250)), `AzureStorage:ConnectionString`, `AzureStorage:ContainerName`, `Sentry:Dsn`, `DocumentAi:ProjectId`, `DocumentAi:Location`, `DocumentAi:ProcessorId`, `DocumentAi:CredentialsPath` (or `CredentialsJson`), `Gemini:ApiKey` (when Endpoint=aistudio), `Anthropic:ApiKey` (optional), `Stripe:SecretKey`, `Stripe:PublishableKey`, `Stripe:WebhookSecret`, `Stripe:MonthlyPriceId`, `Stripe:AnnualPriceId`, `Stripe:FoundingPriceId`, `Resend:ApiKey`, `Resend:FromEmail`, `Resend:WebhookSecret` (Svix `whsec_…` signing secret for the inbound delivery-status webhook; if unset the webhook is rejected in production and allowed-with-warning only in Development).
 
+### Backend log level (not a secret; env var only, no code change)
+
+Serilog carries **no** `MinimumLevel` configuration, so its own default (Information) governs.
+`Serilog__MinimumLevel__Default=Debug` turns the Debug traces on wherever you set it —
+`ReadFrom.Configuration` already binds the section. That is how you see the client-abort line in
+`ExceptionHandlingMiddleware` and the demoted Serilog request line ([#390](https://github.com/neboxdev/complidrop/issues/390),
+[ADR 0053](adr/0053-liveness-and-readiness-are-separate-probes.md) § Sibling decision).
+
+Do **not** add a `Serilog:MinimumLevel:Override:Microsoft.AspNetCore` entry, in config or in code.
+It is the convention Serilog's docs recommend alongside `UseSerilogRequestLogging`, and here it would
+delete the framework request-completion line that is the only production record of an aborted
+request's 499. `appsettings.json`'s `Logging:LogLevel:Microsoft.AspNetCore = Warning` does not reach
+that line — it is MEL config, and `UseSerilog` bypasses MEL filtering. `ClientAbortLoggingTests` fails
+if the line goes away.
+
 ### Frontend env vars (set in the build/host environment; `NEXT_PUBLIC_*` are baked into the client bundle at build time)
 
 `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_POSTHOG_KEY` / `NEXT_PUBLIC_POSTHOG_HOST`, and — frontend Sentry ([ADR 0037](adr/0037-frontend-sentry-pii-scrubbing-and-gating.md)) — `NEXT_PUBLIC_SENTRY_DSN` (public DSN, **distinct from the backend `Sentry:Dsn`**; absence ⇒ Sentry is a no-op, and it stays unset in dev per the posture above), the optional `NEXT_PUBLIC_SENTRY_ENVIRONMENT` (event tag; defaults to `NODE_ENV`) and `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` (default `0`), plus the build-time source-map upload trio `SENTRY_AUTH_TOKEN` / `SENTRY_ORG` / `SENTRY_PROJECT` (server-only, never shipped; absent ⇒ upload skipped and the build still succeeds).

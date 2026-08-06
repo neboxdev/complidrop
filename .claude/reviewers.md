@@ -1544,7 +1544,10 @@ Both are defined in this repo's `.claude/agents/`.
     appsettings does NOT suppress it — that is MEL config and `UseSerilog` bypasses MEL filtering.
     `ClientAbortLoggingTests` pins the line. Raising either Debug trace to Information is also wrong:
     Serilog's `RequestLoggingMiddleware` hard-codes `statusCode: 500` on its exception path, so it
-    would reprint the false 500 this ticket removed.
+    would reprint the false 500 this ticket removed. "The Debug lines are inert in prod" is TRUE and
+    is not a finding — they are switchable with `Serilog__MinimumLevel__Default=Debug` today, no code
+    and no config change (`ReadFrom.Configuration` already binds it); Debug is what the ticket
+    prescribes and noise removal is its stated purpose.
 
 ## Sensitive areas (`careful-review` label ⇒ merge needs a two-reviewer clearance)
 
