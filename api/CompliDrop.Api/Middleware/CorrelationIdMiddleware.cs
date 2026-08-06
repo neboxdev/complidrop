@@ -6,6 +6,16 @@ public class CorrelationIdMiddleware(RequestDelegate next)
 {
     private const string HeaderName = "X-Trace-Id";
 
+    /// <summary>
+    /// The name this id carries as a structured log property. <c>Enrich.FromLogContext</c> puts it on
+    /// EVERY log event raised during the request, the Serilog → Sentry sink forwards it as an event
+    /// extra, and <see cref="SentryScrub"/> promotes it from there onto the <c>correlation_id</c> tag
+    /// (#386 / ADR 0053). Named rather than re-spelled at each end so the promotion cannot silently
+    /// stop finding it — a renamed property would just make every backend event untagged, which looks
+    /// exactly like "no frontend error happened".
+    /// </summary>
+    internal const string LogPropertyName = "CorrelationId";
+
     public async Task InvokeAsync(HttpContext context)
     {
         var correlationId = Resolve(context.Request.Headers[HeaderName].FirstOrDefault());
@@ -16,7 +26,7 @@ public class CorrelationIdMiddleware(RequestDelegate next)
         using var scope = context.RequestServices
             .GetRequiredService<ILoggerFactory>()
             .CreateLogger<CorrelationIdMiddleware>()
-            .BeginScope(new Dictionary<string, object> { ["CorrelationId"] = correlationId });
+            .BeginScope(new Dictionary<string, object> { [LogPropertyName] = correlationId });
 
         await next(context);
     }

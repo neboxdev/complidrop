@@ -70,7 +70,7 @@ builder.Services.AddOptions<TemplateCorrectionsSettings>().Bind(builder.Configur
 builder.Services.AddOptions<ComplianceClaimsSettings>().Bind(builder.Configuration.GetSection(ComplianceClaimsSettings.SectionName));
 
 // ============================================================
-// Logging — Serilog JSON sink
+// Logging — Serilog JSON sink (+ the Serilog → Sentry error bridge)
 // ============================================================
 builder.Host.UseSerilog((ctx, services, config) =>
 {
@@ -78,21 +78,23 @@ builder.Host.UseSerilog((ctx, services, config) =>
         .ReadFrom.Configuration(ctx.Configuration)
         .ReadFrom.Services(services)
         .Enrich.FromLogContext()
-        .WriteTo.Console(new JsonFormatter(renderMessage: true));
+        .WriteTo.Console(new JsonFormatter(renderMessage: true))
+        // #386 / ADR 0053. UseSerilog replaces the MEL provider pipeline, so Sentry's own logger
+        // provider is bypassed and NOTHING reached Sentry — not one unhandled 500 (the exception
+        // middleware swallows it before Sentry's outer middleware), not one worker-tick failure.
+        // This sink is the bridge, and it is what makes both breaks reportable at once. No-op
+        // unless a DSN is configured OUTSIDE Development; read from ctx so a test host's in-memory
+        // override wins (same reason SystemDbContext reads its connection string in-lambda).
+        .AddSentryErrorEvents(ctx.Configuration, ctx.HostingEnvironment);
 });
 
 // ============================================================
-// Sentry — optional, only if DSN present
+// Sentry — optional; only outside Development and only with a DSN
 // ============================================================
-var sentryDsn = builder.Configuration["Sentry:Dsn"];
-if (!string.IsNullOrWhiteSpace(sentryDsn))
+if (BackendSentry.IsEnabled(builder.Configuration, builder.Environment))
 {
     builder.WebHost.UseSentry(opts =>
-    {
-        opts.Dsn = sentryDsn;
-        opts.Environment = builder.Environment.EnvironmentName;
-        opts.TracesSampleRate = builder.Configuration.GetValue("Sentry:TracesSampleRate", 0.1);
-    });
+        BackendSentry.ConfigureOptions(opts, builder.Configuration, builder.Environment));
 }
 
 // ============================================================
