@@ -5,6 +5,36 @@ using Microsoft.Extensions.Options;
 
 namespace CompliDrop.Api.Services;
 
+/// <summary>
+/// Who turns a rejected send into an <c>Error</c>-level log line — which, since #386 / ADR 0053, means
+/// a metered Sentry event.
+/// </summary>
+/// <remarks>
+/// The distinction exists because one revoked <c>Resend:ApiKey</c> makes EVERY send fail, and the
+/// reminder worker sends inside nested <c>org → reminder → doc → recipient</c> loops, re-attempted on
+/// every qualifying tick of the org-local day (ADR 0025's catch-up window, up to 16). At the design
+/// scale in <c>.claude/reviewers.md</c> that is tens of thousands of events a day from ONE failure —
+/// enough to exhaust a Sentry plan's quota, after which Sentry 429s, the SDK drops, and genuine 500s
+/// stop being reported. Backend monitoring would then be dark again, through a different door than the
+/// one #386 closed.
+/// </remarks>
+public enum SendFailureReporting
+{
+    /// <summary>
+    /// The default, and the right answer for a ONE-OFF send: a verification mail, a password reset, a
+    /// vendor portal link. There is no caller-side aggregate to fold it into and each failure is its own
+    /// incident, so the service logs it at <c>Error</c> itself.
+    /// </summary>
+    PerSend,
+
+    /// <summary>
+    /// A BULK send whose caller counts outcomes and raises ONE <c>Error</c> for the batch. The service
+    /// logs the per-send detail at <c>Warning</c> instead — the console/JSON sink still records every
+    /// line in full; only the metered copy is folded up.
+    /// </summary>
+    CallerAggregates,
+}
+
 public interface IEmailService
 {
     bool IsEnabled { get; }
@@ -16,8 +46,18 @@ public interface IEmailService
     /// already-accepted request is deduped at Resend instead of double-delivering. Callers whose
     /// sends can be retried (the reminder worker, ADR 0025) pass a deterministic key; one-shot
     /// transactional sends (verify / reset emails) may leave it null.
+    /// <para/>
+    /// <paramref name="failureReporting"/> decides at which level a REJECTED send is logged — see
+    /// <see cref="SendFailureReporting"/>. It changes logging only; the return value, the retry
+    /// contract and Resend's own behaviour are identical either way.
     /// </summary>
-    Task<string?> SendAsync(string toEmail, string subject, string htmlBody, CancellationToken ct, string? idempotencyKey = null);
+    Task<string?> SendAsync(
+        string toEmail,
+        string subject,
+        string htmlBody,
+        CancellationToken ct,
+        string? idempotencyKey = null,
+        SendFailureReporting failureReporting = SendFailureReporting.PerSend);
 }
 
 public class ResendEmailService(
@@ -32,7 +72,13 @@ public class ResendEmailService(
     // the boot-time email-mode label can never drift from the runtime behaviour.
     public bool IsEnabled => _cfg.WouldSend;
 
-    public async Task<string?> SendAsync(string toEmail, string subject, string htmlBody, CancellationToken ct, string? idempotencyKey = null)
+    public async Task<string?> SendAsync(
+        string toEmail,
+        string subject,
+        string htmlBody,
+        CancellationToken ct,
+        string? idempotencyKey = null,
+        SendFailureReporting failureReporting = SendFailureReporting.PerSend)
     {
         if (!IsEnabled)
         {
@@ -71,7 +117,11 @@ public class ResendEmailService(
         var body = await resp.Content.ReadAsStringAsync(ct);
         if (!resp.IsSuccessStatusCode)
         {
-            logger.LogError("Resend send failed {Status} {Body}", (int)resp.StatusCode, body);
+            // ONE template, one call site — only the LEVEL moves, so the console/JSON sink records the
+            // same line either way and a bulk caller cannot accidentally lose the detail.
+            logger.Log(
+                failureReporting == SendFailureReporting.PerSend ? LogLevel.Error : LogLevel.Warning,
+                "Resend send failed {Status} {Body}", (int)resp.StatusCode, body);
             return null;
         }
         try

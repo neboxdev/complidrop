@@ -154,10 +154,78 @@ public sealed class ReminderBackgroundServiceTests(IntegrationTestFixture fixtur
         return new SeedResult(orgId, reminderId, docId, vendorId, userId);
     }
 
+    /// <summary>As <see cref="BuildWorker(DateTimeOffset)"/>, but with an arbitrary logger — the
+    /// Serilog -> Sentry one, for the per-tick event bound (#386 / ADR 0053).</summary>
+    private ReminderBackgroundService BuildWorker(
+        DateTimeOffset nowUtc, Microsoft.Extensions.Logging.ILogger<ReminderBackgroundService> logger) =>
+        new(
+            Fixture.Factory.Services.GetRequiredService<IServiceScopeFactory>(),
+            new FixedTimeProvider(nowUtc),
+            logger);
+
     private async Task<int> LogCountAsync(Guid reminderId, Guid docId)
     {
         await using var db = CreateSystemDb();
         return await db.ReminderLogs.CountAsync(l => l.ReminderId == reminderId && l.DocumentId == docId);
+    }
+
+    /// <summary>Adds extra internal recipients to an org, so a fan-out bound has something to bound.</summary>
+    private async Task AddInternalUsersAsync(Guid orgId, int count)
+    {
+        await using var db = CreateSystemDb();
+        for (var i = 0; i < count; i++)
+        {
+            db.Users.Add(new User
+            {
+                Id = Guid.NewGuid(),
+                OrganizationId = orgId,
+                Email = $"user{i}@example.com",
+                PasswordHash = "x",
+                FullName = $"User {i}",
+                Role = "member",
+                EmailVerifiedAt = NyEightAm.UtcDateTime,
+                CreatedAt = NyEightAm.UtcDateTime,
+            });
+        }
+        await db.SaveChangesAsync();
+    }
+
+    // ----- #386 / ADR 0053: one tick's send failures are a BOUNDED number of Sentry events -----
+
+    [Fact]
+    public async Task A_days_worth_of_failing_sends_raises_one_sentry_event_per_tick()
+    {
+        // Resend is unreachable, so nothing the tick sends lands. The send loop is nested
+        // org -> reminder -> doc -> recipient, and ADR 0025's catch-up window re-attempts every failed
+        // recipient on each qualifying tick of the org-local day (08:00..23:00 = 16). Unbounded that is
+        // recipients x 16 metered Sentry events from ONE cause; at the design scale in reviewers.md it
+        // burns a Sentry plan's monthly quota in hours, after which Sentry 429s, the SDK drops, and
+        // genuine 500s stop being reported -- #386's own failure arriving through a different door.
+        var seed = await SeedReminderAsync(NyEightAm, notifyVendor: true);
+        await AddInternalUsersAsync(seed.OrgId, 5);
+        const int recipients = 7; // 5 added + the seeded owner + the vendor contact
+        Email.AllSendsThrow = () => new HttpRequestException("Resend unreachable");
+
+        using var sentry = new SentryCaptureHarness();
+        var logger = sentry.Logger<ReminderBackgroundService>();
+
+        const int ticks = 16;
+        for (var hour = 0; hour < ticks; hour++)
+            await BuildWorker(NyEightAm.AddHours(hour), logger).ProcessHourlyTickAsync(CancellationToken.None);
+
+        // ADR 0025 is untouched: every failed recipient is still re-attempted on every qualifying tick.
+        Email.FailureReportingModes.Should().HaveCount(recipients * ticks);
+        Email.FailureReportingModes.Should().OnlyContain(
+            mode => mode == SendFailureReporting.CallerAggregates,
+            "the worker aggregates, so EmailService must not raise its own Error per send");
+
+        var payloads = await sentry.CapturedPayloadsAsync();
+
+        payloads.Should().HaveCount(ticks * ReminderBackgroundService.MaxSendFailureEventsPerTick);
+        payloads.Count.Should().BeLessThan(recipients * ticks,
+            "the event count must follow the tick count, not the recipient count");
+        payloads[0].Should().Contain("sends failed").And.NotContain("user0@example.com",
+            "the summary carries counts, ids and a type name — never a recipient address");
     }
 
     // ----- AC1: local-08:00 window -----------------------------------------------------------

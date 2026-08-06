@@ -251,7 +251,7 @@ public static partial class SentryScrub
         user.IpAddress = null;
         user.Email = Redact(user.Email);
         user.Username = Redact(user.Username);
-        user.Segment = Redact(user.Segment);
+        // Segment is deliberately not touched — the SDK marks it obsolete and nothing writes it.
         foreach (var (key, value) in user.Other.ToArray())
             user.Other[key] = Redact(value) ?? string.Empty;
     }

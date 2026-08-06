@@ -46,7 +46,7 @@ public sealed class BackendSentryTests
     [Fact]
     public async Task An_error_log_line_becomes_a_Sentry_event()
     {
-        using var harness = new SentryHarness(dsnConfiguredForSink: true);
+        using var harness = new SentryCaptureHarness(dsnConfiguredForSink: true);
 
         harness.Logger("ExtractionWorker").LogError(
             new InvalidOperationException("Gemini returned 503"), "ExtractionWorker process failed.");
@@ -63,7 +63,7 @@ public sealed class BackendSentryTests
     [Fact]
     public async Task An_unhandled_request_exception_is_reported_with_the_correlation_id_tag()
     {
-        using var harness = new SentryHarness(dsnConfiguredForSink: true);
+        using var harness = new SentryCaptureHarness(dsnConfiguredForSink: true);
 
         // The REAL production pair, in the real order Program.cs composes them.
         var context = await RunThroughMiddlewareAsync(
@@ -89,7 +89,7 @@ public sealed class BackendSentryTests
     {
         // The SDK itself is live in this harness — only the SINK's configuration lacks a DSN. So a
         // failure here means the gate is gone, not that Sentry happened to be off.
-        using var harness = new SentryHarness(dsnConfiguredForSink: false);
+        using var harness = new SentryCaptureHarness(dsnConfiguredForSink: false);
 
         harness.Logger("ReminderBackgroundService").LogError(
             new InvalidOperationException("Reminder tick failed."), "Reminder tick failed.");
@@ -115,7 +115,7 @@ public sealed class BackendSentryTests
         // integration-test host. The dev database is a clone of prod data, so a dev-side exception
         // naming a real vendor would have been exported to the production Sentry project by running
         // the test suite. Presence of a DSN is therefore NOT the whole gate.
-        BackendSentry.IsEnabled(Configuration(SentryHarness.FakeDsn), Env("Development"))
+        BackendSentry.IsEnabled(Configuration(SentryCaptureHarness.FakeDsn), Env("Development"))
             .Should().BeFalse();
     }
 
@@ -127,14 +127,14 @@ public sealed class BackendSentryTests
         // NOT-Development rather than IS-Production: unset ASPNETCORE_ENVIRONMENT already means
         // Production, and silently going dark because prod spells its environment differently is the
         // exact failure this ticket exists to end.
-        BackendSentry.IsEnabled(Configuration(SentryHarness.FakeDsn), Env(environmentName))
+        BackendSentry.IsEnabled(Configuration(SentryCaptureHarness.FakeDsn), Env(environmentName))
             .Should().BeTrue();
     }
 
     [Fact]
     public async Task The_sink_is_not_registered_in_development()
     {
-        using var harness = new SentryHarness(dsnConfiguredForSink: true, sinkEnvironment: "Development");
+        using var harness = new SentryCaptureHarness(dsnConfiguredForSink: true, sinkEnvironment: "Development");
 
         harness.Logger("ExtractionWorker").LogError(
             new InvalidOperationException("boom"), "ExtractionWorker process failed.");
@@ -149,7 +149,7 @@ public sealed class BackendSentryTests
     [Fact]
     public async Task The_information_and_warning_stream_never_leaves_the_process()
     {
-        using var harness = new SentryHarness(dsnConfiguredForSink: true);
+        using var harness = new SentryCaptureHarness(dsnConfiguredForSink: true);
         var logger = harness.Logger("EmailService");
 
         // Both of these are REAL log lines (EmailService). #378 is still open, so the sub-Error stream
@@ -170,7 +170,7 @@ public sealed class BackendSentryTests
     public async Task A_vendor_portal_capability_token_never_reaches_the_wire()
     {
         const string token = "Xy3kQp7ZmA0bCdEfGhIjKlMn";
-        using var harness = new SentryHarness(dsnConfiguredForSink: true);
+        using var harness = new SentryCaptureHarness(dsnConfiguredForSink: true);
 
         // The shape UseSerilogRequestLogging produces for a 500 on a portal route: the real path, at
         // Error level, as a structured property. The token IS the bearer credential for that link.
@@ -189,7 +189,7 @@ public sealed class BackendSentryTests
     {
         const string token = "Xy3kQp7ZmA0bCdEfGhIjKlMn";
         const string geminiKey = "AIzaSyFAKE0123456789abcdefFAKE0123456789";
-        using var harness = new SentryHarness(dsnConfiguredForSink: true, tracesSampleRate: 1.0);
+        using var harness = new SentryCaptureHarness(dsnConfiguredForSink: true, tracesSampleRate: 1.0);
 
         // Transactions are the SECOND envelope type this process uploads. Sentry.AspNetCore
         // auto-instruments a sampled share of EVERY request (0.1 in prod) and copies the request —
@@ -237,7 +237,7 @@ public sealed class BackendSentryTests
         const string token = "Xy3kQp7ZmA0bCdEfGhIjKlMn";
         var options = new SentryAspNetCoreOptions();
 
-        BackendSentry.ConfigureOptions(options, Configuration(SentryHarness.FakeDsn), Env("Production"));
+        BackendSentry.ConfigureOptions(options, Configuration(SentryCaptureHarness.FakeDsn), Env("Production"));
 
         // The gap BeforeSendTransaction cannot close: SentryTransaction.Name is READ-ONLY there (like
         // SentryEvent.Breadcrumbs) and is copied into the envelope's dynamic-sampling header besides. So
@@ -256,7 +256,7 @@ public sealed class BackendSentryTests
     [Fact]
     public async Task A_proxy_supplied_client_address_never_reaches_the_wire()
     {
-        using var harness = new SentryHarness(dsnConfiguredForSink: true);
+        using var harness = new SentryCaptureHarness(dsnConfiguredForSink: true);
 
         // SendDefaultPii = false suppresses only the SDK's OWN user/IP/cookie attachment; the ASP.NET
         // integration still attaches every request header except Cookie and Authorization. Behind
@@ -289,7 +289,7 @@ public sealed class BackendSentryTests
     public async Task Secrets_inside_the_exception_itself_are_redacted()
     {
         const string token = "Xy3kQp7ZmA0bCdEfGhIjKlMn";
-        using var harness = new SentryHarness(dsnConfiguredForSink: true);
+        using var harness = new SentryCaptureHarness(dsnConfiguredForSink: true);
 
         // The broadest vector: ExceptionHandlingMiddleware logs whatever was thrown, and an exception
         // raised anywhere can embed user content in its Message. The exception VALUES are a separate
@@ -310,7 +310,7 @@ public sealed class BackendSentryTests
     [Fact]
     public async Task An_email_address_inside_a_third_party_error_body_is_redacted()
     {
-        using var harness = new SentryHarness(dsnConfiguredForSink: true);
+        using var harness = new SentryCaptureHarness(dsnConfiguredForSink: true);
 
         // EmailService's real line: `Resend send failed {Status} {Body}` — Resend's 422 body names the
         // recipient it rejected.
@@ -512,7 +512,7 @@ public sealed class BackendSentryTests
     [Fact]
     public async Task A_destructured_log_property_is_redacted_on_the_wire()
     {
-        using var harness = new SentryHarness(dsnConfiguredForSink: true);
+        using var harness = new SentryCaptureHarness(dsnConfiguredForSink: true);
 
         harness.Logger("VendorEndpoints").LogError(
             "Vendor notify failed {@Vendor}", new { Email = "pat@gardenhall.example", Attempts = 3 });
@@ -572,9 +572,9 @@ public sealed class BackendSentryTests
     {
         var options = new SentryAspNetCoreOptions();
 
-        BackendSentry.ConfigureOptions(options, Configuration(SentryHarness.FakeDsn), Env("Production"));
+        BackendSentry.ConfigureOptions(options, Configuration(SentryCaptureHarness.FakeDsn), Env("Production"));
 
-        options.Dsn.Should().Be(SentryHarness.FakeDsn);
+        options.Dsn.Should().Be(SentryCaptureHarness.FakeDsn);
         options.Environment.Should().Be("Production");
         options.SendDefaultPii.Should().BeFalse("no user identity, no IP, no cookies");
         options.MaxRequestBodySize.Should().Be(RequestSize.None, "a request body here is a COI or vendor PII");
@@ -587,7 +587,7 @@ public sealed class BackendSentryTests
         var options = new SentryAspNetCoreOptions();
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
-            [BackendSentry.DsnKey] = SentryHarness.FakeDsn,
+            [BackendSentry.DsnKey] = SentryCaptureHarness.FakeDsn,
             [BackendSentry.TracesSampleRateKey] = "0.5",
         }).Build();
 
@@ -643,7 +643,7 @@ public sealed class BackendSentryTests
         var builder = WebApplication.CreateBuilder();
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
-            [BackendSentry.DsnKey] = SentryHarness.FakeDsn,
+            [BackendSentry.DsnKey] = SentryCaptureHarness.FakeDsn,
         });
         builder.Host.UseSerilog((ctx, _, config) => config
             .MinimumLevel.Verbose()
@@ -685,30 +685,16 @@ public sealed class BackendSentryTests
     // ------------------------------------------------------------------
 
     private static IConfiguration Configuration(string? dsn, string? tracesSampleRate = null) =>
-        new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                [BackendSentry.DsnKey] = dsn,
-                [BackendSentry.TracesSampleRateKey] = tracesSampleRate,
-            })
-            .Build();
+        SentryCaptureHarness.Configuration(dsn, tracesSampleRate);
 
-    private static IHostEnvironment Env(string environmentName) => new FakeHostEnvironment(environmentName);
-
-    private sealed class FakeHostEnvironment(string environmentName) : IHostEnvironment
-    {
-        public string EnvironmentName { get; set; } = environmentName;
-        public string ApplicationName { get; set; } = "CompliDrop.Api";
-        public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
-        public IFileProvider ContentRootFileProvider { get; set; } = null!;
-    }
+    private static IHostEnvironment Env(string environmentName) => SentryCaptureHarness.Env(environmentName);
 
     /// <summary>
-    /// Drives the real <see cref="CorrelationIdMiddleware"/> → <see cref="ExceptionHandlingMiddleware"/>
+    /// Drives the real <see cref="CorrelationIdMiddleware"/> -> <see cref="ExceptionHandlingMiddleware"/>
     /// pair over a throwing endpoint, exactly as <c>Program.cs</c> orders them.
     /// </summary>
     private static async Task<HttpContext> RunThroughMiddlewareAsync(
-        SentryHarness harness, string traceId, Exception thrown)
+        SentryCaptureHarness harness, string traceId, Exception thrown)
     {
         var services = new ServiceCollection()
             .AddSingleton<ILoggerFactory>(harness.LoggerFactory)
@@ -724,69 +710,5 @@ public sealed class BackendSentryTests
 
         await new CorrelationIdMiddleware(exceptionMiddleware.InvokeAsync).InvokeAsync(context);
         return context;
-    }
-
-    /// <summary>
-    /// Production options + production sink + a capturing transport. Nothing between the log call and
-    /// the wire is faked, so what these tests assert on is the envelope a real deploy would upload.
-    /// </summary>
-    private sealed class SentryHarness : IDisposable
-    {
-        internal const string FakeDsn = "https://0123456789abcdef0123456789abcdef@o0.ingest.us.sentry.io/1";
-
-        private readonly IDisposable _sdk;
-        private readonly CapturingSentryTransport _transport = new();
-        private readonly Serilog.Core.Logger _serilog;
-
-        public SentryHarness(
-            bool dsnConfiguredForSink, string sinkEnvironment = "Production", double? tracesSampleRate = null)
-        {
-            var options = new SentryAspNetCoreOptions();
-            // The SDK half is configured from the REAL helper; only the trace sample rate is pinned,
-            // and only through the same configuration key production reads — a transaction test that
-            // set options.TracesSampleRate afterwards would be asserting on a path prod never takes.
-            BackendSentry.ConfigureOptions(
-                options,
-                tracesSampleRate is { } rate
-                    ? Configuration(FakeDsn, rate.ToString(CultureInfo.InvariantCulture))
-                    : Configuration(FakeDsn),
-                Env("Production"));
-            options.Transport = _transport;
-            options.AutoSessionTracking = false;
-            options.SendClientReports = false;
-            _sdk = SentrySdk.Init(options);
-
-            _serilog = new LoggerConfiguration()
-                .MinimumLevel.Verbose()
-                .Enrich.FromLogContext()
-                .AddSentryErrorEvents(
-                    Configuration(dsnConfiguredForSink ? FakeDsn : null), Env(sinkEnvironment))
-                .CreateLogger();
-
-            LoggerFactory = new SerilogLoggerFactory(_serilog);
-        }
-
-        public ILoggerFactory LoggerFactory { get; }
-
-        public Microsoft.Extensions.Logging.ILogger Logger(string category) =>
-            LoggerFactory.CreateLogger(category);
-
-        public async Task<IReadOnlyList<string>> CapturedPayloadsAsync()
-        {
-            await SentrySdk.FlushAsync(TimeSpan.FromSeconds(20));
-            return _transport.Payloads;
-        }
-
-        public async Task<IReadOnlyList<JsonElement>> CapturedEventsAsync()
-        {
-            var payloads = await CapturedPayloadsAsync();
-            return payloads.Select(CapturingSentryTransport.ParseEventItem).ToList();
-        }
-
-        public void Dispose()
-        {
-            _sdk.Dispose();
-            _serilog.Dispose();
-        }
     }
 }

@@ -41,6 +41,29 @@ public class ReminderBackgroundService(
     /// </summary>
     private static readonly TimeSpan TzEditDedupeWindow = TimeSpan.FromHours(26);
 
+    /// <summary>
+    /// How many <c>Error</c>-level lines — i.e. metered Sentry events since #386 / ADR 0053 — one tick's
+    /// SEND failures may raise, however many sends failed. A CONSTANT, deliberately, because the failure
+    /// mode being bounded fans out with recipient count and not with anything an operator would want
+    /// counted twice.
+    /// <para/>
+    /// Concretely: revoke <c>Resend:ApiKey</c> and every send in the tick fails, inside nested
+    /// <c>org → reminder → doc → recipient</c> loops, re-attempted on each of the up-to-16 qualifying
+    /// ticks of the org-local day (the ADR 0025 catch-up window; <c>alreadyServed</c> deliberately does
+    /// not skip a <c>Failed</c> row). At the design scale in <c>.claude/reviewers.md</c> that is tens of
+    /// thousands of events per day from ONE cause — enough to exhaust a Sentry plan's monthly quota in
+    /// hours, after which Sentry 429s and the SDK drops, so genuine 500s stop being reported and backend
+    /// monitoring is dark again. That is the failure #386 closed, arriving through a different door.
+    /// <para/>
+    /// Sentry's own <c>DeduplicateMode</c> is NOT this bound: it collapses repeats of the same exception
+    /// INSTANCE, and a real failing send raises a fresh one every time.
+    /// <para/>
+    /// Logging only. Nothing here changes what is sent, retried or recorded: every per-send line still
+    /// goes to the console/JSON sink in full, at <c>Warning</c>, and ADR 0025's retry-in-place is
+    /// untouched.
+    /// </summary>
+    internal const int MaxSendFailureEventsPerTick = 1;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("ReminderBackgroundService starting.");
@@ -74,6 +97,13 @@ public class ReminderBackgroundService(
         }
 
         var nowUtc = timeProvider.GetUtcNow().UtcDateTime;
+
+        // Per-tick send-failure tally, folded into ONE Error line at the end (MaxSendFailureEventsPerTick).
+        // Locals, not fields: a tick's tally belongs to the tick, and nothing outside it may read one.
+        var sendAttempts = 0;
+        var sendFailures = 0;
+        string? firstFailure = null;
+        Exception? firstFailureException = null;
 
         // Pin one connection for the whole tick. Session-scoped advisory locks (acquired per
         // (org, sendDate) below) live on the connection; if EF Core grabbed a fresh connection
@@ -392,9 +422,21 @@ public class ReminderBackgroundService(
                                         : BuildInternalBody(org.Name, doc, reminder.DaysBefore);
                                     var idempotencyKey = BuildSendIdempotencyKey(
                                         reminder.Id, doc.Id, sendDate, recipient, failedRow?.SentAt);
-                                    var messageId = await email.SendAsync(recipient, subject, body, ct, idempotencyKey);
+                                    sendAttempts++;
+                                    // CallerAggregates: this loop counts outcomes and raises ONE Error
+                                    // for the whole tick, so EmailService must not raise one PER SEND —
+                                    // see MaxSendFailureEventsPerTick. Logging only; the send, the
+                                    // retry contract and the recorded status are unchanged.
+                                    var messageId = await email.SendAsync(
+                                        recipient, subject, body, ct, idempotencyKey,
+                                        SendFailureReporting.CallerAggregates);
                                     var attemptedAt = timeProvider.GetUtcNow().UtcDateTime;
                                     var status = messageId is null ? ReminderLogStatus.Failed : ReminderLogStatus.Sent;
+                                    if (messageId is null)
+                                    {
+                                        sendFailures++;
+                                        firstFailure ??= $"doc {doc.Id}: Resend did not accept the send";
+                                    }
 
                                     if (failedRow is not null)
                                     {
@@ -424,7 +466,15 @@ public class ReminderBackgroundService(
                                 }
                                 catch (Exception ex)
                                 {
-                                    logger.LogError(ex, "Failed sending reminder for doc {DocumentId}", doc.Id);
+                                    // Warning, not Error: this line is per RECIPIENT, so one unreachable
+                                    // Resend would raise one metered event per recipient per qualifying
+                                    // tick. The tick's single Error below carries the count and the first
+                                    // failure — see MaxSendFailureEventsPerTick. Full detail stays here,
+                                    // in the console/JSON sink.
+                                    sendFailures++;
+                                    firstFailure ??= $"doc {doc.Id}: {ex.GetType().Name}";
+                                    firstFailureException ??= ex;
+                                    logger.LogWarning(ex, "Failed sending reminder for doc {DocumentId}", doc.Id);
                                 }
                             }
 
@@ -485,6 +535,19 @@ public class ReminderBackgroundService(
             // even on shutdown so any leftover advisory lock is freed before the connection
             // returns to the pool.
             await db.Database.CloseConnectionAsync();
+        }
+
+        // ONE Error for the whole tick, however many sends failed (MaxSendFailureEventsPerTick, #386
+        // review / ADR 0053). Ids, counts and a type name only — the ADR 0037/0053 rule that an
+        // Error-level template never carries user content applies here as much as anywhere. The first
+        // exception rides along so the event still groups on a real stack trace.
+        if (sendFailures > 0)
+        {
+            logger.LogError(
+                firstFailureException,
+                "Reminder tick: {FailedSends} of {AttemptedSends} sends failed. First: {FirstFailure}. "
+                + "Per-send detail is at Warning in the container log.",
+                sendFailures, sendAttempts, firstFailure);
         }
     }
 
