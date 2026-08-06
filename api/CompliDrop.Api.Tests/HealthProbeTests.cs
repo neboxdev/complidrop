@@ -110,6 +110,13 @@ public sealed class HealthProbeTests(IntegrationTestFixture fixture) : Integrati
         var body = await resp.Content.ReadAsStringAsync();
         body.Should().NotContain(SystemConnectionFaultInterceptor.FaultMessage);
         body.Should().NotContain("host=", "a 503 must not fingerprint the infrastructure it failed to reach");
+
+        // Free ride on the only 5xx this suite produces (#390 review round 2, S2): the abort carve-out
+        // replaced Serilog's default request-log level map with an inline lambda, and the >499 arm is one
+        // of the two it restates BY HAND. Nothing else exercises it, so a lost or inverted arm would ship
+        // green. The other two arms are pinned in ClientAbortLoggingTests.
+        sink.SerilogRequestLevel("/health/ready").Should().Be(LogEventLevel.Error,
+            "a 5xx keeps Serilog's own level — only the client-abort case is demoted");
     }
 
     [Fact]

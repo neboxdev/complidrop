@@ -1,3 +1,4 @@
+using System.Net;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.AspNetCore.TestHost;
@@ -78,15 +79,54 @@ public sealed class ClientAbortLoggingTests(IntegrationTestFixture fixture) : In
         // rather than corrected (and is absent from this sink for exactly that reason).
         sink.Events.Should().Contain(
             e => e.Level == LogEventLevel.Information
-                && Scalar(e, "SourceContext") == "Microsoft.AspNetCore.Hosting.Diagnostics"
-                && Scalar(e, "StatusCode") == "499",
+                && CapturingLogEventSink.Scalar(e, "SourceContext") == "Microsoft.AspNetCore.Hosting.Diagnostics"
+                && CapturingLogEventSink.Scalar(e, "StatusCode") == "499",
             "the 499 is only worth setting if something records it — an aborted request must leave an "
             + "Information-level completion line carrying that status, not silence");
     }
 
-    /// <summary>The scalar value of one Serilog property, unquoted, or null when it is absent.</summary>
-    private static string? Scalar(LogEvent e, string property) =>
-        e.Properties.TryGetValue(property, out var value) && value is ScalarValue { Value: { } v }
-            ? v.ToString()
-            : null;
+    [Fact]
+    public async Task The_request_log_keeps_Serilogs_own_levels_for_everything_that_is_not_an_abort()
+    {
+        // The carve-out replaced Serilog's DEFAULT GetLevel with an inline lambda, and it governs the
+        // level of EVERY request this API serves — but only the demoted arm was pinned. The other two
+        // are restated by hand, "because the default is a private static", so an edit that dropped or
+        // inverted either would ship green while every 500 in production quietly became Information
+        // (#390 review round 2, S2). Both are asserted from one host, one request each.
+        var sink = new CapturingLogEventSink();
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        var link = await SeedLinkAsync();
+        var client = factory.CreateClient();
+
+        var ok = await client.GetAsync("/health/live");
+
+        // An ORDINARY exception: not a cancellation of any kind, so it must not take the abort branch.
+        // The connection hook is the cheapest unhandled throw available on a route that needs no auth —
+        // and this arm is the load-bearing one, because Serilog's request log sits INSIDE the exception
+        // middleware and therefore still reads Response.StatusCode as 200 while the exception unwinds.
+        // Without `ex is not null` there is nothing left to raise the level.
+        var connections = factory.Services.GetRequiredService<SystemConnectionFaultInterceptor>();
+        HttpResponseMessage threw;
+        connections.Armed = true;
+        try
+        {
+            threw = await client.GetAsync($"/api/portal/{link.Token}");
+        }
+        finally
+        {
+            connections.Reset();
+        }
+
+        ok.StatusCode.Should().Be(HttpStatusCode.OK);
+        threw.StatusCode.Should().Be(HttpStatusCode.InternalServerError,
+            "precondition: the request has to have thrown PAST Serilog's request log for that line's "
+            + "level to mean anything");
+
+        sink.SerilogRequestLevel("/health/live").Should().Be(LogEventLevel.Information,
+            "the carve-out moves ONE case; an ordinary 200 keeps Serilog's own mapping");
+        sink.SerilogRequestLevel($"/api/portal/{link.Token}").Should().Be(LogEventLevel.Error,
+            "a request that threw for a reason of OURS is a server error and must stay loud — that is "
+            + "the whole distinction #390 item 2 draws against a client hanging up");
+    }
 }
