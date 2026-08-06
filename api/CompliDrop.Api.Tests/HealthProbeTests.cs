@@ -77,19 +77,23 @@ public sealed class HealthProbeTests(IntegrationTestFixture fixture) : Integrati
         var connections = factory.Services.GetRequiredService<SystemConnectionFaultInterceptor>();
 
         HttpResponseMessage resp;
+        int faults;
         connections.Armed = true;
         try
         {
             resp = await factory.CreateClient().GetAsync("/health/ready");
+            faults = connections.FaultCount;
         }
         finally
         {
-            connections.FaultCount.Should().BeGreaterThan(0,
-                "precondition: the probe must have actually tried to reach the database — a readiness "
-                + "check that never opens a connection cannot report readiness at all");
             connections.Reset();
         }
 
+        // Asserted after the try, not inside the finally — see the liveness pin above: an assertion
+        // that throws from a finally REPLACES whatever the try was failing with.
+        faults.Should().BeGreaterThan(0,
+            "precondition: the probe must have actually tried to reach the database — a readiness "
+            + "check that never opens a connection cannot report readiness at all");
         resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
 
         // The cause is not thrown away: this branch answered a SILENT 503 before #390, so a real
