@@ -68,15 +68,40 @@ the asymmetry corrected for the end that must never go quiet.
 `CustomWebApplicationFactory` additionally pins `Sentry:Dsn = ""`, the same explicit lock it already
 applies to `Stripe:SecretKey` for the same user-secret-leakage reason.
 
-### PII: a `BeforeSend` scrubber, and no breadcrumbs
+The resolved state is **named at boot** — `StartupEnvironmentBanner`'s `Telemetry` field, one of
+`reporting to Sentry` / `silent (no DSN)` / `silent (Development)`, computed from
+`BackendSentry.IsEnabled` so the banner and the gate cannot disagree. It lives in the banner rather
+than as a fourth flag line beside the rule-engine / template-corrections / compliance-claims ones
+because the banner ([ADR 0034](0034-dev-environment-isolation-and-boot-banner.md) / #271) is this
+repo's own mechanism against an outward-facing target being wired up invisibly — which is exactly
+what #386 turned out to be. The DSN itself is never echoed, and Development gains the same
+loud-misconfig WARNING the other live targets carry: the DSN found in local user-secrets was the
+**production project's**, and a production credential in a dev secret store is worth a line even
+once the gate makes it inert.
+
+### The boot window
+
+The sink emits through `HubAdapter.Instance` (it runs `InitializeSdk = false`), i.e. through the
+static `SentrySdk`, and that hub exists only once something resolves `IHub`. With the MEL provider
+pipeline replaced by Serilog, the only thing that does is Sentry's own `IStartupFilter` as the
+request pipeline is built — **inside `app.Run()`**. Everything the startup scope logs happens before
+that: the migration guard, the rule-catalog resolve, and the system-template seed, whose failure is
+explicitly caught-and-logged. So `BackendSentry.EnsureHubInitialized` resolves `IHub` immediately
+after `builder.Build()`, gated on the same `IsEnabled`. Migrations auto-apply at startup
+([ADR 0016](0016-apply-ef-migrations-on-startup.md)), so a Neon hiccup or a malformed system rule at
+boot is exactly the prod incident class this ADR exists to make visible.
+
+### PII: a scrubber on **both** hooks, an allowlist for headers, and no breadcrumbs
 
 `SendDefaultPii = false` and `MaxRequestBodySize = RequestSize.None` are set **explicitly** even
 though both match the SDK default — they are the load-bearing half of the posture, and a default is
-not a decision anyone can see in a diff. On top of them, `SentryScrub.Scrub` runs as `BeforeSend` over
-every event: message (template, formatted, params), exception values, `extra` values, tag values, and
-`Request.Url` / `QueryString` / header values. Four bounded nets, applied after a hard 8192-character
-cap (the cap runs **first**, so an unbounded third-party error body cannot turn `BeforeSend` into a
-stall — same reasoning as ADR 0037's `maxValueLength`):
+not a decision anyone can see in a diff. On top of them, `SentryScrub` runs over every envelope this
+process uploads: message (template, formatted, params), exception values, `extra` values, tag values,
+`Request.Url` / `QueryString` / headers, and `User`. Four bounded nets, applied after a hard
+8192-character cap (the cap runs **first**, so an unbounded third-party error body cannot turn
+`BeforeSend` into a stall — same reasoning as ADR 0037's `maxValueLength`; the cap goes through
+`Services/ColumnClamp.To`, this codebase's ONE surrogate-safe truncation, because a lone high
+surrogate is a string `Utf8JsonWriter` refuses and a refused envelope is a lost error event):
 
 - **Vendor-portal capability token**, replaced deterministically by path shape
   (`/api/portal/{token}` → `/api/portal/[redacted]`, `/portal/…` likewise, case-insensitive, stopping
@@ -92,6 +117,39 @@ stall — same reasoning as ADR 0037's `maxValueLength`):
 
 Document / vendor / org GUIDs and route shapes deliberately survive — the same triage-preserving trade
 ADR 0037 makes with its entropy-blind metadata net.
+
+**Both hooks, one net.** Events and performance **transactions** are separate envelope types leaving
+through separate hooks, and a transaction carries its own `Request` — url, query string, headers —
+copied from the same ASP.NET scope. `Sentry.AspNetCore` auto-instruments a sampled share of every
+request, so a scrubber on `BeforeSend` alone left roughly `TracesSampleRate` of `/api/portal/{token}/…`
+requests uploading the vendor's bearer credential. `ScrubTransaction` runs the same net through one
+shared `IEventLike` walk (the shape ADR 0037's frontend already uses: one `scrub` serving both hooks),
+and it reaches SPANS too — `SentryHttpMessageHandler` instruments every `IHttpClientFactory` client
+this process owns, and `GeminiExtractionClient`'s URL carries the API key as a query parameter.
+
+One thing `BeforeSendTransaction` cannot repair: `SentryTransaction.Name` is **read-only** there (the
+same shape as `SentryEvent.Breadcrumbs` below) and is copied into the envelope's dynamic-sampling
+header, which no hook rewrites. A route-named transaction spells the PATTERN and carries no
+credential, but when routing yields no name the SDK falls back to the raw path. So the name is fixed
+where it is *chosen*: `options.TransactionNameProvider = SentryScrub.TransactionName`.
+
+**Headers are an allowlist, not a denylist.** `SendDefaultPii = false` suppresses only the SDK's OWN
+user/IP/cookie attachment; the ASP.NET integration still attaches every request header except
+`Cookie` and `Authorization`. Behind Railway's ingress the caller's — or the portal vendor's — IP
+arrives in exactly those headers: an `X-Forwarded-For` residue past `ForwardedHeaders`' `ForwardLimit`
+of 1, plus `X-Real-Ip` / `CF-Connecting-IP` / `X-Envoy-External-Address`, which
+`ForwardedHeadersMiddleware` never consumes. None of the four nets matches an IP literal. Rather than
+enumerate proxy headers vendor by vendor — a list that goes stale silently — the scrubber keeps four
+diagnostic headers (`User-Agent`, `Referer`, `Content-Type`, `X-Trace-Id`, each still passed through
+the nets) and drops the rest, which makes "no IP" structurally true. `SentryUser.IpAddress` is cleared
+for the same reason: the SDK stamps `{{auto}}` — an instruction to Sentry's ingest to fill the address
+in from the connecting socket — onto transactions even with `SendDefaultPii` off. `SentryUser.Id`
+deliberately survives: it is the SDK's *installation* id, one value per running container.
+
+**Structured values are walked, not just strings.** A log property that is an object, an array or a
+dictionary is serialized to the wire as-is, so a net that only touched `string` values would miss
+`logger.LogError("… {@Vendor}", vendor)` entirely. Scalars whose rendering cannot embed user content
+(counts, ids, status codes, GUIDs, timestamps) keep their own type so events stay triageable.
 
 **Breadcrumbs are off** (`MinimumBreadcrumbLevel = Fatal`, the highest level, at which this codebase
 logs nothing). A breadcrumb would ship the whole `Information`/`Warning` log stream to a third party,
@@ -133,7 +191,31 @@ never overwritten.
 - **A 500 now produces two events.** `ExceptionHandlingMiddleware` logs the exception, and
   `UseSerilogRequestLogging` independently logs the completed request at `Error`. Kept rather than
   filtered: the request-completion line is the only signal for a 500 that never threw, Sentry groups
-  by fingerprint, and both pass the scrubber. Revisit only if quota becomes a real cost.
+  by fingerprint, and both pass the scrubber. A constant factor on a per-request event, so it is a
+  cost, not a hazard — unlike the fan-out below.
+- **Quota is a correctness concern, not a billing one, so one fan-out is bounded.** Turning every
+  `Error` line into a metered event means a failure mode that fans out with RECIPIENT count can
+  exhaust a plan's monthly quota, after which Sentry 429s and the SDK drops — and *genuine 500s stop
+  being reported*, which is this ADR's own failure arriving through a different door. The live case is
+  the reminder tick: `EmailService` logs one `Error` per rejected send, the worker sends inside nested
+  `org → reminder → doc → recipient` loops, and ADR 0025's catch-up window re-attempts every failed
+  recipient on each of the up-to-16 qualifying ticks of the org-local day. At the `.claude/reviewers.md`
+  design threshold one revoked `Resend:ApiKey` is ~26k events/day; at the 10× scale that file says to
+  flag against, ~263k — a Sentry Team plan's 50k month in ~4.5 hours.
+  The tick now counts its own outcomes and raises exactly ONE `Error`
+  (`ReminderBackgroundService.MaxSendFailureEventsPerTick`), carrying the failed/attempted counts, the
+  first failure's document id and exception type, and the first exception so the event still groups on
+  a real stack trace. The per-recipient lines drop to `Warning`; the console/JSON sink still records
+  every one in full. `IEmailService.SendAsync` takes a `SendFailureReporting` so the demotion is scoped
+  to the caller that aggregates — a one-off send (verification mail, reset link, vendor portal link)
+  has no caller-side aggregate and keeps its own `Error`, and a blanket demotion would have silenced
+  exactly the sends a customer notices. **Logging only**: nothing about what is sent, retried or
+  recorded changes, so ADR 0025 is untouched (pinned by a test asserting `recipients × ticks` attempts
+  alongside the event bound). Sentry's own `DeduplicateMode` is *not* a substitute — it collapses
+  repeats of the same exception INSTANCE, and a real failing send raises a fresh one every time.
+  **Founder-facing, not repo-reachable:** turn on Sentry's own **spike protection** and set a
+  **spend cap** on the project. Those are dashboard settings; this bound is the code-side half, and
+  neither replaces the other.
 - **The scrubber is a shape net, not a prose filter.** ADR 0037's project rule carries over verbatim
   to the backend: *application code never hands raw document field values to Sentry*, and by extension
   never to an `Error`-level log line. The #386 audit walked all 23 `Error`-level sites (no `Fatal`
@@ -180,7 +262,24 @@ is ever spelled differently. See the Decision for the asymmetry.
 
 ### Scrub breadcrumbs instead of suppressing them
 Not available: `SentryEvent.Breadcrumbs` is read-only, so `BeforeSend` cannot rewrite them. The only
-lever is the level at which they are created.
+lever is the level at which they are created. `SentryTransaction.Name` has the same shape and the same
+answer — fix it where it is chosen, not where it is sent.
+
+### Denylist the known proxy IP headers instead of allowlisting four diagnostic ones
+Rejected. `X-Forwarded-For`, `X-Real-Ip`, `CF-Connecting-IP`, `X-Envoy-External-Address`, `True-Client-IP`,
+`Fastly-Client-IP` … is a list that grows with whoever fronts the deploy, and a stale denylist fails
+OPEN and silently. An allowlist fails closed: a new header nobody vouched for is simply absent from
+the event, and the cost is that adding a diagnostic header is a deliberate edit.
+
+### Record the reminder fan-out as a known cost instead of bounding it
+Rejected. It is not a cost, it is an availability failure of the monitoring itself: past the quota the
+SDK is rate-limited and unhandled 500s stop arriving, which is the state this ADR exists to end. A
+"revisit if it becomes expensive" note would have been discovered by the outage it was meant to prevent.
+
+### Bound it by changing what the reminder tick does — stop retrying, or skip a failing org
+Rejected outright. ADR 0025's retry-in-place is a delivery guarantee for a paying customer's expiry
+notice; trading it for a telemetry bill would be the wrong side of the trade by a wide margin. The
+bound is on the LOG LEVEL only.
 
 ## References
 
@@ -190,9 +289,17 @@ lever is the level at which they are created.
 - **Related ADRs:** [0037](0037-frontend-sentry-pii-scrubbing-and-gating.md) (the frontend half — the
   scrubber shape, the `correlation_id` tag, the never-attach-user-content rule),
   [0044](0044-audit-client-input-clamped-at-the-boundary.md) (`IsUsableTraceId`, the charset that keeps
-  the un-redacted tag safe), [0034](0034-dev-environment-isolation-and-boot-banner.md) /
-  [#271](https://github.com/neboxdev/complidrop/issues/271) (the isolated-by-default dev posture).
+  the un-redacted tag safe, and `ColumnClamp.To`, the one surrogate-safe truncation the value cap
+  reuses), [0034](0034-dev-environment-isolation-and-boot-banner.md) /
+  [#271](https://github.com/neboxdev/complidrop/issues/271) (the isolated-by-default dev posture and
+  the boot banner this ADR adds a `Telemetry` field to),
+  [0025](0025-reminder-catch-up-window-and-failed-send-retry.md) (the catch-up window and failed-send
+  retry the event bound is deliberately logging-only against),
+  [0016](0016-apply-ef-migrations-on-startup.md) (why the boot window is load-bearing).
 - **Code:** `api/CompliDrop.Api/BackendSentry.cs`, `api/CompliDrop.Api/SentryScrub.cs`,
-  `api/CompliDrop.Api/Program.cs`, `api/CompliDrop.Api/Middleware/CorrelationIdMiddleware.cs`.
+  `api/CompliDrop.Api/Program.cs`, `api/CompliDrop.Api/StartupEnvironmentBanner.cs`,
+  `api/CompliDrop.Api/Middleware/CorrelationIdMiddleware.cs`,
+  `api/CompliDrop.Api/Services/EmailService.cs`,
+  `api/CompliDrop.Api/BackgroundServices/ReminderBackgroundService.cs`.
 - **Env:** `Sentry:Dsn` (backend DSN, **distinct** from `NEXT_PUBLIC_SENTRY_DSN`; absent or
   Development ⇒ no events at all), `Sentry:TracesSampleRate` (default `0.1`).

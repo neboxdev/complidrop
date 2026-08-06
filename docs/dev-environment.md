@@ -82,8 +82,13 @@ On startup, `StartupEnvironmentBanner` logs one INFO line naming the resolved ta
 guard against silently pointing dev at prod again:
 
 ```
-Startup environment [Development] — Database: dev-host.neon.tech (db: cd_dev) | Blob: Azurite (local emulator) | Email: silent (no Resend API key — sends are skipped) | Stripe: test mode
+Startup environment [Development] — Database: dev-host.neon.tech (db: cd_dev) | Blob: Azurite (local emulator) | Email: silent (no Resend API key — sends are skipped) | Stripe: test mode | Errors: silent (no DSN)
 ```
+
+`Errors:` is the backend Sentry state ([ADR 0053](adr/0053-backend-error-events-via-a-serilog-sentry-sink.md)),
+one of `reporting to Sentry` / `silent (no DSN)` / `silent (Development)`. It is computed from the same
+gate the SDK and the log sink ask, so the banner cannot claim a state the behaviour disagrees with —
+and the DSN itself is never printed.
 
 The line is printed **immediately above the migration line**, so the DB host is visible before any
 DDL runs. It is **redacted** — it shows hostnames, account names, and key *modes* (test/live), never
@@ -94,7 +99,10 @@ a **live/production** resource:
 
 - `Stripe:SecretKey` is a live key,
 - `Resend:ApiKey` is set (dev would send real email),
-- `AzureStorage` points at a real Azure account instead of Azurite.
+- `AzureStorage` points at a real Azure account instead of Azurite,
+- `Sentry:Dsn` is set (nothing is uploaded — the ADR 0053 gate refuses Development — but a Sentry DSN
+  is a production-only secret, and the one #386 found in local user-secrets was the *production
+  project's*).
 
 These warnings are Development-only — those same values are *correct* in prod. The guard **warns, it
 does not abort the boot**: deliberately pointing local at a prod resource for a one-off is a

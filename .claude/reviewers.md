@@ -1369,8 +1369,37 @@ Both are defined in this repo's `.claude/agents/`.
     survive so events stay triageable. The `correlation_id` tag is deliberately UN-redacted and is
     safe only because the promotion re-asks `CorrelationIdMiddleware.IsUsableTraceId` — dropping
     that re-check, or redacting the tag, are both real findings in opposite directions.
+  - The scrubber covers BOTH envelope types. `ScrubTransaction` is `BeforeSendTransaction` and a
+    transaction carries its own `Request` (url / query string / headers) plus SPAN descriptions;
+    scrubbing only events was a real leak (~`TracesSampleRate` of portal requests). Tags, extras,
+    request and user go through ONE shared `IEventLike` walk — a second copy is the same bug in a
+    new place. A transaction's `Name` is read-only there, so it is fixed at `TransactionNameProvider`
+    instead; removing that provider re-opens the raw path for anything routing cannot name.
+  - Request headers are an ALLOWLIST (`User-Agent`, `Referer`, `Content-Type`, `X-Trace-Id`), and
+    `SentryUser.IpAddress` is cleared. `SendDefaultPii = false` does NOT stop header attachment,
+    and behind Railway the caller's IP arrives in a proxy header no net matches. Turning the
+    allowlist into a denylist of known IP headers is a real finding: it fails open and silently.
+  - The scrubber walks NON-string structured values too (objects, arrays, dictionaries). Scalars
+    whose rendering cannot embed user content keep their own type on purpose.
   - Two events per 500 (the exception line plus `UseSerilogRequestLogging`'s Error-level completion
     line) is RECORDED, not an oversight — see ADR 0053 § Consequences. Do not flag it.
+  - QUOTA IS A CORRECTNESS AXIS here, not a billing one: past a plan's quota Sentry 429s, the SDK
+    drops, and genuine 500s stop being reported — #386's own failure through a different door. An
+    `Error` line that fans out with recipient/row count is therefore a real finding.
+    `ReminderBackgroundService.MaxSendFailureEventsPerTick` bounds the live case at ONE event per
+    tick, with the per-recipient lines at `Warning` and `IEmailService.SendAsync`'s
+    `SendFailureReporting` scoping the demotion to the caller that aggregates. It is LOGGING ONLY —
+    ADR 0025's retry-in-place is untouched, and any change to it is a separate, bigger decision.
+    A one-off send (verify / reset / portal link) keeping its own `Error` is deliberate: demoting
+    those blanket-silences the sends a customer notices.
+  - The boot window is inside the reporting window: `BackendSentry.EnsureHubInitialized` runs right
+    after `builder.Build()` because the sink emits through the static `SentrySdk`, which otherwise
+    comes up only inside `app.Run()`. Migrations auto-apply at boot (ADR 0016) and the seed's
+    failure is caught-and-logged, so deleting that call takes the boot incident class dark again.
+  - `StartupEnvironmentBanner.Describe` takes `IHostEnvironment` for ONE reason: its `Telemetry`
+    field. It is computed from `BackendSentry.IsEnabled` so the banner cannot claim a state the
+    gate disagrees with — a second copy of the rule there is a real finding. The banner never
+    echoes the DSN.
 - Request strings bound before a bounded column is ADR 0046 (#389); the review-time facts that
   follow are pointers into it, not a second copy of the rationale.
   - Reject-vs-clamp is PER-FIELD by design, and the axis is who authored the value. User-TYPED
@@ -1576,6 +1605,9 @@ api/**/AppDbContext.cs
 api/**/AuditSaveChangesInterceptor.cs
 api/**/ComplianceCheckDeleteConcurrencyInterceptor.cs
 api/**/*Portal*
+api/**/SentryScrub.cs
+api/**/BackendSentry.cs
+frontend/src/lib/sentry/**
 frontend/src/app/(auth)/**
 frontend/src/lib/api.ts
 .github/workflows/**
@@ -1590,6 +1622,14 @@ container image, and dependency manifests are an unreviewed-path-to-prod risk.)
 (`ComplianceCheckDeleteConcurrencyInterceptor.cs` is listed BY NAME, not as
 `api/**/*Interceptor*`: it changes `SaveChanges` semantics on BOTH contexts like the audit
 one beside it, while a wildcard would drag every test-only interceptor into a clearance.)
+
+(The three Sentry paths are the PII choke point in the Sensitive-areas list above — the only
+code deciding what leaves this process for a third-party processor. By name, same reasoning as
+the interceptor: `api/**/*Sentry*` would drag test helpers in. The frontend one is a directory
+because ADR 0037's scrubber, options and gate are four files that only make sense together.
+Added because #386 declared the area sensitive in prose and left the machine-readable fence
+alone, so a one-line edit to the scrubber would have merged without a careful clearance — that
+PR itself only caught the gate through `api/**/*.csproj`.)
 
 ## Labels
 
