@@ -32,12 +32,15 @@ public sealed class StartupEnvironmentBannerTests
         "DefaultEndpointsProtocol=https;AccountName=complidropstorage;AccountKey=" + BlobKey
         + ";EndpointSuffix=core.windows.net";
 
+    private const string SentryDsnKey = "Sentry:Dsn";
+    private const string FakeDsn = "https://0123456789abcdef0123456789abcdef@o0.ingest.us.sentry.io/1";
+
     // ---- security invariant: never echo a secret ------------------------------------------------
 
     [Fact]
     public void Describe_names_the_db_host_but_never_the_password()
     {
-        var summary = StartupEnvironmentBanner.Describe(Config(("ConnectionStrings:Database", DbConnString)));
+        var summary = StartupEnvironmentBanner.Describe(Config(("ConnectionStrings:Database", DbConnString)), Env("Production"));
 
         summary.Database.Should().Contain("ep-sparkling-shape-a4inp0of.us-east-1.aws.neon.tech")
             .And.Contain("complidrop");
@@ -47,7 +50,7 @@ public sealed class StartupEnvironmentBannerTests
     [Fact]
     public void Describe_names_the_blob_account_but_never_the_account_key()
     {
-        var summary = StartupEnvironmentBanner.Describe(Config(("AzureStorage:ConnectionString", RealBlobConnString)));
+        var summary = StartupEnvironmentBanner.Describe(Config(("AzureStorage:ConnectionString", RealBlobConnString)), Env("Production"));
 
         summary.BlobStorage.Should().Contain("complidropstorage");
         summary.BlobStorage.Should().NotContain(BlobKey, "the storage account key must never reach a log line");
@@ -56,7 +59,7 @@ public sealed class StartupEnvironmentBannerTests
     [Fact]
     public void Describe_reports_stripe_mode_but_never_the_key()
     {
-        var summary = StartupEnvironmentBanner.Describe(Config(("Stripe:SecretKey", "sk_live_ABCDEF1234567890")));
+        var summary = StartupEnvironmentBanner.Describe(Config(("Stripe:SecretKey", "sk_live_ABCDEF1234567890")), Env("Production"));
 
         summary.Stripe.Should().Be("LIVE mode");
         summary.Stripe.Should().NotContain("ABCDEF1234567890");
@@ -65,7 +68,7 @@ public sealed class StartupEnvironmentBannerTests
     [Fact]
     public void Describe_reports_email_live_but_never_the_resend_key()
     {
-        var summary = StartupEnvironmentBanner.Describe(Config(("Resend:ApiKey", "re_secret_key_value")));
+        var summary = StartupEnvironmentBanner.Describe(Config(("Resend:ApiKey", "re_secret_key_value")), Env("Production"));
 
         summary.Email.Should().Contain("LIVE");
         summary.Email.Should().NotContain("re_secret_key_value");
@@ -90,7 +93,7 @@ public sealed class StartupEnvironmentBannerTests
     [Fact]
     public void Describe_database_handles_absent_connection_string()
     {
-        StartupEnvironmentBanner.Describe(Config()).Database.Should().Be("not configured");
+        StartupEnvironmentBanner.Describe(Config(), Env("Production")).Database.Should().Be("not configured");
     }
 
     [Fact]
@@ -98,14 +101,14 @@ public sealed class StartupEnvironmentBannerTests
     {
         // The banner is a boot-path diagnostic: a garbage value must degrade to a safe label, not throw
         // (which would take startup down) and not echo the value.
-        var summary = StartupEnvironmentBanner.Describe(Config(("ConnectionStrings:Database", "Port=not-a-number;@@@")));
+        var summary = StartupEnvironmentBanner.Describe(Config(("ConnectionStrings:Database", "Port=not-a-number;@@@")), Env("Production"));
         summary.Database.Should().Be("unparseable connection string");
     }
 
     [Fact]
     public void Describe_database_shows_a_non_default_port()
     {
-        StartupEnvironmentBanner.Describe(Config(("ConnectionStrings:Database", "Host=localhost;Port=6543;Database=cd")))
+        StartupEnvironmentBanner.Describe(Config(("ConnectionStrings:Database", "Host=localhost;Port=6543;Database=cd")), Env("Production"))
             .Database.Should().Contain("localhost:6543").And.Contain("cd");
     }
 
@@ -119,21 +122,21 @@ public sealed class StartupEnvironmentBannerTests
     [InlineData("DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqF==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1")]
     public void Describe_blob_recognizes_azurite(string connectionString)
     {
-        StartupEnvironmentBanner.Describe(Config(("AzureStorage:ConnectionString", connectionString)))
+        StartupEnvironmentBanner.Describe(Config(("AzureStorage:ConnectionString", connectionString)), Env("Production"))
             .BlobStorage.Should().Be("Azurite (local emulator)");
     }
 
     [Fact]
     public void Describe_blob_names_a_real_account()
     {
-        StartupEnvironmentBanner.Describe(Config(("AzureStorage:ConnectionString", RealBlobConnString)))
+        StartupEnvironmentBanner.Describe(Config(("AzureStorage:ConnectionString", RealBlobConnString)), Env("Production"))
             .BlobStorage.Should().Be("account 'complidropstorage'");
     }
 
     [Fact]
     public void Describe_blob_handles_absent_connection_string()
     {
-        StartupEnvironmentBanner.Describe(Config()).BlobStorage.Should().Be("not configured");
+        StartupEnvironmentBanner.Describe(Config(), Env("Production")).BlobStorage.Should().Be("not configured");
     }
 
     // ---- email describer ------------------------------------------------------------------------
@@ -141,7 +144,7 @@ public sealed class StartupEnvironmentBannerTests
     [Fact]
     public void Describe_email_is_silent_without_a_key()
     {
-        StartupEnvironmentBanner.Describe(Config()).Email.Should().Contain("silent");
+        StartupEnvironmentBanner.Describe(Config(), Env("Production")).Email.Should().Contain("silent");
     }
 
     [Fact]
@@ -149,7 +152,7 @@ public sealed class StartupEnvironmentBannerTests
     {
         // Only ApiKey set: binding applies FromEmail's non-empty default, so this models the real send
         // gate (WouldSend = ApiKey && FromEmail) the same way the runtime IOptions<ResendSettings> does.
-        StartupEnvironmentBanner.Describe(Config(("Resend:ApiKey", "re_anything")))
+        StartupEnvironmentBanner.Describe(Config(("Resend:ApiKey", "re_anything")), Env("Production"))
             .Email.Should().Contain("LIVE");
     }
 
@@ -160,7 +163,7 @@ public sealed class StartupEnvironmentBannerTests
         // a key present but FromEmail explicitly emptied means the service would NOT send, so the banner
         // must say "silent" and NOT warn — not over-claim LIVE. Pins the no-drift contract (#271 review).
         var config = Config(("Resend:ApiKey", "re_anything"), ("Resend:FromEmail", ""));
-        StartupEnvironmentBanner.Describe(config).Email.Should().Contain("silent");
+        StartupEnvironmentBanner.Describe(config, Env("Production")).Email.Should().Contain("silent");
         StartupEnvironmentBanner.LiveResourceWarnings(config).Should().BeEmpty();
     }
 
@@ -179,7 +182,7 @@ public sealed class StartupEnvironmentBannerTests
     [InlineData("SK_LIVE_abc", "configured (unrecognized key prefix)")]
     public void Describe_stripe_classifies_by_key_prefix(string key, string expected)
     {
-        StartupEnvironmentBanner.Describe(Config(("Stripe:SecretKey", key))).Stripe.Should().Be(expected);
+        StartupEnvironmentBanner.Describe(Config(("Stripe:SecretKey", key)), Env("Production")).Stripe.Should().Be(expected);
     }
 
     [Theory]
@@ -191,9 +194,49 @@ public sealed class StartupEnvironmentBannerTests
         // value before NpgsqlConnectionStringBuilder / the segment scan ever sees it.
         var summary = StartupEnvironmentBanner.Describe(Config(
             ("ConnectionStrings:Database", blank),
-            ("AzureStorage:ConnectionString", blank)));
+            ("AzureStorage:ConnectionString", blank)), Env("Production"));
         summary.Database.Should().Be("not configured");
         summary.BlobStorage.Should().Be("not configured");
+    }
+
+    // ---- telemetry: the fourth outward-facing target (#386 / ADR 0053) --------------------------
+
+    [Theory]
+    [InlineData("Production", true, "reporting to Sentry")]
+    [InlineData("Staging", true, "reporting to Sentry")]
+    [InlineData("Production", false, "silent (no DSN)")]
+    [InlineData("Development", false, "silent (no DSN)")]
+    [InlineData("Development", true, "silent (Development)")]
+    public void Describe_names_the_resolved_error_reporting_state(
+        string environmentName, bool dsnConfigured, string expected)
+    {
+        // #386's discovered scope IS the failure this banner exists to prevent: an outward-facing
+        // target wired up invisibly and believed live for months while reporting nothing. Sentry was
+        // the only config-gated subsystem in this host that named no resolved state at boot.
+        var config = dsnConfigured ? Config((SentryDsnKey, FakeDsn)) : Config();
+
+        StartupEnvironmentBanner.Describe(config, Env(environmentName)).Telemetry.Should().Be(expected);
+    }
+
+    [Fact]
+    public void The_banner_never_echoes_the_sentry_dsn()
+    {
+        var captured = new CapturingLogger();
+
+        StartupEnvironmentBanner.Log(Config((SentryDsnKey, FakeDsn)), Env("Production"), captured);
+
+        captured.Messages.Should().ContainSingle(m => m.Level == LogLevel.Information)
+            .Which.Message.Should().Contain("reporting to Sentry").And.NotContain(FakeDsn);
+    }
+
+    [Fact]
+    public void Warns_on_a_sentry_dsn_in_development()
+    {
+        // Inert, unlike the three targets above — the ADR 0053 gate refuses Development whatever the
+        // DSN says. It warns anyway because #386's finding was the PRODUCTION project's DSN sitting in
+        // local user-secrets: a live credential in a store it does not belong in.
+        StartupEnvironmentBanner.LiveResourceWarnings(Config((SentryDsnKey, FakeDsn)))
+            .Should().ContainSingle().Which.Should().Contain("Sentry:Dsn").And.NotContain(FakeDsn);
     }
 
     // ---- live-resource warnings (env-agnostic predicate set) ------------------------------------
@@ -237,7 +280,7 @@ public sealed class StartupEnvironmentBannerTests
     [Fact]
     public void Collects_a_warning_for_every_live_target_at_once()
     {
-        StartupEnvironmentBanner.LiveResourceWarnings(FullyLiveConfig()).Should().HaveCount(3);
+        StartupEnvironmentBanner.LiveResourceWarnings(FullyLiveConfig()).Should().HaveCount(4);
     }
 
     // ---- Log: env gating ------------------------------------------------------------------------
@@ -271,7 +314,7 @@ public sealed class StartupEnvironmentBannerTests
 
         StartupEnvironmentBanner.Log(FullyLiveConfig(), Env("Development"), captured);
 
-        captured.Messages.Where(m => m.Level == LogLevel.Warning).Should().HaveCount(3);
+        captured.Messages.Where(m => m.Level == LogLevel.Warning).Should().HaveCount(4);
     }
 
     [Fact]
@@ -304,7 +347,10 @@ public sealed class StartupEnvironmentBannerTests
         ("ConnectionStrings:Database", DbConnString),
         ("AzureStorage:ConnectionString", RealBlobConnString),
         ("Stripe:SecretKey", "sk_live_ABCDEF1234567890"),
-        ("Resend:ApiKey", "re_secret_key_value"));
+        ("Resend:ApiKey", "re_secret_key_value"),
+        // #386 / ADR 0053: a production Sentry DSN in dev secrets is the fourth hazard — inert
+        // (the gate refuses Development) but still a prod credential where it does not belong.
+        ("Sentry:Dsn", "https://0123456789abcdef0123456789abcdef@o0.ingest.us.sentry.io/1"));
 
     private static IHostEnvironment Env(string name) => new StubEnv(name);
 

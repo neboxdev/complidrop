@@ -44,19 +44,25 @@ public static class StartupEnvironmentBanner
     /// A redacted, human-readable summary of the targets the process is wired to. Every field is
     /// safe to log: no field can contain a password, account key, or API key.
     /// </summary>
-    public sealed record TargetSummary(string Database, string BlobStorage, string Email, string Stripe);
+    public sealed record TargetSummary(
+        string Database, string BlobStorage, string Email, string Stripe, string Telemetry);
 
     /// <summary>
     /// Builds the redacted <see cref="TargetSummary"/> from configuration. Pure — reads config, never
     /// touches the network. Takes <see cref="IConfiguration"/> (not bound options) to match the sibling
     /// helpers (<see cref="DatabaseMigrator.ShouldAutoMigrate"/>, <see cref="RateLimitingGate.ShouldEnable"/>)
     /// and stay trivially unit-testable from a few in-memory entries.
+    /// <para/>
+    /// <see cref="IHostEnvironment"/> is a parameter only because <see cref="Telemetry"/> needs it: error
+    /// reporting is the one target whose resolved state is not decided by configuration alone (ADR 0053's
+    /// gate is a DSN <b>and</b> a non-Development environment).
     /// </summary>
-    public static TargetSummary Describe(IConfiguration config) => new(
+    public static TargetSummary Describe(IConfiguration config, IHostEnvironment env) => new(
         Database: DescribeDatabase(config.GetConnectionString("Database")),
         BlobStorage: DescribeBlob(config["AzureStorage:ConnectionString"]),
         Email: DescribeEmail(BindResend(config)),
-        Stripe: DescribeStripe(config["Stripe:SecretKey"]));
+        Stripe: DescribeStripe(config["Stripe:SecretKey"]),
+        Telemetry: DescribeTelemetry(config, env));
 
     /// <summary>
     /// One message per data-bearing / outward-facing target that looks like a LIVE/production
@@ -89,6 +95,17 @@ public static class StartupEnvironmentBanner
                 $"AzureStorage points at a real Azure account ('{account}'), not Azurite — local "
                 + "uploads write to it. Use UseDevelopmentStorage=true (Azurite) in Development.");
 
+        // #386 / ADR 0053. Unlike the three above this target is INERT in Development — the gate
+        // refuses to report there whatever the DSN says, which is the whole point of its second half.
+        // It still warns, because #386's finding was a DSN sitting in local user-secrets, and that DSN
+        // was the PRODUCTION project's: a live credential in a store it does not belong in, one gate
+        // away from exporting exceptions raised against a clone of prod data. Never echoes the value.
+        if (!string.IsNullOrWhiteSpace(config[BackendSentry.DsnKey]))
+            warnings.Add(
+                "Sentry:Dsn is set in Development. Nothing is uploaded (ADR 0053 gates on a "
+                + "non-Development environment too), but a Sentry DSN is a production-only secret — "
+                + "run `dotnet user-secrets remove \"Sentry:Dsn\"` to keep it out of dev entirely.");
+
         return warnings;
     }
 
@@ -99,12 +116,13 @@ public static class StartupEnvironmentBanner
     /// </summary>
     public static void Log(IConfiguration config, IHostEnvironment env, ILogger logger)
     {
-        var summary = Describe(config);
+        var summary = Describe(config, env);
 
         logger.LogInformation(
             "Startup environment [{Environment}] — Database: {Database} | Blob: {BlobStorage} | "
-            + "Email: {Email} | Stripe: {Stripe}",
-            env.EnvironmentName, summary.Database, summary.BlobStorage, summary.Email, summary.Stripe);
+            + "Email: {Email} | Stripe: {Stripe} | Errors: {Telemetry}",
+            env.EnvironmentName, summary.Database, summary.BlobStorage, summary.Email, summary.Stripe,
+            summary.Telemetry);
 
         if (!env.IsDevelopment()) return;
 
@@ -164,6 +182,27 @@ public static class StartupEnvironmentBanner
         var resend = new ResendSettings();
         config.GetSection("Resend").Bind(resend);
         return resend;
+    }
+
+    /// <summary>
+    /// Whether backend errors leave this process, and if not, WHY not (#386 / ADR 0053).
+    /// <para/>
+    /// Sentry is the fourth config-gated outward-facing target in this host and #386's discovered scope
+    /// was precisely the failure this banner exists to prevent: something outward-facing wired up
+    /// invisibly, believed live for months, reporting nothing. Computed from
+    /// <see cref="BackendSentry.IsEnabled"/> — the same predicate the SDK and the Serilog sink ask — so
+    /// the banner and the behaviour cannot disagree; a second copy of the rule here is how they would.
+    /// <para/>
+    /// The DSN check comes first so a Development box with no DSN reads "no DSN" (true, and naming the
+    /// environment would imply a DSN was present); a Development box WITH one reads "Development",
+    /// which is the state that needs explaining. The DSN itself is NEVER echoed.
+    /// </summary>
+    private static string DescribeTelemetry(IConfiguration config, IHostEnvironment env)
+    {
+        if (BackendSentry.IsEnabled(config, env)) return "reporting to Sentry";
+        return string.IsNullOrWhiteSpace(config[BackendSentry.DsnKey])
+            ? "silent (no DSN)"
+            : "silent (Development)";
     }
 
     private static string DescribeStripe(string? secretKey)
