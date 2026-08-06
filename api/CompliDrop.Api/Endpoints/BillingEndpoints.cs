@@ -218,11 +218,23 @@ public static class BillingEndpoints
         }
         catch (StripeException ex)
         {
-            // ex.Message is one of Stripe.net's own fixed verification diagnostics ("no signatures found
-            // matching…", "timestamp outside the tolerance zone", an API-version mismatch). It carries
-            // neither the payload nor the header, and it is what separates a rotated secret from a
-            // replayed/stale delivery.
-            logger.LogWarning("Stripe webhook rejected: signature verification failed ({Reason}).", ex.Message);
+            // The headline names only what this branch actually covers — the event could not be
+            // constructed — because not every StripeException here is a signature problem: an API-version
+            // mismatch lands here too, and a headline saying "signature verification failed" would send
+            // the operator to check the signing secret for an incident that has nothing to do with it
+            // (the same wrong-diagnosis shape this ticket is about). {Reason} is what discriminates.
+            //
+            // ex.Message is one of Stripe.net's own fixed diagnostics. In 47.4.0 the whole reachable set
+            // is: "The signature header format is unexpected."; "The expected signature was not found in
+            // the Stripe-Signature header. Make sure you're using the correct webhook secret (whsec_)…"
+            // (the rotated-secret case this ticket is about); "…the current timestamp is outside of the
+            // allowed tolerance."; "The webhook cannot be processed because the signature cannot be
+            // safely calculated."; and "Received event with API version X, but Stripe.net … expects API
+            // version Y". Fixed literals plus, at most, the two API-version strings — never the CONFIGURED
+            // secret (the second one prints the literal `whsec_` prefix as guidance, not our value), never
+            // the Stripe-Signature header value, never the payload. StripeWebhookTests pins that at
+            // runtime rather than trusting this comment.
+            logger.LogWarning("Stripe webhook rejected: could not construct the event ({Reason}).", ex.Message);
             return Results.BadRequest();
         }
 

@@ -439,13 +439,27 @@ public sealed class StripeWebhookTests(IntegrationTestFixture fixture) : Integra
         bad.Should().Be(HttpStatusCode.BadRequest);
         Warnings(missingSink).Should().Contain(m => m.Contains("Stripe webhook rejected")
             && m.Contains("no Stripe-Signature header"));
+
+        // The construct-event branch's HEADLINE says only what the branch covers, and the reason
+        // discriminates. It deliberately does NOT say "signature verification failed": an API-version
+        // mismatch raises StripeException here too, and a headline naming the signature would send the
+        // operator to check the signing secret for an incident that has nothing to do with it — the same
+        // wrong-diagnosis shape this ticket exists to remove (#390 review, S5).
         Warnings(badSink).Should().Contain(m => m.Contains("Stripe webhook rejected")
-            && m.Contains("signature verification failed"));
+            && m.Contains("could not construct the event")
+            && m.Contains("The expected signature was not found in the Stripe-Signature header"),
+            "the headline names the branch; the reason names the incident — and it is the rotated-secret "
+            + "reason specifically, which is the failure #390 was filed about");
+        Warnings(badSink).Should().NotContain(m => m.Contains("signature verification failed"),
+            "that headline claims more than the branch knows");
 
         // Whatever the reason says, it may never be the material an attacker (or a log reader) could
-        // replay: not the signing secret, not the header, not the body.
+        // replay: not the signing secret, not the header, not the body. Stripe.net's diagnostics for
+        // this branch are fixed literals plus at most an API-version string, but the guarantee is the
+        // one we owe, so it is asserted rather than assumed.
         Warnings(badSink).Should().NotContain(m => m.Contains(WebhookSecret) || m.Contains(corrupted));
         Warnings(badSink).Should().NotContain(m => m.Contains(subId));
+        Warnings(badSink).Should().NotContain(m => m.Contains(payload));
         (await ReloadAsync(subId)).Status.Should().Be("active", "a rejected delivery mutates nothing");
     }
 
