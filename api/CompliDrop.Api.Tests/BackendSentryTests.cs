@@ -85,10 +85,12 @@ public sealed class BackendSentryTests
     }
 
     [Fact]
-    public async Task Dev_stays_silent_when_no_dsn_is_configured()
+    public async Task A_blank_dsn_registers_no_sink_so_nothing_reaches_the_wire()
     {
         // The SDK itself is live in this harness — only the SINK's configuration lacks a DSN. So a
         // failure here means the gate is gone, not that Sentry happened to be off.
+        // The environment half of the gate is NOT what this pins: the harness runs Production. That
+        // half has one owner, The_sink_is_not_registered_in_development.
         using var harness = new SentryCaptureHarness(dsnConfiguredForSink: false);
 
         harness.Logger("ReminderBackgroundService").LogError(
@@ -570,13 +572,22 @@ public sealed class BackendSentryTests
     [Fact]
     public void The_sdk_options_keep_the_privacy_posture_the_ticket_says_to_keep()
     {
-        var options = new SentryAspNetCoreOptions();
+        var options = new SentryAspNetCoreOptions
+        {
+            // HOSTILE starting values, and that is the point of the test. Both of these already hold
+            // their safe value on a freshly-constructed options object, so asserting them against a
+            // default would leave the test green with BOTH explicit assignments deleted from
+            // ConfigureOptions — i.e. it would give exactly none of the protection ADR 0053 says those
+            // explicit lines exist to give.
+            SendDefaultPii = true,
+            MaxRequestBodySize = RequestSize.Always,
+        };
 
         BackendSentry.ConfigureOptions(options, Configuration(SentryCaptureHarness.FakeDsn), Env("Production"));
 
         options.Dsn.Should().Be(SentryCaptureHarness.FakeDsn);
         options.Environment.Should().Be("Production");
-        options.SendDefaultPii.Should().BeFalse("no user identity, no IP, no cookies");
+        options.SendDefaultPii.Should().BeFalse("no user identity, no cookies");
         options.MaxRequestBodySize.Should().Be(RequestSize.None, "a request body here is a COI or vendor PII");
         options.TracesSampleRate.Should().Be(BackendSentry.DefaultTracesSampleRate);
     }
