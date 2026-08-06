@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.RegularExpressions;
 using CompliDrop.Api.Tests.TestHelpers;
 using FluentAssertions;
 using Microsoft.AspNetCore.TestHost;
@@ -31,21 +32,37 @@ public sealed class HealthProbeTests(IntegrationTestFixture fixture) : Integrati
         var client = CreateClient();
 
         HttpResponseMessage health, live;
+        int afterLiveness, afterReadiness;
         connections.Armed = true;
         try
         {
             health = await client.GetAsync("/health");
             live = await client.GetAsync("/health/live");
+            afterLiveness = connections.FaultCount;
+
+            // POSITIVE CONTROL, inside the SAME armed window. A fault count of zero is also exactly what
+            // a mis-wired harness yields — an interceptor never registered, or a second host resolving a
+            // different singleton — so on its own the assertion below cannot tell "liveness asked
+            // nothing" from "the hook was never live". One readiness probe settles it: that is the one
+            // endpoint that DOES open a connection, so a count that MOVES here proves the count that
+            // stayed put above was a real observation.
+            await client.GetAsync("/health/ready");
+            afterReadiness = connections.FaultCount;
         }
         finally
         {
-            var faults = connections.FaultCount;
             connections.Reset();
-            faults.Should().Be(0,
-                "a liveness probe that opens a database connection lets a transient Neon blip restart a "
-                + "healthy container — and the restart re-enters the fail-fast boot while the database is "
-                + "still blipping, turning a 30-second blip into a hard outage (ADR 0053)");
         }
+
+        // Asserted after the try, not inside the finally: a finally that throws its own assertion
+        // REPLACES whatever the try was failing with, so the harness's real error would never be seen.
+        afterLiveness.Should().Be(0,
+            "a liveness probe that opens a database connection lets a transient Neon blip restart a "
+            + "healthy container — and the restart re-enters the fail-fast boot while the database is "
+            + "still blipping, turning a 30-second blip into a hard outage (ADR 0053)");
+        afterReadiness.Should().Be(1,
+            "the fault hook has to have been ARMED for the zero above to mean anything — the readiness "
+            + "probe is the one endpoint that opens a connection, so it is the control");
 
         health.StatusCode.Should().Be(HttpStatusCode.OK, "the process is up, which is all /health claims");
         live.StatusCode.Should().Be(HttpStatusCode.OK);
@@ -99,14 +116,56 @@ public sealed class HealthProbeTests(IntegrationTestFixture fixture) : Integrati
         // response — the ticket's own red-team correction, and the reason item 4 is Low rather than a
         // broad infra disclosure. What survives is narrow (whatever EF does NOT swallow) but the rule is
         // absolute for a PUBLIC, unauthenticated endpoint, so it is pinned where it is decidable.
+        //
+        // Pinned by SHAPE, not by a blacklist of spellings. The rule is "nothing the data layer said
+        // reaches the response", and two literals cannot express it: ex.InnerException.Message,
+        // ex.GetBaseException().Message, $"{ex}", Results.Problem(detail: $"{ex}") and
+        // Results.Json(new { error = ex }) — serializing an exception emits its message — all sail past
+        // one, and renaming the caught variable defeats any of them (#390 review, S2). So instead:
+        // enumerate what the recovery path may RETURN, and where the exception may be READ.
         var source = File.ReadAllText(SourceScan.ProductionFile("Program.cs"));
         var handler = SourceScan.ExtractMethodBody(source, "app.MapGet(\"/health/ready\"");
+        var recovery = SourceScan.ExtractMethodBody(handler, "catch (");
 
+        // 0. The two spellings that were actually there before #390, kept for the legible failure.
         handler.Should().NotContain("ex.Message",
             "an exception message from the data layer names the host, database and user it could not reach");
         handler.Should().NotContain("ex.ToString");
+
+        // 1. The recovery path produces exactly one response, and that response carries no payload at
+        //    all. Counting every `Results.` is what makes this a whitelist: a second one, whatever it
+        //    is spelled and whatever it wraps, fails here.
+        SourceScan.Count(recovery, "Results.").Should().Be(1,
+            "the failure branch answers with one thing and one thing only");
+        recovery.Should().Contain("Results.StatusCode(503)",
+            "a bare status — anything with a body is a body we would have to audit for what it names");
+
+        // 2. The caught exception may be read in exactly one place: handed WHOLE to the logger as its
+        //    exception argument. Every other mention is a candidate response payload — formatted into a
+        //    string, projected into an anonymous object, unwrapped through InnerException. Keyed on the
+        //    name the catch clause actually declares, so renaming `ex` cannot slip past.
+        var caught = Regex.Match(handler, @"catch\s*\(\s*\w[\w.<>]*\s+(?<name>\w+)\s*\)");
+        caught.Success.Should().BeTrue(
+            "the recovery path must name its exception for this pin to be able to follow it");
+        var name = caught.Groups["name"].Value;
+
+        var mentions = handler.Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => Regex.IsMatch(line, $@"\b{Regex.Escape(name)}\b"))
+            .ToList();
+
+        mentions.Should().OnlyContain(
+            line => line.StartsWith("catch (", StringComparison.Ordinal)
+                || (line.StartsWith("logger.Log", StringComparison.Ordinal)
+                    && line.Contains($"({name},", StringComparison.Ordinal)),
+            "the exception may be declared and handed to the logger, and nothing else — every other "
+            + "mention is a value that could end up in a body served to an unauthenticated caller");
+
+        // 3. …and it does have to reach the logger: a bare 503 that records nothing is the silence this
+        //    ticket is about, on the branch where we know the most.
         handler.Should().Contain("logger.Log",
             "the cause has to go somewhere — a bare 503 that logs nothing is the silence this ticket is about");
+        recovery.Should().Contain($"logger.Log", "including on the branch EF did not swallow");
     }
 
     [Fact]

@@ -177,8 +177,9 @@ public sealed class CustomWebApplicationFactory(
             // Lets a test make the database UNREACHABLE to the request path — the state the health
             // probes disagree about (#390 / ADR 0053): liveness stays 200 and never asks, readiness
             // answers 503. A second host on a dead connection string cannot stand in, because
-            // Program.cs migrates at boot and that host would never start. Same callback-style arming
-            // and containment as the hook above; inert until a test sets Armed.
+            // Program.cs migrates at boot and that host would never start. Armed by a flag rather than a
+            // callback (there is no HttpContext at the connection layer), inert until a test sets Armed,
+            // and disarmed by IntegrationTestFixture.ResetAsync like the four hooks around it.
             services.AddSingleton<SystemConnectionFaultInterceptor>();
             services.AddSingleton<IDbContextOptionsConfiguration<SystemDbContext>, SystemConnectionFaultOptionsConfiguration>();
 

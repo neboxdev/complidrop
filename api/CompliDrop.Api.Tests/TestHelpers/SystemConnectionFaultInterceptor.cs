@@ -26,7 +26,10 @@ namespace CompliDrop.Api.Tests.TestHelpers;
 /// the same reason (there is no <c>HttpContext</c> at the connection layer). It does NOT self-disarm —
 /// the liveness pin is an assertion about TWO requests — so callers arm it in a <c>try</c> and
 /// <see cref="Reset"/> in the matching <c>finally</c>. Containment is the suite being serial
-/// (<c>AssemblyInfo</c>'s <c>CollectionBehavior(DisableTestParallelization = true)</c>).
+/// (<c>AssemblyInfo</c>'s <c>CollectionBehavior(DisableTestParallelization = true)</c>) PLUS
+/// <c>IntegrationTestFixture.ResetAsync</c>, which disarms it between tests like the four hooks beside
+/// it — the backstop matters most here, because left armed this one fails every
+/// <see cref="SystemDbContext"/> connection in the rest of the run, not just one write.
 /// </summary>
 public sealed class SystemConnectionFaultInterceptor : DbConnectionInterceptor
 {

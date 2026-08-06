@@ -19,9 +19,10 @@ namespace CompliDrop.Api.Tests.TestHelpers;
 /// <c>await ...(ct)</c> in the handler throws → <c>finally</c> → cleanup.
 /// <para/>
 /// TestServer's own request lifetime is untouched, so the request still completes normally: the
-/// <c>OperationCanceledException</c> reaches <c>ExceptionHandlingMiddleware</c> and comes back as the
-/// ordinary 500 envelope — which means the client's response arrives only AFTER the handler's
-/// <c>finally</c> has run, and the test can assert on the blob store with no waiting.
+/// <c>OperationCanceledException</c> reaches <c>ExceptionHandlingMiddleware</c> and comes back as a
+/// BODILESS 499 (#390 — it was the ordinary 500 envelope until then; an abort is not a server fault
+/// and nobody is left to read an envelope) — which means the client's response arrives only AFTER the
+/// handler's <c>finally</c> has run, and the test can assert on the blob store with no waiting.
 /// <para/>
 /// Inert unless the request carries <see cref="HeaderName"/>, so every other test is unaffected.
 /// </summary>

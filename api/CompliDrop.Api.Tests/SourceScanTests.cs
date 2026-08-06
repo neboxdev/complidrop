@@ -75,6 +75,39 @@ public class SourceScanTests
     }
 
     [Fact]
+    public void The_body_extractor_anchors_on_code_not_on_prose_quoting_it()
+    {
+        // A gate's anchor is a code shape, and the prose around it routinely quotes that shape — every
+        // one of these gates has a doc comment naming the very signature it scans for. Anchoring on the
+        // RAW source would land the scan on the comment and hand the gate whatever braces followed,
+        // which is a gate that silently stops enforcing (#390 review, S2).
+        const string fixture = """
+            class C
+            {
+                // See private static async Task<IResult> Target( below — it must not ExecuteUpdateAsync().
+                private static void Decoy() { FirstOrDefaultAsync(); }
+
+                private static async Task<IResult> Target(Guid id)
+                {
+                    return await db.Documents.Where(d => d.Id == id).ExecuteUpdateAsync(s => s);
+                }
+            }
+            """;
+
+        var body = SourceScan.ExtractMethodBody(fixture, TargetSignature);
+
+        SourceScan.Count(body, "ExecuteUpdateAsync(").Should().Be(1,
+            "the anchor belongs to the method, not to the sentence naming it");
+        SourceScan.Count(body, "FirstOrDefaultAsync(").Should().Be(0,
+            "landing on the comment would have handed the gate the DECOY's body instead");
+
+        var onlyInProse = () => SourceScan.ExtractMethodBody(
+            "// private static async Task<IResult> Target(Guid id)\nclass C { }", TargetSignature);
+        onlyInProse.Should().Throw<InvalidOperationException>().WithMessage("*not found*",
+            "a signature that survives only in a comment means the method was renamed — fail, don't guess");
+    }
+
+    [Fact]
     public void The_body_extractor_fails_closed_when_the_method_is_missing_or_unbalanced()
     {
         // Both failure modes THROW rather than returning "" — the difference between a gate that is
