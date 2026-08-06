@@ -429,26 +429,52 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 // ============================================================
-// Health endpoints
+// Health endpoints — LIVENESS vs READINESS (ADR 0053)
 // ============================================================
+// Two different questions, and which probe a given consumer points at is a real operational choice:
+//
+//   /health, /health/live  →  LIVENESS.  "This process is up." DB-BLIND on purpose. This is what a
+//                             restart/deploy healthcheck belongs on: Railway's healthcheck path is
+//                             configured OUTSIDE this repo (dashboard setting — there is no
+//                             railway.json here), so a DB-touching liveness probe would let a
+//                             transient Neon blip kill a healthy container, and the restart re-enters
+//                             ADR 0016's fail-fast boot, which ABORTS while the DB is still blipping.
+//                             A 30-second blip becomes a hard outage. Do not "improve" these by
+//                             adding a database check — that is the trade, not an oversight.
+//   /health/ready          →  READINESS. "This process can serve." The ONLY probe that touches the
+//                             database, and therefore the one an UPTIME MONITOR / alert belongs on:
+//                             the #226 shape (process up, every query failing) is green on the two
+//                             liveness probes BY DESIGN and 503 here.
+//
+// Repointing UptimeRobot at /health/ready is an EXTERNAL action (its dashboard), tracked in the QA
+// launch checklist — nothing in this repo can do it. See ADR 0053 and README § Health probes.
 app.MapGet("/health/live", () => Results.Ok(new { status = "live", at = DateTime.UtcNow }));
 
-app.MapGet("/health/ready", async (SystemDbContext db, CancellationToken ct) =>
+app.MapGet("/health/ready", async (SystemDbContext db, ILogger<Program> logger, CancellationToken ct) =>
 {
     try
     {
-        var ok = await db.Database.CanConnectAsync(ct);
-        return ok
-            ? Results.Ok(new { status = "ready", at = DateTime.UtcNow })
-            : Results.StatusCode(503);
+        if (await db.Database.CanConnectAsync(ct))
+            return Results.Ok(new { status = "ready", at = DateTime.UtcNow });
+
+        // The branch a real DB incident lands on: EF swallows connection/auth failures and answers
+        // false. It used to answer a silent 503 — the outage left no trace on OUR side at all.
+        logger.LogWarning("Readiness probe failed: the database is not reachable.");
+        return Results.StatusCode(503);
     }
-    catch (Exception ex)
+    catch (Exception ex) when (!ct.IsCancellationRequested)
     {
-        return Results.Json(new { status = "not_ready", error = ex.Message }, statusCode: 503);
+        // Whatever CanConnectAsync did NOT swallow. The cause goes to the logs; the response stays a
+        // bare 503, because this endpoint is public and unauthenticated and an exception message is
+        // the one thing here that could name our infrastructure (#390). The `when` keeps a client
+        // abort out: a monitor hanging up mid-probe is not a readiness failure, and the abort carve-out
+        // in ExceptionHandlingMiddleware already answers it correctly.
+        logger.LogError(ex, "Readiness probe failed.");
+        return Results.StatusCode(503);
     }
 });
 
-// Legacy health endpoint — kept for UptimeRobot compatibility
+// Liveness twin of /health/live, kept because UptimeRobot points here today (see the block above).
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
 
 app.MapWaitlistEndpoints();

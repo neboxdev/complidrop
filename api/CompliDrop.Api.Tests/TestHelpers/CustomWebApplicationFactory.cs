@@ -174,6 +174,14 @@ public sealed class CustomWebApplicationFactory(
             services.AddSingleton<SystemCommandFaultInterceptor>();
             services.AddSingleton<IDbContextOptionsConfiguration<SystemDbContext>, SystemCommandFaultOptionsConfiguration>();
 
+            // Lets a test make the database UNREACHABLE to the request path — the state the health
+            // probes disagree about (#390 / ADR 0053): liveness stays 200 and never asks, readiness
+            // answers 503. A second host on a dead connection string cannot stand in, because
+            // Program.cs migrates at boot and that host would never start. Same callback-style arming
+            // and containment as the hook above; inert until a test sets Armed.
+            services.AddSingleton<SystemConnectionFaultInterceptor>();
+            services.AddSingleton<IDbContextOptionsConfiguration<SystemDbContext>, SystemConnectionFaultOptionsConfiguration>();
+
             // The other half of the #366 harness: fails an explicit transaction's COMMIT with 40001 and
             // runs a callback once the rollback has released the row locks. Same arming and containment
             // as the hook above (callback, not header) — see CommitFaultInterceptor for why the
