@@ -15,6 +15,7 @@ using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Serilog;
+using Serilog.Events;
 using Serilog.Formatting.Json;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -402,7 +403,18 @@ else
     app.UseHttpsRedirection();
 }
 
-app.UseSerilogRequestLogging();
+// Serilog's request log sits INSIDE ExceptionHandlingMiddleware, and its catch hard-codes "responded
+// 500" at Error for any exception passing through it. So a client abort printed an Error line here too
+// — the louder of the two, since it names a status the request never had (#390). Only that one case
+// moves; everything else keeps Serilog's own default mapping, restated inline because the default is a
+// private static. The discrimination is the middleware's: cancellation ONLY counts as an abort when
+// RequestAborted is the token that fired.
+app.UseSerilogRequestLogging(opts => opts.GetLevel = (ctx, _, ex) =>
+    ex is OperationCanceledException && ctx.RequestAborted.IsCancellationRequested
+        ? LogEventLevel.Debug
+        : ex is not null || ctx.Response.StatusCode > 499
+            ? LogEventLevel.Error
+            : LogEventLevel.Information);
 app.UseRouting();
 app.UseCors();
 // Gate behind config so integration tests (which have no client IP to partition on) can
