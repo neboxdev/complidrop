@@ -478,7 +478,15 @@ app.MapGet("/health/ready", async (SystemDbContext db, ILogger<Program> logger, 
 
         // The branch a real DB incident lands on: EF swallows connection/auth failures and answers
         // false. It used to answer a silent 503 — the outage left no trace on OUR side at all.
-        logger.LogWarning("Readiness probe failed: the database is not reachable.");
+        //
+        // …unless the CLIENT left, which is the same carve-out as the catch's `when` below, applied to
+        // the branch that actually fires. A monitor hanging up mid-probe is not a readiness failure,
+        // and saying "the database is not reachable" about a probe we never finished mints a FALSE
+        // outage line in the very log this endpoint added for outage detection (#390 review round 2).
+        // The 503 itself stays unconditional — only the CLAIM is dropped, because an abandoned probe
+        // establishes nothing about the database either way.
+        if (!ct.IsCancellationRequested)
+            logger.LogWarning("Readiness probe failed: the database is not reachable.");
         return Results.StatusCode(503);
     }
     catch (Exception ex) when (!ct.IsCancellationRequested)

@@ -113,6 +113,51 @@ public sealed class HealthProbeTests(IntegrationTestFixture fixture) : Integrati
     }
 
     [Fact]
+    public async Task A_readiness_probe_the_client_abandoned_does_not_claim_the_database_is_down()
+    {
+        // The two 503 branches used to disagree about a client hang-up (#390 review round 2, S5). The
+        // catch has always been guarded by `when (!ct.IsCancellationRequested)` — "a monitor hanging up
+        // mid-probe is not a readiness failure" — but the branch a real incident lands on is the FALSE
+        // one, and that one warned regardless. So the endpoint added for outage DETECTION was minting a
+        // "the database is not reachable" line for probes that were never finished, in the log an
+        // operator reads to decide whether there is an outage.
+        //
+        // Both halves have to be arranged: the token is cancelled before the pipeline runs, AND the
+        // connection hook makes the open fail with something that is NOT a cancellation — which is what
+        // sends CanConnectAsync down the false branch instead of out through the catch.
+        var sink = new CapturingLogEventSink();
+        await using var factory = Fixture.Factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services => services.AddSingleton<ILogEventSink>(sink)));
+        var connections = factory.Services.GetRequiredService<SystemConnectionFaultInterceptor>();
+
+        HttpResponseMessage resp;
+        int faults;
+        connections.Armed = true;
+        try
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, "/health/ready");
+            req.Headers.Add(ClientAbortStartupFilter.BeforeHandlerHeaderName, "1");
+            resp = await factory.CreateClient().SendAsync(req);
+            faults = connections.FaultCount;
+        }
+        finally
+        {
+            connections.Reset();
+        }
+
+        // Asserted after the try — see the liveness pin above.
+        faults.Should().BeGreaterThan(0, "precondition: the probe must have actually tried to connect");
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable,
+            "the 503 stays unconditional — and it also proves WHICH branch ran: a cancellation escaping "
+            + "CanConnectAsync would take the catch's `when` and come back 499 instead");
+
+        sink.Events.Should().NotContain(
+            e => e.RenderMessage().Contains("the database is not reachable"),
+            "an abandoned probe establishes nothing about the database, and a false outage line in the "
+            + "outage log is worse than no line at all");
+    }
+
+    [Fact]
     public void The_readiness_handler_never_puts_an_exception_message_in_its_response()
     {
         // The behavioural test above cannot reach the catch: EF answers false for the exceptions a real

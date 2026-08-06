@@ -59,7 +59,12 @@ dangerous one:
    § Health probes and monitoring — rather than silently attempted from code.
 4. The readiness probe reports failures **server-side**: a warning on the not-reachable branch
    (silent until now) and an error with the exception on the branch EF does not swallow, while the
-   response stays a bare 503 (#390 item 4 — the endpoint is public and unauthenticated).
+   response stays a bare 503 (#390 item 4 — the endpoint is public and unauthenticated). Neither line
+   fires when the CALLER hung up — the catch by its `when (!ct.IsCancellationRequested)`, the
+   not-reachable branch by the same test as an `if` (round-2 review). A probe we never finished
+   establishes nothing about the database, and "the database is not reachable" is precisely the
+   sentence that would turn this endpoint's own log into a source of false outages. The 503 stays
+   unconditional; only the claim is dropped.
 
 Net invariant: **the probe that a monitor polls is the one that answers a question about the
 product; the probe that an orchestrator polls answers a question about the process — and neither
