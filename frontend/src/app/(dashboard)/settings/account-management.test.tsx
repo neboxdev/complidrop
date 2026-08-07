@@ -201,7 +201,10 @@ describe("DataExportSection — export (#183 / #320 FP-113)", () => {
   });
 });
 
-describe("DangerZone — delete account (#183)", () => {
+// Named for the control that ships, not for the endpoint behind it (#398 round 2 / S3). This is
+// the one line CI prints for every case below, and the same correction round 2 made in
+// providers.test.tsx — a title asserting a claim the ticket retired is a record that outlives it.
+describe("DangerZone — close account (#183 / #398)", () => {
   beforeEach(() => resetSonner());
 
   it("requires a confirm step, then deletes and redirects to /login", async () => {
@@ -224,6 +227,10 @@ describe("DangerZone — delete account (#183)", () => {
     fireEvent.click(screen.getByRole("button", { name: /^close account$/i }));
 
     await waitFor(() => expect(captured).toEqual({ password: "Password1234" }));
+    // The success toast is the LAST deletion claim a closing customer reads, and until #398
+    // round 2 nothing asserted it at all — "Your account has been deleted." could be restored
+    // here and ship green. The frontend twin of the backend's AssertNoErasureClaim (C2).
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Your account is closed."));
     await waitFor(() => expect(navState.router.push).toHaveBeenCalledWith("/login"));
     // useDeleteAccount's onSuccess must tear down the cached session (setMeCache(null)
     // + qc.clear()) so the deleted user can't keep rendering as authenticated.
