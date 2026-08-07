@@ -25,11 +25,14 @@ on:
       # exact claim the ticket removed from every other surface, through two sweeps. A
       # README-only edit must run the census that guards it.
       - "README.md"
-      # TWO frontend suites read the counsel gate's §0 register and check that every
+      # THREE frontend suites read the counsel gate's §0 register and check that every
       # sentence a row quotes for the attorney to bless still ships verbatim — a quote that
       # drifted is worse than none, since counsel would bless a string nobody ships. CLM-4 is
       # pinned by src/test/marketing-claims.test.ts (#403), CLM-5 by
-      # src/app/portal/[token]/page.test.tsx (#404); both parse the row through
+      # src/app/portal/[token]/page.test.tsx (#404), and CLM-7's closure notice by
+      # src/app/(dashboard)/settings/account-management.test.tsx (#398 — that sentence embeds a
+      # <Link> to /privacy, so it is not contiguous in source and only a render can read it,
+      # the same split CLM-5 lives on); all three parse the row through
       # src/test/counsel-brief.ts. So a brief-only edit must run frontend tests.
       - "docs/rule-engine/G1-COUNSEL-BRIEF.md"
   pull_request:
@@ -42,11 +45,14 @@ on:
       - "api/CompliDrop.Api/Data/Seed/ComplianceTemplateSeed.cs"
       - "api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json"
       - "README.md"
-      # TWO frontend suites read the counsel gate's §0 register and check that every
+      # THREE frontend suites read the counsel gate's §0 register and check that every
       # sentence a row quotes for the attorney to bless still ships verbatim — a quote that
       # drifted is worse than none, since counsel would bless a string nobody ships. CLM-4 is
       # pinned by src/test/marketing-claims.test.ts (#403), CLM-5 by
-      # src/app/portal/[token]/page.test.tsx (#404); both parse the row through
+      # src/app/portal/[token]/page.test.tsx (#404), and CLM-7's closure notice by
+      # src/app/(dashboard)/settings/account-management.test.tsx (#398 — that sentence embeds a
+      # <Link> to /privacy, so it is not contiguous in source and only a render can read it,
+      # the same split CLM-5 lives on); all three parse the row through
       # src/test/counsel-brief.ts. So a brief-only edit must run frontend tests.
       - "docs/rule-engine/G1-COUNSEL-BRIEF.md"
 

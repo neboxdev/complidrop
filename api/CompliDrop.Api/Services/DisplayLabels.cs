@@ -1,4 +1,4 @@
-﻿using System.Text.RegularExpressions;
+using System.Text.RegularExpressions;
 using CompliDrop.Api.Entities;
 
 namespace CompliDrop.Api.Services;
