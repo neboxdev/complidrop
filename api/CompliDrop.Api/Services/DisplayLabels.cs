@@ -1,4 +1,4 @@
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 using CompliDrop.Api.Entities;
 
 namespace CompliDrop.Api.Services;
@@ -91,7 +91,10 @@ public static class DisplayLabels
             ["user.email_verified"] = "Email verified",
             ["user.email_changed"] = "Email changed",
             ["user.email_change_requested"] = "Email change requested",
-            ["user.account_deleted"] = "Account deleted",
+            // #398 / ADR 0013 Amendment 1: the stored action key keeps its name (renaming it
+            // orphans historical rows), the LABEL does not claim a deletion. This one prints
+            // into the audit PDF via ExportService and into the dashboard feed's mirror.
+            ["user.account_deleted"] = "Account closed",
         };
 
     public static string Action(string? action)

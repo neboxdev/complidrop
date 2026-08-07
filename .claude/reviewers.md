@@ -232,6 +232,14 @@ Both are defined in this repo's `.claude/agents/`.
   - `frontend/src/lib/removal-copy.ts` single-sources the document + vendor notices for ADR
     0047 §1's reason (the document sentence shipped as two hand-copied literals). Inlining
     either back is the drift, not a simplification.
+  - The audit LABEL for the closure event reads **"Account closed"** in both mirrors
+    (`frontend/src/lib/display-labels.ts` + `Services/DisplayLabels.cs`) while the stored ACTION
+    key stays `user.account_deleted` — renaming the key orphans historical rows. The label is
+    user-facing on two surfaces (`DashboardEndpoints.FeedVisibleActions` whitelists the action;
+    `ExportService` prints `DisplayLabels.Action` into the audit PDF) and readable again exactly
+    on ADR 0013's support path, so "the key still says deleted, align the label back" is the bug.
+    The census cannot reach this one — it is a MAP VALUE, not prose — which is why both mirrors
+    carry a direct assertion instead.
   - What is DELIBERATELY not done: no purge job, no retention period, no change to what is
     retained, and no per-dialog retention paragraph (that disclosure belongs to `/privacy`
     § "How long we keep it" and the closure card). Proposing option (b) — build the purge —

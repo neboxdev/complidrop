@@ -99,6 +99,21 @@ describe("actionLabel (#188)", () => {
     expect(actionLabel("fooBar.created")).toBe("Foo Bar · Created");
     expect(actionLabel("weird.action")).toBe("Weird · Action");
   });
+  it("prints account closure as a closure, key unchanged (#398)", () => {
+    // The stored action key stays `user.account_deleted` — renaming it orphans
+    // historical audit rows — but the LABEL reaches two user surfaces: the
+    // dashboard activity feed (`DashboardEndpoints.FeedVisibleActions` whitelists
+    // this action) and the exported audit PDF via the backend mirror
+    // (`Services/DisplayLabels.cs` → `ExportService`). It was the only entry here
+    // still saying the product deletes, with every sibling soft-delete already
+    // reading "removed" — and it becomes readable again exactly on ADR 0013's
+    // designed-in support path (clear `DeletedAt` to restore the account).
+    expect(actionLabel("user.account_deleted")).toBe("Account closed");
+    expect(actionLabel("user.account_deleted")).not.toMatch(/delet/i);
+    // The siblings this one was out of step with.
+    expect(actionLabel("document.deleted")).toBe("Document removed");
+    expect(actionLabel("vendor.deleted")).toBe("Vendor removed");
+  });
 });
 
 describe("relativeTime (#318 FP-049)", () => {

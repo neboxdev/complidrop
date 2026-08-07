@@ -95,6 +95,7 @@ recreate this defect in a new sentence.
 | `/privacy`: "…we clear your name and email from your account record straight away, cancel any paid plan, and stop sending reminders." | The scrub, the Stripe cancel, and `ReminderBackgroundService`'s `o.DeletedAt == null` org filter. |
 | `/privacy`: "We have not set a fixed disposal period for those records, so they stay with us until you ask us to delete them." | True by absence — no purge job exists. The request channel is the one § "Your choices and rights" already offers. |
 | "This removes the document from your records. You won't be able to undo it." | `DeleteDocument` soft-deletes and **retains the blob** so the document *"remains recoverable"* (its own comment). The claim is scoped to the customer, who has no restore affordance anywhere in `frontend/`. |
+| Audit label "Account closed" (round 2) | The `user.account_deleted` audit ACTION key is a stored value and keeps its name; its LABEL prints in the dashboard activity feed and the exported audit PDF (`ExportService` → `DisplayLabels.Action`), and it becomes readable again on exactly the support path § Consequences names as a benefit — so it would have reported a deletion for an account nothing deleted. Every sibling soft-delete already read "removed". |
 
 Two further surfaces carried the same family and moved with it: the vendor removal dialog (same
 soft-delete, same scoping), and the Settings data-export card, which offered *"a JSON copy of your …
