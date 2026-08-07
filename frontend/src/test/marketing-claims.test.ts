@@ -226,7 +226,9 @@ const deletionFixture: { retention: string; rules: FixtureRule[] } = JSON.parse(
  */
 const DELETION_CLAIMS: readonly ClaimRule[] = deletionFixture.rules.map((rule) => ({
   pattern: new RegExp(rule.pattern, "i"),
-  why: `${deletionFixture.retention}${rule.why}`,
+  // The fixture's `id` leads the reason so a failure here names the same rule the backend census
+  // would name for the same sentence — that is how the two are compared by hand.
+  why: `[${rule.id}] ${deletionFixture.retention}${rule.why}`,
   sample: rule.sample,
   alsoCatches: rule.alsoCatches,
 }));
