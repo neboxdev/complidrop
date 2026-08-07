@@ -29,11 +29,11 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { describe, it, expect } from "vitest";
+import { counselRegisterRow } from "./counsel-brief";
 
 const FRONTEND_SRC = resolve(__dirname, "..");
 const REPO_ROOT = resolve(__dirname, "..", "..", "..");
 const REPO_README = join(REPO_ROOT, "README.md");
-const COUNSEL_BRIEF = join(REPO_ROOT, "docs", "rule-engine", "G1-COUNSEL-BRIEF.md");
 const TEST_FILE_RE = /\.(test|spec)\.tsx?$/;
 
 interface ClaimRule {
@@ -226,10 +226,10 @@ describe("Marketing-claim census (#403)", () => {
  * defect that put the footer tagline in one row and not the other.
  */
 describe("Counsel brief §0 CLM-4 register (#403)", () => {
-  const row = readFileSync(COUNSEL_BRIEF, "utf8")
-    .split("\n")
-    .filter((line) => line.startsWith("| **CLM-4**"));
-  const quoted = row.length === 1 ? [...row[0].matchAll(/\*"(.+?)"\*/g)].map((m) => m[1]) : [];
+  // Path walk + row filter + quote extraction live in `./counsel-brief` — the
+  // CLM-5 pin in `app/portal/[token]/page.test.tsx` needs the same three steps
+  // and used to carry its own copy of them (#404 review S6).
+  const { rows: row, quoted } = counselRegisterRow("CLM-4");
   const shipped = SURFACES.map(([, path]) => normalize(readFileSync(path, "utf8")));
 
   it("is a single row that quotes every item it asks counsel to bless", () => {

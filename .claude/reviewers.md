@@ -53,6 +53,12 @@ Both are defined in this repo's `.claude/agents/`.
     it. Same for the `SUPPORT_EMAIL` mailto, pinned by a singular `getByRole("link")`.
   - Same-tab link, matching every other legal link in `frontend/` — there is no
     `target="_blank"` anywhere in the tree. Adding one here is a new pattern, not a fix.
+  - `/terms` is NOT linked, and the reason is RELEVANCE only (ADR 0054 Option E, corrected in
+    the #404 review). Do NOT restate it as "the Terms bind a customer, the vendor is not one":
+    `terms/page.tsx` accepts on "or using" and its Acceptable-use clause governs uploading, so
+    they are drafted to reach this reader — whether they BIND one who was never shown them is
+    CLM-5 (iv), routed to counsel. Both halves are pinned by
+    `marketing-content.test.tsx`'s "Terms are drafted to reach a portal uploader".
   - Frontend-only by design: `/api/portal/*` is untouched, this change ADDS the token to no
     link and no analytics property, and no session is needed to read the policy. The DOM half
     is what `assertNotInDom` pins, and only that half — its own docstring scopes it out of

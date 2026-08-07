@@ -144,9 +144,15 @@ is an edit to two components in one file.
 
 ### Neutral
 
-- `/terms` is deliberately not linked. The vendor is not entering a subscription agreement, and a
-  second legal link on a favour-doing stranger's upload page trades disclosure for noise. The notice
-  points at the document that describes what happens to their data, which is the question they have.
+- `/terms` is deliberately not linked, on RELEVANCE — **not** on a claim that the Terms do not reach
+  this reader, which would be false. `frontend/src/app/terms/page.tsx` accepts on *"By creating an
+  account **or using** CompliDrop, you agree to them"*, and its Acceptable-use list governs
+  *uploading content you don't have the right to upload* — the act the portal vendor performs. So
+  the Terms are written to reach them; what is true is that a second legal link on a favour-doing
+  stranger's upload page trades disclosure for noise, and that the notice points at the document
+  answering the question they actually have (what happens to my file). Whether an agreement nobody
+  showed them binds them at all is a question for counsel, not for this ADR to assume either way —
+  it is routed as part of CLM-5.
 - The link opens in the same tab, matching every other legal link in the app (there is no
   `target="_blank"` anywhere in `frontend/`). The cost is a vendor who reads the policy *after*
   uploading loses the Received card on the way back; the card itself says the page can be closed, and
@@ -179,7 +185,15 @@ banner in the app. If one is ever warranted it belongs site-wide, driven by a ju
 not bolted onto one route by a notice ticket.
 
 ### Option E — Link `/terms` alongside `/privacy`
-**Rejected**: see § Consequences → Neutral. The Terms bind a *customer*; the vendor is not one.
+**Rejected on relevance**: see § Consequences → Neutral. The rejection deliberately does **not**
+rest on "the Terms bind a customer and the vendor is not one" — the shipped Terms contradict that.
+They accept on *"By creating an account **or using** CompliDrop, you agree to them"* and their
+Acceptable-use clause is aimed at uploading, so they are drafted to reach exactly this reader. A
+recorded rejection does not get re-examined, so the reason on file has to be the true one: the
+notice's job is to answer *what happens to my file*, `/privacy` is that document, and a second
+legal link here buys noise rather than disclosure. The consequence — a stranger arguably bound by
+an agreement the surface never showed them — is a **counsel question, routed under CLM-5**, not
+something this ADR settles by asserting the Terms do not apply.
 
 ### Option F — Suppress the cookie sentence when `NEXT_PUBLIC_POSTHOG_KEY` is unset
 **Rejected**: it would make the disclosure depend on a build-time variable, so no two deployments
@@ -191,4 +205,4 @@ would necessarily say the same thing, and the honest failure direction here is o
 - Gate: `docs/rule-engine/G1-COUNSEL-BRIEF.md` §0 (CLM-5) + §C
 - ADRs: [0047](0047-exports-carry-a-non-advice-disclaimer.md) (the on-by-default disclosure precedent this follows), [0043](0043-additional-insured-claim-wording-staged-behind-flag.md) (the flag-staging precedent it deliberately does not follow), [0032](0032-portal-upload-idempotency.md) (the portal upload path being disclosed)
 - Code: `frontend/src/app/portal/[token]/page.tsx` (`UploadPrivacyNotice`, `VisitPrivacyNotice`, `PrivacyPolicyLink`), `frontend/src/app/privacy/page.tsx` ("If you were sent an upload link")
-- Tests: `frontend/src/app/portal/[token]/page.test.tsx` ("notice at collection (#404)"), `frontend/src/app/marketing-content.test.tsx`
+- Tests: `frontend/src/app/portal/[token]/page.test.tsx` ("notice at collection (#404)" — presence in every state, the no-AI-vendor pin for §3, and the DOM-order pin for §1), `frontend/src/app/marketing-content.test.tsx` (the `/privacy` section, and the Terms clauses Option E's rationale rests on), `frontend/src/test/counsel-brief.{ts,test.ts}` (the shared §0 register reader both CLM pins use)

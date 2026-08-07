@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -429,6 +431,44 @@ describe("Legal + contact pages (#194)", () => {
     const mainHrefs = main.getAllByRole("link").map((l) => l.getAttribute("href"));
     expect(mainHrefs).toContain("/privacy");
     expect(mainHrefs).toContain("/contact");
+  });
+
+  it("Terms are drafted to reach a portal uploader — so no record may claim otherwise (#404)", () => {
+    // ADR 0054 declines to link /terms from the portal. Its FIRST rationale was
+    // "the Terms bind a customer; the vendor is not one" — falsified by this
+    // page, which accepts on "or using" and whose acceptable-use clause governs
+    // uploading, the one act the portal vendor performs. A recorded rejection
+    // does not get re-examined, so a false reason on file is a durable defect;
+    // the decision now stands on RELEVANCE and the binding question is routed
+    // to counsel as CLM-5 (iv).
+    const { container } = render(<TermsOfServicePage />);
+    const text = (container.textContent ?? "").replace(/\s+/g, " ");
+
+    // (1) Acceptance is not account-gated.
+    expect(
+      text,
+      "the Terms no longer accept on mere USE — ADR 0054 Option E and counsel item CLM-5 (iv) both rest on this clause and need re-reading",
+    ).toMatch(/creating an account or using [^.]*, you agree to them/i);
+    // (2) …and what they govern includes the vendor's act.
+    expect(
+      text,
+      "the Terms' acceptable-use clause no longer governs uploading — same two records to re-read",
+    ).toMatch(/upload content you don't have the right to upload/i);
+
+    // The ADR must not carry the retired reason. Both forms it took — and the
+    // hits, not the 20 KB document, are what a failure prints.
+    const adr = readFileSync(
+      resolve(__dirname, "..", "..", "..", "docs", "adr", "0054-portal-gives-notice-at-collection.md"),
+      "utf8",
+    ).replace(/\s+/g, " ");
+    const retired = [
+      /The Terms bind a \*customer\*; the vendor is not one/i,
+      /The vendor is not entering a subscription agreement/i,
+    ];
+    expect(
+      retired.filter((claim) => claim.test(adr)).map(String),
+      "ADR 0054 states a reason for not linking /terms that the shipped Terms contradict — a recorded rejection does not get re-examined, so the reason on file has to be the true one",
+    ).toEqual([]);
   });
 
   it("each legal/contact page sets a self-canonical and a descriptive title", () => {
