@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState, useCallback, useEffect } from "react";
 import { useDropzone, type FileRejection } from "react-dropzone";
@@ -70,6 +71,63 @@ type UploadError = {
 // rejectionCopy moved to @/lib/upload-policy (#265) — the dashboard documents
 // dropzone now shares the same code→copy mapping and accept list.
 
+// ── Notice at collection (#404 / counsel gate CLM-5) ─────────────────────────
+//
+// The portal is the one surface a NON-customer touches: the vendor never signed
+// up, agreed to nothing, and until now was told only "Secure upload". What
+// actually happens to their file, verified in code rather than assumed:
+//
+//   - it is stored in Azure Blob — `VendorPortalEndpoints` calls
+//     `IBlobStorageService.UploadAsync`, whose implementation is the Azure
+//     `BlobContainerClient` (`Services/BlobStorageService.cs`);
+//   - it is read by third-party AI services — `ExtractionWorker` runs Document
+//     AI OCR (`Services/Ocr/DocumentAiOcrService.cs`) and then the LLM selected
+//     by `Extraction:Provider` (`ExtractionClientFactory`, gemini by default);
+//   - and the VISIT is measured by PostHog — `app/layout.tsx` wraps every route
+//     in `Providers`, which calls `initAnalytics()`; there is no `app/portal`
+//     layout opting out, and the portal route sits under the root one.
+//
+// Notice-at-collection means the disclosure is at or BEFORE the point of
+// collection, so it renders beside the dropzone in every state that offers one
+// — never only on the success card. The two states with no dropzone still get
+// the policy link, because the PostHog pageview fires there too.
+//
+// It names no AI vendor on purpose. `Extraction:Provider` is a config switch,
+// so a portal sentence naming one would go stale silently; the Privacy Policy
+// owns the named subprocessor list, one link away, where it is maintained.
+// (Whether that list stays complete on every configured provider path is a
+// separate counsel item — CLM-6 / #405 — not something this notice can fix.)
+//
+// Module scope, not inline: `react-hooks/static-components` blocks a component
+// declared inside another component's render body.
+function PrivacyPolicyLink() {
+  return (
+    <Link href="/privacy" className="underline underline-offset-2 hover:text-sky-700">
+      Privacy Policy
+    </Link>
+  );
+}
+
+/** Rendered wherever the vendor can upload — the loading shell included, so the notice is never absent while the dropzone is. */
+function UploadPrivacyNotice() {
+  return (
+    <p className="text-center text-xs text-slate-500">
+      By uploading, you agree your document will be stored and processed — including
+      automated reading by the AI services we use — as described in our{" "}
+      <PrivacyPolicyLink />. This page also uses cookies to measure how it&apos;s used.
+    </p>
+  );
+}
+
+/** The dead-link and transient-failure states: nothing to upload, but the visit is still measured. */
+function VisitPrivacyNotice() {
+  return (
+    <p className="mt-2 text-center text-xs text-slate-500">
+      This page uses cookies to measure how it&apos;s used — see our <PrivacyPolicyLink />.
+    </p>
+  );
+}
+
 // Branded loading state that mirrors the portal shell (secure-upload brand +
 // a skeleton dropzone) instead of a bare unstyled "Loading…". The portal is a
 // one-shot, high-empathy surface often hit on a slow mobile connection — a
@@ -95,6 +153,9 @@ function PortalLoadingSkeleton() {
           <div className="mx-auto mt-4 h-4 w-56 rounded bg-slate-200/60 motion-safe:animate-pulse" />
           <div className="mx-auto mt-2 h-3 w-40 rounded bg-slate-200/50 motion-safe:animate-pulse" />
         </div>
+        {/* Real copy, not a skeleton bar (#404): the notice is the one element that must never
+            be pending — and rendering it here also keeps the shell from reflowing on settle. */}
+        <UploadPrivacyNotice />
         <p className="text-center text-xs text-slate-500">
           Powered by <span className="font-semibold text-sky-700">CompliDrop</span>
         </p>
@@ -323,7 +384,9 @@ export default function PortalPage() {
   // "ask your customer for a fresh link". `!info && !deadlink` defensively falls here too (retryable).
   if (!info && loadError?.kind !== "deadlink") {
     return (
-      <main className="min-h-screen flex items-center justify-center px-4">
+      <main className="min-h-screen flex flex-col items-center justify-center px-4">
+        {/* The notice sits OUTSIDE role="alert" — it is standing disclosure, not part of the failure
+            a screen reader is being interrupted for. */}
         <div className="max-w-md text-center p-6" role="alert">
           <p className="font-medium text-slate-800">We couldn&apos;t load this page.</p>
           <p className="mt-2 text-sm text-slate-500">
@@ -337,6 +400,7 @@ export default function PortalPage() {
             <RefreshCw className="h-4 w-4" /> Try again
           </button>
         </div>
+        <VisitPrivacyNotice />
       </main>
     );
   }
@@ -345,7 +409,7 @@ export default function PortalPage() {
   // The server's curated message (when present) rides below as a small detail line.
   if (!info) {
     return (
-      <main className="min-h-screen flex items-center justify-center">
+      <main className="min-h-screen flex flex-col items-center justify-center px-4">
         <div className="max-w-md text-center p-6">
           <p className="text-rose-600 font-medium">This link is no longer available.</p>
           <p className="text-sm text-slate-500 mt-2">
@@ -355,6 +419,7 @@ export default function PortalPage() {
             <p className="text-xs text-slate-500 mt-3">{loadError.message}</p>
           )}
         </div>
+        <VisitPrivacyNotice />
       </main>
     );
   }
@@ -454,6 +519,12 @@ export default function PortalPage() {
           </p>
           {uploading && <p className="text-xs text-sky-600 mt-2">Uploading…</p>}
         </div>
+
+        {/* Directly beneath the dropzone, ABOVE the error and Received cards (#404): the vendor
+            reads it while deciding to upload, and it stays put once they have. It is deliberately
+            not conditioned on `atQuota` — the notice belongs to the collection surface, not to a
+            particular attempt. */}
+        <UploadPrivacyNotice />
 
         {error && (
           <div
