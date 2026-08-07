@@ -87,8 +87,13 @@ touches a verdict, so neither needs a runbook or a re-grade.
 The privacy copy (CLM-4) is the same shape: it shipped in #403 with no flag, because copy
 that contradicts our own policy is a defect either way round. Sign-off is a wording
 confirmation, not a flip — the FAQ answer lives in `frontend/src/app/faq/page.tsx` and the
-parenthetical in `frontend/src/app/privacy/page.tsx`, each pinned verbatim by test, and
-neither reaches a verdict.
+parenthetical in `frontend/src/app/privacy/page.tsx`. Both are pinned verbatim, as
+whole-sentence string literals compared against the rendered page by
+`frontend/src/app/marketing-content.test.tsx` → *"ships both CLM-4 sentences byte-for-byte
+as the counsel brief quotes them"*: a reword of **any** word inside either sentence turns
+the suite red, so what ships stays the string quoted above. (The other assertions on these
+pages match key phrases only — they catch the old claim coming back, not a reword.) Neither
+sentence reaches a verdict.
 
 ---
 

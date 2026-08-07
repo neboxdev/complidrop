@@ -31,6 +31,21 @@ vi.mock("@/hooks/useAuth", () => ({ useMe: () => ({ data: null }) }));
 
 const linkHrefs = () => screen.getAllByRole("link").map((el) => el.getAttribute("href"));
 
+/**
+ * The two sentences `docs/rule-engine/G1-COUNSEL-BRIEF.md` §0 CLM-4 quotes and
+ * asks the attorney to bless. Spelled out here so the brief's claim that they
+ * are "pinned verbatim by test" is TRUE — the `ExportService.Disclaimer`
+ * mechanism, in TypeScript. The key-phrase regexes elsewhere in this file catch
+ * a claim REGRESSION (someone reintroducing "we don't sell or share your data");
+ * only these catch a REWORD, which is the thing that must not happen silently to
+ * copy an attorney has signed off on. Editing either string is therefore a
+ * deliberate act that re-opens CLM-4. (#403)
+ */
+const CLM4_FAQ_SHARING_SENTENCE =
+  "We don't sell your data, and we share it only as described in our Privacy Policy — with the service providers that help us run CompliDrop, and where the law or the protection of rights and safety requires it.";
+const CLM4_PRIVACY_CCPA_PARENTHETICAL =
+  "(we don't sell personal information, and we don't share it for targeted advertising)";
+
 /** Parse every JSON-LD <script> rendered into a container. */
 function jsonLdNodes(container: HTMLElement): Array<Record<string, unknown>> {
   return Array.from(container.querySelectorAll('script[type="application/ld+json"]'))
@@ -126,6 +141,35 @@ describe("FAQ page", () => {
     expect(joined).not.toMatch(/before anything expires/i);
     expect(joined).toMatch(/won[’']t slip through unnoticed/i);
     expect(joined).toMatch(/sends reminders/i);
+  });
+});
+
+// The counsel gate quotes both sentences and asks for a yes/no on the exact
+// wording, so a reword between the ask and the answer would leave the attorney
+// blessing a string that no longer ships. (#403 / G1-COUNSEL-BRIEF §0 CLM-4)
+describe("Counsel-gate copy (CLM-4)", () => {
+  it("ships both CLM-4 sentences byte-for-byte as the counsel brief quotes them (#403)", () => {
+    const faq = render(<FaqPage />);
+    const security = faqPairs(faq.container)
+      .map((pair) => pair.answer)
+      .find((answer) => /sell your data/i.test(answer));
+    expect(security, "an answer must still carry the no-sale promise").toBeTruthy();
+    // The FAQPage JSON-LD payload search engines and AI assistants quote.
+    expect(security!).toContain(CLM4_FAQ_SHARING_SENTENCE);
+    // …and the visible <p> carries the identical bytes. `getByText` ignores
+    // <script>, so this reads the rendered page, not the schema; the assertion
+    // is against the LITERAL above, not against the page's own string.
+    expect(
+      within(screen.getByRole("main")).getByText(security!).textContent,
+    ).toContain(CLM4_FAQ_SHARING_SENTENCE);
+    faq.unmount();
+
+    // The policy half. It sits mid-paragraph across three source lines, so
+    // collapse JSX whitespace before matching the phrase.
+    const privacy = render(<PrivacyPolicyPage />);
+    expect((privacy.container.textContent ?? "").replace(/\s+/g, " ")).toContain(
+      CLM4_PRIVACY_CCPA_PARENTHETICAL,
+    );
   });
 });
 
