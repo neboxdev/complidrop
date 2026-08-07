@@ -18,14 +18,40 @@ function ChecklistHarness() {
   return <GetStartedChecklist checklist={checklist} />;
 }
 
+// Surfaces the hint of every step the real hook reports as DONE. The card's
+// done branch renders only the label, so any such hint is copy no user can
+// reach — this probe exists to assert there is none, not to read one. (#403)
+function DoneStepHints() {
+  const { steps } = useOnboardingChecklist();
+  return <p data-testid="done-step-hints">{steps.filter((s) => s.done).map((s) => s.hint ?? "").join("")}</p>;
+}
+
 function makeChecklist(done: boolean[]): OnboardingChecklist {
+  // Hints mirror the real hook's: the three completable steps carry one, the
+  // hardcoded-done reminders step carries none (it can only render as done, and
+  // the done branch prints only the label).
   const labels = [
-    { key: "vendor", label: "Add your first vendor", href: "/vendors" },
-    { key: "requirements", label: "Choose what they must prove", href: "/vendors" },
-    { key: "document", label: "Collect a document", href: "/documents" },
+    {
+      key: "vendor",
+      label: "Add your first vendor",
+      hint: "The business whose documents you track.",
+      href: "/vendors",
+    },
+    {
+      key: "requirements",
+      label: "Choose what they must prove",
+      hint: "Pick a requirement checklist for the vendor.",
+      href: "/vendors",
+    },
+    {
+      key: "document",
+      label: "Collect a document",
+      hint: "Upload an insurance certificate (COI) you have on file.",
+      href: "/documents",
+    },
     { key: "reminders", label: "Expiry reminders are on", href: "/reminders" },
   ];
-  const steps = labels.map((l, i) => ({ ...l, hint: "", done: done[i] }));
+  const steps = labels.map((l, i) => ({ ...l, done: done[i] }));
   const completedCount = steps.filter((s) => s.done).length;
   return {
     steps,
@@ -87,6 +113,33 @@ describe("GetStartedChecklist (#191)", () => {
     expect(screen.queryByRole("link", { name: /add your first vendor/i })).toBeNull();
     expect(screen.getByRole("link", { name: /choose what they must prove/i })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /collect a document/i })).toBeInTheDocument();
+  });
+
+  it("ships no hint on a step the card can only render as done (#403)", async () => {
+    // The reminders step is hardcoded `done: true` and the done branch renders
+    // only the label, so its `hint` reached no surface — yet it was shipped
+    // copy, and #403 spent a rewrite on it (from a promise the Terms disclaim)
+    // that no user could ever see and only a bespoke probe could assert. The
+    // string is gone; this pins the shape so another one can't accrue. The
+    // first-run reminder copy the user DOES read is the WelcomeModal's, pinned
+    // against the real DOM in WelcomeModal.test.tsx.
+    // The hints are stats-independent, but the hook still fetches — answer it
+    // so the run carries no unhandled-request noise.
+    server.use(http.get(url("/api/dashboard/stats"), () => jsonOk({ totalVendors: 0, totalDocuments: 0 })));
+
+    renderWithProviders(<DoneStepHints />, { auth: authedMe });
+    expect(await screen.findByTestId("done-step-hints")).toBeEmptyDOMElement();
+  });
+
+  it("renders the hint of an INCOMPLETE step, so the probe above is not vacuous", () => {
+    // Anti-vacuous partner: a hook that stopped producing hints at all, or a
+    // card that stopped rendering them, would satisfy the assertion above for
+    // the wrong reason.
+    renderWithProviders(
+      <GetStartedChecklist checklist={makeChecklist([false, false, false, true])} />,
+      { auth: null },
+    );
+    expect(screen.getByText("The business whose documents you track.")).toBeInTheDocument();
   });
 
   it("stays hidden while stats are still loading (no cold-cache flash)", () => {

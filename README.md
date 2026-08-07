@@ -1,6 +1,6 @@
 # CompliDrop
 
-SMB compliance-document tracking SaaS — drop a COI / license / permit, extract the fields, get warned before anything expires.
+SMB compliance-document tracking SaaS — drop a COI / license / permit, extract the fields, get reminders ahead of the expiration date.
 
 - Landing + dashboard: Next.js 16, React 19, Tailwind 4, shadcn/ui.
 - API: ASP.NET Core (.NET 10) Minimal API, EF Core 10, Npgsql → Neon.

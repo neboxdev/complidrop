@@ -11,7 +11,14 @@ import { TrySampleButton } from "@/components/onboarding/SampleData";
 type ChecklistStep = {
   key: string;
   label: string;
-  hint: string;
+  /**
+   * Sub-label for an INCOMPLETE step. The done branch renders only the label
+   * (see the `<ol>` below), so a hint on a step that is done is copy no user
+   * can ever read — optional for exactly that reason. #403 spent a rewrite on
+   * one such string before noticing it reached no surface; a test now pins
+   * that a done step carries none.
+   */
+  hint?: string;
   href: string;
   done: boolean;
 };
@@ -85,8 +92,12 @@ export function useOnboardingChecklist(): OnboardingChecklist {
     },
     {
       key: "reminders",
+      // Hardcoded done (the default expiry reminders are seeded at
+      // registration), so this step only ever renders through the done branch —
+      // no hint, because none could be shown. The first-run reminder copy the
+      // user actually reads is the WelcomeModal's ("sends reminders ahead of
+      // the expiration date"), pinned there against the rendered DOM.
       label: "Expiry reminders are on",
-      hint: "We email you before anything lapses — already set up for you.",
       href: "/reminders",
       done: true,
     },
@@ -182,7 +193,7 @@ export function GetStartedChecklist({ checklist }: { checklist: OnboardingCheckl
                   />
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium text-slate-800">{step.label}</p>
-                    <p className="text-xs text-slate-500">{step.hint}</p>
+                    {step.hint ? <p className="text-xs text-slate-500">{step.hint}</p> : null}
                   </div>
                   <ChevronRight
                     className="h-4 w-4 shrink-0 text-slate-400 group-hover:text-sky-600"

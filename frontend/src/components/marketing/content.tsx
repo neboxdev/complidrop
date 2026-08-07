@@ -102,7 +102,7 @@ const ctaClass = cn(
 /** Conversion strip rendered at the bottom of content pages to route readers into signup. */
 export function ContentCta({
   heading = "Stop tracking certificates in a spreadsheet.",
-  body = "CompliDrop reads your COIs, checks the coverage, and reminds you before anything expires. Free for your first 5 documents — no credit card.",
+  body = "CompliDrop reads your COIs, checks the coverage, and sends reminders ahead of the expiration date. Free for your first 5 documents — no credit card.",
 }: {
   heading?: string;
   body?: string;

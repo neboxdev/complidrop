@@ -21,7 +21,17 @@ describe("WelcomeModal (#191)", () => {
 
     // Slide 1 — the promise (now spells out COIs at first use, FP-044).
     expect(await screen.findByText(/stay audit-ready without the chase/i)).toBeInTheDocument();
-    expect(screen.getByText(/insurance certificates \(cois\)/i)).toBeInTheDocument();
+    const slide1 = screen.getByText(/insurance certificates \(cois\)/i);
+    expect(slide1).toBeInTheDocument();
+
+    // …and it describes what the product DOES rather than promising a warning
+    // before every expiry (#403). The Terms disclaim reminder delivery ("treat
+    // reminders as a helpful nudge, not a guaranteed notice"), and a document
+    // with no expiration date is never reminded on at all — so this, the first
+    // sentence a new customer reads, can't carry the claim the landing page
+    // just dropped.
+    expect(slide1).toHaveTextContent(/sends reminders ahead of the expiration date/i);
+    expect(slide1).not.toHaveTextContent(/warns you/i);
     fireEvent.click(screen.getByRole("button", { name: /^next$/i }));
 
     // Slide 2 — the four-step workflow.

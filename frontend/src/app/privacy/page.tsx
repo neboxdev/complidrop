@@ -21,7 +21,7 @@ export const metadata: Metadata = pageMetadata({
 
 // Fixed effective date — a legal document's "last updated" must not change on
 // every render/build (so never `new Date()` here). Bump by hand on real edits.
-const EFFECTIVE_DATE = "June 4, 2026";
+const EFFECTIVE_DATE = "August 6, 2026";
 
 export default function PrivacyPolicyPage() {
   return (
@@ -87,14 +87,16 @@ export default function PrivacyPolicyPage() {
 
       <LegalSection title="Service providers we share data with">
         <p>
-          We share data only with the vendors that help us run {SITE_NAME}, and only
-          to the extent each needs it to do its job. These include:
+          We share data with the vendors that help us run {SITE_NAME}, and only to
+          the extent each needs it to do its job. These include:
         </p>
         <ul className="ml-5 list-disc space-y-1.5">
           <li><strong className="text-foreground">Stripe</strong> — payment processing.</li>
           <li><strong className="text-foreground">Google Cloud (Document AI &amp; Vertex AI)</strong> — reading text and fields from your uploaded documents.</li>
           <li><strong className="text-foreground">Microsoft Azure</strong> — encrypted storage of your uploaded files.</li>
           <li><strong className="text-foreground">Neon</strong> — our application database.</li>
+          <li><strong className="text-foreground">Railway</strong> — hosting the application servers that receive and process your uploads.</li>
+          <li><strong className="text-foreground">Vercel</strong> — hosting and delivering the {SITE_NAME} web app you use in your browser.</li>
           <li><strong className="text-foreground">Resend</strong> — sending reminder and notification emails.</li>
           <li><strong className="text-foreground">PostHog</strong> — product analytics that help us understand and improve how the app is used.</li>
           <li><strong className="text-foreground">Sentry</strong> — error monitoring so we can fix problems quickly.</li>
@@ -146,7 +148,8 @@ export default function PrivacyPolicyPage() {
           Depending on where you live, you may have additional rights — to know what
           we collect, to access or correct it, to delete it, and to opt out of any
           &quot;sale&quot; or &quot;sharing&quot; of personal information (we don&apos;t
-          sell or share it). We honor these rights as required by applicable law and
+          sell personal information, and we don&apos;t share it for targeted
+          advertising). We honor these rights as required by applicable law and
           aim to respond within 30 days.
         </p>
         <p>

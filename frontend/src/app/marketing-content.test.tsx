@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import FaqPage from "./faq/page";
 import GlossaryIndexPage from "./glossary/page";
 import CoiVsSpreadsheetPage from "./coi-tracking-software-vs-spreadsheet/page";
-import EventVenuesPage from "./coi-tracking-for-event-venues/page";
+import EventVenuesPage, { metadata as eventVenuesMeta } from "./coi-tracking-for-event-venues/page";
 import GlossaryTermPage, {
   generateStaticParams,
   generateMetadata,
@@ -30,6 +30,21 @@ vi.mock("next/link", () => ({
 vi.mock("@/hooks/useAuth", () => ({ useMe: () => ({ data: null }) }));
 
 const linkHrefs = () => screen.getAllByRole("link").map((el) => el.getAttribute("href"));
+
+/**
+ * The two sentences `docs/rule-engine/G1-COUNSEL-BRIEF.md` §0 CLM-4 quotes and
+ * asks the attorney to bless. Spelled out here so the brief's claim that they
+ * are "pinned verbatim by test" is TRUE — the `ExportService.Disclaimer`
+ * mechanism, in TypeScript. The key-phrase regexes elsewhere in this file catch
+ * a claim REGRESSION (someone reintroducing "we don't sell or share your data");
+ * only these catch a REWORD, which is the thing that must not happen silently to
+ * copy an attorney has signed off on. Editing either string is therefore a
+ * deliberate act that re-opens CLM-4. (#403)
+ */
+const CLM4_FAQ_SHARING_SENTENCE =
+  "We don't sell your data, and we share it only as described in our Privacy Policy — with the service providers that help us run CompliDrop, and where the law or the protection of rights and safety requires it.";
+const CLM4_PRIVACY_CCPA_PARENTHETICAL =
+  "(we don't sell personal information, and we don't share it for targeted advertising)";
 
 /** Parse every JSON-LD <script> rendered into a container. */
 function jsonLdNodes(container: HTMLElement): Array<Record<string, unknown>> {
@@ -78,6 +93,83 @@ describe("FAQ page", () => {
       expect(screen.getByText(name)).toBeInTheDocument();
       expect(screen.getByText(answer)).toBeInTheDocument();
     }
+  });
+
+  // The FAQ answers are emitted as FAQPage JSON-LD — the exact strings search
+  // engines and AI assistants quote — so a claim that contradicts our own
+  // Privacy Policy is a machine-amplified one. (#403)
+  it("qualifies the data-sharing answer instead of claiming we don't share (#403)", () => {
+    const { container } = render(<FaqPage />);
+    const answers = faqPairs(container).map((pair) => pair.answer);
+    expect(answers.length).toBeGreaterThan(0);
+    const joined = answers.join(" ");
+
+    // "We don't sell or share your data" contradicts the policy's own
+    // "Service providers we share data with" section — seven vendors, with
+    // document contents going to Google to be read.
+    expect(joined).not.toMatch(/sell or share/i);
+    expect(joined).not.toMatch(/(don[’']t|do not|never) share your data/i);
+
+    // What must survive: the no-sale promise, qualified by where the sharing
+    // that DOES happen is disclosed.
+    const security = answers.find((answer) => /sell your data/i.test(answer));
+    expect(security, "an answer must still carry the no-sale promise").toBeTruthy();
+    expect(security!).toMatch(/we share it only as described in our Privacy Policy/i);
+
+    // …and the qualification must not be NARROWER than the policy it points at.
+    // The policy introduces its vendor list with "These include:" (non-exhaustive
+    // by construction) and reserves TWO disclosure channels — "if required by law,
+    // or to protect the rights, safety, and security of CompliDrop, our customers,
+    // or the public". An FAQ sentence promising only the LISTED providers, or only
+    // the legally-compelled half, is a promise the policy doesn't keep.
+    expect(security!).not.toMatch(/only with the service providers listed/i);
+    expect(security!).toMatch(/rights and safety/i);
+
+    // …and the visible answer is the same string the schema carries.
+    expect(screen.getByText(security!)).toBeInTheDocument();
+  });
+
+  it("describes what the product does instead of guaranteeing an outcome the Terms disclaim (#403)", () => {
+    const { container } = render(<FaqPage />);
+    const joined = faqPairs(container)
+      .map((pair) => pair.answer)
+      .join(" ");
+
+    // The Terms disclaim extraction accuracy AND reminder delivery ("not a
+    // guaranteed notice"), so no answer may promise that nothing gets past us.
+    expect(joined).not.toMatch(/can[’']t slip through/i);
+    expect(joined).not.toMatch(/before anything expires/i);
+    expect(joined).toMatch(/won[’']t slip through unnoticed/i);
+    expect(joined).toMatch(/sends reminders/i);
+  });
+});
+
+// The counsel gate quotes both sentences and asks for a yes/no on the exact
+// wording, so a reword between the ask and the answer would leave the attorney
+// blessing a string that no longer ships. (#403 / G1-COUNSEL-BRIEF §0 CLM-4)
+describe("Counsel-gate copy (CLM-4)", () => {
+  it("ships both CLM-4 sentences byte-for-byte as the counsel brief quotes them (#403)", () => {
+    const faq = render(<FaqPage />);
+    const security = faqPairs(faq.container)
+      .map((pair) => pair.answer)
+      .find((answer) => /sell your data/i.test(answer));
+    expect(security, "an answer must still carry the no-sale promise").toBeTruthy();
+    // The FAQPage JSON-LD payload search engines and AI assistants quote.
+    expect(security!).toContain(CLM4_FAQ_SHARING_SENTENCE);
+    // …and the visible <p> carries the identical bytes. `getByText` ignores
+    // <script>, so this reads the rendered page, not the schema; the assertion
+    // is against the LITERAL above, not against the page's own string.
+    expect(
+      within(screen.getByRole("main")).getByText(security!).textContent,
+    ).toContain(CLM4_FAQ_SHARING_SENTENCE);
+    faq.unmount();
+
+    // The policy half. It sits mid-paragraph across three source lines, so
+    // collapse JSX whitespace before matching the phrase.
+    const privacy = render(<PrivacyPolicyPage />);
+    expect((privacy.container.textContent ?? "").replace(/\s+/g, " ")).toContain(
+      CLM4_PRIVACY_CCPA_PARENTHETICAL,
+    );
   });
 });
 
@@ -132,6 +224,61 @@ describe("Comparison page (vs. spreadsheet)", () => {
   });
 });
 
+// ContentCta's default body renders on the FAQ, the glossary index, every
+// glossary term page, the comparison page and /contact — one string, five
+// surfaces, and nothing asserted it before (#403). These assertions run over a
+// RENDERED page body, not the JSON-LD, so restoring the old claim goes red.
+describe("Shared content CTA (#403)", () => {
+  it("uses the softened default body where a page takes it", () => {
+    render(<FaqPage />);
+    const main = within(screen.getByRole("main"));
+    expect(
+      main.getByText(/sends reminders ahead of the expiration date/i),
+    ).toBeInTheDocument();
+    expect(main.queryByText(/reminds you before anything expires/i)).toBeNull();
+  });
+
+  it("keeps the venue page's override to what the product actually does", () => {
+    render(<EventVenuesPage />);
+    const main = within(screen.getByRole("main"));
+    // The override claimed CompliDrop "renews" the certificates. It renews
+    // nothing: the reminder emails the vendor an upload link and the VENDOR
+    // acts (ReminderBackgroundService.BuildVendorBody). There is no carrier
+    // integration anywhere in the API.
+    expect(main.queryByText(/renews your vendors/i)).toBeNull();
+    expect(
+      main.getByText(/chases the renewal ahead of the expiration date/i),
+    ).toBeInTheDocument();
+    // …and the lead no longer guarantees the outcome either.
+    expect(main.queryByText(/never the reason a booking/i)).toBeNull();
+    expect(
+      main.getByText(/see who is still missing while there is time to chase them/i),
+    ).toBeInTheDocument();
+
+    // The fourth guarantee on this page, in the "How CompliDrop works for
+    // venues" section. Both halves are falsifiable: a reminder reaches the
+    // vendor only when the reminder has NotifyVendor on AND the vendor has a
+    // non-blank ContactEmail (ReminderBackgroundService, the recipients block)
+    // AND the address isn't suppressed (ADR 0031) — and whether the list is
+    // clean on the day depends on the vendor uploading, which CompliDrop does
+    // not control. Terms: "a helpful nudge, not a guaranteed notice".
+    expect(main.queryByText(/looking at a clean list/i)).toBeNull();
+    expect(main.queryByText(/reminders go out automatically/i)).toBeNull();
+    expect(
+      main.getByText(/marks who is covered and who still owes you a document/i),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the venue page's <meta name=description> off the same guarantee", () => {
+    // The page's meta description is machine-quoted the same way the FAQ's
+    // JSON-LD is, and it carried the outcome promise in its own words
+    // ("so a missing certificate never holds up a booking").
+    const description = String(eventVenuesMeta.description);
+    expect(description).not.toMatch(/never holds up a booking/i);
+    expect(description).toMatch(/see who is still missing before the day/i);
+  });
+});
+
 describe("Event venues use-case page", () => {
   it("speaks to venues, links the additional-insured gotcha in the body, and converts", () => {
     render(<EventVenuesPage />);
@@ -179,6 +326,12 @@ describe("Legal + contact pages (#194)", () => {
     expect(screen.getByText(/Document AI/i)).toBeInTheDocument();
     expect(screen.getByText(/Microsoft Azure/i)).toBeInTheDocument();
     expect(screen.getByText(/Resend/)).toBeInTheDocument();
+    // The COMPUTE hosts receive the data too — the API container every upload is
+    // posted to, and the host that serves the app (README § Deploy). They were
+    // missing while the FAQ told readers this list is where the sharing is
+    // disclosed. (#403)
+    expect(screen.getByText(/Railway/i)).toBeInTheDocument();
+    expect(screen.getByText(/Vercel/i)).toBeInTheDocument();
     // PostHog MUST be disclosed — the app actually runs it (analytics.ts), so the
     // policy claiming "essential cookies only" without it would be false. (#194 legal review)
     expect(screen.getAllByText(/PostHog/i).length).toBeGreaterThan(0);
@@ -195,6 +348,36 @@ describe("Legal + contact pages (#194)", () => {
     expect(screen.getByText(new RegExp(LEGAL_ADDRESS))).toBeInTheDocument();
     const main = within(screen.getByRole("main"));
     expect(main.getAllByRole("link").map((l) => l.getAttribute("href"))).toContain("/contact");
+  });
+
+  it("Privacy Policy backs the FAQ's qualified sharing claim, and makes no unqualified one of its own (#403)", () => {
+    const { container } = render(<PrivacyPolicyPage />);
+    // The FAQ routes readers here with "we share it only as described in our
+    // Privacy Policy" — true only while this page actually describes the
+    // sharing under a heading a reader can find.
+    //
+    // NOT "the service providers listed in our Privacy Policy": that is the
+    // TERMS' wording (terms/page.tsx § Your content), and it is explicitly
+    // rejected for the FAQ by the sibling assertion
+    // `not.toMatch(/only with the service providers listed/i)` above — the
+    // policy introduces its vendors with "These include:" and reserves a
+    // rights-and-safety disclosure channel beside the legal one, so a
+    // list-scoped promise is narrower than the policy it points at. Quoting it
+    // here would invite an editor to reintroduce round 1's confirmed bug.
+    expect(
+      screen.getByRole("heading", { name: /service providers we share data with/i }),
+    ).toBeInTheDocument();
+    // The one that matters most: full document contents go to Google to be read.
+    expect(screen.getByText(/Document AI/i)).toBeInTheDocument();
+
+    const text = container.textContent ?? "";
+    // The policy must not contradict itself either — an unqualified "we don't
+    // sell or share it" sat in the same document as that vendor list (seven
+    // entries when #403 opened; nine since this diff added Railway and Vercel).
+    // CCPA "sharing" is a term of art (targeted advertising), so say that.
+    expect(text).not.toMatch(/sell or share/i);
+    expect(text).toMatch(/we do not sell your data/i);
+    expect(text).toMatch(/share it for targeted advertising/i);
   });
 
   it("Terms of Service renders the not-advice disclaimer + cancellation terms (Stripe requirement)", () => {
