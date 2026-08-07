@@ -153,9 +153,11 @@ Both are defined in this repo's `.claude/agents/`.
       measured, and credential-free: `rel="noreferrer"` means the tokenized URL is not in
       `document.referrer`, and `before_send` would redact it anyway. The unmeasured-`/privacy`
       claim is true only of the counterfactual SOFT-NAV round trip the sticky flag exists to
-      survive — which is exactly what `providers.test.tsx`'s "the vendor's /privacy visit
+      survive — which is exactly what `providers.test.tsx`'s "a soft-nav /privacy round trip
       included" case drives (jsdom never navigates), so that test is still a correct pin of
-      layer (2) and must not be "fixed" to match the shipped flow.
+      layer (2) and must not be "fixed" to match the shipped flow. Its NAME moved in round 2
+      (and only its name): the title still asserted the retracted claim, on the one line CI
+      prints, while the body and docstring already said soft-nav.
     The residue that REMAINS is also recorded, and RESTATED accurately (#398): a tab that arrives
     at the portal from an ordinary route keeps its already-live SDK. It used to say "today this
     needs a pasted URL" — but a pasted URL is an ADDRESS-BAR navigation, i.e. a full document load

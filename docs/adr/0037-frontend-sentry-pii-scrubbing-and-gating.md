@@ -458,9 +458,11 @@ survives one of them being rewritten by someone who has not read this.
   one Amendment 3 actually bought — `rel="noreferrer"` keeps the tokenized URL out of
   `document.referrer` / `Referer`, and `before_send` redacts it in any case. The unmeasured-`/privacy`
   claim is true only of the counterfactual **soft-navigation** round trip that (2) exists to survive,
-  which is what `providers.test.tsx`'s "the vendor's /privacy visit included" case drives (jsdom
+  which is what `providers.test.tsx`'s "a soft-nav /privacy round trip included" case drives (jsdom
   never navigates). That test remains a correct pin **of layer (2)** and must not be rewritten to
-  match the shipped flow — deleting the flag must still redden it. The false claim was corrected
+  match the shipped flow — deleting the flag must still redden it. Its NAME moved in round 2 of the
+  #398 review and only its name: the title said "the vendor's /privacy visit included", i.e. the
+  retracted claim asserted in the one line CI prints, while the body drives the counterfactual. The false claim was corrected
   everywhere it had been copied: this bullet, `.claude/reviewers.md`, both `CLAUDE.md` files,
   `providers.tsx`'s flag doc, `analytics.test.ts` and `providers.test.tsx`. It erred conservative
   (it under-claims what we measure, never over-claims what we protect), so nothing shipped on top of
@@ -485,7 +487,11 @@ every flow, which is the point of fixing rather than rewording.
 before a dynamic import, so `providers.tsx`'s flag and `analytics.ts`'s `initialized` are re-evaluated
 the way a hard load re-evaluates them) and adds two cases: the round trip — portal → `/privacy` → Back
 → tab close, asserting **no PostHog request while on the portal route** — and the sticky half, which
-asserts the `/privacy` leg is unmeasured and so reddens if the flag is deleted. The dashboard case
+asserts the `/privacy` leg is unmeasured **in the SOFT-NAV counterfactual jsdom drives** and so
+reddens if the flag is deleted. That qualifier is load-bearing and was missing here until #398
+round 2: read on its own, this paragraph re-derived the claim the cost bullet above **retracts**.
+The shipped flow is a plain `<a>`, i.e. a full document load, so the vendor's real `/privacy` visit
+IS measured — credential-free. The dashboard case
 runs LAST and is load-bearing that it does: vitest externalises node_modules, so posthog-js's own
 singleton outlives `resetModules()` and only one case may initialise it. The full-document-load half
 is pinned in `frontend/src/app/portal/[token]/page.test.tsx`; half of that pin reads the page SOURCE,

@@ -157,7 +157,14 @@ describe("Providers analytics gate (#404 / ADR 0037 Amendments 2–3)", () => {
     ).toEqual([]);
   });
 
-  it("never initialises again in a tab that has held the credential — the vendor's /privacy visit included", async () => {
+  // The name says SOFT-NAV, not "the vendor's /privacy visit" (#398 round 2 / S8):
+  // the shipped link is a plain `<a>`, so the real visit is a full document load
+  // in a fresh context and IS measured. This case drives the counterfactual the
+  // sticky flag exists to survive, which is what the docstring above already
+  // says — the title was the last place the retracted claim was still asserted,
+  // and it is the line CI prints. The BODY is unchanged on purpose: reviewers.md
+  // is explicit that it must not be rewritten to match the shipped flow.
+  it("never initialises again in a tab that has held the credential — a soft-nav /privacy round trip included", async () => {
     const Providers = await freshTab();
     setNavigationState({ pathname: PORTAL_PATH, params: { token: PORTAL_TOKEN } });
     render(<Providers>portal</Providers>);

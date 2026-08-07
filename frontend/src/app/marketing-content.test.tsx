@@ -469,7 +469,13 @@ describe("Legal + contact pages (#194)", () => {
 
     expect(text).toMatch(/that business decides what to do with the document/i);
     expect(text).toMatch(/we keep our own copy while they use/i);
-    expect(text).toMatch(/how long we keep it/i);
+    // The whole clause, not just the section name (#398 round 2 / S1): the page
+    // ALWAYS renders a "How long we keep it" heading, so `/how long we keep it/i`
+    // was satisfied by the heading and stayed green with the cross-reference
+    // deleted — while reviewers.md calls that pointer load-bearing ("Rewording
+    // either half alone re-opens the false impression for the one reader with no
+    // account"). textContent renders `&quot;` as `"`.
+    expect(text).toMatch(/afterwards as described in "How long we keep it" above/i);
   });
 
   it("Terms of Service renders the not-advice disclaimer + cancellation terms (Stripe requirement)", () => {
