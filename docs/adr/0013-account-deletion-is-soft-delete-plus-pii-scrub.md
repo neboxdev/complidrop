@@ -119,9 +119,21 @@ The card now enumerates the five columns and states the omissions outright.
 - The retention disclosure is deliberately **not** repeated in every destructive dialog. It belongs to
   `/privacy` § "How long we keep it" and to the account-closure card, where the customer is deciding
   about all of it at once; a paragraph on every per-item confirm is noise that gets skimmed.
-- The deletion family is now in the **marketing-claim census**
-  (`frontend/src/test/marketing-claims.test.ts`), not only in per-page assertions — the same sentence
-  sat on four surfaces, and the fifth is a dialog on a page nobody has written yet.
+- The deletion claims are now guarded by a **census**, not only per-page assertions — the same
+  sentence sat on four surfaces, and the fifth is a dialog on a page nobody has written yet. Its
+  reach is stated exactly, because round 2 of the #398 review found the claim still live on
+  surfaces the first records implied were covered: **one rule table, two walks, plus direct
+  assertions where no walk can read.** The table is
+  `api/CompliDrop.Api.Tests/SharedFixtures/deletion-claim-rules.json` (ADR 0038's ContactEmail
+  arrangement — the two hand-maintained copies were already unequal, 7 rules against 5, while the
+  records called them "the same census"); `frontend/src/test/marketing-claims.test.ts` runs it over
+  `frontend/src/**` + the repo README, `api/CompliDrop.Api.Tests/DeletionClaimCensusTests.cs` runs
+  it over `api/CompliDrop.Api/**/*.cs`, which is the only walk that can see a SERVER message — and
+  a server message is where both of round 2's confirmed majors were. Both are SOURCE scans catching
+  a KNOWN list: backstops, blind to copy assembled at runtime, to a rendered page, and to a display
+  label, which is a map value rather than prose. Those last are asserted directly instead
+  (`user.account_deleted` → "Account closed" in both mirrors, the closure endpoint's three
+  messages, the closure success toast).
 - **The retention itself is unchanged and still unbounded.** Nothing here reduces what CompliDrop
   holds after a closure; it only stops the product from claiming otherwise. If counsel answers CLM-7
   with "purge", that work supersedes this ADR's § Decision and needs its own.

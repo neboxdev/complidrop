@@ -227,25 +227,52 @@ Both are defined in this repo's `.claude/agents/`.
     § Alternatives — a Delete button beside "your records are kept" is the deception's shape,
     not its cure).
   - Enforcement is a CENSUS, not a per-page assertion (the same sentence sat on FOUR surfaces and
-    the next one is a dialog on a page nobody has written) — but it is THREE mechanisms with
-    different reach, and conflating them is what let round 2 find the claim still live:
-    - `frontend/src/test/marketing-claims.test.ts` scans `frontend/src/**` + the repo README. Its
-      deletion rules match the claim FAMILY since round 2 (S7), not only the retired sentences:
-      an erasure verb after "permanently" (`permanently removes` used to pass), the
-      irreversibility family, and "we delete your…" in both voices. A broadened pattern carries
-      `alsoCatches` samples so narrowing it back reddens the not-dark test instead of going quiet.
-      Bare "forever" is deliberately NOT banned — "Free forever" / "Locked forever" ship and are
-      about something else. The schedule rule bans a stated disposal PERIOD: publishing one no job
-      enforces is #398's own defect re-shipped, so "the policy should say how long" is not a
-      finding, it is CLM-7's question.
-    - `api/CompliDrop.Api.Tests/DeletionClaimCensusTests.cs` is the same census over the API
-      source, and it exists because the frontend walk structurally cannot see a server message —
-      which is exactly where round 2's two CONFIRMED majors lived (both abort arms of the renamed
-      endpoint still said *"so your account was not deleted"*, rendered verbatim in a toast under
-      "Close my account"). The closure endpoint's three messages are ALSO pinned behaviourally by
-      `AccountManagementTests.AssertNoErasureClaim` (success, 502, 503).
-    - A display LABEL is a MAP VALUE, not prose, so neither census can judge it — see the
-      "Account closed" bullet below. Do not expect the census to cover it.
+    the next one is a dialog on a page nobody has written). State its reach EXACTLY — round 2
+    found the claim still live because three records described it as more than it was. It is
+    **ONE rule table, TWO walks, plus direct assertions where no walk can read**:
+    - The table is `api/CompliDrop.Api.Tests/SharedFixtures/deletion-claim-rules.json` — 7 rules,
+      each carrying the copy it must catch. **Add or broaden a rule THERE, not in one suite.**
+      That is ADR 0038's arrangement for the ContactEmail mirrors, adopted for its exact reason:
+      round 2 found the two hand-maintained tables already unequal (7 rules frontend, 5 backend,
+      each catching sentences the other missed) while the records called them "the same census".
+      Each side compiles the patterns with its OWN engine (JS `i` / .NET `IgnoreCase |
+      CultureInvariant`) and normalizes with its own function, so "the two agree" is PROVED by
+      each side's not-dark test running every sample, never asserted by the fixture. Both count
+      floors equal the table size — a floor one BELOW it (the shipped state round 2 found) cannot
+      fire on the first deletion, which is the one thing a floor is for.
+    - `frontend/src/test/marketing-claims.test.ts` runs that table over `frontend/src/**` (test
+      files excluded by `TEST_FILE_RE`) + the repo README, and additionally carries the #403
+      MARKETING rules, which are NOT mirrored and are not claimed to be.
+    - `api/CompliDrop.Api.Tests/DeletionClaimCensusTests.cs` runs the SAME table over
+      `api/CompliDrop.Api/**/*.cs`. The WALK is why it exists: the frontend one structurally
+      cannot see a server message — exactly where round 2's two CONFIRMED majors lived (both
+      abort arms of the renamed endpoint still said *"so your account was not deleted"*, rendered
+      verbatim in a toast under "Close my account").
+    - The rules match the claim FAMILY, not the retired sentences: an erasure verb after
+      "permanently" (`permanently removes` used to pass), the irreversibility family including
+      "is/are not reversible", "we delete your…" in both voices AND with a modal between ("we
+      WILL delete your data", "we'll…" — every one of those used to pass), and the passive with
+      the full tense list plus an optional `not`, so both the success shape ("your account HAS
+      BEEN deleted") and the abort shape ("was NOT deleted") land on one rule. A broadened
+      pattern carries `alsoCatches` samples so narrowing it back reddens the not-dark test
+      instead of going quiet. Bare "forever" is deliberately NOT banned — "Free forever" /
+      "Locked forever" ship and are about something else. The schedule rule bans a stated
+      disposal PERIOD: publishing one no job enforces is #398's own defect re-shipped, so "the
+      policy should say how long" is not a finding, it is CLM-7's question.
+    - BOTH are SOURCE scans over a KNOWN list, so both are BACKSTOPS. A regex census over natural
+      language can never be complete; neither reads copy assembled at runtime from fragments, a
+      rendered page, or a map value. Do not describe either as covering "the family" — describe
+      it as catching the table, over its tree.
+    - What no walk reads is asserted DIRECTLY: the closure endpoint's three messages by
+      `AccountManagementTests.AssertNoErasureClaim` (success, 502, 503); the closure success
+      toast by `account-management.test.tsx` (added round 2 — nothing asserted it, so "Your
+      account has been deleted." could be restored on the one surface a closing customer reads
+      and ship green); and the display LABEL, which is a MAP VALUE, not prose — see the
+      "Account closed" bullet below.
+    - `ConfirmDialog.test.tsx` imports `DOCUMENT_REMOVAL_NOTICE` rather than typing a
+      description. Test files are excluded from the frontend walk by construction, and that
+      fixture is what a developer copies when wiring the next dialog — it held the retired
+      "This can't be undone." until round 2. Do not re-inline a literal there.
   - `frontend/src/lib/removal-copy.ts` single-sources the document + vendor notices for ADR
     0047 §1's reason (the document sentence shipped as two hand-copied literals). Inlining
     either back is the drift, not a simplification.
@@ -267,8 +294,13 @@ Both are defined in this repo's `.claude/agents/`.
     those five and names the omissions. Round 2 of the #398 review found the first replacement
     over-claiming in a NEW way — *"the details we hold for each document"* is, in the product's own
     vocabulary, the "Extracted fields" — so the rule is: a vaguer word is not a fix, an export
-    description names what the projection contains and states what it leaves out (`DocumentField`
-    / `Document.ExtractionFields`, the `ComplianceCheck` rows and the `AuditLog` are all absent).
+    description names what the projection contains and states what it leaves out. The OMISSION
+    list is finite and therefore reads as COMPLETE, so it has to name every absence a portability
+    reader would look for: `DocumentField` / `Document.ExtractionFields`, the `ComplianceCheck`
+    rows, the `AuditLog`, AND the requirement checklists (`ComplianceTemplate` + `ComplianceRule`,
+    a user-authored feature with its own nav item) plus `Vendor.ComplianceTemplateId`, which the
+    vendor projection drops — so which checklist a vendor is on is absent too. Adding a table to
+    the projection means editing this sentence in the same PR.
     It is still out of ADR 0047's disclaimer scope (a portability dump) — the two facts are
     about different things, so do not merge them.
   - The closure card LINKS `/privacy` (#398 round 2). Not decoration: the sentence defers the
