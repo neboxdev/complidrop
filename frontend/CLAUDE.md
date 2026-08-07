@@ -15,7 +15,13 @@ User-facing error toasts and error-card copy come from the server's `error.messa
 
 ## Deletion copy ([ADR 0013](../docs/adr/0013-account-deletion-is-soft-delete-plus-pii-scrub.md) Amendment 1, #398 / CLM-7)
 
-Nothing in the product hard-deletes, so no surface may say it does — not "permanently", not "can't be undone", not "we delete your data", and not a retention period (no purge job enforces one; that is CLM-7's open question). Claims are scoped to what the CUSTOMER sees: **Close account**, "You won't be able to undo it". The document + vendor notices are single-sourced in [src/lib/removal-copy.ts](src/lib/removal-copy.ts) (ADR 0047 §1's reason — the document sentence had shipped as two hand-copied literals). Enforcement is the census in [src/test/marketing-claims.test.ts](src/test/marketing-claims.test.ts), not per-page assertions: the same sentence sat on four surfaces at once.
+Nothing in the product hard-deletes, so no surface may say it does — not "permanently", not "can't be undone", not "we delete your data", and not a retention period (no purge job enforces one; that is CLM-7's open question). Claims are scoped to what the CUSTOMER sees: **Close account**, "You won't be able to undo it". The document + vendor notices are single-sourced in [src/lib/removal-copy.ts](src/lib/removal-copy.ts) (ADR 0047 §1's reason — the document sentence had shipped as two hand-copied literals).
+
+Enforcement is a census, not per-page assertions — the same sentence sat on four surfaces at once — but **be precise about which census reaches which surface**, because round 2 of #398 found the claim alive in two places the records already implied were covered:
+
+- [src/test/marketing-claims.test.ts](src/test/marketing-claims.test.ts) scans `frontend/src/**` + the repo README. Its deletion rules now match the claim FAMILY (erasure verb after "permanently", the irreversibility family, "we delete your…" active and passive), not only the sentences #398 retired — a rule broadened without an `alsoCatches` entry pinning what the broadening bought will narrow again silently.
+- Server messages are OUT of its reach and are where both round-2 majors lived (the closure endpoint's abort arms still said "your account was not deleted"). `api/CompliDrop.Api.Tests/DeletionClaimCensusTests.cs` is the same census over the API source; the closure endpoint's three messages are pinned behaviourally by `AccountManagementTests`.
+- A display LABEL is a map value, not prose, so neither census can judge it. `user.account_deleted` → **"Account closed"** is asserted directly in both mirrors ([src/lib/display-labels.ts](src/lib/display-labels.ts) / `Services/DisplayLabels.cs`).
 
 ## Component + label rules (lint-enforced, CI-blocking)
 

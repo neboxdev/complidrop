@@ -224,11 +224,26 @@ Both are defined in this repo's `.claude/agents/`.
     "the button used to say Delete, restore it" is the recorded rejection (ADR 0013 Amendment 1
     § Alternatives — a Delete button beside "your records are kept" is the deception's shape,
     not its cure).
-  - The four rules in `frontend/src/test/marketing-claims.test.ts` are the enforcement, and the
-    census (not a per-page assertion) is deliberate: the same sentence sat on FOUR surfaces and
-    the next one is a dialog on a page nobody has written. The fourth rule bans a stated
-    disposal SCHEDULE — publishing a period no job enforces is #398's own defect re-shipped, so
-    "the policy should say how long" is not a finding, it is CLM-7's question.
+  - Enforcement is a CENSUS, not a per-page assertion (the same sentence sat on FOUR surfaces and
+    the next one is a dialog on a page nobody has written) — but it is THREE mechanisms with
+    different reach, and conflating them is what let round 2 find the claim still live:
+    - `frontend/src/test/marketing-claims.test.ts` scans `frontend/src/**` + the repo README. Its
+      deletion rules match the claim FAMILY since round 2 (S7), not only the retired sentences:
+      an erasure verb after "permanently" (`permanently removes` used to pass), the
+      irreversibility family, and "we delete your…" in both voices. A broadened pattern carries
+      `alsoCatches` samples so narrowing it back reddens the not-dark test instead of going quiet.
+      Bare "forever" is deliberately NOT banned — "Free forever" / "Locked forever" ship and are
+      about something else. The schedule rule bans a stated disposal PERIOD: publishing one no job
+      enforces is #398's own defect re-shipped, so "the policy should say how long" is not a
+      finding, it is CLM-7's question.
+    - `api/CompliDrop.Api.Tests/DeletionClaimCensusTests.cs` is the same census over the API
+      source, and it exists because the frontend walk structurally cannot see a server message —
+      which is exactly where round 2's two CONFIRMED majors lived (both abort arms of the renamed
+      endpoint still said *"so your account was not deleted"*, rendered verbatim in a toast under
+      "Close my account"). The closure endpoint's three messages are ALSO pinned behaviourally by
+      `AccountManagementTests.AssertNoErasureClaim` (success, 502, 503).
+    - A display LABEL is a MAP VALUE, not prose, so neither census can judge it — see the
+      "Account closed" bullet below. Do not expect the census to cover it.
   - `frontend/src/lib/removal-copy.ts` single-sources the document + vendor notices for ADR
     0047 §1's reason (the document sentence shipped as two hand-copied literals). Inlining
     either back is the drift, not a simplification.

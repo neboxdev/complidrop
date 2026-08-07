@@ -43,6 +43,20 @@ interface ClaimRule {
   readonly why: string;
   /** Copy this rule must catch — the real retired sentence where one exists. Pinned by the matcher self-test below. */
   readonly sample: string;
+  /**
+   * Further copy the rule must catch — the near-synonyms it was broadened to
+   * cover, none of which was ever shipped, so none can be a `sample`.
+   *
+   * Added by round 2 of the #398 review (S7). The four deletion rules matched
+   * only the exact sentences #398 retired, while the records claimed the census
+   * enforced the whole invariant ("not 'permanently', not 'can't be undone',
+   * not 'we delete your data'") — so "This permanently REMOVES the vendor and
+   * everything they sent." passed. Broadening a pattern without pinning what
+   * the broadening buys is how a rule quietly narrows again on the next edit;
+   * this is the `sample` discipline applied to the family rather than to the
+   * one historical string.
+   */
+  readonly alsoCatches?: readonly string[];
 }
 
 const TERMS_REMINDERS =
@@ -150,14 +164,55 @@ const BANNED_CLAIMS: readonly ClaimRule[] = [
   // regulatory teeth, so it is the last claim that should depend on someone
   // remembering.
   {
-    pattern: /permanently delet/i,
+    // Broadened past the literal verb (#398 round 2 / S7): the claim is
+    // "permanently" + ANY erasure word, and "permanently removes" is the phrase
+    // a new dialog reaches for. Noun forms ride along via `permanent(ly)?`.
+    pattern: /permanent(ly)?\s+(delet|remov|eras|destroy|wip|purg)/i,
     why: `${TERMS_DELETION}; ADR 0013 also names support-reversibility as a benefit, so "permanently" is false twice over`,
     sample: "Permanently deletes your account and organization data. This can't be undone.",
+    alsoCatches: [
+      "This permanently removes the vendor and everything they sent.",
+      "Closing your account triggers permanent deletion of your files.",
+      "Confirm to permanently erase this certificate.",
+    ],
+  },
+  {
+    // The irreversibility claim is a FAMILY, not the one literal #398 happened
+    // to retire (S7). Bare "forever" is deliberately NOT here — "Free forever",
+    // "tracked forever" and "Locked forever" are shipped, true, and about
+    // something else entirely.
+    pattern:
+      /\b(irreversibl[ey]|can(no|')t be reversed|cannot be reversed|deleted forever|gone forever|unrecoverable|permanent(ly)? and final)\b/i,
+    why: `${TERMS_DELETION} — nothing is irreversible: the row keeps its DeletedAt tombstone, a document keeps its blob, and support restores an account by clearing DeletedAt`,
+    sample: "Removing a vendor is irreversible.",
+    alsoCatches: [
+      "Once you confirm, this action cannot be reversed.",
+      "Your uploads are gone forever.",
+    ],
   },
   {
     pattern: /can(no|')t be undone/i,
     why: `${TERMS_DELETION} — every delete path soft-deletes, and DeleteDocument keeps the blob so the document "remains recoverable" (its own comment). Say what the CUSTOMER can't do instead`,
     sample: "This removes the document from your records and can't be undone.",
+  },
+  {
+    // The third phrase frontend/CLAUDE.md bans and no rule matched (S7): the
+    // plain first-person erasure promise. Scoped to "we <verb> your/all/every…"
+    // so the Privacy Policy's honest "…until you ask us to delete them" and
+    // "delete what we can" (a REQUEST channel, not a standing promise) stay legal.
+    pattern:
+      /\bwe\s+(then\s+|also\s+|automatically\s+|permanently\s+)?(delete|erase|destroy|wipe|purge)\s+(your|all|every|everything)\b/i,
+    why: `${TERMS_DELETION}. We delete nothing on closure — say what closure DOES (scrub the holder's name + email, cancel the plan, stop reminders) and what is kept`,
+    sample: "When you close your account we delete your data.",
+    alsoCatches: ["We permanently erase all documents you uploaded."],
+  },
+  {
+    // Same claim in the passive, which is how a policy page phrases it.
+    pattern:
+      /\byour\s+(data|documents|files|account|information|uploads)\s+(is|are|will be|gets?)\s+(permanently\s+|automatically\s+)?(deleted|erased|destroyed|wiped|purged)\b/i,
+    why: `${TERMS_DELETION} — the passive voice does not make it true; no purge job exists anywhere in the codebase`,
+    sample: "Your data is permanently deleted when you close your account.",
+    alsoCatches: ["Your documents will be erased once the account closes."],
   },
   {
     pattern: /(delete|de-identify)[^.]{0,40}within a reasonable/i,
@@ -222,12 +277,20 @@ describe("Marketing-claim census (#403)", () => {
   it("every rule matches the copy it exists to ban (the matcher is not dark)", () => {
     // Without this the whole census could silently stop matching — a broken
     // `normalize`, an over-escaped pattern, an entity form nobody anticipated —
-    // and every file below would pass for the wrong reason.
-    const dark = BANNED_CLAIMS.filter((rule) => !rule.pattern.test(normalize(rule.sample)));
-    expect(dark.map((rule) => String(rule.pattern))).toEqual([]);
-    // Floor raised from 15 by #398's four deletion rules — a rule deleted rather
-    // than deliberately retired reddens here.
-    expect(BANNED_CLAIMS.length).toBeGreaterThanOrEqual(19);
+    // and every file below would pass for the wrong reason. `alsoCatches` extends
+    // the same discipline to the near-synonyms a broadened rule was widened FOR
+    // (#398 round 2 / S7): a pattern narrowed back to its historical string goes
+    // red here rather than going quietly dark on copy nobody has written yet.
+    const dark = BANNED_CLAIMS.flatMap((rule) =>
+      [rule.sample, ...(rule.alsoCatches ?? [])]
+        .filter((copy) => !rule.pattern.test(normalize(copy)))
+        .map((copy) => `${String(rule.pattern)} misses: ${copy}`),
+    );
+    expect(dark).toEqual([]);
+    // Floor raised from 15 by #398's four deletion rules, then to 22 by round 2's
+    // three (the irreversibility family, "we delete your…", and its passive) — a
+    // rule deleted rather than deliberately retired reddens here.
+    expect(BANNED_CLAIMS.length).toBeGreaterThanOrEqual(22);
   });
 
   it("scans the whole shipped surface, not a hand-picked subset", () => {
