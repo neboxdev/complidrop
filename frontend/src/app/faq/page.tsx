@@ -55,7 +55,7 @@ const FAQ_ITEMS: readonly FaqItem[] = [
   {
     question: "Is my data secure?",
     answer:
-      "Your documents are transmitted over an encrypted connection and stored privately. Each account's data is isolated from every other account, and every change is written to an audit log. We don't sell your data, and we share it only with the service providers listed in our Privacy Policy or where the law requires it.",
+      "Your documents are transmitted over an encrypted connection and stored privately. Each account's data is isolated from every other account, and every change is written to an audit log. We don't sell your data, and we share it only as described in our Privacy Policy — with the service providers that help us run CompliDrop, and where the law or the protection of rights and safety requires it.",
   },
 ];
 

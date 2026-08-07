@@ -99,9 +99,17 @@ describe("FAQ page", () => {
     // that DOES happen is disclosed.
     const security = answers.find((answer) => /sell your data/i.test(answer));
     expect(security, "an answer must still carry the no-sale promise").toBeTruthy();
-    expect(security!).toMatch(
-      /we share it only with the service providers listed in our Privacy Policy/i,
-    );
+    expect(security!).toMatch(/we share it only as described in our Privacy Policy/i);
+
+    // …and the qualification must not be NARROWER than the policy it points at.
+    // The policy introduces its vendor list with "These include:" (non-exhaustive
+    // by construction) and reserves TWO disclosure channels — "if required by law,
+    // or to protect the rights, safety, and security of CompliDrop, our customers,
+    // or the public". An FAQ sentence promising only the LISTED providers, or only
+    // the legally-compelled half, is a promise the policy doesn't keep.
+    expect(security!).not.toMatch(/only with the service providers listed/i);
+    expect(security!).toMatch(/rights and safety/i);
+
     // …and the visible answer is the same string the schema carries.
     expect(screen.getByText(security!)).toBeInTheDocument();
   });
@@ -219,6 +227,12 @@ describe("Legal + contact pages (#194)", () => {
     expect(screen.getByText(/Document AI/i)).toBeInTheDocument();
     expect(screen.getByText(/Microsoft Azure/i)).toBeInTheDocument();
     expect(screen.getByText(/Resend/)).toBeInTheDocument();
+    // The COMPUTE hosts receive the data too — the API container every upload is
+    // posted to, and the host that serves the app (README § Deploy). They were
+    // missing while the FAQ told readers this list is where the sharing is
+    // disclosed. (#403)
+    expect(screen.getByText(/Railway/i)).toBeInTheDocument();
+    expect(screen.getByText(/Vercel/i)).toBeInTheDocument();
     // PostHog MUST be disclosed — the app actually runs it (analytics.ts), so the
     // policy claiming "essential cookies only" without it would be false. (#194 legal review)
     expect(screen.getAllByText(/PostHog/i).length).toBeGreaterThan(0);
