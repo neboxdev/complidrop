@@ -194,6 +194,17 @@ describe("Landing page claims vs. the Terms (#403)", () => {
     ).toBeInTheDocument();
   });
 
+  it("stops the venue card guaranteeing the booking outcome", () => {
+    const { container } = render(<Home />);
+    // Whether a booking survives is not something CompliDrop controls — the
+    // same absolutist shape the hero was just softened away from, one section
+    // down the same page. Say what shows up where instead.
+    expect(container.textContent ?? "").not.toMatch(/never the reason a booking/i);
+    expect(
+      screen.getByText(/shows up on your dashboard instead of at the door/i),
+    ).toBeInTheDocument();
+  });
+
   it("keeps the softened claim in the SoftwareApplication JSON-LD description too", () => {
     const { container } = render(<Home />);
     const software = Array.from(

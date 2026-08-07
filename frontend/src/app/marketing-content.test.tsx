@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import FaqPage from "./faq/page";
 import GlossaryIndexPage from "./glossary/page";
 import CoiVsSpreadsheetPage from "./coi-tracking-software-vs-spreadsheet/page";
-import EventVenuesPage from "./coi-tracking-for-event-venues/page";
+import EventVenuesPage, { metadata as eventVenuesMeta } from "./coi-tracking-for-event-venues/page";
 import GlossaryTermPage, {
   generateStaticParams,
   generateMetadata,
@@ -177,6 +177,48 @@ describe("Comparison page (vs. spreadsheet)", () => {
     expect(screen.getAllByText(/certificate of insurance/i).length).toBeGreaterThan(0);
     expect(screen.queryByText(/\bOCR\b/i)).toBeNull();
     expect(linkHrefs()).toContain("/register");
+  });
+});
+
+// ContentCta's default body renders on the FAQ, the glossary index, every
+// glossary term page, the comparison page and /contact — one string, five
+// surfaces, and nothing asserted it before (#403). These assertions run over a
+// RENDERED page body, not the JSON-LD, so restoring the old claim goes red.
+describe("Shared content CTA (#403)", () => {
+  it("uses the softened default body where a page takes it", () => {
+    render(<FaqPage />);
+    const main = within(screen.getByRole("main"));
+    expect(
+      main.getByText(/sends reminders ahead of the expiration date/i),
+    ).toBeInTheDocument();
+    expect(main.queryByText(/reminds you before anything expires/i)).toBeNull();
+  });
+
+  it("keeps the venue page's override to what the product actually does", () => {
+    render(<EventVenuesPage />);
+    const main = within(screen.getByRole("main"));
+    // The override claimed CompliDrop "renews" the certificates. It renews
+    // nothing: the reminder emails the vendor an upload link and the VENDOR
+    // acts (ReminderBackgroundService.BuildVendorBody). There is no carrier
+    // integration anywhere in the API.
+    expect(main.queryByText(/renews your vendors/i)).toBeNull();
+    expect(
+      main.getByText(/chases the renewal ahead of the expiration date/i),
+    ).toBeInTheDocument();
+    // …and the lead no longer guarantees the outcome either.
+    expect(main.queryByText(/never the reason a booking/i)).toBeNull();
+    expect(
+      main.getByText(/see who is still missing while there is time to chase them/i),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the venue page's <meta name=description> off the same guarantee", () => {
+    // The page's meta description is machine-quoted the same way the FAQ's
+    // JSON-LD is, and it carried the outcome promise in its own words
+    // ("so a missing certificate never holds up a booking").
+    const description = String(eventVenuesMeta.description);
+    expect(description).not.toMatch(/never holds up a booking/i);
+    expect(description).toMatch(/see who is still missing before the day/i);
   });
 });
 

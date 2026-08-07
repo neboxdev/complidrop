@@ -11,7 +11,7 @@ import { pageMetadata } from "@/lib/seo";
 export const metadata: Metadata = pageMetadata({
   title: "COI Tracking for Event Venues",
   description:
-    "Every caterer, DJ, and rental vendor needs a current certificate of insurance before the event. CompliDrop collects and checks vendor COIs so a missing certificate never holds up a booking.",
+    "Every caterer, DJ, and rental vendor needs a current certificate of insurance before the event. CompliDrop collects and checks vendor COIs, so you can see who is still missing before the day.",
   path: "/coi-tracking-for-event-venues",
 });
 
@@ -94,8 +94,8 @@ export default function EventVenuesPage() {
             venue should carry a current certificate of insurance &mdash; with
             the right limits and your venue named as additional insured &mdash;
             before the event. CompliDrop collects those certificates, checks
-            them, and reminds the stragglers, so a missing COI is never the
-            reason a booking falls apart.
+            them, and reminds the stragglers, so you can see who is still
+            missing while there is time to chase them.
           </Lead>
 
           <section>
@@ -173,7 +173,7 @@ export default function EventVenuesPage() {
 
           <ContentCta
             heading="Never chase a vendor COI the week of an event again."
-            body="CompliDrop collects, checks, and renews your vendors' certificates of insurance automatically. Free for your first 5 documents — no credit card."
+            body="CompliDrop collects your vendors' certificates of insurance, checks them against your requirements, and chases the renewal ahead of the expiration date. Free for your first 5 documents — no credit card."
           />
         </div>
       </main>

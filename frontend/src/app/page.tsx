@@ -225,7 +225,7 @@ interface AudienceCard {
 const AUDIENCE_CARDS: readonly AudienceCard[] = [
   {
     title: "Event venues",
-    body: "Every caterer, DJ, and rental vendor needs a current COI — with the right limits and your venue named as additional insured — before the event. CompliDrop collects and checks them so you're never the reason a booking falls through.",
+    body: "Every caterer, DJ, and rental vendor needs a current COI — with the right limits and your venue named as additional insured — before the event. CompliDrop collects and checks them, so a short or expired certificate shows up on your dashboard instead of at the door.",
     href: "/coi-tracking-for-event-venues",
   },
   {
