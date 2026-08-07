@@ -50,6 +50,8 @@ const TERMS_REMINDERS =
 const TERMS_ACCURACY =
   "the Terms disclaim accuracy (\"we do not guarantee that every extracted value or compliance result is accurate or complete\")";
 const NEVER_SAY = "G1-LEGAL-RESEARCH §V.4 never-say list";
+const TERMS_DELETION =
+  "nothing in CompliDrop hard-deletes (#398 / ADR 0013 Amendment 1): closing an account scrubs the holder's email + name and soft-deletes the user + org, while the vendors' contact details, the documents, the uploaded blobs, the reminder logs, the Subscription row and the audit trail are all RETAINED";
 
 const BANNED_CLAIMS: readonly ClaimRule[] = [
   // ── §V.4 "Never" ──────────────────────────────────────────────────────────
@@ -136,6 +138,38 @@ const BANNED_CLAIMS: readonly ClaimRule[] = [
     sample:
       "Reminders go out automatically before a certificate expires, so by the day of the event you're looking at a clean list, not a phone in your hand.",
   },
+  // ── The deletion-claim family #398 retired (CLM-7) ─────────────────────────
+  // Nothing in CompliDrop hard-deletes. Account closure scrubs the holder's
+  // email + name and stamps `DeletedAt`; `DeleteDocument` / `DeleteVendor`
+  // soft-delete and the document's blob is RETAINED on purpose. These belong in
+  // the census rather than in per-page assertions for the reason the census
+  // exists: the same sentence sat on four surfaces (settings card, settings
+  // form, document list row, document detail header) and the fifth — a new
+  // dialog on a page nobody has written yet — is the one an assertion cannot
+  // reach. "Deceptive deletion" is also the finding class with the most
+  // regulatory teeth, so it is the last claim that should depend on someone
+  // remembering.
+  {
+    pattern: /permanently delet/i,
+    why: `${TERMS_DELETION}; ADR 0013 also names support-reversibility as a benefit, so "permanently" is false twice over`,
+    sample: "Permanently deletes your account and organization data. This can't be undone.",
+  },
+  {
+    pattern: /can(no|')t be undone/i,
+    why: `${TERMS_DELETION} — every delete path soft-deletes, and DeleteDocument keeps the blob so the document "remains recoverable" (its own comment). Say what the CUSTOMER can't do instead`,
+    sample: "This removes the document from your records and can't be undone.",
+  },
+  {
+    pattern: /(delete|de-identify)[^.]{0,40}within a reasonable/i,
+    why: "the retired Privacy Policy retention promise — no purge job exists anywhere in the codebase, so nothing implements it (#398)",
+    sample:
+      "If you close your account, we delete or de-identify your data within a reasonable period.",
+  },
+  {
+    pattern: /\b(delete|deleted|dispose of|disposed of|purge)\b[^.]{0,60}\b(after|within)\s+\d{1,3}\s*(day|month|year)/i,
+    why: "a retention SCHEDULE nobody enforces recreates #398's defect in a new sentence — the disposal question is counsel-gate CLM-7, not a copy decision",
+    sample: "If you close your account we delete everything you uploaded within 90 days.",
+  },
 ];
 
 /**
@@ -191,7 +225,9 @@ describe("Marketing-claim census (#403)", () => {
     // and every file below would pass for the wrong reason.
     const dark = BANNED_CLAIMS.filter((rule) => !rule.pattern.test(normalize(rule.sample)));
     expect(dark.map((rule) => String(rule.pattern))).toEqual([]);
-    expect(BANNED_CLAIMS.length).toBeGreaterThanOrEqual(15);
+    // Floor raised from 15 by #398's four deletion rules — a rule deleted rather
+    // than deliberately retired reddens here.
+    expect(BANNED_CLAIMS.length).toBeGreaterThanOrEqual(19);
   });
 
   it("scans the whole shipped surface, not a hand-picked subset", () => {
@@ -225,29 +261,61 @@ describe("Marketing-claim census (#403)", () => {
  * that keeps the register honest when the §C detail row is edited alone — the
  * defect that put the footer tagline in one row and not the other.
  */
-describe("Counsel brief §0 CLM-4 register (#403)", () => {
-  // Path walk + row filter + quote extraction live in `./counsel-brief` — the
-  // CLM-5 pin in `app/portal/[token]/page.test.tsx` needs the same three steps
-  // and used to carry its own copy of them (#404 review S6).
-  const { rows: row, quoted } = counselRegisterRow("CLM-4");
-  const shipped = SURFACES.map(([, path]) => normalize(readFileSync(path, "utf8")));
+/**
+ * Every shipped surface with its comments stripped — so a register quote that
+ * survives only inside a code comment explaining why it was retired does NOT
+ * read as shipping. (The CLM-4 pin scanned raw source; nothing depended on the
+ * looseness, and #398's corrections are quoted in comments beside the copy they
+ * replaced, which is exactly the vacuous pass this closes.)
+ */
+const SHIPPED_COPY = SURFACES.map(([, path]) => normalize(stripComments(readFileSync(path, "utf8"))));
 
-  it("is a single row that quotes every item it asks counsel to bless", () => {
-    expect(row, "expected exactly one §0 CLM-4 register row").toHaveLength(1);
-    // (a) the FAQ answer, (b) the CCPA parenthetical, (c) the footer tagline,
-    // (d) the "won't slip through unnoticed" clause. Dropping one must be a
-    // deliberate edit, not an accident of rewriting the cell.
-    expect(quoted.length).toBeGreaterThanOrEqual(4);
+/**
+ * Assert a §0 register row is single, quotes at least `minQuotes` sentences,
+ * and that each of them is copy some surface actually carries.
+ *
+ * Shared because CLM-4 and CLM-7 want the identical three assertions, and the
+ * next CLM item will too — the same reason `./counsel-brief` owns the path walk
+ * and the quote regex (#404 review S6).
+ */
+function pinRegisterQuotes(item: string, minQuotes: number, whatIsQuoted: string): void {
+  const { rows: row, quoted } = counselRegisterRow(item);
+
+  it(`§0 ${item} is a single row that quotes every item it asks counsel to bless`, () => {
+    expect(row, `expected exactly one §0 ${item} register row`).toHaveLength(1);
+    expect(quoted.length, whatIsQuoted).toBeGreaterThanOrEqual(minQuotes);
   });
 
   it.each(quoted.map((q) => [q.slice(0, 56), q] as const))(
-    'the copy it quotes as "%s…" actually ships',
+    `${item}: the copy it quotes as "%s…" actually ships`,
     (_label, sentence) => {
-      const where = shipped.filter((text) => text.includes(normalize(sentence)));
+      const where = SHIPPED_COPY.filter((text) => text.includes(normalize(sentence)));
       expect(
         where.length,
-        `the §0 CLM-4 row quotes copy that no shipped surface carries — either the page was reworded without updating the brief, or the brief quotes something that was never shipped:\n  ${sentence}`,
+        `the §0 ${item} row quotes copy that no shipped surface carries — either the page was reworded without updating the brief, or the brief quotes something that was never shipped:\n  ${sentence}`,
       ).toBeGreaterThan(0);
     },
   );
+}
+
+describe("Counsel brief §0 CLM-4 register (#403)", () => {
+  // (a) the FAQ answer, (b) the CCPA parenthetical, (c) the footer tagline,
+  // (d) the "won't slip through unnoticed" clause, (e) the Rules page's "warn
+  // you 30 days before" helper — added by #398 as a QUESTION, not a rewrite:
+  // it is true of the code (60/30/14/7 seeded reminders; ExpiringSoonWindowDays
+  // = 30) but it is (d)'s delivery-flavoured family and both #403 clearance
+  // reviewers named it. Dropping one must be a deliberate edit, not an accident
+  // of rewriting the cell.
+  pinRegisterQuotes("CLM-4", 5, "expected (a)–(e) to be quoted in the CLM-4 row");
+});
+
+/**
+ * The deletion claim is the highest-risk sentence in the product, so the §0 row
+ * that scopes counsel's engagement has to quote what actually renders. Same
+ * guard as CLM-4's, aimed at the copy #398 shipped: (a) the Settings closure
+ * notice, (b) the Privacy Policy's replacement retention sentences, (c) the
+ * per-item removal notice, (d) the export description.
+ */
+describe("Counsel brief §0 CLM-7 register (#398)", () => {
+  pinRegisterQuotes("CLM-7", 6, "expected (a)–(d) — six sentences — to be quoted in the CLM-7 row");
 });
