@@ -26,6 +26,37 @@ Both are defined in this repo's `.claude/agents/`.
   per-token with a 240/hr per-IP backstop — deliberate (#242). The UPLOAD route caps
   (`portal-token` 10/hr, `portal-ip` 30/hr, per-link `MaxUploads`, per-org monthly cost
   ceiling) DO apply and their absence would be a bug.
+- The portal's notice at collection is ADR 0054 (#404 / counsel gate CLM-5); the facts that
+  follow are pointers into it, not a second copy of the rationale.
+  - The notice renders in the loading shell, in the main return (which is ALSO the at-limit
+    and post-upload state), and — as a DIFFERENT sentence — in the dead-link and transient
+    branches. "Consolidate it into one render site" is not available: those two branches
+    return their own `<main>`, and "By uploading, you agree…" is FALSE where there is no
+    dropzone, so they carry the visit line plus the same policy link instead. On the
+    transient branch it sits OUTSIDE `role="alert"` deliberately — standing disclosure is
+    not part of the failure a screen reader is interrupted for.
+  - The full notice is on the LOADING SHELL as real copy, not a skeleton bar, and is NOT
+    gated on `atQuota`. Both are decisions: the notice belongs to the collection surface,
+    not to a particular attempt, and it is the one element that must never be pending.
+  - It names NO AI vendor. `Extraction:Provider` is a config switch, so portal copy naming
+    Google would go stale silently; the named subprocessor list lives in `/privacy`, one
+    link away. "#404's summary said Google, so the copy should say Google" is the bug — and
+    the Anthropic-path disclosure gap is CLM-6 / [#405](https://github.com/neboxdev/complidrop/issues/405),
+    deliberately NOT pre-empted here (ADR 0054 §3 / Option B).
+  - The cookie sentence is STATIC while PostHog is gated on `NEXT_PUBLIC_POSTHOG_KEY`
+    (`lib/analytics.ts`), so a key-less environment over-discloses. Accepted; making the
+    notice depend on a build-time env var is the recorded rejection (Option F).
+  - The `/privacy` section added for this reader re-names NO subprocessor, and that is
+    load-bearing twice over: `marketing-content.test.tsx` pins each vendor with a SINGULAR
+    `getByText` (a second "Document AI" / "Microsoft Azure" / "Railway" / "Vercel" /
+    "Resend" reddens CI), and the section's job is to point at the one list rather than fork
+    it. Same for the `SUPPORT_EMAIL` mailto, pinned by a singular `getByRole("link")`.
+  - Same-tab link, matching every other legal link in `frontend/` — there is no
+    `target="_blank"` anywhere in the tree. Adding one here is a new pattern, not a fix.
+  - Frontend-only by design: `/api/portal/*` is untouched, no token reaches any link or
+    analytics property (pinned by `assertNotInDom`), and no session is needed to read the
+    policy. A version that adds a consent checkbox or a cookie banner is ADR 0054 Options
+    C/D, both refuted.
 - `IgnoreQueryFilters()` / `SystemDbContext` inside background workers and system
   contexts — by design. In request-path code it IS a blocker (tenant leakage).
 - Idempotency records replay the winner's exact response for as long as the row exists;
