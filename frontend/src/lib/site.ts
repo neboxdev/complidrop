@@ -50,15 +50,25 @@ export const LEGAL_ENTITY = "Nebox Dev LLC";
 export const LEGAL_ADDRESS = "407 Lincoln Road, Suite 708, Miami Beach, FL 33139, USA";
 
 /**
- * One-line value proposition. Buyer language + the terms people actually search
- * ("certificate of insurance", "COI tracking"). Kept ≤ {@link SITE_DESCRIPTION_MAX_CHARS}
- * so it works verbatim as a `<meta name="description">` — search engines
- * truncate past roughly that, and this string is also both JSON-LD entities'
- * `description` and the manifest's. The bound is enforced by `site.test.ts`
- * rather than left to the comment: it shipped violated by 58 characters (#403).
+ * The `<meta name="description">` budget: search engines truncate past roughly
+ * this many characters. Enforced against {@link SITE_DESCRIPTION} by
+ * `site.test.ts`, which also pins this number — widening it is the natural
+ * one-line edit when copy grows, and it must be a visible decision (#403).
  */
 export const SITE_DESCRIPTION_MAX_CHARS = 160;
 
+/**
+ * One-line value proposition, in buyer language and led by the term people
+ * actually search ("COI tracking"). Kept ≤ {@link SITE_DESCRIPTION_MAX_CHARS} so
+ * it works verbatim as a `<meta name="description">`; this string is also the
+ * OG/Twitter description, both JSON-LD entities' `description`, and the
+ * manifest's, so it is a brand fact with one source (ADR 0012 §2).
+ *
+ * The longer head term "certificate of insurance" does NOT fit the budget
+ * beside the buyer term — that is a trade, not an oversight. It is targeted by
+ * the pages whose whole subject it is: `/glossary/certificate-of-insurance` and
+ * `/coi-tracking-software-vs-spreadsheet`, each with its own metadata.
+ */
 export const SITE_DESCRIPTION =
   "COI tracking software for small businesses. CompliDrop reads certificates, licenses, and permits, flags what's non-compliant, and sends expiration reminders.";
 
