@@ -1,6 +1,6 @@
 # 0054. The public vendor portal gives notice at collection — on the surface, before the upload, in every state (CLM-5)
 
-- **Status:** accepted (amended 2026-08-07 — see [Amendment 1](#amendment-1-2026-08-07--the-cookie-sentence-becomes-a-disclaimer-because-the-route-stopped-being-measured))
+- **Status:** accepted (amended 2026-08-07 — see [Amendment 1](#amendment-1-2026-08-07--the-cookie-sentence-becomes-a-disclaimer-because-the-route-stopped-being-measured); amended 2026-08-07 — see [Amendment 2](#amendment-2-2026-08-07--the-policy-link-leaves-the-portals-js-context), which keeps Amendment 1's sentences true across the policy round trip)
 - **Date:** 2026-08-07
 - **Deciders:** Ruben G. (founder), Claude (implementing #404)
 
@@ -156,7 +156,10 @@ is an edit to two components in one file.
 - The link opens in the same tab, matching every other legal link in the app (there is no
   `target="_blank"` anywhere in `frontend/`). The cost is a vendor who reads the policy *after*
   uploading loses the Received card on the way back; the card itself says the page can be closed, and
-  the notice is positioned to be read before the upload, not after.
+  the notice is positioned to be read before the upload, not after. **Same tab still holds, but it is
+  no longer a client-side transition** — [Amendment 2](#amendment-2-2026-08-07--the-policy-link-leaves-the-portals-js-context)
+  makes it a plain `<a>`, i.e. a full document load, because this round trip is exactly where the
+  route's analytics invariant lapsed.
 - Document-level analytics behaviour is unchanged — this ADR discloses PostHog, it does not gate it.
   A consent gate for the portal route would be a different decision with a different reader (GDPR),
   and CompliDrop processes primarily in the United States.
@@ -247,10 +250,68 @@ rejected: a disclosure that varies with a build-time variable is one nobody can 
 is the opposite shape — the CODE changed for every deployment, so the copy changed once, for every
 deployment, and the two are pinned together.
 
+## Amendment 2 (2026-08-07) — the policy link leaves the portal's JS context
+
+Round 3 of #404 found the sentence Amendment 1 shipped to be false again — in the same
+under-disclosure direction, for the one reader the notice is aimed at, and **while they are reading
+it**.
+
+The mechanism is [ADR 0037 Amendment 3](0037-frontend-sentry-pii-scrubbing-and-gating.md#amendment-3-2026-08-07--the-credential-outlives-the-pathname).
+In short: the route gate keys on the CURRENT pathname, while posthog-js is a module-global singleton
+that nothing de-initialises. `PrivacyPolicyLink` was a same-tab `next/link`, so the click was a
+client-side transition — `Providers` survives it, the effect re-ran with pathname `/privacy`, and
+PostHog went live in the SAME JS context as the portal page. On Back, the gate returns early but the
+SDK keeps running against `/portal/{token}`: `capture_pageleave` at tab close, autocapture on portal
+clicks, and its `localStorage+cookie` persistence rewriting the cookie the notice denies. § Consequences
+→ Neutral above already anticipated that round trip ("loses the Received card on the way back") —
+what it did not anticipate is that the trip re-instrumented the page it returned to.
+
+**The copy does not move this time.** Amendment 1 changed the sentence because the code had changed;
+here the sentence is right and the code was wrong, so the code changed:
+
+- `PrivacyPolicyLink` renders a plain **`<a href="/privacy" rel="noreferrer">`**. A full document
+  load lands the policy in a NEW JS context, so the portal context never contains an initialised SDK
+  and Back returns to an uninstrumented page. `rel="noreferrer"` is defence in depth — the tokenized
+  URL is not even sent as `document.referrer` / `Referer`; the redaction that protects a portal
+  `$referrer` on every OTHER route is untouched.
+- `Providers` additionally makes its gate **sticky per browsing context** (ADR 0037 Amendment 3),
+  which is the belt to this brace. Either mechanism alone keeps the sentence true; both ship, the
+  same shape #404 round 2 used for the heatmaps channel.
+
+`target="_blank"` would also have left the context and is refused separately: there is no
+`target="_blank"` anywhere in `frontend/`, so a new-tab legal link would be a new pattern rather than
+a fix.
+
+### The lint rule is reconciled, not silenced
+
+`@next/next/no-html-link-for-pages` forbids exactly this shape and `eslint-config-next/core-web-vitals`
+sets it to `error`. It does not fire — and **not** because App Router is exempt: the rule builds its
+app-dir matchers via `normalizeAppPath` (`/^\/privacy$/`) and then tests the href through
+`normalizeURL`, which appends a trailing slash (`/privacy/`), so no app-dir route can match. Verified
+in `node_modules/@next/eslint-plugin-next/dist/utils/url.js`, and confirmed the other way round: an
+`eslint-disable-next-line` there is reported as an UNUSED directive, which `eslint src --max-warnings=0`
+fails on. So there is nothing to disable today; the reason is on file at the call site, and if a
+plugin release fixes the mismatch the answer is a one-line scoped disable pointing back here — never a
+rule turned off for the file or the repo, and never a reversion to `<Link>`.
+
+### Rejected alternative — accept the residue and reword the notice
+
+Refused. The sentence is one-directional disclosure on the product's only non-customer surface;
+weakening it to accommodate a leak trades a legal claim for an implementation convenience, and it
+would have to be weakened in **both** CLM-5 registers too — asking counsel to bless a narrower promise
+than the code can easily keep. With the two mechanisms in place the sentence is true in every flow,
+so the CLM-5 quotes are untouched by this amendment and the pins that hold them still hold.
+
+### What did NOT change
+
+§1–§5 stand. Amendment 1's two sentences ship **verbatim**, and both remain provisional pending
+CLM-5. The §C register row records the mechanism change (the notice's link is now a full document
+load) because the row describes how the negative claim is kept true, not merely that it is asserted.
+
 ## References
 
 - Tickets: [#404](https://github.com/neboxdev/complidrop/issues/404) (bug, careful-review), [#48](https://github.com/neboxdev/complidrop/issues/48) (rolling bug-fix epic); adjacent [#405](https://github.com/neboxdev/complidrop/issues/405) (CLM-6 — the provider-path disclosure this deliberately does not pre-empt)
 - Gate: `docs/rule-engine/G1-COUNSEL-BRIEF.md` §0 (CLM-5) + §C
-- ADRs: [0047](0047-exports-carry-a-non-advice-disclaimer.md) (the on-by-default disclosure precedent this follows), [0043](0043-additional-insured-claim-wording-staged-behind-flag.md) (the flag-staging precedent it deliberately does not follow), [0032](0032-portal-upload-idempotency.md) (the portal upload path being disclosed)
-- Code: `frontend/src/app/portal/[token]/page.tsx` (`UploadPrivacyNotice`, `VisitPrivacyNotice`, `PrivacyPolicyLink`), `frontend/src/app/privacy/page.tsx` ("If you were sent an upload link")
-- Tests: `frontend/src/app/portal/[token]/page.test.tsx` ("notice at collection (#404)" — presence in every state, the no-AI-vendor pin for §3, and the DOM-order pin for §1), `frontend/src/app/marketing-content.test.tsx` (the `/privacy` section, and the Terms clauses Option E's rationale rests on), `frontend/src/test/counsel-brief.{ts,test.ts}` (the shared §0 register reader both CLM pins use)
+- ADRs: [0047](0047-exports-carry-a-non-advice-disclaimer.md) (the on-by-default disclosure precedent this follows), [0043](0043-additional-insured-claim-wording-staged-behind-flag.md) (the flag-staging precedent it deliberately does not follow), [0032](0032-portal-upload-idempotency.md) (the portal upload path being disclosed), [0037](0037-frontend-sentry-pii-scrubbing-and-gating.md) Amendments 2-3 (the analytics half of the negative claim: the route gate, and the round trip that made a pathname-only gate lapse)
+- Code: `frontend/src/app/portal/[token]/page.tsx` (`UploadPrivacyNotice`, `VisitPrivacyNotice`, and `PrivacyPolicyLink` — a plain `<a href="/privacy" rel="noreferrer">` since Amendment 2), `frontend/src/app/privacy/page.tsx` ("If you were sent an upload link"), `frontend/src/lib/providers.tsx` (`contextHeldCredentialInUrl`, Amendment 2's other half)
+- Tests: `frontend/src/app/portal/[token]/page.test.tsx` ("notice at collection (#404)" — presence in every state, the no-AI-vendor pin for §3, the DOM-order pin for §1, and the full-document-load pin for Amendment 2), `frontend/src/lib/providers.test.tsx` (Amendment 2 — the round trip, per browsing context), `frontend/src/app/marketing-content.test.tsx` (the `/privacy` section, and the Terms clauses Option E's rationale rests on), `frontend/src/test/counsel-brief.{ts,test.ts}` (the shared §0 register reader both CLM pins use)

@@ -138,11 +138,16 @@ function redactUrlProperties(result: CaptureResult | null): CaptureResult | null
 }
 
 /**
- * Never called on `/portal/*` — `Providers` gates it on the pathname (ADR 0037
- * Amendment 2). That route's URL IS a bearer credential, and per-channel
- * redaction against a dependency that keeps adding channels is a promise this
- * file cannot keep; everything below is the layer for every OTHER route, which
- * can still carry a portal URL in `document.referrer`.
+ * Never called on `/portal/*`, nor anywhere in a browsing context that has EVER
+ * been there — `Providers` gates it on the pathname AND on a module-scope flag
+ * (ADR 0037 Amendments 2-3). That route's URL IS a bearer credential, and
+ * per-channel redaction against a dependency that keeps adding channels is a
+ * promise this file cannot keep. The second half of the gate exists because what
+ * this function starts is a MODULE-GLOBAL singleton that nothing here stops:
+ * initialise it once anywhere in a tab and it keeps measuring that tab, so a
+ * pathname-only gate lapsed the moment a soft navigation left the portal and came
+ * back. Everything below is the layer for every OTHER route, which can still
+ * carry a portal URL in a `$referrer` (a reminder mail, quoted free text).
  */
 export function initAnalytics() {
   if (initialized || typeof window === "undefined") return;

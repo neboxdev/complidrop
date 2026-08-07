@@ -59,7 +59,10 @@ Both are defined in this repo's `.claude/agents/`.
     "Resend" reddens CI), and the section's job is to point at the one list rather than fork
     it. Same for the `SUPPORT_EMAIL` mailto, pinned by a singular `getByRole("link")`.
   - Same-tab link, matching every other legal link in `frontend/` — there is no
-    `target="_blank"` anywhere in the tree. Adding one here is a new pattern, not a fix.
+    `target="_blank"` anywhere in the tree. Adding one here is a new pattern, not a fix. Same tab,
+    but since ADR 0054 Amendment 2 NOT a client-side transition: it is a plain `<a>` so the policy
+    loads in a fresh JS context. See the telemetry block below for why, and why reverting it to
+    `<Link>` re-opens a leak.
   - `/terms` is NOT linked, and the reason is RELEVANCE only (ADR 0054 Option E, corrected in
     the #404 review). Do NOT restate it as "the Terms bind a customer, the vendor is not one":
     `terms/page.tsx` accepts on "or using" and its Acceptable-use clause governs uploading, so
@@ -110,15 +113,47 @@ Both are defined in this repo's `.claude/agents/`.
   - `Providers` NOT calling `initAnalytics()` under `/portal/` is the decision (ADR 0037
     Amendment 2), not a missing feature: that route's URL IS the bearer credential, and two
     reviewed rounds of per-channel redaction each missed a channel. The founder losing PostHog
-    on the portal page is the accepted cost, recorded in the ADR. It is gated on the CURRENT
-    pathname on purpose — a vendor who follows the notice's policy link is measured from that
-    click on. `analytics.ts`'s redaction is NOT thereby dead code: `/privacy` reached from the
-    portal carries the tokenized URL in `document.referrer`.
+    on the portal page is the accepted cost, recorded in the ADR. `analytics.ts`'s redaction is
+    NOT thereby dead code: `/privacy` reached from the portal carries the tokenized URL in
+    `document.referrer`, and a reminder mail can put one in any route's `$referrer`.
+  - CORRECTED — this entry used to add "it is gated on the CURRENT pathname on purpose — a vendor
+    who follows the notice's policy link is measured from that click on". That is now FALSE in
+    both directions (ADR 0037 Amendment 3 / #404 round 3). posthog-js is a module-global singleton
+    nothing de-initialises, so a pathname-only gate lapsed across the notice's own policy round
+    trip (`<Link>` → `/privacy` → init → Back) and left a live SDK on `/portal/{token}`. TWO
+    mechanisms now ship and NEITHER is redundant — "one of these is enough" is not a finding:
+    - `PrivacyPolicyLink` is a plain `<a href="/privacy" rel="noreferrer">`, NOT `next/link`. The
+      full document load is the security property (a new JS context); `rel="noreferrer"` keeps the
+      tokenized URL out of `document.referrer` / `Referer` as defence in depth, and does NOT
+      retire the referrer redaction, which still covers every other route. "Use `<Link>` for an
+      internal href" and "add `target="_blank"` instead" are both refuted (ADR 0054 Amendment 2).
+      `@next/next/no-html-link-for-pages` is `error`-tier but cannot fire on an app-dir route (the
+      rule matches `/^\/privacy$/` against a `normalizeURL`-trailing-slashed `/privacy/`), so an
+      `eslint-disable` there is an UNUSED directive and reddens `--max-warnings=0`. The reason is
+      on file at the call site; do not add the directive, and do not switch the rule off.
+    - `Providers` keeps a module-scope `contextHeldCredentialInUrl`, so once a tab has held the
+      credential nothing initialises in it again until a hard load. **The cost is recorded, not
+      overlooked:** that tab is unmeasured for the rest of its session and the vendor's `/privacy`
+      visit is not measured either. Flagging either as a regression is reviewer noise.
+    The residue that REMAINS is also recorded: a tab that arrives at the portal from an ordinary
+    route keeps its already-live SDK (nothing in `frontend/` links to `/portal/{token}`, so it
+    needs a pasted URL). ADR 0037 Amendment 3 § What stays open.
   - The portal notice + `/privacy` saying the page "sets no cookies and doesn't measure how it's
     used" are claims of ABSENCE that moved with that gate (ADR 0054 Amendment 1) and are pinned
     — `page.test.tsx` reads `document.cookie`, `providers.test.tsx` asserts no PostHog request
-    leaves the route. Their earlier cookie wording is not "missing", it was made false by the
-    code change and replaced in the same commit, counsel-brief quotes included.
+    leaves the route, per BROWSING CONTEXT and across the policy round trip. Their earlier cookie
+    wording is not "missing", it was made false by the code change and replaced in the same commit,
+    counsel-brief quotes included. Round 3 went the OTHER way — the sentence went false again and
+    the CODE moved instead (ADR 0054 Amendment 2); "reword the notice to match the residue" was
+    considered and refused, so proposing it is not a finding.
+  - `providers.test.tsx` runs each case in its own browsing context (`vi.resetModules()` + a
+    dynamic import) and keeps the dashboard case LAST. Both are load-bearing: the gate is sticky,
+    so a shared context would let the first portal render suppress every later case, and vitest
+    externalises node_modules, so posthog-js's own singleton outlives `resetModules()` and only the
+    last case may initialise it. Half the full-document-load pin reads page SOURCE rather than the
+    DOM — deliberately: jsdom never navigates and `next/link` without an `AppRouterContext` does
+    not even `preventDefault`, so a "was the click intercepted" probe was written, run against
+    `<Link>`, and found non-discriminating.
 - `IgnoreQueryFilters()` / `SystemDbContext` inside background workers and system
   contexts — by design. In request-path code it IS a blocker (tenant leakage).
 - Idempotency records replay the winner's exact response for as long as the row exists;
@@ -1688,7 +1723,7 @@ Both are defined in this repo's `.claude/agents/`.
 - **Billing**: Stripe checkout, webhook, subscription state
 - **Tenancy**: `AppDbContext.CurrentOrgId`, global query filters, any
   `IgnoreQueryFilters` call
-- **Vendor portal**: `/api/portal/*` (public, untrusted input)
+- **Vendor portal**: `/api/portal/*` (public, untrusted input), the `frontend/src/app/portal/**` page, and the two files that decide whether its tokenized URL reaches a telemetry vendor (`frontend/src/lib/providers.tsx`, `frontend/src/lib/analytics.ts`)
 - **Blob storage**: Azure Blob access, SAS scoping
 - **Audit**: `AuditSaveChangesInterceptor`, `IAuditLogger`
 - **PII**: extraction fields, exports, email contents
@@ -1720,6 +1755,8 @@ api/**/*Portal*
 frontend/src/app/portal/**
 frontend/src/app/(auth)/**
 frontend/src/lib/api.ts
+frontend/src/lib/providers.tsx
+frontend/src/lib/analytics.ts
 .github/workflows/**
 Dockerfile*
 **/package.json
@@ -1732,6 +1769,11 @@ container image, and dependency manifests are an unreviewed-path-to-prod risk.)
 (`ComplianceCheckDeleteConcurrencyInterceptor.cs` is listed BY NAME, not as
 `api/**/*Interceptor*`: it changes `SaveChanges` semantics on BOTH contexts like the audit
 one beside it, while a wildcard would drag every test-only interceptor into a clearance.)
+
+(`providers.tsx` + `analytics.ts` joined the list in #404 round 3. Neither is under
+`frontend/src/app/portal/**`, yet between them they decide whether the portal's bearer
+credential reaches a third party — three review rounds each found a live leak there, and the
+last one lived in a five-line effect that no portal-path glob would have matched.)
 
 ## Labels
 

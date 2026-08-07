@@ -1,6 +1,6 @@
 # 0037. Frontend Sentry: PII scrubbing, sampling, and dev gating
 
-- **Status:** accepted (amended 2026-08-07 — see [Amendment 1](#amendment-1-2026-08-07--the-other-telemetry-vendor-gets-the-same-url-rule-from-the-same-function); amended 2026-08-07 — see [Amendment 2](#amendment-2-2026-08-07--the-portal-route-initialises-no-analytics-at-all), which **retracts Amendment 1 § What stays open**)
+- **Status:** accepted (amended 2026-08-07 — see [Amendment 1](#amendment-1-2026-08-07--the-other-telemetry-vendor-gets-the-same-url-rule-from-the-same-function); amended 2026-08-07 — see [Amendment 2](#amendment-2-2026-08-07--the-portal-route-initialises-no-analytics-at-all), which **retracts Amendment 1 § What stays open**; amended 2026-08-07 — see [Amendment 3](#amendment-3-2026-08-07--the-credential-outlives-the-pathname), which **corrects Amendment 2's current-pathname paragraph**)
 - **Date:** 2026-06-25
 - **Deciders:** Ruben G.
 
@@ -310,6 +310,11 @@ channels and named a third (`/i/v1/logs` — the console-log extension puts `loc
 everywhere else a leaked URL exposes an identifier, here it exposes upload authority. One invariant
 that holds whatever the SDK does next beats N promises that each hold until it changes.
 
+> **This paragraph is WRONG and is corrected by [Amendment 3](#amendment-3-2026-08-07--the-credential-outlives-the-pathname).**
+> Kept verbatim because the mistake is the instructive part: a gate scoped to *where the tab is now*
+> was reasoned about as if the thing it gates were also scoped that way, when posthog-js is a
+> module-global singleton that nothing de-initialises. Do not cite it.
+
 Gated on the **current pathname**, not on "has ever been on the portal": a vendor who follows the
 notice's Privacy Policy link is on an ordinary route from that click on. Every other route is
 unaffected.
@@ -366,18 +371,140 @@ request rather than only `/e/` — scoping assertions to one endpoint is what hi
 - **Sentry is untouched** and still runs on the portal route. It sets no cookie, has Session Replay
   off, and `sanitizeUrl` has redacted `/portal/{token}` there since #356.
 
+## Amendment 3 (2026-08-07) — the credential outlives the pathname
+
+### The correction first
+
+Amendment 2 took its decision on this sentence:
+
+> *"Gated on the **current pathname**, not on 'has ever been on the portal': a vendor who follows the
+> notice's Privacy Policy link is on an ordinary route from that click on. Every other route is
+> unaffected."*
+
+**It does not hold, and the flow that breaks it is the one ADR 0054's own notice recommends.**
+posthog-js is a module-global singleton; `initAnalytics` sets a module-global `initialized`; nothing
+in this codebase calls `posthog.opt_out_capturing()`, `reset()` or any teardown. The pathname gate
+therefore controls only whether the SDK STARTS — never whether it is running.
+
+The round trip: the notice's Privacy Policy link was a same-tab client-side `<Link>`, `Providers`
+persists across an App Router transition, so the effect re-ran with pathname `/privacy`,
+`initAnalytics()` ran, and PostHog went live — persistence and all — **in the same JS context as the
+portal page**. Press Back (a soft navigation; ADR 0054 § Consequences → Neutral explicitly
+anticipates this round trip, "loses the Received card on the way back") and the gate returns early
+while the live SDK carries on against `/portal/{token}`. Each of these was read off posthog-js
+1.369.2 rather than assumed:
+
+- **`$pageleave` at tab close.** `_handle_unload` is bound to `pagehide` at init and
+  `capture_pageleave: true` makes `_shouldCapturePageleave()` true, so closing the tab captures an
+  event whose `$current_url` is the portal URL and unloads the request queue. This is the mechanism
+  the regression test reproduces.
+- **Autocapture on portal clicks.** `autocapture` is not set, so it defaults to `true` — and
+  `Autocapture.isEnabled`'s "wait for the server before enabling" guard is
+  `… && !this.instance._shouldDisableFlags()`, which our own `advanced_disable_flags: true` makes
+  false. The guard is therefore skipped and autocapture runs on client config alone. Closing `/flags`
+  removes the server's ability to turn autocapture OFF; it does not turn it off.
+- **The persistence cookie.** `persistence: 'localStorage+cookie'` keeps rewriting during
+  portal-page activity — which is what the notice's *"sets no cookies"* half denies directly.
+
+Not claimed: that remote config keeps loading. `RemoteConfigLoader.load()` early-returns on
+`_shouldDisableFlags()` too, so the remote-gated extensions (`/i/v1/logs` among them) stay unarmed
+unless a preloaded `array.js` config is on `window`, which importing the npm package does not
+produce. The residue is the three above plus whatever the SDK opens on its own next — which is the
+class this route's gate exists for.
+
+Three consequences, in the order that matters:
+
+1. **The shipped legal sentence became false in the UNDER-disclosure direction** — *"This page sets
+   no cookies and doesn't measure how it's used"*, a CCPA notice-at-collection claim quoted verbatim
+   in the CLM-5 counsel register — for precisely the vendor who followed the notice's own link and
+   came back, i.e. while they are reading it.
+2. **The pin stayed green.** `providers.test.tsx` rendered the route in a fresh context, which is the
+   one case the residue does not touch.
+3. **No record layer named it.** Amendment 2, the root `CLAUDE.md`, `frontend/CLAUDE.md`,
+   `.claude/reviewers.md` and the test docstring all stated the invariant as absolute.
+
+### What changed in code
+
+Two mechanisms, **both**, in the shape Amendment 2 already used for the heatmaps channel (the general
+walker rule AND `capture_heatmaps: false`). Either alone holds the invariant; the pair is what
+survives one of them being rewritten by someone who has not read this.
+
+1. **The notice's policy link is a plain `<a href="/privacy" rel="noreferrer">`**, not `next/link`
+   ([ADR 0054 Amendment 2](0054-portal-gives-notice-at-collection.md#amendment-2-2026-08-07--the-policy-link-leaves-the-portals-js-context)).
+   A full document load lands the policy in a NEW JS context, so the portal context never contains an
+   initialised SDK at all and Back returns to an uninstrumented page. `rel="noreferrer"` is defence in
+   depth — the tokenized URL is not even sent as `document.referrer` / `Referer`. The redaction pin
+   for the referrer path is **unchanged**: it still protects every other route (a reminder mail can
+   put a portal URL in any route's `$referrer`), so nothing about Amendment 2 § *Layer (1)+(2) are not
+   redundant* is retracted.
+2. **The gate is sticky per browsing context.** `providers.tsx` holds a module-scope
+   `contextHeldCredentialInUrl`, set when `isCredentialInUrlRoute(pathname)` matches and checked
+   beside the pathname, so once a tab has held the credential `initAnalytics()` never runs in it again
+   until a hard load. Module scope is the point: that is exactly the lifetime of the singleton it
+   guards.
+
+### The cost of (2), recorded rather than discovered
+
+- **A customer who opens a portal link in the same tab loses PostHog for the rest of that tab's
+  session.** Nothing in `frontend/` links to `/portal/{token}` today (verified by search), so this is
+  reachable by pasting a link into an in-app tab, not by any in-product affordance — but a future
+  "preview this vendor's link" button would make it routine.
+- **The vendor's `/privacy` visit is no longer measured.** Amendment 2's "a vendor who follows the
+  notice's policy link is measured from that click on" is now false in both mechanisms: with (1) the
+  visit happens in a context that never runs `initAnalytics` on the portal, and with (2) the flag
+  refuses it. The claim is corrected wherever it was copied — `.claude/reviewers.md` carried it in
+  the do-NOT-flag list, which is the one place a stale fact does active harm.
+
+Accepted for the same reason Amendment 2's cost was: the alternative is a bearer credential in a
+third party's store. Every route is measured again on the next hard document load.
+
+### Rejected alternative — accept the residue and reword the notice
+
+The third option on the table was to leave the code alone and soften the sentence to something true
+of the round trip. **Refused.** The sentence is one-directional disclosure on the product's only
+non-customer surface; weakening it to accommodate a leak trades a legal claim for an implementation
+convenience, and it would have to be weakened in the CLM-5 register too — asking counsel to bless a
+narrower promise than the code can easily keep. With (1) and (2) in place the sentence is true in
+every flow, which is the point of fixing rather than rewording.
+
+### Pins
+
+`frontend/src/lib/providers.test.tsx` now runs each case in its OWN browsing context (`vi.resetModules()`
+before a dynamic import, so `providers.tsx`'s flag and `analytics.ts`'s `initialized` are re-evaluated
+the way a hard load re-evaluates them) and adds two cases: the round trip — portal → `/privacy` → Back
+→ tab close, asserting **no PostHog request while on the portal route** — and the sticky half, which
+asserts the `/privacy` leg is unmeasured and so reddens if the flag is deleted. The dashboard case
+runs LAST and is load-bearing that it does: vitest externalises node_modules, so posthog-js's own
+singleton outlives `resetModules()` and only one case may initialise it. The full-document-load half
+is pinned in `frontend/src/app/portal/[token]/page.test.tsx`; half of that pin reads the page SOURCE,
+because jsdom never navigates and `next/link` without an `AppRouterContext` does not even
+`preventDefault` — a DOM-level "was the click intercepted" probe was written, run against `<Link>`,
+and found non-discriminating.
+
+### What stays open (Amendment 3)
+
+- **A tab that reaches the portal from an ordinary route keeps its already-live SDK.** The flag stops
+  a NEW init; it cannot un-initialise one. Nothing in the app links to `/portal/{token}`, so today
+  this needs a pasted URL — but it is the residue, and the fix if it ever becomes routine is an
+  explicit `posthog.opt_out_capturing()` on entry, not a wider gate.
+- Amendment 2's three open items are unchanged.
+
 ## References
 
 - **Tickets:** [#356](https://github.com/neboxdev/complidrop/issues/356) (this feature),
   [#404](https://github.com/neboxdev/complidrop/issues/404) (Amendment 1 — the PostHog half,
   found while shipping the portal notice-at-collection; Amendment 2 — its round-2 review, which
-  falsified Amendment 1's `/flags` boundary and took the route out of analytics entirely).
+  falsified Amendment 1's `/flags` boundary and took the route out of analytics entirely;
+  Amendment 3 — its round-3 careful-clearance review, which found the route gate lapsing across the
+  notice's own policy round trip).
 - **Related ADRs:** [0035](0035-standing-cleanup-tooling-gates.md) (supersedes its
   `@sentry/nextjs` kept-but-ignored knip sub-decision),
   [0034](0034-dev-environment-isolation-and-boot-banner.md) /
   [#271](https://github.com/neboxdev/complidrop/issues/271) (dev isolation posture this mirrors),
   [0054](0054-portal-gives-notice-at-collection.md) Amendment 1 (the portal copy that moved with
-  Amendment 2 — the notice's cookie sentence became false in the other direction).
+  Amendment 2 — the notice's cookie sentence became false in the other direction) and
+  [0054](0054-portal-gives-notice-at-collection.md) Amendment 2 (the plain-anchor half of
+  Amendment 3, which keeps that same sentence true across the round trip the notice recommends).
 - **Error-copy policy:** [#77](https://github.com/neboxdev/complidrop/issues/77),
   [#254](https://github.com/neboxdev/complidrop/issues/254).
 - **Code:** `frontend/src/lib/sentry/{scrub,options,build}.ts`,
@@ -385,11 +512,15 @@ request rather than only `/e/` — scoping assertions to one endpoint is what hi
   `frontend/src/app/global-error.tsx`, `frontend/next.config.ts`; Amendment 1 —
   `frontend/src/lib/analytics.ts` (imports `sanitizeUrl`); Amendment 2 —
   `frontend/src/lib/providers.tsx` (the pathname gate) and `analytics.ts`'s
-  `advanced_disable_flags` / `capture_heatmaps` / `sanitizeUrlKey`.
+  `advanced_disable_flags` / `capture_heatmaps` / `sanitizeUrlKey`; Amendment 3 —
+  `frontend/src/lib/providers.tsx`'s `contextHeldCredentialInUrl` and
+  `frontend/src/app/portal/[token]/page.tsx`'s `PrivacyPolicyLink` (a plain `<a rel="noreferrer">`).
 - **Tests:** `frontend/src/lib/sentry/scrub.test.ts`; Amendment 1 —
   `frontend/src/lib/analytics.test.ts` (drives the real SDK and asserts on the decompressed
   ingest bodies, now on EVERY channel); Amendment 2 — `frontend/src/lib/providers.test.tsx`
-  (no PostHog request whatsoever from `/portal/{token}`).
+  (no PostHog request whatsoever from `/portal/{token}`); Amendment 3 — the same file's
+  round-trip and sticky cases, each in its own browsing context, plus
+  `frontend/src/app/portal/[token]/page.test.tsx` ("FULL DOCUMENT LOAD").
 - **Env:** `NEXT_PUBLIC_SENTRY_DSN` (public DSN; absence ⇒ no-op), optional
   `NEXT_PUBLIC_SENTRY_ENVIRONMENT` (tag; defaults to `NODE_ENV`) and
   `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` (default `0`), plus the build-time

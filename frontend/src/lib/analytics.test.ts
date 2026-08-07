@@ -10,14 +10,22 @@
  * reuses that same `sanitizeUrl` rather than keeping a second copy of the rule.
  *
  * WHY THIS SUITE STILL EXISTS NOW THAT THE PORTAL ROUTE ITSELF NEVER
- * INITIALISES POSTHOG (ADR 0037 Amendment 2, pinned by `providers.test.tsx`).
+ * INITIALISES POSTHOG (ADR 0037 Amendments 2-3, pinned by `providers.test.tsx`).
  * Not initialising is the invariant that holds against channels nobody has
- * enumerated yet, but the token does not only appear in `location.href`: a
- * vendor who follows the notice's Privacy Policy link reaches `/privacy` — a
- * route that DOES measure — carrying the tokenized portal URL in
- * `document.referrer`, and a reminder mail can put one in any route's
- * `$referrer`. Redaction is the layer that covers that, so it is driven and
- * asserted here on its own.
+ * enumerated yet, but the token does not only appear in `location.href` — a
+ * reminder mail can put a portal URL in any route's `$referrer`, and free text
+ * can quote one anywhere. Redaction is the layer that covers that, so it is
+ * driven and asserted here on its own.
+ *
+ * The example this docstring used to lead with — "a vendor who follows the
+ * notice's Privacy Policy link reaches `/privacy`, a route that DOES measure,
+ * carrying the tokenized portal URL in `document.referrer`" — is no longer one
+ * of them, in TWO ways (Amendment 3, #404 round 3). That link is now a plain
+ * `<a … rel="noreferrer">`, so the referrer is not sent at all; and the gate is
+ * sticky per browsing context, so that `/privacy` visit is not measured either.
+ * The redaction it motivated stays exactly as it is — it protects every OTHER
+ * route, and narrowing a redactor because one of its callers went away is how
+ * the next channel gets missed.
  *
  * WHY IT DRIVES THE REAL SDK. The defect was never in our code — it is in what
  * posthog-js adds on its own — so the fix is only as good as the set of
