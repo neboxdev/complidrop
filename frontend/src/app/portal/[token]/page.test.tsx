@@ -20,6 +20,8 @@
  * into the DOM (no debug crumb, no analytics tag, no aria-label
  * containing it).
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
 import { http, HttpResponse } from "msw";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
@@ -36,7 +38,9 @@ import {
   dropFilesIn,
   makeFile,
   assertNotInDom,
+  sequencedResponses,
 } from "@/test";
+import { counselRegisterRow, flattenCopy } from "@/test/counsel-brief";
 
 // Sonner not used by the portal page (it has its own inline error UI),
 // but the harness mocks it anyway (vitest.setup.ts + src/test/sonner.ts)
@@ -1212,5 +1216,410 @@ describe("PortalPage — idempotency key (#333)", () => {
     expect(keys[0]).toBeTruthy();
     expect(keys[1]).toBeTruthy();
     expect(keys[1]).not.toBe(keys[0]);
+  });
+});
+
+/**
+ * Notice at collection (#404 / counsel gate CLM-5).
+ *
+ * The portal is the only surface a NON-customer touches, and it disclosed
+ * nothing: no privacy link, no terms link, just "Secure upload" and "Powered by
+ * CompliDrop". Meanwhile the file is stored in Azure Blob, read by third-party
+ * AI services, and the visit is measured by PostHog (the root layout wraps
+ * `/portal` — there is no `app/portal/layout.tsx` opting out).
+ *
+ * The load-bearing word is AT. A disclosure that only appears on the success
+ * card is a disclosure the vendor reads after we already have their document,
+ * so these tests assert presence in the state where the dropzone is live and
+ * NOTHING has been uploaded yet — then that every other state the route can
+ * render keeps it.
+ */
+const NOTICE_RE = /by uploading, you agree your document will be stored and processed/i;
+
+function policyLink() {
+  return screen.getByRole("link", { name: /privacy policy/i });
+}
+
+describe("PortalPage — notice at collection (#404)", () => {
+  it("discloses storage, automated reading and the absence of tracking BEFORE anything is uploaded", async () => {
+    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+
+    // The collection point is live…
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+    // …nothing has been collected yet…
+    expect(screen.queryByText(/^received$/i)).toBeNull();
+    // …and all three things that happen to the document are already disclosed.
+    const notice = screen.getByText(NOTICE_RE);
+    expect(notice).toBeInTheDocument();
+    const text = (notice.textContent ?? "").replace(/\s+/g, " ");
+    expect(text).toMatch(/stored and processed/i);
+    expect(text).toMatch(/automated reading by the AI services we use/i);
+    // Until round 2 of #404 this said "This page also uses cookies to measure
+    // how it's used", which was true — the root layout measured every route.
+    // `Providers` now refuses to initialise PostHog under `/portal/`
+    // (ADR 0037 Amendment 2), so the same sentence became false in the other
+    // direction, and a portal that over-discloses is still a portal that says
+    // something untrue. See ADR 0054 Amendment 1.
+    expect(text).toMatch(/sets no cookies and doesn't measure how it's used/i);
+    // The policy is one click away, and it is the real route.
+    expect(policyLink()).toHaveAttribute("href", "/privacy");
+  });
+
+  it("sets no cookie, so the sentence saying so stays true by construction", async () => {
+    // The claim above is a NEGATIVE one about the app's behaviour, and prose
+    // cannot keep itself honest: whoever adds the first cookie to this route
+    // will not think to reword a notice. PostHog's `localStorage+cookie`
+    // persistence was the only writer and it no longer runs here; `/api/portal/*`
+    // sets none (`AuthEndpoints` is the only `Cookies.Append` in the API, on
+    // sign-in), and the fetch below carries no credentials either way.
+    document.cookie = "";
+    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+    expect(document.cookie, "the portal route set a cookie the notice denies").toBe("");
+  });
+
+  it("names no AI vendor — the linked policy owns that list (ADR 0054 §3)", async () => {
+    // `Extraction:Provider` is a config switch (gemini | anthropic,
+    // `ExtractionClientFactory`), so a provider name hard-coded into the
+    // highest-consequence copy in the product would go stale SILENTLY the day
+    // the switch moves. ADR 0054 §3 makes that a decision with a named failure
+    // mode — "#404's summary said Google, so the copy should say Google" is
+    // the bug — and until now nothing pinned it. The completeness of the named
+    // list on every configured path is CLM-6 / #405, deliberately not
+    // pre-empted here.
+    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+
+    // Scan innerHTML, not just textContent: a vendor name smuggled into a
+    // title/aria-label would be a named provider just the same.
+    const rendered = `${container.textContent ?? ""} ${container.innerHTML}`;
+    for (const vendor of [
+      /google/i,
+      /document ai/i,
+      /gemini/i,
+      /vertex/i,
+      /anthropic/i,
+      /claude/i,
+      /openai/i,
+      /\bGPT\b/,
+      /azure/i,
+    ]) {
+      expect(
+        rendered,
+        `the portal names an AI/infrastructure vendor (${vendor}) — ADR 0054 §3 keeps that list in /privacy, which the notice links to, because portal copy naming one goes stale silently`,
+      ).not.toMatch(vendor);
+    }
+    // …and the provider-agnostic phrase it uses INSTEAD is present, so this
+    // can't pass by the disclosure having been deleted.
+    expect(screen.getByText(/automated reading by the AI services we use/i)).toBeInTheDocument();
+  });
+
+  it("sits beneath the dropzone and above the error + Received cards (ADR 0054 §1)", async () => {
+    // Placement is the decision, not a styling detail: a disclosure the vendor
+    // meets only after the upload is the very gap #404 reports, relocated. The
+    // busiest state is the discriminating one — one upload received, the next
+    // one failed — because it is where a careless reorder would push the
+    // notice below both cards while every presence assertion stayed green.
+    const uploadSeq = sequencedResponses(
+      () => jsonOk({ uploadId: "u_ok", extractionStatus: "Pending", message: "Received" }),
+      () =>
+        jsonError("rate_limit.exceeded", "Too many uploads on this link.", { status: 429 }),
+    );
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () => uploadSeq()),
+    );
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+
+    dropFiles([makeFile("coi.pdf")]);
+    await waitFor(() => expect(screen.getByText(/^received$/i)).toBeInTheDocument());
+    dropFiles([makeFile("license.pdf")]);
+    await waitFor(() =>
+      expect(screen.getByTestId("portal-error-rate_limit")).toBeInTheDocument(),
+    );
+
+    // The dropzone is the element react-dropzone's getRootProps() decorates —
+    // reached from the file input it wraps rather than by class name.
+    const fileInput = container.querySelector('input[type="file"]');
+    const dropzone = fileInput?.parentElement;
+    expect(dropzone, "could not locate the dropzone").toBeTruthy();
+
+    const notice = screen.getByText(NOTICE_RE);
+    const errorCard = screen.getByTestId("portal-error-rate_limit");
+    const receivedCard = screen.getByText(/^received$/i);
+
+    const precedes = (first: Node, second: Node) =>
+      Boolean(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+    // Beside the collection point, not inside it (which would also read as "following").
+    expect(dropzone!.contains(notice)).toBe(false);
+    expect(precedes(dropzone!, notice), "the notice renders BEFORE the dropzone").toBe(true);
+    expect(
+      precedes(notice, errorCard),
+      "the notice renders below the error card — a vendor meets it only after a failed attempt",
+    ).toBe(true);
+    expect(
+      precedes(notice, receivedCard),
+      "the notice renders below the Received card — that is notice AFTER collection, the gap #404 reports",
+    ).toBe(true);
+  });
+
+  it("the policy link needs no account, no token and no query string", async () => {
+    // The reader is unauthenticated by definition. A link that carried the
+    // upload token would leak it into the referer/analytics of another page.
+    const sensitiveToken = "notice-secret-token-QRS-77777";
+    server.use(http.get(url(`/api/portal/${sensitiveToken}`), () => jsonOk(portalInfo)));
+    ({ container } = renderWithProviders(<PortalPage />, {
+      params: { token: sensitiveToken },
+    }));
+
+    await waitFor(() => expect(screen.getByText(NOTICE_RE)).toBeInTheDocument());
+    const href = policyLink().getAttribute("href") ?? "";
+    expect(href).toBe("/privacy");
+    expect(href).not.toContain("?");
+    assertNotInDom(sensitiveToken);
+  });
+
+  it("opens the policy in a FULL DOCUMENT LOAD, so the portal context never holds a live analytics SDK", async () => {
+    // #404 round 3 / ADR 0054 Amendment 2. As `next/link` this was a client-side
+    // transition: `Providers` survives it, its effect re-runs with pathname
+    // `/privacy`, `initAnalytics()` starts a MODULE-GLOBAL posthog-js, and on the
+    // way Back — the round trip ADR 0054 § Neutral already anticipates — the
+    // pathname gate returns early while the live SDK keeps `capture_pageleave`,
+    // autocapture and its `localStorage+cookie` writer running on
+    // `/portal/{token}`. That is precisely what the sentence two tests above
+    // denies, for precisely the vendor who followed the notice's own link.
+    //
+    // HALF THE PIN IS AT THE SOURCE, and deliberately so. Whether a click causes
+    // a document load is not observable here: jsdom never navigates, and
+    // `next/link` renders a plain `<a>` and — with no `AppRouterContext` above it
+    // in this harness — does not even call `preventDefault`, so a DOM-level
+    // "was the click intercepted" probe passes against BOTH shapes. It was
+    // written, run against `<Link>`, and found non-discriminating. What decides
+    // the behaviour is which element the file renders, so that is what is read.
+    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() => expect(screen.getByText(NOTICE_RE)).toBeInTheDocument());
+
+    const source = readFileSync(resolve(__dirname, "page.tsx"), "utf8");
+    expect(
+      source,
+      "the portal imports next/link again — a client-side transition keeps the portal's JS context, where PostHog then goes live",
+    ).not.toMatch(/^\s*import\s+.*from\s+["']next\/link["']/m);
+    expect(
+      source,
+      "the notice's policy link is no longer a plain anchor",
+    ).toMatch(/<a\s+href="\/privacy"/);
+
+    // The rendered half: it is a real anchor to the real route, and it carries
+    // `rel="noreferrer"` — defence in depth beside the full load, since without
+    // it the tokenized portal URL travels to `/privacy` as `document.referrer`
+    // and as the `Referer` header. Sentry's redaction of a portal `$referrer` on
+    // every OTHER route (ADR 0037 Amendment 1) is untouched; this just means the
+    // credential never has to rely on it here.
+    const link = policyLink();
+    expect(link.tagName).toBe("A");
+    expect(link).toHaveAttribute("href", "/privacy");
+    expect(link).toHaveAttribute("rel", "noreferrer");
+  });
+
+  it("is already on the loading shell, so it is never absent while the page settles", async () => {
+    let release: () => void = () => {};
+    const settled = new Promise<void>((r) => (release = r));
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), async () => {
+        await settled;
+        return jsonOk(portalInfo);
+      }),
+    );
+
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+
+    expect(
+      screen.getByRole("status", { name: /loading your upload page/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(NOTICE_RE)).toBeInTheDocument();
+    expect(policyLink()).toHaveAttribute("href", "/privacy");
+
+    // Drain inside the test boundary (the loading-state test's pattern).
+    release();
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+  });
+
+  it("survives a successful upload — the notice does not vanish behind the Received card", async () => {
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () =>
+        jsonOk({ uploadId: "u_notice", extractionStatus: "Pending", message: "Received" }),
+      ),
+    );
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+
+    dropFiles([makeFile("coi.pdf")]);
+    await waitFor(() => expect(screen.getByText(/^received$/i)).toBeInTheDocument());
+
+    expect(screen.getByText(NOTICE_RE)).toBeInTheDocument();
+    expect(policyLink()).toHaveAttribute("href", "/privacy");
+  });
+
+  it("survives an at-limit link, where the dropzone is disabled but the page is still the collection surface", async () => {
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () =>
+        jsonOk(makePortalInfo({ uploadCount: 5, maxUploads: 5 })),
+      ),
+    );
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/upload limit reached on this link/i)).toBeInTheDocument(),
+    );
+
+    expect(screen.getByText(NOTICE_RE)).toBeInTheDocument();
+    expect(policyLink()).toHaveAttribute("href", "/privacy");
+  });
+
+  it("survives an upload failure, where the vendor is most likely to look for who has their file", async () => {
+    server.use(
+      http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)),
+      http.post(url(`/api/portal/${TOKEN}/upload`), () =>
+        jsonError("vendor.portal_quota_exceeded", "You've used every upload on this link.", {
+          status: 429,
+        }),
+      ),
+    );
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+
+    dropFiles([makeFile("coi.pdf")]);
+    await waitFor(() =>
+      expect(screen.getByTestId("portal-error-quota_exhausted")).toBeInTheDocument(),
+    );
+
+    expect(screen.getByText(NOTICE_RE)).toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      "a dead link",
+      () => expiredPortalLinkHandler(TOKEN),
+      /ask your customer for a fresh upload link/i,
+    ],
+    [
+      "a transient failure",
+      () =>
+        http.get(url(`/api/portal/${TOKEN}`), () =>
+          jsonError("server.unavailable", "Service temporarily unavailable.", { status: 503 }),
+        ),
+      /we couldn't load this page/i,
+    ],
+  ] as const)(
+    "still links the policy on %s — no upload is possible there, but the disclosure stands",
+    async (_label, handler, settledCopy) => {
+      server.use(handler());
+      ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+
+      await waitFor(() => expect(screen.getByText(settledCopy)).toBeInTheDocument());
+
+      // The "by uploading" half would be false here — there is no dropzone —
+      // so this state carries the standing visit disclosure and the same policy
+      // link. It is no longer there because a pageview fires (it does not, since
+      // ADR 0037 Amendment 2): it is there because a reader on a dead link is
+      // still owed the answer to "what does this page do with me".
+      expect(screen.queryByText(NOTICE_RE)).toBeNull();
+      expect(
+        screen.getByText(/this page sets no cookies and doesn't measure how it's used/i),
+      ).toBeInTheDocument();
+      expect(policyLink()).toHaveAttribute("href", "/privacy");
+    },
+  );
+});
+
+/**
+ * The counsel gate quotes this page's two sentences and asks for a yes/no on the
+ * exact wording, so a reword landing between the ask and the answer would leave
+ * the attorney blessing a string nobody ships. (#404 / G1-COUNSEL-BRIEF §0 CLM-5)
+ *
+ * This is `marketing-claims.test.ts`'s CLM-4 register pin in the one shape that
+ * works here. That one scans SOURCE, and the collection notice embeds a `<Link>`
+ * mid-sentence, so the sentence is not contiguous in the file — rendering is
+ * what puts the link's own text back inline. Checking the two RENDERED states is
+ * therefore both the only workable form AND the closer one: it compares the
+ * brief against what a vendor actually reads, not against JSX.
+ */
+describe("Counsel brief §0 CLM-5 register (#404)", () => {
+  // Path walk + row filter + quote extraction come from the shared reader — the
+  // CLM-4 pin in `src/test/marketing-claims.test.ts` performs the identical
+  // three steps and this block used to re-implement them (#404 review S6).
+  const { rows, quoted } = counselRegisterRow("CLM-5");
+
+  it("quotes BOTH shipped sentences, named — not merely two of something", () => {
+    expect(rows, "expected exactly one §0 CLM-5 register row").toHaveLength(1);
+    // A count assertion passes for the wrong reason: the row yields three
+    // quotes (the two notices plus "the AI services we use", which the
+    // provider-naming ruling cites), so `>= 2` stayed green if one of the two
+    // notices were REPLACED by something else. Name them instead — dropping
+    // either must be a deliberate edit, not an accident of rewriting the cell.
+    const flat = quoted.map(flattenCopy);
+    expect(
+      flat,
+      "the §0 CLM-5 row no longer quotes the collection notice (item (a))",
+    ).toContainEqual(expect.stringContaining("By uploading, you agree your document will be"));
+    expect(
+      flat,
+      "the §0 CLM-5 row no longer quotes the line the no-dropzone branches carry (item (b))",
+      // Matched on the trailing "— see our Privacy Policy", which is what
+      // DISTINGUISHES (b) from (a): the two sentences now share their opening
+      // clause, so a prefix match is satisfied by (a) alone and this pin would
+      // stay green with (b) deleted — the exact failure the naming exists to
+      // stop.
+    ).toContainEqual(
+      expect.stringContaining(
+        "This page sets no cookies and doesn't measure how it's used — see our Privacy Policy.",
+      ),
+    );
+  });
+
+  it("every sentence it quotes is one the portal actually renders", async () => {
+    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+    const upload = renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+    const uploadState = flattenCopy(upload.container.textContent ?? "");
+    upload.unmount();
+
+    server.use(expiredPortalLinkHandler(TOKEN));
+    const dead = renderWithProviders(<PortalPage />, { params: { token: TOKEN } });
+    await waitFor(() =>
+      expect(screen.getByText(/ask your customer for a fresh upload link/i)).toBeInTheDocument(),
+    );
+    const deadState = flattenCopy(dead.container.textContent ?? "");
+
+    const missing = quoted.filter(
+      (sentence) =>
+        !uploadState.includes(flattenCopy(sentence)) && !deadState.includes(flattenCopy(sentence)),
+    );
+    expect(
+      missing,
+      "the §0 CLM-5 row quotes copy no portal state renders — either the page was reworded without updating the brief, or the brief quotes something that was never shipped",
+    ).toEqual([]);
   });
 });

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -380,6 +382,35 @@ describe("Legal + contact pages (#194)", () => {
     expect(text).toMatch(/share it for targeted advertising/i);
   });
 
+  it("Privacy Policy addresses the vendor who arrives from the portal's notice, not only account holders (#404)", () => {
+    // The portal's notice-at-collection links here, so this page has to cover
+    // the person reading it: someone with no account who was sent an upload
+    // link. A policy that only speaks to customers is not notice to them.
+    // The pre-existing paragraph below covers the person NAMED inside a
+    // document; this section covers the person who UPLOADS one — different
+    // reader, different remedy, so neither substitutes for the other.
+    const { container } = render(<PrivacyPolicyPage />);
+    expect(
+      screen.getByRole("heading", { name: /if you were sent an upload link/i }),
+    ).toBeInTheDocument();
+
+    const text = (container.textContent ?? "").replace(/\s+/g, " ");
+    // The three collection facts the portal notice summarizes must be findable here.
+    expect(text).toMatch(/you do not need an account/i);
+    expect(text).toMatch(/your file is stored, and it is read automatically/i);
+    // This said "the page sets the analytics cookie" until round 2 of #404,
+    // which was true when written and stopped being true when `Providers`
+    // started refusing to initialise PostHog under `/portal/`
+    // (ADR 0037 Amendment 2). The policy and the portal notice make the same
+    // claim about the same page, so they move together or one of them lies —
+    // see ADR 0054 Amendment 1.
+    expect(text).toMatch(/that page sets no cookies and we do not measure how it is used/i);
+    // …and the reader is told who actually controls the record they care about.
+    expect(text).toMatch(/that business decides what to do with the document/i);
+    // The other reader keeps their own paragraph — this section did not replace it.
+    expect(text).toMatch(/if your information appears inside a document/i);
+  });
+
   it("Terms of Service renders the not-advice disclaimer + cancellation terms (Stripe requirement)", () => {
     render(<TermsOfServicePage />);
     expect(
@@ -406,6 +437,44 @@ describe("Legal + contact pages (#194)", () => {
     const mainHrefs = main.getAllByRole("link").map((l) => l.getAttribute("href"));
     expect(mainHrefs).toContain("/privacy");
     expect(mainHrefs).toContain("/contact");
+  });
+
+  it("Terms are drafted to reach a portal uploader — so no record may claim otherwise (#404)", () => {
+    // ADR 0054 declines to link /terms from the portal. Its FIRST rationale was
+    // "the Terms bind a customer; the vendor is not one" — falsified by this
+    // page, which accepts on "or using" and whose acceptable-use clause governs
+    // uploading, the one act the portal vendor performs. A recorded rejection
+    // does not get re-examined, so a false reason on file is a durable defect;
+    // the decision now stands on RELEVANCE and the binding question is routed
+    // to counsel as CLM-5 (iv).
+    const { container } = render(<TermsOfServicePage />);
+    const text = (container.textContent ?? "").replace(/\s+/g, " ");
+
+    // (1) Acceptance is not account-gated.
+    expect(
+      text,
+      "the Terms no longer accept on mere USE — ADR 0054 Option E and counsel item CLM-5 (iv) both rest on this clause and need re-reading",
+    ).toMatch(/creating an account or using [^.]*, you agree to them/i);
+    // (2) …and what they govern includes the vendor's act.
+    expect(
+      text,
+      "the Terms' acceptable-use clause no longer governs uploading — same two records to re-read",
+    ).toMatch(/upload content you don't have the right to upload/i);
+
+    // The ADR must not carry the retired reason. Both forms it took — and the
+    // hits, not the 20 KB document, are what a failure prints.
+    const adr = readFileSync(
+      resolve(__dirname, "..", "..", "..", "docs", "adr", "0054-portal-gives-notice-at-collection.md"),
+      "utf8",
+    ).replace(/\s+/g, " ");
+    const retired = [
+      /The Terms bind a \*customer\*; the vendor is not one/i,
+      /The vendor is not entering a subscription agreement/i,
+    ];
+    expect(
+      retired.filter((claim) => claim.test(adr)).map(String),
+      "ADR 0054 states a reason for not linking /terms that the shipped Terms contradict — a recorded rejection does not get re-examined, so the reason on file has to be the true one",
+    ).toEqual([]);
   });
 
   it("each legal/contact page sets a self-canonical and a descriptive title", () => {

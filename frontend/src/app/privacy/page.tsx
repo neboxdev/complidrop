@@ -21,7 +21,7 @@ export const metadata: Metadata = pageMetadata({
 
 // Fixed effective date — a legal document's "last updated" must not change on
 // every render/build (so never `new Date()` here). Bump by hand on real edits.
-const EFFECTIVE_DATE = "August 6, 2026";
+const EFFECTIVE_DATE = "August 7, 2026";
 
 export default function PrivacyPolicyPage() {
   return (
@@ -138,6 +138,35 @@ export default function PrivacyPolicyPage() {
           is active. If you close your account, we delete or de-identify your data
           within a reasonable period, except where we must retain certain records to
           meet legal, tax, or security obligations.
+        </p>
+      </LegalSection>
+
+      {/* The portal's notice-at-collection links here, and a vendor arriving from it is not the
+          reader the rest of this policy addresses — they have no account and never will (#404 /
+          counsel gate CLM-5). The "information inside a document" paragraph below covers the person
+          NAMED on a certificate; this covers the person who UPLOADS one. */}
+      <LegalSection title="If you were sent an upload link">
+        <p>
+          Some people reach {SITE_NAME} without ever creating an account: one of our
+          customers sends a vendor, contractor, or supplier a link to a secure upload
+          page and asks for a current certificate, license, or permit. If that is you,
+          this section is the short version.
+        </p>
+        <p>
+          You do not need an account, and we do not ask you to create one. When you use
+          that page we collect the file you upload, along with the basic technical data
+          described above such as IP address and browser type. Unlike the rest of the
+          site, that page sets no cookies and we do not measure how it is used, because
+          the link you were sent is itself the key to it. Your file is stored, and it is read
+          automatically by the service providers listed above — that automated reading
+          is how the dates, names, and coverage amounts on it are turned into fields —
+          so the business that sent you the link can check it against what they require.
+        </p>
+        <p>
+          That business decides what to do with the document it asked you for and how
+          long it keeps its copy, so a request about it is usually fastest with them.
+          You can also reach us using the contact details at the end of this page and
+          we&apos;ll help route your request.
         </p>
       </LegalSection>
 

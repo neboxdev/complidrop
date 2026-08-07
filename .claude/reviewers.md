@@ -26,6 +26,134 @@ Both are defined in this repo's `.claude/agents/`.
   per-token with a 240/hr per-IP backstop — deliberate (#242). The UPLOAD route caps
   (`portal-token` 10/hr, `portal-ip` 30/hr, per-link `MaxUploads`, per-org monthly cost
   ceiling) DO apply and their absence would be a bug.
+- The portal's notice at collection is ADR 0054 (#404 / counsel gate CLM-5); the facts that
+  follow are pointers into it, not a second copy of the rationale.
+  - The notice renders in the loading shell, in the main return (which is ALSO the at-limit
+    and post-upload state), and — as a DIFFERENT sentence — in the dead-link and transient
+    branches. "Consolidate it into one render site" is not available: those two branches
+    return their own `<main>`, and "By uploading, you agree…" is FALSE where there is no
+    dropzone, so they carry the standing visit line plus the same policy link instead. That
+    line is NOT there because a pageview fires — since ADR 0037 Amendment 2 none does — it is
+    there because a reader on a dead link is still owed the answer to "what does this page do
+    with me". On the transient branch it sits OUTSIDE `role="alert"` deliberately — standing
+    disclosure is not part of the failure a screen reader is interrupted for.
+  - The full notice is on the LOADING SHELL as real copy, not a skeleton bar, and is NOT
+    gated on `atQuota`. Both are decisions: the notice belongs to the collection surface,
+    not to a particular attempt, and it is the one element that must never be pending.
+  - It names NO AI vendor. `Extraction:Provider` is a config switch, so portal copy naming
+    Google would go stale silently; the named subprocessor list lives in `/privacy`, one
+    link away. "#404's summary said Google, so the copy should say Google" is the bug — and
+    the Anthropic-path disclosure gap is CLM-6 / [#405](https://github.com/neboxdev/complidrop/issues/405),
+    deliberately NOT pre-empted here (ADR 0054 §3 / Option B).
+  - The analytics clause now DISCLAIMS ("sets no cookies and doesn't measure how it's used",
+    ADR 0054 Amendment 1) because ADR 0037 Amendment 2 took the route out of analytics. It is
+    STATIC, and the env-var question no longer cuts either way — with or without
+    `NEXT_PUBLIC_POSTHOG_KEY` the page is unmeasured, so the sentence is true in every
+    environment. Making a notice depend on a build-time env var stays the recorded rejection
+    (Option F) and is not reopened. Both halves of the disclaimer are PINNED (`document.cookie`
+    in `page.test.tsx`, no-PostHog-request in `providers.test.tsx`) and `/privacy` + both CLM-5
+    counsel rows carry the same words — rewording one without the others is the finding.
+  - The `/privacy` section added for this reader re-names NO subprocessor, and that is
+    load-bearing twice over: `marketing-content.test.tsx` pins each vendor with a SINGULAR
+    `getByText` (a second "Document AI" / "Microsoft Azure" / "Railway" / "Vercel" /
+    "Resend" reddens CI), and the section's job is to point at the one list rather than fork
+    it. Same for the `SUPPORT_EMAIL` mailto, pinned by a singular `getByRole("link")`.
+  - Same-tab link, matching every other legal link in `frontend/` — there is no
+    `target="_blank"` anywhere in the tree. Adding one here is a new pattern, not a fix. Same tab,
+    but since ADR 0054 Amendment 2 NOT a client-side transition: it is a plain `<a>` so the policy
+    loads in a fresh JS context. See the telemetry block below for why, and why reverting it to
+    `<Link>` re-opens a leak.
+  - `/terms` is NOT linked, and the reason is RELEVANCE only (ADR 0054 Option E, corrected in
+    the #404 review). Do NOT restate it as "the Terms bind a customer, the vendor is not one":
+    `terms/page.tsx` accepts on "or using" and its Acceptable-use clause governs uploading, so
+    they are drafted to reach this reader — whether they BIND one who was never shown them is
+    CLM-5 (iv), routed to counsel. Both halves are pinned by
+    `marketing-content.test.tsx`'s "Terms are drafted to reach a portal uploader".
+  - Frontend-only by design: `/api/portal/*` is untouched, this change ADDS the token to no
+    link and no analytics property, and no session is needed to read the policy. The DOM half
+    is what `assertNotInDom` pins, and only that half — its own docstring scopes it out of
+    non-DOM channels ("`localStorage` / `sessionStorage` / `window.*` … non-DOM channels are
+    explicitly out of scope"), so it never spoke for what leaves over the wire. Whether the
+    token reaches a telemetry VENDOR is a separate mechanism with its own record and its own
+    pin: ADR 0037 Amendments 1-2 / `frontend/src/lib/analytics.test.ts` +
+    `providers.test.tsx` (Sentry has redacted it since #356; PostHog does not run on this route
+    at all since #404 round 2). A version that adds a consent checkbox or a cookie banner is
+    ADR 0054 Options C/D, both refuted.
+- Frontend telemetry URL redaction is ADR 0037 (#356) + its Amendments 1 and 2 (#404); the facts
+  that follow are pointers into it, not a second copy of the rationale.
+  - `lib/analytics.ts` IMPORTING `sanitizeUrl` from `lib/sentry/scrub.ts` is the decision, not a
+    layering slip. One redaction rule, two vendors — a mirrored regex is the drift ADR 0038
+    already refuses, and worse here (the two vendors would disagree about what a secret is).
+    `scrub.ts`'s only `@sentry/nextjs` import is `import type`, so no Sentry runtime enters the
+    analytics bundle. "Move the shared helper somewhere neutral" is a rename, not a finding.
+  - `before_send`, NOT `sanitize_properties`: the installed SDK marks the latter `@deprecated`
+    and logs an error on every event that uses it. (It is NOT "handed `properties` alone" — that
+    clause was false and is gone: `_calculate_set_once_properties` calls it a second time with the
+    `$set_once` bag. The choice is unchanged; only its recorded reason was wrong.) `before_send`
+    receives the whole assembled `CaptureResult`, so it sees `$set` / `$set_once` — where the
+    `$initial_*` family rides, a SIBLING of `properties` on the wire.
+  - The key match is a SUBSTRING rule (`url`|`path`|`referrer`|`href`, applied recursively) on
+    purpose. The property set was established by DRIVING THE REAL SDK
+    (`analytics.test.ts` intercepts + gunzips the ingest requests), which is how
+    `$session_entry_url` / `_pathname` / `_referrer` were found at all; the SDK grows these by
+    family, so "replace it with the exact list" re-opens the hole on the next SDK release.
+    Over-matching is harmless — `sanitizeUrl` leaves a non-portal URL alone and preserves dashed
+    GUIDs — so `$host` / `$referring_domain` going unmatched (they carry no path) is not a gap.
+  - RETRACTED — the entry that used to sit here said the `/flags` residue "fires only after
+    `identify()`, so the value is an identified CUSTOMER's own URL". That was FALSE (posthog-js
+    issues `/flags` at init and again every 5 min, no identify in either chain; the bag is built
+    from persistence, so it carried an ANONYMOUS vendor's raw portal URL), and as a do-NOT-flag
+    entry it told the next reviewer not to report a live leak. ADR 0037 Amendment 2 retracts it.
+    Both channels are now CLOSED, not redacted, and the closures are the do-not-flag facts:
+    `advanced_disable_flags: true` (deliberate — it also disables PostHog remote config; nothing
+    in `frontend/` reads a flag) and `capture_heatmaps: false` (the extension buffers by
+    `location.href` and sends the map as `$heatmap_data`, i.e. a URL as an object KEY —
+    `sanitizeUrlKey` is the general rule, the init flag is what survives a walker rewrite).
+    Deliberately BOTH; "one of these is redundant" is not a finding.
+  - `Providers` NOT calling `initAnalytics()` under `/portal/` is the decision (ADR 0037
+    Amendment 2), not a missing feature: that route's URL IS the bearer credential, and two
+    reviewed rounds of per-channel redaction each missed a channel. The founder losing PostHog
+    on the portal page is the accepted cost, recorded in the ADR. `analytics.ts`'s redaction is
+    NOT thereby dead code: `/privacy` reached from the portal carries the tokenized URL in
+    `document.referrer`, and a reminder mail can put one in any route's `$referrer`.
+  - CORRECTED — this entry used to add "it is gated on the CURRENT pathname on purpose — a vendor
+    who follows the notice's policy link is measured from that click on". That is now FALSE in
+    both directions (ADR 0037 Amendment 3 / #404 round 3). posthog-js is a module-global singleton
+    nothing de-initialises, so a pathname-only gate lapsed across the notice's own policy round
+    trip (`<Link>` → `/privacy` → init → Back) and left a live SDK on `/portal/{token}`. TWO
+    mechanisms now ship and NEITHER is redundant — "one of these is enough" is not a finding:
+    - `PrivacyPolicyLink` is a plain `<a href="/privacy" rel="noreferrer">`, NOT `next/link`. The
+      full document load is the security property (a new JS context); `rel="noreferrer"` keeps the
+      tokenized URL out of `document.referrer` / `Referer` as defence in depth, and does NOT
+      retire the referrer redaction, which still covers every other route. "Use `<Link>` for an
+      internal href" and "add `target="_blank"` instead" are both refuted (ADR 0054 Amendment 2).
+      `@next/next/no-html-link-for-pages` is `error`-tier but cannot fire on an app-dir route (the
+      rule matches `/^\/privacy$/` against a `normalizeURL`-trailing-slashed `/privacy/`), so an
+      `eslint-disable` there is an UNUSED directive and reddens `--max-warnings=0`. The reason is
+      on file at the call site; do not add the directive, and do not switch the rule off.
+    - `Providers` keeps a module-scope `contextHeldCredentialInUrl`, so once a tab has held the
+      credential nothing initialises in it again until a hard load. **The cost is recorded, not
+      overlooked:** that tab is unmeasured for the rest of its session and the vendor's `/privacy`
+      visit is not measured either. Flagging either as a regression is reviewer noise.
+    The residue that REMAINS is also recorded: a tab that arrives at the portal from an ordinary
+    route keeps its already-live SDK (nothing in `frontend/` links to `/portal/{token}`, so it
+    needs a pasted URL). ADR 0037 Amendment 3 § What stays open.
+  - The portal notice + `/privacy` saying the page "sets no cookies and doesn't measure how it's
+    used" are claims of ABSENCE that moved with that gate (ADR 0054 Amendment 1) and are pinned
+    — `page.test.tsx` reads `document.cookie`, `providers.test.tsx` asserts no PostHog request
+    leaves the route, per BROWSING CONTEXT and across the policy round trip. Their earlier cookie
+    wording is not "missing", it was made false by the code change and replaced in the same commit,
+    counsel-brief quotes included. Round 3 went the OTHER way — the sentence went false again and
+    the CODE moved instead (ADR 0054 Amendment 2); "reword the notice to match the residue" was
+    considered and refused, so proposing it is not a finding.
+  - `providers.test.tsx` runs each case in its own browsing context (`vi.resetModules()` + a
+    dynamic import) and keeps the dashboard case LAST. Both are load-bearing: the gate is sticky,
+    so a shared context would let the first portal render suppress every later case, and vitest
+    externalises node_modules, so posthog-js's own singleton outlives `resetModules()` and only the
+    last case may initialise it. Half the full-document-load pin reads page SOURCE rather than the
+    DOM — deliberately: jsdom never navigates and `next/link` without an `AppRouterContext` does
+    not even `preventDefault`, so a "was the click intercepted" probe was written, run against
+    `<Link>`, and found non-discriminating.
 - `IgnoreQueryFilters()` / `SystemDbContext` inside background workers and system
   contexts — by design. In request-path code it IS a blocker (tenant leakage).
 - Idempotency records replay the winner's exact response for as long as the row exists;
@@ -1595,7 +1723,7 @@ Both are defined in this repo's `.claude/agents/`.
 - **Billing**: Stripe checkout, webhook, subscription state
 - **Tenancy**: `AppDbContext.CurrentOrgId`, global query filters, any
   `IgnoreQueryFilters` call
-- **Vendor portal**: `/api/portal/*` (public, untrusted input)
+- **Vendor portal**: `/api/portal/*` (public, untrusted input), the `frontend/src/app/portal/**` page, and the two files that decide whether its tokenized URL reaches a telemetry vendor (`frontend/src/lib/providers.tsx`, `frontend/src/lib/analytics.ts`)
 - **Blob storage**: Azure Blob access, SAS scoping
 - **Audit**: `AuditSaveChangesInterceptor`, `IAuditLogger`
 - **PII**: extraction fields, exports, email contents
@@ -1624,8 +1752,11 @@ api/**/AppDbContext.cs
 api/**/AuditSaveChangesInterceptor.cs
 api/**/ComplianceCheckDeleteConcurrencyInterceptor.cs
 api/**/*Portal*
+frontend/src/app/portal/**
 frontend/src/app/(auth)/**
 frontend/src/lib/api.ts
+frontend/src/lib/providers.tsx
+frontend/src/lib/analytics.ts
 .github/workflows/**
 Dockerfile*
 **/package.json
@@ -1638,6 +1769,11 @@ container image, and dependency manifests are an unreviewed-path-to-prod risk.)
 (`ComplianceCheckDeleteConcurrencyInterceptor.cs` is listed BY NAME, not as
 `api/**/*Interceptor*`: it changes `SaveChanges` semantics on BOTH contexts like the audit
 one beside it, while a wildcard would drag every test-only interceptor into a clearance.)
+
+(`providers.tsx` + `analytics.ts` joined the list in #404 round 3. Neither is under
+`frontend/src/app/portal/**`, yet between them they decide whether the portal's bearer
+credential reaches a third party — three review rounds each found a live leak there, and the
+last one lived in a five-line effect that no portal-path glob would have matched.)
 
 ## Labels
 
