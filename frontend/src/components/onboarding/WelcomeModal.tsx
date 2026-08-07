@@ -20,7 +20,7 @@ const SLIDES = [
   {
     title: "Stay audit-ready without the chase",
     description:
-      "CompliDrop keeps your vendors' insurance certificates (COIs), licenses, and permits on file — and warns you before any of them expire.",
+      "CompliDrop keeps your vendors' insurance certificates (COIs), licenses, and permits on file — and sends reminders ahead of the expiration date.",
     showSteps: false,
   },
   {

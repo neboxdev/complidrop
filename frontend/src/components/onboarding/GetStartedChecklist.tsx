@@ -86,7 +86,7 @@ export function useOnboardingChecklist(): OnboardingChecklist {
     {
       key: "reminders",
       label: "Expiry reminders are on",
-      hint: "We email you before anything lapses — already set up for you.",
+      hint: "We email you ahead of the expiration date — already set up for you.",
       href: "/reminders",
       done: true,
     },

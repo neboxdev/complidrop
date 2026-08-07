@@ -18,6 +18,15 @@ function ChecklistHarness() {
   return <GetStartedChecklist checklist={checklist} />;
 }
 
+// Renders every hint the real hook derives. The reminders step is hardcoded
+// `done: true` and the done branch renders only the label, so its hint never
+// reaches the card's DOM — but it is shipped copy that a future
+// conditionally-done reminders step would surface, so it is asserted here. (#403)
+function HintProbe() {
+  const { steps } = useOnboardingChecklist();
+  return <p>{steps.map((step) => step.hint).join(" ")}</p>;
+}
+
 function makeChecklist(done: boolean[]): OnboardingChecklist {
   const labels = [
     { key: "vendor", label: "Add your first vendor", href: "/vendors" },
@@ -87,6 +96,22 @@ describe("GetStartedChecklist (#191)", () => {
     expect(screen.queryByRole("link", { name: /add your first vendor/i })).toBeNull();
     expect(screen.getByRole("link", { name: /choose what they must prove/i })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /collect a document/i })).toBeInTheDocument();
+  });
+
+  it("says what the reminder emails do instead of promising one before every lapse (#403)", async () => {
+    // The Terms disclaim reminder delivery ("a helpful nudge, not a guaranteed
+    // notice"), a document with no expiration date is never reminded on, and a
+    // suppressed recipient is skipped (ADR 0031) — so "before anything lapses"
+    // is an outcome the product can't promise. Same claim, same fix as the
+    // landing page and the welcome modal.
+    // The reminders hint is stats-independent, but the hook still fetches —
+    // answer it so the run carries no unhandled-request noise.
+    server.use(http.get(url("/api/dashboard/stats"), () => jsonOk({ totalVendors: 0, totalDocuments: 0 })));
+
+    renderWithProviders(<HintProbe />, { auth: authedMe });
+    const hints = await screen.findByText(/already set up for you/i);
+    expect(hints).toHaveTextContent(/we email you ahead of the expiration date/i);
+    expect(hints).not.toHaveTextContent(/before anything lapses/i);
   });
 
   it("stays hidden while stats are still loading (no cold-cache flash)", () => {
