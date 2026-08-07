@@ -278,6 +278,11 @@ live leak. **A wrong fact in a do-NOT-flag list is worse than no fact.** All fiv
 corrected; the subsection above is marked rather than deleted, because the lesson is the process one:
 "verified live, not inferred" was written about a claim nobody had verified.
 
+Amendment 1's closing line — *"this amendment discloses nothing new to a user — ADR 0054's notice
+already says the page uses analytics cookies"* — is stale for the same reason, in the other
+direction: the notice no longer says that, because the page no longer does it. See
+[ADR 0054 Amendment 1](0054-portal-gives-notice-at-collection.md#amendment-1-2026-08-07--the-cookie-sentence-becomes-a-disclaimer-because-the-route-stopped-being-measured).
+
 ### What changed in code
 
 Three layers, smallest to largest:
