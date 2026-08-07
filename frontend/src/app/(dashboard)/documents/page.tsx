@@ -37,6 +37,7 @@ import { complianceStatusLabel } from "@/lib/display-labels";
 import { formatCalendarDate } from "@/lib/dates";
 import { cn } from "@/lib/utils";
 import { GENERIC_FALLBACK_MESSAGE } from "@/lib/api";
+import { DOCUMENT_REMOVAL_NOTICE } from "@/lib/removal-copy";
 import {
   rejectionCopy,
   UPLOAD_ACCEPT,
@@ -845,7 +846,7 @@ export default function DocumentsPage() {
                     <td className="px-4 py-3 text-right">
                       <ConfirmDialog
                         title={`Remove ${d.originalFileName}?`}
-                        description="This removes the document from your records and can't be undone."
+                        description={DOCUMENT_REMOVAL_NOTICE}
                         confirmLabel="Remove"
                         destructive
                         onConfirm={() =>

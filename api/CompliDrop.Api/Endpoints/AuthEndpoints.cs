@@ -817,11 +817,19 @@ public static class AuthEndpoints
     }
 
     /// <summary>
-    /// Authenticated (#183). Deletes the account after a password re-check
-    /// (GDPR/CCPA erasure): scrubs the user's PII (email + name), soft-deletes the
-    /// user + organization (revoking all access and hiding tenant data via the
-    /// query filters), and clears the auth cookies. Scrubbing the email also frees
-    /// it for a future re-registration.
+    /// Authenticated (#183). CLOSES the account after a password re-check: cancels any live
+    /// Stripe subscription, scrubs the account holder's PII (email + name), soft-deletes the
+    /// user + organization (revoking all access and hiding tenant data via the query filters),
+    /// and clears the auth cookies. Scrubbing the email also frees it for a future
+    /// re-registration.
+    /// <para>
+    /// NOT an erasure, and the user-facing copy must never say it is (#398 / ADR 0013
+    /// Amendment 1): the tenant's vendors (contact email/phone included), documents,
+    /// uploaded blobs, reminder logs, <c>Subscription</c> row and audit trail all SURVIVE —
+    /// hidden behind the soft-delete query filters, not purged (ADR 0013 § Consequences) —
+    /// and clearing <c>DeletedAt</c> restores the account. Whether a post-closure purge
+    /// should exist at all is counsel-gate item CLM-7, deliberately not answered in code.
+    /// </para>
     /// </summary>
     private static async Task<IResult> DeleteAccount(
         DeleteAccountRequest req,
@@ -927,7 +935,13 @@ public static class AuthEndpoints
         }
 
         ClearAuthCookies(http, cookieOpts.Value);
-        return Results.Ok(new { data = new { message = "Your account has been deleted." }, error = (object?)null });
+        // "Closed", not "deleted" (#398 / ADR 0013 Amendment 1). Nothing above erases the
+        // tenant's data — the org is tombstoned and every child row, blob and reminder log
+        // survives — and ADR 0013 names support-reversibility as a benefit, so an erasure
+        // word here is the same false claim the Settings card carried. The frontend renders
+        // its own toast today, but the error-copy policy makes every server message a
+        // candidate for display, so it must be true where it is written.
+        return Results.Ok(new { data = new { message = "Your account is closed." }, error = (object?)null });
     }
 
     /// <summary>

@@ -13,6 +13,7 @@ import { VendorCoverageBadge } from "@/components/VendorCoverageBadge";
 import { requirementSentence } from "@/lib/requirements";
 import { complianceStatusLabel } from "@/lib/display-labels";
 import { contactEmailError, trimContactEmail } from "@/lib/contact-email";
+import { VENDOR_REMOVAL_NOTICE } from "@/lib/removal-copy";
 import {
   useVendor,
   useGeneratePortalLink,
@@ -371,7 +372,7 @@ function VendorDetailContent({ vendor, vendorId }: { vendor: VendorDetail; vendo
                 and soft-deleting the vendor is handled server-side (#269); uploaded docs are kept. */}
             <ConfirmDialog
               title={`Remove ${vendor.name}?`}
-              description="This removes the vendor and deactivates any upload links you shared with them. Documents they already sent stay in your account. This can’t be undone."
+              description={VENDOR_REMOVAL_NOTICE}
               confirmLabel="Remove vendor"
               destructive
               onConfirm={() =>

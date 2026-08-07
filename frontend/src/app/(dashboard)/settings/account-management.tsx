@@ -201,8 +201,12 @@ export function DataExportSection() {
     <Card>
       <CardContent className="p-6 space-y-2">
         <h2 className="text-base font-semibold text-slate-800">Export your data</h2>
+        {/* #398: says what `AuthEndpoints.ExportAccount` actually serializes. The documents
+            block is METADATA — file name, type, expiration date, status, created date — so
+            "documents" unqualified reads as "my files", which this export does not contain. */}
         <p className="text-sm text-slate-500">
-          Download a JSON copy of your account, organization, vendors, documents, and reminders.
+          Download a JSON copy of your account, organization, vendors, reminders, and the details
+          we hold for each document. The uploaded files themselves aren&apos;t included.
         </p>
         <Button type="button" size="sm" variant="outline" onClick={onExport} disabled={busy}>
           {busy ? "Preparing…" : "Export my data"}
@@ -220,7 +224,7 @@ export function DangerZone() {
       <CardContent className="p-6 space-y-6">
         <div>
           <h2 className="text-base font-semibold text-rose-700">Danger zone</h2>
-          <p className="text-sm text-slate-500">Permanently delete your account and organization data.</p>
+          <p className="text-sm text-slate-500">Close your account and cancel billing.</p>
         </div>
         <DeleteAccountForm />
       </CardContent>
@@ -245,7 +249,7 @@ function DeleteAccountForm() {
   const onSubmit = async (values: DeleteForm) => {
     try {
       await del.mutateAsync(values);
-      toast.success("Your account has been deleted.");
+      toast.success("Your account is closed.");
       router.push("/login");
     } catch (err) {
       toast.error(friendly(err));
@@ -254,14 +258,23 @@ function DeleteAccountForm() {
 
   return (
     <div className="space-y-2">
-      <h3 className="text-sm font-medium text-slate-700">Delete account</h3>
+      {/* #398 / ADR 0013 Amendment 1. Every clause below is what `AuthEndpoints.DeleteAccount`
+          actually does, in its order: cancel the Stripe subscription (aborting the whole request
+          if it can't), scrub `User.Email` + `FullName`, soft-delete the user and the org. It does
+          NOT touch vendors, documents, the Azure blobs, reminder logs or the audit trail — ADR
+          0013 § Consequences lists that retention as a deliberate MVP boundary, and ADR 0013's own
+          "reversibility by support" makes "can't be undone" false as well. No word here may imply
+          erasure or irreversibility; the retention question is at the counsel gate as CLM-7. */}
+      <h3 className="text-sm font-medium text-slate-700">Close account</h3>
       <p className="text-xs text-slate-500">
-        Permanently deletes your account and organization data. This can&apos;t be undone. If you
-        have a paid plan, it will be canceled — no new charges will start.
+        Closing signs you out for good and clears your name and email from your account record. If
+        you have a paid plan, it will be canceled — no new charges will start. Your vendors,
+        documents, the files uploaded for them, and our record of account activity are kept, and we
+        handle them as described in our Privacy Policy.
       </p>
       {!confirming ? (
         <Button type="button" size="sm" variant="destructive" onClick={() => setConfirming(true)}>
-          Delete my account
+          Close my account
         </Button>
       ) : (
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-3 rounded-md border border-rose-200 bg-rose-50/50 p-3">
@@ -272,7 +285,7 @@ function DeleteAccountForm() {
           </div>
           <div className="flex gap-2">
             <Button type="submit" size="sm" variant="destructive" disabled={del.isPending}>
-              {del.isPending ? "Deleting…" : "Permanently delete"}
+              {del.isPending ? "Closing…" : "Close account"}
             </Button>
             <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(false)} disabled={del.isPending}>
               Cancel

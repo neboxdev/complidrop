@@ -27,6 +27,7 @@ import { requirementSentence } from "@/lib/requirements";
 import { SUPPORT_EMAIL } from "@/lib/site";
 import { formatCalendarDate } from "@/lib/dates";
 import { cn } from "@/lib/utils";
+import { DOCUMENT_REMOVAL_NOTICE } from "@/lib/removal-copy";
 import { useEffect, useId, useRef, useState } from "react";
 
 type DocField = {
@@ -1108,7 +1109,7 @@ export default function DocumentDetailPage() {
               </Button>
             }
             title={`Remove ${doc.originalFileName}?`}
-            description="This removes the document from your records and can't be undone."
+            description={DOCUMENT_REMOVAL_NOTICE}
             confirmLabel="Remove"
             destructive
             onConfirm={() =>

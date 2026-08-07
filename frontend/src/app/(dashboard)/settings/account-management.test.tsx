@@ -158,6 +158,17 @@ describe("DataExportSection — export (#183 / #320 FP-113)", () => {
     }
   });
 
+  it("describes the export as the metadata dump it actually is (#398)", () => {
+    // `AuthEndpoints.ExportAccount` selects `d.OriginalFileName, d.DocumentType,
+    // d.ExpirationDate, d.ComplianceStatus, d.CreatedAt` — document ROWS, never
+    // the blobs. "a JSON copy of your … documents" reads as "my files" to the
+    // person clicking a data-portability button, so the disclaimer is explicit.
+    const { container } = renderWithProviders(<DataExportSection />);
+    const text = (container.textContent ?? "").replace(/\s+/g, " ");
+    expect(text).toMatch(/the details we hold for each document/i);
+    expect(text).toMatch(/the uploaded files themselves aren't included/i);
+  });
+
   it("shows a jargon-free toast on export failure — the friendly server message, never an HTTP status", async () => {
     // api.getBlob (#254) now surfaces the server's friendly envelope message (not always the generic
     // fallback the old bare fetch used); the contract is "no HTTP jargon", which this still pins.
@@ -190,18 +201,44 @@ describe("DangerZone — delete account (#183)", () => {
 
     // The password field is hidden until the user opts in.
     expect(screen.queryByLabelText(/enter your password to confirm/i)).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /^delete my account$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^close my account$/i }));
 
     fireEvent.change(screen.getByLabelText(/enter your password to confirm/i), {
       target: { value: "Password1234" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /permanently delete/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^close account$/i }));
 
     await waitFor(() => expect(captured).toEqual({ password: "Password1234" }));
     await waitFor(() => expect(navState.router.push).toHaveBeenCalledWith("/login"));
     // useDeleteAccount's onSuccess must tear down the cached session (setMeCache(null)
     // + qc.clear()) so the deleted user can't keep rendering as authenticated.
     await waitFor(() => expect(queryClient.getQueryData([...ME_KEY])).toBeUndefined());
+  });
+
+  it("claims no erasure and no irreversibility, and names what closure keeps (#398)", () => {
+    // THE claim this card exists to get right. `AuthEndpoints.DeleteAccount`
+    // scrubs `User.Email` + `FullName` and soft-deletes the user + org; the
+    // vendors (contact email/phone included), documents, the uploaded blobs in
+    // Azure, reminder logs, the Subscription row and the audit trail are all
+    // RETAINED — ADR 0013 § Consequences calls that a deliberate MVP boundary,
+    // and the same ADR names support-reversibility as one of its benefits. So
+    // "Permanently delete … This can't be undone" was false in BOTH halves: the
+    // FTC Act §5 deceptive-deletion shape, and the reason #398 is a blocker.
+    // Copy only — ADR 0013's behaviour is unchanged and the retention question
+    // is routed to counsel as CLM-7, not answered here.
+    const { container } = renderWithProviders(<DangerZone />, { auth: authedMe });
+    const text = (container.textContent ?? "").replace(/\s+/g, " ");
+
+    expect(text).not.toMatch(/permanent/i);
+    expect(text).not.toMatch(/can(no|')t be undone/i);
+    // "Delete" itself is the representation the finding turns on — nothing here
+    // deletes, so no control or sentence may say it.
+    expect(text).not.toMatch(/delete/i);
+    // …and the truthful replacements actually render.
+    expect(text).toMatch(/clears your name and email from your account record/i);
+    expect(text).toMatch(
+      /your vendors, documents, the files uploaded for them, and our record of account activity are kept/i,
+    );
   });
 
   it("warns that a paid plan is canceled on deletion (#255)", () => {
@@ -230,11 +267,11 @@ describe("DangerZone — delete account (#183)", () => {
     );
     const { queryClient } = renderWithProviders(<DangerZone />, { auth: authedMe });
 
-    fireEvent.click(screen.getByRole("button", { name: /^delete my account$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^close my account$/i }));
     fireEvent.change(screen.getByLabelText(/enter your password to confirm/i), {
       target: { value: "Password1234" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /permanently delete/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^close account$/i }));
 
     await waitFor(() => expect(toastError).toHaveBeenCalledWith(serverMessage));
     expect(toastError).not.toHaveBeenCalledWith(expect.stringMatching(/502|bad gateway|failed to fetch/i));

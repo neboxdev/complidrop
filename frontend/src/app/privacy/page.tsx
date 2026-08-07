@@ -132,12 +132,34 @@ export default function PrivacyPolicyPage() {
         </p>
       </LegalSection>
 
+      {/* #398 / ADR 0013 Amendment 1 / counsel gate CLM-7. The retired sentence promised that
+          "we delete or de-identify your data within a reasonable period" after closure. No purge
+          job exists anywhere in the codebase: `AuthEndpoints.DeleteAccount` scrubs the account
+          holder's email + name and stamps `DeletedAt` on the user and the org, and that is all.
+          Every clause below is traceable — the scrub and the org tombstone to that endpoint, the
+          Stripe cancel to its `CancelSubscriptionAsync` call (which aborts the whole request if
+          it fails), the reminder stop to `ReminderBackgroundService`'s `o.DeletedAt == null`
+          filter, and the retained set to ADR 0013 § Consequences. NO retention period is stated,
+          deliberately: a number no job enforces would recreate the same defect in a new sentence. */}
       <LegalSection title="How long we keep it">
         <p>
           We keep your account information and documents for as long as your account
-          is active. If you close your account, we delete or de-identify your data
-          within a reasonable period, except where we must retain certain records to
-          meet legal, tax, or security obligations.
+          is active.
+        </p>
+        <p>
+          When you close your account from Settings, we clear your name and email from
+          your account record straight away, cancel any paid plan, and stop sending
+          reminders. Closing makes the account unusable — but on its own it is not a
+          deletion of everything the account held. Your organization&apos;s records stay
+          with us: the vendors you added and their contact details, your documents and
+          the files uploaded for them, reminder history, billing records, and our log of
+          what happened in the account.
+        </p>
+        <p>
+          We have not set a fixed disposal period for those records, so they stay with us
+          until you ask us to delete them. To ask, use the contact details at the end of
+          this page. We&apos;ll check the request is really yours, delete what we can, and
+          keep only what we must to meet legal, tax, or security obligations.
         </p>
       </LegalSection>
 
@@ -162,11 +184,16 @@ export default function PrivacyPolicyPage() {
           is how the dates, names, and coverage amounts on it are turned into fields —
           so the business that sent you the link can check it against what they require.
         </p>
+        {/* #398: read this together with "How long we keep it" above. This paragraph used to end
+            the reader's retention question at the business ("how long it keeps its copy"), which
+            left an account-less vendor with no answer about OUR copy — and ours outlives the
+            customer's account, since closing it purges nothing. */}
         <p>
-          That business decides what to do with the document it asked you for and how
-          long it keeps its copy, so a request about it is usually fastest with them.
-          You can also reach us using the contact details at the end of this page and
-          we&apos;ll help route your request.
+          That business decides what to do with the document it asked you for, so a
+          request about it is usually fastest with them. We keep our own copy while they
+          use {SITE_NAME}, and afterwards as described in &quot;How long we keep it&quot;
+          above. You can also reach us using the contact details at the end of this page
+          and we&apos;ll help route your request.
         </p>
       </LegalSection>
 
