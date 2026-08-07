@@ -1,7 +1,9 @@
 /**
  * Account management (#183) — Security section (change password / change email)
- * and Danger zone (export / delete). Drives the real hooks → api client → MSW so
- * envelope/mapping regressions fail here. Error copy must stay jargon-free.
+ * and Danger zone (export / account closure). Drives the real hooks → api client
+ * → MSW so envelope/mapping regressions fail here. Error copy must stay
+ * jargon-free, and since #398 the closure copy must also stay TRUE — see
+ * "claims no erasure and no irreversibility" below.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { http } from "msw";
