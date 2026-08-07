@@ -83,14 +83,21 @@ type UploadError = {
 //   - it is read by third-party AI services — `ExtractionWorker` runs Document
 //     AI OCR (`Services/Ocr/DocumentAiOcrService.cs`) and then the LLM selected
 //     by `Extraction:Provider` (`ExtractionClientFactory`, gemini by default);
-//   - and the VISIT is measured by PostHog — `app/layout.tsx` wraps every route
-//     in `Providers`, which calls `initAnalytics()`; there is no `app/portal`
-//     layout opting out, and the portal route sits under the root one.
+//   - and the visit is NOT measured. It was, when this notice shipped: the root
+//     layout wraps every route in `Providers`, which called `initAnalytics()`
+//     unconditionally. `Providers` now gates that on the pathname (#404 round 2
+//     / ADR 0037 Amendment 2), because on this one route the URL IS the bearer
+//     credential and per-channel redaction is a promise renewed every time
+//     posthog-js grows a channel. So the cookie clause the first version of this
+//     notice carried became FALSE IN THE OTHER DIRECTION and moved with the code
+//     — see ADR 0054 Amendment 1. Nothing else here sets a cookie: the auth
+//     cookies are issued by `AuthEndpoints` on sign-in and `/api/portal/*` sets
+//     none, which `page.test.tsx` pins by reading `document.cookie`.
 //
 // Notice-at-collection means the disclosure is at or BEFORE the point of
 // collection, so it renders beside the dropzone in every state that offers one
 // — never only on the success card. The two states with no dropzone still get
-// the policy link, because the PostHog pageview fires there too.
+// the policy link and the same standing statement about the visit.
 //
 // It names no AI vendor on purpose. `Extraction:Provider` is a config switch,
 // so a portal sentence naming one would go stale silently; the Privacy Policy
@@ -114,16 +121,18 @@ function UploadPrivacyNotice() {
     <p className="text-center text-xs text-slate-500">
       By uploading, you agree your document will be stored and processed — including
       automated reading by the AI services we use — as described in our{" "}
-      <PrivacyPolicyLink />. This page also uses cookies to measure how it&apos;s used.
+      <PrivacyPolicyLink />. This page sets no cookies and doesn&apos;t measure how
+      it&apos;s used.
     </p>
   );
 }
 
-/** The dead-link and transient-failure states: nothing to upload, but the visit is still measured. */
+/** The dead-link and transient-failure states: nothing to upload, so no collection to consent to — but the standing disclosure and the policy link stay. */
 function VisitPrivacyNotice() {
   return (
     <p className="mt-2 text-center text-xs text-slate-500">
-      This page uses cookies to measure how it&apos;s used — see our <PrivacyPolicyLink />.
+      This page sets no cookies and doesn&apos;t measure how it&apos;s used — see our{" "}
+      <PrivacyPolicyLink />.
     </p>
   );
 }

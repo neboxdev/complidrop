@@ -1239,7 +1239,7 @@ function policyLink() {
 }
 
 describe("PortalPage — notice at collection (#404)", () => {
-  it("discloses storage, automated reading and cookies BEFORE anything is uploaded", async () => {
+  it("discloses storage, automated reading and the absence of tracking BEFORE anything is uploaded", async () => {
     server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
     ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
 
@@ -1255,9 +1255,31 @@ describe("PortalPage — notice at collection (#404)", () => {
     const text = (notice.textContent ?? "").replace(/\s+/g, " ");
     expect(text).toMatch(/stored and processed/i);
     expect(text).toMatch(/automated reading by the AI services we use/i);
-    expect(text).toMatch(/cookies to measure how it's used/i);
+    // Until round 2 of #404 this said "This page also uses cookies to measure
+    // how it's used", which was true — the root layout measured every route.
+    // `Providers` now refuses to initialise PostHog under `/portal/`
+    // (ADR 0037 Amendment 2), so the same sentence became false in the other
+    // direction, and a portal that over-discloses is still a portal that says
+    // something untrue. See ADR 0054 Amendment 1.
+    expect(text).toMatch(/sets no cookies and doesn't measure how it's used/i);
     // The policy is one click away, and it is the real route.
     expect(policyLink()).toHaveAttribute("href", "/privacy");
+  });
+
+  it("sets no cookie, so the sentence saying so stays true by construction", async () => {
+    // The claim above is a NEGATIVE one about the app's behaviour, and prose
+    // cannot keep itself honest: whoever adds the first cookie to this route
+    // will not think to reword a notice. PostHog's `localStorage+cookie`
+    // persistence was the only writer and it no longer runs here; `/api/portal/*`
+    // sets none (`AuthEndpoints` is the only `Cookies.Append` in the API, on
+    // sign-in), and the fetch below carries no credentials either way.
+    document.cookie = "";
+    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() =>
+      expect(screen.getByText(/drag a file here or click to select/i)).toBeInTheDocument(),
+    );
+    expect(document.cookie, "the portal route set a cookie the notice denies").toBe("");
   });
 
   it("names no AI vendor — the linked policy owns that list (ADR 0054 §3)", async () => {
@@ -1464,7 +1486,7 @@ describe("PortalPage — notice at collection (#404)", () => {
       /we couldn't load this page/i,
     ],
   ] as const)(
-    "still links the policy on %s — no upload is possible there, but the pageview is still measured",
+    "still links the policy on %s — no upload is possible there, but the disclosure stands",
     async (_label, handler, settledCopy) => {
       server.use(handler());
       ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
@@ -1472,9 +1494,14 @@ describe("PortalPage — notice at collection (#404)", () => {
       await waitFor(() => expect(screen.getByText(settledCopy)).toBeInTheDocument());
 
       // The "by uploading" half would be false here — there is no dropzone —
-      // so this state carries the visit disclosure and the same policy link.
+      // so this state carries the standing visit disclosure and the same policy
+      // link. It is no longer there because a pageview fires (it does not, since
+      // ADR 0037 Amendment 2): it is there because a reader on a dead link is
+      // still owed the answer to "what does this page do with me".
       expect(screen.queryByText(NOTICE_RE)).toBeNull();
-      expect(screen.getByText(/this page uses cookies to measure how it's used/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(/this page sets no cookies and doesn't measure how it's used/i),
+      ).toBeInTheDocument();
       expect(policyLink()).toHaveAttribute("href", "/privacy");
     },
   );
@@ -1513,7 +1540,16 @@ describe("Counsel brief §0 CLM-5 register (#404)", () => {
     expect(
       flat,
       "the §0 CLM-5 row no longer quotes the line the no-dropzone branches carry (item (b))",
-    ).toContainEqual(expect.stringContaining("This page uses cookies to measure how it's used"));
+      // Matched on the trailing "— see our Privacy Policy", which is what
+      // DISTINGUISHES (b) from (a): the two sentences now share their opening
+      // clause, so a prefix match is satisfied by (a) alone and this pin would
+      // stay green with (b) deleted — the exact failure the naming exists to
+      // stop.
+    ).toContainEqual(
+      expect.stringContaining(
+        "This page sets no cookies and doesn't measure how it's used — see our Privacy Policy.",
+      ),
+    );
   });
 
   it("every sentence it quotes is one the portal actually renders", async () => {

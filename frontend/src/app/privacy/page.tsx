@@ -155,8 +155,9 @@ export default function PrivacyPolicyPage() {
         <p>
           You do not need an account, and we do not ask you to create one. When you use
           that page we collect the file you upload, along with the basic technical data
-          described above such as IP address and browser type, and the page sets the
-          analytics cookie described above. Your file is stored, and it is read
+          described above such as IP address and browser type. Unlike the rest of the
+          site, that page sets no cookies and we do not measure how it is used, because
+          the link you were sent is itself the key to it. Your file is stored, and it is read
           automatically by the service providers listed above — that automated reading
           is how the dates, names, and coverage amounts on it are turned into fields —
           so the business that sent you the link can check it against what they require.

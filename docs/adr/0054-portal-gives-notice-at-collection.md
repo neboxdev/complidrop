@@ -1,6 +1,6 @@
 # 0054. The public vendor portal gives notice at collection — on the surface, before the upload, in every state (CLM-5)
 
-- **Status:** accepted
+- **Status:** accepted (amended 2026-08-07 — see [Amendment 1](#amendment-1-2026-08-07--the-cookie-sentence-becomes-a-disclaimer-because-the-route-stopped-being-measured))
 - **Date:** 2026-08-07
 - **Deciders:** Ruben G. (founder), Claude (implementing #404)
 
@@ -198,6 +198,54 @@ something this ADR settles by asserting the Terms do not apply.
 ### Option F — Suppress the cookie sentence when `NEXT_PUBLIC_POSTHOG_KEY` is unset
 **Rejected**: it would make the disclosure depend on a build-time variable, so no two deployments
 would necessarily say the same thing, and the honest failure direction here is over-disclosure.
+
+## Amendment 1 (2026-08-07) — the cookie sentence becomes a disclaimer, because the route stopped being measured
+
+Round 2 of #404 removed the third collection fact this ADR disclosed. `Providers` no longer
+initialises PostHog under `/portal/` at all ([ADR 0037 Amendment 2](0037-frontend-sentry-pii-scrubbing-and-gating.md#amendment-2-2026-08-07--the-portal-route-initialises-no-analytics-at-all)),
+because redaction could not reach every channel the SDK opens: `/flags` was carrying an
+**anonymous** visitor's raw `$initial_current_url` at init, with no `identify()` in the chain, and
+the heatmaps buffer is keyed by `location.href`. On the one route where the URL IS the bearer
+credential, an invariant beats a per-channel promise.
+
+So *"This page also uses cookies to measure how it's used"* — true when it shipped — became **false
+in the other direction**, and a notice that overstates what we collect is still a notice that says
+something untrue. Both sentences now read:
+
+- **(a), beside the dropzone:** *"By uploading, you agree your document will be stored and processed
+  — including automated reading by the AI services we use — as described in our Privacy Policy. This
+  page sets no cookies and doesn't measure how it's used."*
+- **(b), the two branches with no dropzone:** *"This page sets no cookies and doesn't measure how
+  it's used — see our Privacy Policy."*
+
+`/privacy`'s **"If you were sent an upload link"** section made the same claim (*"the page sets the
+analytics cookie described above"*) and moved in the same commit — two documents describing one page
+either agree or one of them lies. The CLM-5 rows in both `G1-COUNSEL-BRIEF.md` registers quote (a)
+and (b) verbatim for the attorney and were rewritten with them; the §C row also records that (i)
+*notice vs consent* is now being asked about a **smaller** collection than when it was filed.
+
+### The negative claim is pinned, not merely written
+
+*"Sets no cookies"* and *"doesn't measure how it's used"* are assertions of **absence**, and prose
+cannot keep itself honest — whoever adds the first cookie to this route will not think to reword a
+notice. Both halves are therefore tests: `page.test.tsx` reads `document.cookie` after rendering the
+live-dropzone state, and `frontend/src/lib/providers.test.tsx` asserts that route issues **no PostHog
+request at all** (with a dashboard case beside it, so the pin cannot pass on a broken key or a dead
+provider).
+
+### What did NOT change
+
+§1–§4 stand: the notice is still at collection, still in every branch, still names no AI vendor,
+still links a policy written for its reader. §5's on-by-default reasoning is untouched. The
+**wording remains provisional pending CLM-5** — this amendment changes what the sentence has to say,
+not who gets to bless it.
+
+### Option F is not reopened
+
+*Suppress the sentence when `NEXT_PUBLIC_POSTHOG_KEY` is unset* stays rejected for the reason it was
+rejected: a disclosure that varies with a build-time variable is one nobody can rely on. This change
+is the opposite shape — the CODE changed for every deployment, so the copy changed once, for every
+deployment, and the two are pinned together.
 
 ## References
 

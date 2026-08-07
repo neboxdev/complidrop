@@ -398,7 +398,13 @@ describe("Legal + contact pages (#194)", () => {
     // The three collection facts the portal notice summarizes must be findable here.
     expect(text).toMatch(/you do not need an account/i);
     expect(text).toMatch(/your file is stored, and it is read automatically/i);
-    expect(text).toMatch(/the page sets the analytics cookie/i);
+    // This said "the page sets the analytics cookie" until round 2 of #404,
+    // which was true when written and stopped being true when `Providers`
+    // started refusing to initialise PostHog under `/portal/`
+    // (ADR 0037 Amendment 2). The policy and the portal notice make the same
+    // claim about the same page, so they move together or one of them lies —
+    // see ADR 0054 Amendment 1.
+    expect(text).toMatch(/that page sets no cookies and we do not measure how it is used/i);
     // …and the reader is told who actually controls the record they care about.
     expect(text).toMatch(/that business decides what to do with the document/i);
     // The other reader keeps their own paragraph — this section did not replace it.
