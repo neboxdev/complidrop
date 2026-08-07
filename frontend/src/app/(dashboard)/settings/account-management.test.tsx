@@ -260,8 +260,12 @@ describe("DangerZone — delete account (#183)", () => {
     // fails. The actionable server copy must reach the toast verbatim (error-message
     // policy) — not collapse into the generic fallback, and never leak HTTP jargon —
     // and the user must NOT be logged out or redirected (nothing was deleted).
+    // Verbatim from `AuthEndpoints.DeleteAccount`'s 502 arm. "not closed", not
+    // "not deleted" (#398 round 2): this string is rendered under a button
+    // labelled "Close my account", so an erasure word here re-opens the claim
+    // the ticket exists to remove — on the one surface the sweep didn't look at.
     const serverMessage =
-      "We couldn't cancel your paid plan, so your account was not deleted. Please try again, or cancel the plan from Manage billing first.";
+      "We couldn't cancel your paid plan, so your account was not closed. Please try again, or cancel the plan from Manage billing first.";
     server.use(
       http.post(url("/api/auth/account/delete"), () =>
         jsonError("billing.cancel_failed", serverMessage, { status: 502 }),

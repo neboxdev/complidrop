@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using System.Text.Json;
 using CompliDrop.Api.Auth;
 using CompliDrop.Api.Configuration;
@@ -868,8 +868,13 @@ public static class AuthEndpoints
                 // an ops emergency: every paid user's GDPR erasure is blocked until fixed.
                 logger.LogError(
                     "Account deletion blocked for org {OrgId}: a live Stripe subscription exists but Stripe is not configured (IsEnabled=false)", orgId);
+                // "closed", not "deleted" (#398 round 2 / ADR 0013 Amendment 1). The abort
+                // messages presupposed that the success path deletes — the exact implicature
+                // the ticket removed everywhere else — and the frontend renders a server
+                // message verbatim (`friendly` returns `err.message`), so this sentence lands
+                // in a toast under a button labelled "Close my account".
                 return Error(503, "billing.unavailable",
-                    "We can't reach billing right now, so your account was not deleted. Please try again later.");
+                    "We can't reach billing right now, so your account was not closed. Please try again later.");
             }
             try
             {
@@ -883,7 +888,7 @@ public static class AuthEndpoints
             {
                 logger.LogError(ex, "Stripe subscription cancel failed during account deletion for org {OrgId}", orgId);
                 return Error(502, "billing.cancel_failed",
-                    "We couldn't cancel your paid plan, so your account was not deleted. Please try again, or cancel the plan from Manage billing first.");
+                    "We couldn't cancel your paid plan, so your account was not closed. Please try again, or cancel the plan from Manage billing first.");
             }
         }
 
