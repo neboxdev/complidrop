@@ -380,6 +380,29 @@ describe("Legal + contact pages (#194)", () => {
     expect(text).toMatch(/share it for targeted advertising/i);
   });
 
+  it("Privacy Policy addresses the vendor who arrives from the portal's notice, not only account holders (#404)", () => {
+    // The portal's notice-at-collection links here, so this page has to cover
+    // the person reading it: someone with no account who was sent an upload
+    // link. A policy that only speaks to customers is not notice to them.
+    // The pre-existing paragraph below covers the person NAMED inside a
+    // document; this section covers the person who UPLOADS one — different
+    // reader, different remedy, so neither substitutes for the other.
+    const { container } = render(<PrivacyPolicyPage />);
+    expect(
+      screen.getByRole("heading", { name: /if you were sent an upload link/i }),
+    ).toBeInTheDocument();
+
+    const text = (container.textContent ?? "").replace(/\s+/g, " ");
+    // The three collection facts the portal notice summarizes must be findable here.
+    expect(text).toMatch(/you do not need an account/i);
+    expect(text).toMatch(/your file is stored, and it is read automatically/i);
+    expect(text).toMatch(/the page sets the analytics cookie/i);
+    // …and the reader is told who actually controls the record they care about.
+    expect(text).toMatch(/that business decides what to do with the document/i);
+    // The other reader keeps their own paragraph — this section did not replace it.
+    expect(text).toMatch(/if your information appears inside a document/i);
+  });
+
   it("Terms of Service renders the not-advice disclaimer + cancellation terms (Stripe requirement)", () => {
     render(<TermsOfServicePage />);
     expect(
