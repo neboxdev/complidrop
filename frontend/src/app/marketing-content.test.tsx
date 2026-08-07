@@ -352,9 +352,18 @@ describe("Legal + contact pages (#194)", () => {
 
   it("Privacy Policy backs the FAQ's qualified sharing claim, and makes no unqualified one of its own (#403)", () => {
     const { container } = render(<PrivacyPolicyPage />);
-    // The FAQ now routes readers here with "the service providers listed in our
-    // Privacy Policy" — that sentence is only true while this page actually
-    // lists them under a heading a reader can find.
+    // The FAQ routes readers here with "we share it only as described in our
+    // Privacy Policy" — true only while this page actually describes the
+    // sharing under a heading a reader can find.
+    //
+    // NOT "the service providers listed in our Privacy Policy": that is the
+    // TERMS' wording (terms/page.tsx § Your content), and it is explicitly
+    // rejected for the FAQ by the sibling assertion
+    // `not.toMatch(/only with the service providers listed/i)` above — the
+    // policy introduces its vendors with "These include:" and reserves a
+    // rights-and-safety disclosure channel beside the legal one, so a
+    // list-scoped promise is narrower than the policy it points at. Quoting it
+    // here would invite an editor to reintroduce round 1's confirmed bug.
     expect(
       screen.getByRole("heading", { name: /service providers we share data with/i }),
     ).toBeInTheDocument();
@@ -363,7 +372,8 @@ describe("Legal + contact pages (#194)", () => {
 
     const text = container.textContent ?? "";
     // The policy must not contradict itself either — an unqualified "we don't
-    // sell or share it" sat in the same document as that seven-vendor list.
+    // sell or share it" sat in the same document as that vendor list (seven
+    // entries when #403 opened; nine since this diff added Railway and Vercel).
     // CCPA "sharing" is a term of art (targeted advertising), so say that.
     expect(text).not.toMatch(/sell or share/i);
     expect(text).toMatch(/we do not sell your data/i);
