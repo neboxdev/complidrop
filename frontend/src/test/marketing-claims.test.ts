@@ -278,15 +278,40 @@ const SHIPPED_COPY = SURFACES.map(([, path]) => normalize(stripComments(readFile
  * next CLM item will too — the same reason `./counsel-brief` owns the path walk
  * and the quote regex (#404 review S6).
  */
-function pinRegisterQuotes(item: string, minQuotes: number, whatIsQuoted: string): void {
+function pinRegisterQuotes(
+  item: string,
+  minQuotes: number,
+  whatIsQuoted: string,
+  /**
+   * Quotes this SOURCE scan structurally cannot see, because the copy embeds a
+   * `<Link>` mid-sentence and is therefore not contiguous in the file — only a
+   * render puts the link's own text back inline. Each entry names the test that
+   * pins it instead, and the prefix is asserted to still match one of the row's
+   * quotes, so a register reword cannot silently orphan the exemption. This is
+   * the same split CLM-5 has lived on since #404 (`app/portal/[token]/page.test.tsx`
+   * renders two portal states for exactly this reason); #398 round 2 brought
+   * CLM-7 (a) into it by linking the Privacy Policy the sentence defers to.
+   */
+  pinnedByARender: ReadonlyArray<readonly [prefix: string, pinnedBy: string]> = [],
+): void {
   const { rows: row, quoted } = counselRegisterRow(item);
 
   it(`§0 ${item} is a single row that quotes every item it asks counsel to bless`, () => {
     expect(row, `expected exactly one §0 ${item} register row`).toHaveLength(1);
     expect(quoted.length, whatIsQuoted).toBeGreaterThanOrEqual(minQuotes);
+    for (const [prefix, pinnedBy] of pinnedByARender) {
+      expect(
+        quoted.filter((q) => q.includes(prefix)),
+        `the §0 ${item} row no longer quotes the sentence ${pinnedBy} pins — either the register was reworded (update the exemption) or the quote was dropped`,
+      ).toHaveLength(1);
+    }
   });
 
-  it.each(quoted.map((q) => [q.slice(0, 56), q] as const))(
+  const scannable = quoted.filter(
+    (q) => !pinnedByARender.some(([prefix]) => q.includes(prefix)),
+  );
+
+  it.each(scannable.map((q) => [q.slice(0, 56), q] as const))(
     `${item}: the copy it quotes as "%s…" actually ships`,
     (_label, sentence) => {
       const where = SHIPPED_COPY.filter((text) => text.includes(normalize(sentence)));
@@ -317,5 +342,10 @@ describe("Counsel brief §0 CLM-4 register (#403)", () => {
  * per-item removal notice, (d) the export description.
  */
 describe("Counsel brief §0 CLM-7 register (#398)", () => {
-  pinRegisterQuotes("CLM-7", 6, "expected (a)–(d) — six sentences — to be quoted in the CLM-7 row");
+  pinRegisterQuotes("CLM-7", 6, "expected (a)–(d) — six sentences — to be quoted in the CLM-7 row", [
+    [
+      "we handle them as described in our Privacy Policy.",
+      "`app/(dashboard)/settings/account-management.test.tsx`",
+    ],
+  ]);
 });

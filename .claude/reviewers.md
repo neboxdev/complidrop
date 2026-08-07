@@ -238,9 +238,24 @@ Both are defined in this repo's `.claude/agents/`.
     is not a review finding: it reverses ADR 0013's § Decision and needs its own ADR plus the
     sign-off CLM-7 is asking for.
   - `AuthEndpoints.ExportAccount` serializes document ROWS (`OriginalFileName`, `DocumentType`,
-    `ExpirationDate`, `ComplianceStatus`, `CreatedAt`) and NO files; the Settings card now says
-    so. It is still out of ADR 0047's disclaimer scope (a portability dump) — the two facts are
+    `ExpirationDate`, `ComplianceStatus`, `CreatedAt`) and NO files; the Settings card ENUMERATES
+    those five and names the omissions. Round 2 of the #398 review found the first replacement
+    over-claiming in a NEW way — *"the details we hold for each document"* is, in the product's own
+    vocabulary, the "Extracted fields" — so the rule is: a vaguer word is not a fix, an export
+    description names what the projection contains and states what it leaves out (`DocumentField`
+    / `Document.ExtractionFields`, the `ComplianceCheck` rows and the `AuditLog` are all absent).
+    It is still out of ADR 0047's disclaimer scope (a portability dump) — the two facts are
     about different things, so do not merge them.
+  - The closure card LINKS `/privacy` (#398 round 2). Not decoration: the sentence defers the
+    retention disclosure to the policy and `app/(dashboard)/layout.tsx` renders no footer and no
+    legal links, so the pointer went somewhere a signed-in customer could not reach — ADR 0013
+    Amendment 1 § Alternatives rejects "leave it to `/privacy`" on exactly that ground. Same-tab
+    `<Link>` like every other legal link in the tree; `target="_blank"` is a new pattern, not a fix.
+    Its consequence for the pins is the CLM-5 shape arriving at CLM-7: the sentence is no longer
+    CONTIGUOUS in source, so `marketing-claims.test.ts` cannot scan it and
+    `pinRegisterQuotes`'s `pinnedByARender` hands that ONE quote to a render in
+    `account-management.test.tsx` (which asserts the register still quotes it, so the exemption
+    cannot be orphaned). Do not "simplify" the exemption away by re-flattening the sentence.
 - Vendor contact-email validation is ADR 0038; the review-time facts that follow are
   pointers into it, not a second copy of the rationale.
   - Two email validators coexist ON PURPOSE: `Services/ContactEmail.IsWellFormed` (vendor

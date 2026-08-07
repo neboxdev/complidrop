@@ -91,7 +91,7 @@ recreate this defect in a new sentence.
 |---|---|
 | "Closing signs you out for good and clears your name and email from your account record." | `AuthEndpoints.DeleteAccount` — the `Email` / `FullName` overwrite + `DeletedAt`; the login lookup and `/me` filter the soft-deleted user out. Scoped to *your account record* on purpose: the `user.account_deleted` audit row keeps the intact email by design (see the Decision above), so "removes it from our records" would have been the same class of overstatement. |
 | "If you have a paid plan, it will be canceled — no new charges will start." | Unchanged (#255). `CancelSubscriptionAsync` runs **before** any local change and a failure aborts the whole request with a 502/503 — the one clause of the old copy that was already true. |
-| "Your vendors, documents, the files uploaded for them, and our record of account activity are kept…" | § Consequences above, verbatim. |
+| "Your vendors, documents, the files uploaded for them, and our record of account activity are kept…" | § Consequences above, verbatim. The trailing "…as described in our **Privacy Policy**" is a link (round 2): the dashboard shell renders no footer and no legal links, so the deferral pointed somewhere a signed-in customer could not reach — the § Alternatives rejection of "leave it to `/privacy`" applies one step along. |
 | `/privacy`: "…we clear your name and email from your account record straight away, cancel any paid plan, and stop sending reminders." | The scrub, the Stripe cancel, and `ReminderBackgroundService`'s `o.DeletedAt == null` org filter. |
 | `/privacy`: "We have not set a fixed disposal period for those records, so they stay with us until you ask us to delete them." | True by absence — no purge job exists. The request channel is the one § "Your choices and rights" already offers. |
 | "This removes the document from your records. You won't be able to undo it." | `DeleteDocument` soft-deletes and **retains the blob** so the document *"remains recoverable"* (its own comment). The claim is scoped to the customer, who has no restore affordance anywhere in `frontend/`. |
@@ -101,6 +101,14 @@ soft-delete, same scoping), and the Settings data-export card, which offered *"a
 documents"* for an export (`AuthEndpoints.ExportAccount`) that serializes document **rows** —
 `OriginalFileName`, `DocumentType`, `ExpirationDate`, `ComplianceStatus`, `CreatedAt` — and no files
 at all. `ExportAccount` itself is unchanged; only its description is.
+
+The export card took a **second** pass in round 2 of the review, and it is worth recording why: the
+first replacement said the dump held *"the details we hold for each document"*, which is a different
+over-claim in the same family. The product's own word for what it holds per document is
+**"Extracted fields"** (the detail page's heading), and `DocumentField` / `Document.ExtractionFields`
+— along with the `ComplianceCheck` results and the `AuditLog` — appear nowhere in `ExportAccount`.
+So the rule this ticket ends on is sharper than "don't say delete": **a vaguer word is not a fix.**
+The card now enumerates the five columns and states the omissions outright.
 
 ### Consequences
 

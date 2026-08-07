@@ -1,6 +1,7 @@
 "use client";
 
 import { useId, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -201,12 +202,23 @@ export function DataExportSection() {
     <Card>
       <CardContent className="p-6 space-y-2">
         <h2 className="text-base font-semibold text-slate-800">Export your data</h2>
-        {/* #398: says what `AuthEndpoints.ExportAccount` actually serializes. The documents
-            block is METADATA — file name, type, expiration date, status, created date — so
-            "documents" unqualified reads as "my files", which this export does not contain. */}
+        {/* #398: every noun below is a projection in `AuthEndpoints.ExportAccount`, in its
+            order — account (email, name, role, verified, created), organization (name,
+            industry, size, time zone, created), vendors (name, contact email, contact phone,
+            category, created), reminders (days before, the two notify flags, active), and
+            documents (`OriginalFileName`, `DocumentType`, `ExpirationDate`,
+            `ComplianceStatus`, `CreatedAt`). Round 2 of the #398 review caught the first
+            replacement over-claiming in a NEW way: "the details we hold for each document"
+            reads, to a portability/CCPA-access reader, as the thing the product itself calls
+            "Extracted fields" — and the `DocumentField` rows, `Document.ExtractionFields`,
+            the `ComplianceCheck` results and the `AuditLog` appear nowhere in the dump. An
+            omission this export makes has to be stated, not covered by a vaguer word. */}
         <p className="text-sm text-slate-500">
-          Download a JSON copy of your account, organization, vendors, reminders, and the details
-          we hold for each document. The uploaded files themselves aren&apos;t included.
+          Download a JSON copy of your profile, your organization, your vendors and their contact
+          details, your reminder settings, and one row per document — file name, type, expiration
+          date, status and the date you added it. The uploaded files themselves aren&apos;t
+          included. Neither are the fields we read from your documents, their compliance-check
+          results, or your activity log.
         </p>
         <Button type="button" size="sm" variant="outline" onClick={onExport} disabled={busy}>
           {busy ? "Preparing…" : "Export my data"}
@@ -270,7 +282,18 @@ function DeleteAccountForm() {
         Closing signs you out for good and clears your name and email from your account record. If
         you have a paid plan, it will be canceled — no new charges will start. Your vendors,
         documents, the files uploaded for them, and our record of account activity are kept, and we
-        handle them as described in our Privacy Policy.
+        handle them as described in our{" "}
+        {/* #398 round 2: the sentence defers the retention disclosure to the policy, and
+            `app/(dashboard)/layout.tsx` renders no footer and no legal links — so the customer
+            at the decision point had no route to the document they were being sent to. ADR
+            0013 Amendment 1 § Alternatives rejects "leave it to /privacy" precisely because
+            "a policy nobody opens is where the original claim already hid"; a pointer the
+            reader cannot follow is the same defect one step along. Same-tab `<Link>` matching
+            `register-form.tsx` — there is no `target="_blank"` anywhere in the tree. */}
+        <Link href="/privacy" className="text-sky-700 hover:underline">
+          Privacy Policy
+        </Link>
+        .
       </p>
       {!confirming ? (
         <Button type="button" size="sm" variant="destructive" onClick={() => setConfirming(true)}>

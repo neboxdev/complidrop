@@ -10,6 +10,7 @@ import { http } from "msw";
 import { screen, fireEvent, waitFor } from "@testing-library/react";
 import { SecuritySection, DataExportSection, DangerZone } from "./account-management";
 import { ME_KEY } from "@/hooks/useAuth";
+import { counselRegisterRow, flattenCopy } from "@/test/counsel-brief";
 import {
   renderWithProviders,
   server,
@@ -160,15 +161,27 @@ describe("DataExportSection — export (#183 / #320 FP-113)", () => {
     }
   });
 
-  it("describes the export as the metadata dump it actually is (#398)", () => {
+  it("names the columns the export actually serializes, and the omissions (#398)", () => {
     // `AuthEndpoints.ExportAccount` selects `d.OriginalFileName, d.DocumentType,
     // d.ExpirationDate, d.ComplianceStatus, d.CreatedAt` — document ROWS, never
-    // the blobs. "a JSON copy of your … documents" reads as "my files" to the
-    // person clicking a data-portability button, so the disclaimer is explicit.
+    // the blobs. "a JSON copy of your … documents" read as "my files" to the
+    // person clicking a data-portability button; "the details we hold for each
+    // document" (round 1's replacement) read as the thing the product itself
+    // calls "Extracted fields", which is equally absent — as are the
+    // `ComplianceCheck` rows and the `AuditLog`. So the card enumerates what IS
+    // in the dump and states what is not, and this pins both halves.
     const { container } = renderWithProviders(<DataExportSection />);
     const text = (container.textContent ?? "").replace(/\s+/g, " ");
-    expect(text).toMatch(/the details we hold for each document/i);
+    expect(text).toMatch(
+      /one row per document — file name, type, expiration date, status and the date you added it/i,
+    );
     expect(text).toMatch(/the uploaded files themselves aren't included/i);
+    expect(text).toMatch(
+      /neither are the fields we read from your documents, their compliance-check results, or your activity log/i,
+    );
+    // The claim round 2 retired: nothing may promise "the details we hold", which
+    // the export does not contain.
+    expect(text).not.toMatch(/the details we hold/i);
   });
 
   it("shows a jargon-free toast on export failure — the friendly server message, never an HTTP status", async () => {
@@ -240,6 +253,40 @@ describe("DangerZone — delete account (#183)", () => {
     expect(text).toMatch(/clears your name and email from your account record/i);
     expect(text).toMatch(
       /your vendors, documents, the files uploaded for them, and our record of account activity are kept/i,
+    );
+  });
+
+  it("renders the closure notice the §0 CLM-7 register quotes, link inline (#398)", () => {
+    // `marketing-claims.test.ts` pins every other CLM-7 quote by scanning source,
+    // and cannot see this one: linking the Privacy Policy puts a `<Link>` mid-
+    // sentence, so the sentence is no longer contiguous in the file. Same split
+    // CLM-5 has lived on since #404 — rendering is what puts the link's own text
+    // back inline, and it compares the brief against what the customer reads
+    // rather than against JSX. Without this the register would quote a sentence
+    // nothing checks, which is the failure the register pins exist for.
+    const CLOSURE_NOTICE =
+      "Your vendors, documents, the files uploaded for them, and our record of account " +
+      "activity are kept, and we handle them as described in our Privacy Policy.";
+    expect(
+      counselRegisterRow("CLM-7").quoted.map(flattenCopy),
+      "the §0 CLM-7 row no longer quotes the closure notice (item (a))",
+    ).toContainEqual(CLOSURE_NOTICE);
+
+    const { container } = renderWithProviders(<DangerZone />, { auth: authedMe });
+    expect(flattenCopy(container.textContent ?? "")).toContain(CLOSURE_NOTICE);
+  });
+
+  it("links the Privacy Policy it defers the retention disclosure to (#398)", () => {
+    // The sentence above sends the customer to "our Privacy Policy" at the moment
+    // of decision, and the dashboard shell renders no footer and no legal links —
+    // so before this the pointer went nowhere a signed-in user could follow. ADR
+    // 0013 Amendment 1 § Alternatives already rejected leaving the disclosure to
+    // /privacy on the grounds that "a policy nobody opens is where the original
+    // claim already hid".
+    renderWithProviders(<DangerZone />, { auth: authedMe });
+    expect(screen.getByRole("link", { name: /privacy policy/i })).toHaveAttribute(
+      "href",
+      "/privacy",
     );
   });
 
