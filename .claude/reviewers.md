@@ -65,19 +65,23 @@ Both are defined in this repo's `.claude/agents/`.
     non-DOM channels ("`localStorage` / `sessionStorage` / `window.*` … non-DOM channels are
     explicitly out of scope"), so it never spoke for what leaves over the wire. Whether the
     token reaches a telemetry VENDOR is a separate mechanism with its own record and its own
-    pin: ADR 0037 Amendment 1 / `frontend/src/lib/analytics.test.ts` (Sentry has redacted it
-    since #356; PostHog since #404). A version that adds a consent checkbox or a cookie
-    banner is ADR 0054 Options C/D, both refuted.
-- Frontend telemetry URL redaction is ADR 0037 (#356) + its Amendment 1 (#404); the facts that
-  follow are pointers into it, not a second copy of the rationale.
+    pin: ADR 0037 Amendments 1-2 / `frontend/src/lib/analytics.test.ts` +
+    `providers.test.tsx` (Sentry has redacted it since #356; PostHog does not run on this route
+    at all since #404 round 2). A version that adds a consent checkbox or a cookie banner is
+    ADR 0054 Options C/D, both refuted.
+- Frontend telemetry URL redaction is ADR 0037 (#356) + its Amendments 1 and 2 (#404); the facts
+  that follow are pointers into it, not a second copy of the rationale.
   - `lib/analytics.ts` IMPORTING `sanitizeUrl` from `lib/sentry/scrub.ts` is the decision, not a
     layering slip. One redaction rule, two vendors — a mirrored regex is the drift ADR 0038
     already refuses, and worse here (the two vendors would disagree about what a secret is).
     `scrub.ts`'s only `@sentry/nextjs` import is `import type`, so no Sentry runtime enters the
     analytics bundle. "Move the shared helper somewhere neutral" is a rename, not a finding.
-  - `before_send`, NOT `sanitize_properties`: the installed SDK marks the latter `@deprecated`,
-    logs an error on every event that uses it, and hands it `properties` alone — while the
-    `$initial_*` family rides in `$set_once`, a SIBLING of `properties` on the wire.
+  - `before_send`, NOT `sanitize_properties`: the installed SDK marks the latter `@deprecated`
+    and logs an error on every event that uses it. (It is NOT "handed `properties` alone" — that
+    clause was false and is gone: `_calculate_set_once_properties` calls it a second time with the
+    `$set_once` bag. The choice is unchanged; only its recorded reason was wrong.) `before_send`
+    receives the whole assembled `CaptureResult`, so it sees `$set` / `$set_once` — where the
+    `$initial_*` family rides, a SIBLING of `properties` on the wire.
   - The key match is a SUBSTRING rule (`url`|`path`|`referrer`|`href`, applied recursively) on
     purpose. The property set was established by DRIVING THE REAL SDK
     (`analytics.test.ts` intercepts + gunzips the ingest requests), which is how
@@ -85,12 +89,29 @@ Both are defined in this repo's `.claude/agents/`.
     family, so "replace it with the exact list" re-opens the hole on the next SDK release.
     Over-matching is harmless — `sanitizeUrl` leaves a non-portal URL alone and preserves dashed
     GUIDs — so `$host` / `$referring_domain` going unmatched (they carry no path) is not a gap.
-  - KNOWN residue, ADR 0037 Amendment 1 § What stays open — do NOT re-report: the `/flags`
-    request builds `person_properties` from persistence and never reaches `before_send`, so it
-    can still carry a raw `$initial_current_url`. It fires only after `identify()`, which the
-    portal never calls, so the value is an identified CUSTOMER's own URL. Closing it means
-    `advanced_disable_flags: true`, which also disables remote config — a product decision
-    recorded rather than taken silently.
+  - RETRACTED — the entry that used to sit here said the `/flags` residue "fires only after
+    `identify()`, so the value is an identified CUSTOMER's own URL". That was FALSE (posthog-js
+    issues `/flags` at init and again every 5 min, no identify in either chain; the bag is built
+    from persistence, so it carried an ANONYMOUS vendor's raw portal URL), and as a do-NOT-flag
+    entry it told the next reviewer not to report a live leak. ADR 0037 Amendment 2 retracts it.
+    Both channels are now CLOSED, not redacted, and the closures are the do-not-flag facts:
+    `advanced_disable_flags: true` (deliberate — it also disables PostHog remote config; nothing
+    in `frontend/` reads a flag) and `capture_heatmaps: false` (the extension buffers by
+    `location.href` and sends the map as `$heatmap_data`, i.e. a URL as an object KEY —
+    `sanitizeUrlKey` is the general rule, the init flag is what survives a walker rewrite).
+    Deliberately BOTH; "one of these is redundant" is not a finding.
+  - `Providers` NOT calling `initAnalytics()` under `/portal/` is the decision (ADR 0037
+    Amendment 2), not a missing feature: that route's URL IS the bearer credential, and two
+    reviewed rounds of per-channel redaction each missed a channel. The founder losing PostHog
+    on the portal page is the accepted cost, recorded in the ADR. It is gated on the CURRENT
+    pathname on purpose — a vendor who follows the notice's policy link is measured from that
+    click on. `analytics.ts`'s redaction is NOT thereby dead code: `/privacy` reached from the
+    portal carries the tokenized URL in `document.referrer`.
+  - The portal notice + `/privacy` saying the page "sets no cookies and doesn't measure how it's
+    used" are claims of ABSENCE that moved with that gate (ADR 0054 Amendment 1) and are pinned
+    — `page.test.tsx` reads `document.cookie`, `providers.test.tsx` asserts no PostHog request
+    leaves the route. Their earlier cookie wording is not "missing", it was made false by the
+    code change and replaced in the same commit, counsel-brief quotes included.
 - `IgnoreQueryFilters()` / `SystemDbContext` inside background workers and system
   contexts — by design. In request-path code it IS a blocker (tenant leakage).
 - Idempotency records replay the winner's exact response for as long as the row exists;

@@ -1,6 +1,6 @@
 # 0037. Frontend Sentry: PII scrubbing, sampling, and dev gating
 
-- **Status:** accepted
+- **Status:** accepted (amended 2026-08-07 — see [Amendment 1](#amendment-1-2026-08-07--the-other-telemetry-vendor-gets-the-same-url-rule-from-the-same-function); amended 2026-08-07 — see [Amendment 2](#amendment-2-2026-08-07--the-portal-route-initialises-no-analytics-at-all), which **retracts Amendment 1 § What stays open**)
 - **Date:** 2026-06-25
 - **Deciders:** Ruben G.
 
@@ -223,6 +223,12 @@ carry no path and so cannot carry the token.
 
 ### What stays open (recorded, not overlooked)
 
+> **This subsection is WRONG and is retracted by [Amendment 2](#amendment-2-2026-08-07--the-portal-route-initialises-no-analytics-at-all).**
+> It is kept verbatim because the mistake — accepting a residue on an unverified premise, and then
+> recording that premise in four places where it told the next reviewer not to look — is the thing
+> worth remembering. `/flags` fires at **init**, with no `identify()`, and the URL it exposes is an
+> **anonymous vendor's bearer credential**. Do not cite anything below.
+
 The **`/flags` request** builds its `person_properties` bag straight from persistence and does not
 pass through `before_send`, so it can still carry a raw `$initial_current_url`. Verified live, not
 inferred. It is bounded and it is a different population: it fires only after `identify()`, which
@@ -242,24 +248,143 @@ on DSN presence (PostHog-style)" alternative is about *Sentry's* stricter gate a
 reopened), and this amendment discloses nothing new to a user — [ADR 0054](0054-portal-gives-notice-at-collection.md)'s
 notice already says the page uses analytics cookies.
 
+## Amendment 2 (2026-08-07) — the portal route initialises no analytics at all
+
+### The retraction first
+
+Amendment 1 accepted the `/flags` residue on this sentence:
+
+> *"It is bounded and it is a different population: it fires only after `identify()`, which the
+> portal never calls (there is no session there), so the exposed value is an **identified customer's
+> own** initial URL … never a stranger's credential."*
+
+**That is false in posthog-js 1.369.2, and it was false when it was written.** `_loaded()` ends with
+`new RemoteConfigLoader(this).load()`; `load()` → `_onRemoteConfig()` calls
+`featureFlags.ensureFlagsLoaded()` whenever the remote config does not say `hasFeatureFlags: false`
+(including when the fetch fails, since `undefined !== false`), and `RemoteConfigLoader.refresh()`
+re-issues it every 5 minutes. `identify()` appears in neither chain. The bag it posts is
+`person_properties: { ...persistence.get_initial_props(), … }` — the `$initial_current_url` /
+`$initial_pathname` / `$initial_referrer` written by `set_initial_person_info()` inside the FIRST
+`capture()`, i.e. the anonymous portal `$pageview`, raw, because nothing there passes through
+`before_send`. Driven in-repo before the fix, the body read
+`"$initial_current_url":"http://localhost:3000/portal/{TOKEN}"` with no identify anywhere.
+
+So the accepted residue was **every anonymous vendor's bearer credential**, on every visit and again
+on every later one (it is persisted in `localStorage+cookie`) — the exact vector #404 exists to
+close, not the bounded identified-customer case the decision was taken on. The same false boundary
+had been copied into `.claude/reviewers.md`'s do-NOT-flag list, `frontend/CLAUDE.md`, the root
+`CLAUDE.md` index line and the test docstring, where it instructed the next reviewer not to report a
+live leak. **A wrong fact in a do-NOT-flag list is worse than no fact.** All five copies are
+corrected; the subsection above is marked rather than deleted, because the lesson is the process one:
+"verified live, not inferred" was written about a claim nobody had verified.
+
+### What changed in code
+
+Three layers, smallest to largest:
+
+1. **`advanced_disable_flags: true`.** `_callFlagsEndpoint()` early-returns on `_shouldDisableFlags()`,
+   so the channel is closed rather than redacted — redaction cannot reach a bag built straight from
+   persistence. The cost is real and accepted: PostHog **remote configuration** goes with it (web
+   vitals, surveys, and anything else configured in PostHog's settings rather than in code). Nothing
+   in `frontend/` reads a feature flag today, verified by search rather than assumed.
+2. **`capture_heatmaps: false`, plus keys sanitized in the walker.** The heatmaps extension ships in
+   the default bundle and, with neither `capture_heatmaps` nor `enable_heatmaps` set, enables itself
+   from the PostHog project's own dashboard toggle. It buffers by `window.location.href` and sends the
+   map as `$heatmap_data` — the URL is an object **KEY**, and the walker rewrote values only, so the
+   token left intact. `sanitizeUrlKey` is the correct general rule (only URL-shaped keys, so the
+   opaque-token net cannot rename an ordinary property); the init flag is what survives someone
+   rewriting the walker. Both, deliberately.
+3. **`Providers` does not call `initAnalytics()` under `/portal/`.**
+
+### Why (3), when (1) and (2) close what is known
+
+Because the enumeration keeps growing. Round 1 shipped a reviewed fix; round 2 found two more
+channels and named a third (`/i/v1/logs` — the console-log extension puts `location.href` in
+`context.currentUrl`, remote-gated). Each is a promise renewed at the vendor's release cadence, and
+`/portal/{token}` is the one route in this product where **the URL itself is the credential**:
+everywhere else a leaked URL exposes an identifier, here it exposes upload authority. One invariant
+that holds whatever the SDK does next beats N promises that each hold until it changes.
+
+Gated on the **current pathname**, not on "has ever been on the portal": a vendor who follows the
+notice's Privacy Policy link is on an ordinary route from that click on. Every other route is
+unaffected.
+
+**The cost, stated plainly: the founder loses PostHog analytics on the vendor-portal page.** Traffic,
+conversion and drop-off on the upload surface become unmeasurable. That is a deliberate trade, not an
+oversight.
+
+**Rejected alternative — keep measuring the portal and redact each channel as it is discovered.** It
+is what round 1 chose and what round 2 falsified: two live leaks shipped through a full review under
+that model, and the record it produced actively discouraged the next reviewer from looking. It also
+scales the wrong way — every posthog-js release is a re-audit of a third party's transport surface
+against a credential.
+
+### Layer (1)+(2) are not redundant
+
+Redaction still matters, and the analytics suite still drives it. The token is not only in
+`location.href`: the notice's own out-link means a vendor reaching `/privacy` carries the tokenized
+URL in `document.referrer`, and a reminder mail can put one in any route's `$referrer`. (3) covers the
+portal route; (1) and (2) cover the token wherever else it turns up.
+
+### Pins
+
+`frontend/src/lib/providers.test.tsx` asserts **no PostHog request at all** from `/portal/{token}`,
+with a dashboard case beside it so the pin cannot pass on a broken key or a dead provider — it did,
+until the SDK was imported dynamically (`posthog-js/lib/src/utils/globals.js` binds
+`exports.fetch = global.fetch` at module-eval time, before MSW patches it, so a static import in a
+test file sends every request past the interceptor). `analytics.test.ts` now records **every** PostHog
+request rather than only `/e/` — scoping assertions to one endpoint is what hid this — and adds the
+`$$heatmap` key case, the `$elements` / `$set` recursion cases, and a depth-cap probe.
+
+### Two smaller corrections carried here
+
+- **`sanitize_properties` is NOT handed `properties` alone.** `_calculate_set_once_properties` calls
+  it a second time with the `$set_once` bag. The `before_send` choice is unchanged and still right —
+  the hook is `@deprecated` and logs an error on every event that uses it — but the reason recorded in
+  four places was half false, and this repo treats a false reason on file as a durable defect
+  ([ADR 0054](0054-portal-gives-notice-at-collection.md) Option E's own rationale).
+- **The walker's depth cap failed OPEN** while its comment claimed to mirror `sentry/scrub.ts`, which
+  fails closed. Past the cap a value under a URL-bearing key is now `REDACTED`, and the limit matches
+  the neighbour's 12. It is deliberately not the neighbour's blanket `return REDACTED`: outside a
+  URL-bearing key this walker redacts nothing anyway, so blanking those would delete ordinary deep
+  analytics for no privacy gain.
+
+### What stays open (Amendment 2)
+
+- **Everything PostHog measures on the OTHER routes still relies on redaction**, i.e. on the property
+  set being complete. That set is established by driving the real SDK, not from docs, which is what
+  found `$session_entry_*`; it is a smaller claim than round 1's because the credential-bearing route
+  is out of scope entirely, but it is not zero.
+- **Server-side.** This is a browser decision. `/api/portal/{token}` still receives the token (it must
+  — it is the credential) and it appears in ordinary request logs; that is first-party and out of
+  this ADR's scope.
+- **Sentry is untouched** and still runs on the portal route. It sets no cookie, has Session Replay
+  off, and `sanitizeUrl` has redacted `/portal/{token}` there since #356.
+
 ## References
 
 - **Tickets:** [#356](https://github.com/neboxdev/complidrop/issues/356) (this feature),
   [#404](https://github.com/neboxdev/complidrop/issues/404) (Amendment 1 — the PostHog half,
-  found while shipping the portal notice-at-collection).
+  found while shipping the portal notice-at-collection; Amendment 2 — its round-2 review, which
+  falsified Amendment 1's `/flags` boundary and took the route out of analytics entirely).
 - **Related ADRs:** [0035](0035-standing-cleanup-tooling-gates.md) (supersedes its
   `@sentry/nextjs` kept-but-ignored knip sub-decision),
   [0034](0034-dev-environment-isolation-and-boot-banner.md) /
-  [#271](https://github.com/neboxdev/complidrop/issues/271) (dev isolation posture this mirrors).
+  [#271](https://github.com/neboxdev/complidrop/issues/271) (dev isolation posture this mirrors),
+  [0054](0054-portal-gives-notice-at-collection.md) Amendment 1 (the portal copy that moved with
+  Amendment 2 — the notice's cookie sentence became false in the other direction).
 - **Error-copy policy:** [#77](https://github.com/neboxdev/complidrop/issues/77),
   [#254](https://github.com/neboxdev/complidrop/issues/254).
 - **Code:** `frontend/src/lib/sentry/{scrub,options,build}.ts`,
   `frontend/src/instrumentation.ts`, `frontend/src/instrumentation-client.ts`,
   `frontend/src/app/global-error.tsx`, `frontend/next.config.ts`; Amendment 1 —
-  `frontend/src/lib/analytics.ts` (imports `sanitizeUrl`).
+  `frontend/src/lib/analytics.ts` (imports `sanitizeUrl`); Amendment 2 —
+  `frontend/src/lib/providers.tsx` (the pathname gate) and `analytics.ts`'s
+  `advanced_disable_flags` / `capture_heatmaps` / `sanitizeUrlKey`.
 - **Tests:** `frontend/src/lib/sentry/scrub.test.ts`; Amendment 1 —
   `frontend/src/lib/analytics.test.ts` (drives the real SDK and asserts on the decompressed
-  ingest bodies).
+  ingest bodies, now on EVERY channel); Amendment 2 — `frontend/src/lib/providers.test.tsx`
+  (no PostHog request whatsoever from `/portal/{token}`).
 - **Env:** `NEXT_PUBLIC_SENTRY_DSN` (public DSN; absence ⇒ no-op), optional
   `NEXT_PUBLIC_SENTRY_ENVIRONMENT` (tag; defaults to `NODE_ENV`) and
   `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` (default `0`), plus the build-time
