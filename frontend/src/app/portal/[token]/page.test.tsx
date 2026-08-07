@@ -20,6 +20,8 @@
  * into the DOM (no debug crumb, no analytics tag, no aria-label
  * containing it).
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
 import { http, HttpResponse } from "msw";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
@@ -1388,6 +1390,49 @@ describe("PortalPage — notice at collection (#404)", () => {
     expect(href).toBe("/privacy");
     expect(href).not.toContain("?");
     assertNotInDom(sensitiveToken);
+  });
+
+  it("opens the policy in a FULL DOCUMENT LOAD, so the portal context never holds a live analytics SDK", async () => {
+    // #404 round 3 / ADR 0054 Amendment 2. As `next/link` this was a client-side
+    // transition: `Providers` survives it, its effect re-runs with pathname
+    // `/privacy`, `initAnalytics()` starts a MODULE-GLOBAL posthog-js, and on the
+    // way Back — the round trip ADR 0054 § Neutral already anticipates — the
+    // pathname gate returns early while the live SDK keeps `capture_pageleave`,
+    // autocapture and its `localStorage+cookie` writer running on
+    // `/portal/{token}`. That is precisely what the sentence two tests above
+    // denies, for precisely the vendor who followed the notice's own link.
+    //
+    // HALF THE PIN IS AT THE SOURCE, and deliberately so. Whether a click causes
+    // a document load is not observable here: jsdom never navigates, and
+    // `next/link` renders a plain `<a>` and — with no `AppRouterContext` above it
+    // in this harness — does not even call `preventDefault`, so a DOM-level
+    // "was the click intercepted" probe passes against BOTH shapes. It was
+    // written, run against `<Link>`, and found non-discriminating. What decides
+    // the behaviour is which element the file renders, so that is what is read.
+    server.use(http.get(url(`/api/portal/${TOKEN}`), () => jsonOk(portalInfo)));
+    ({ container } = renderWithProviders(<PortalPage />, { params: { token: TOKEN } }));
+    await waitFor(() => expect(screen.getByText(NOTICE_RE)).toBeInTheDocument());
+
+    const source = readFileSync(resolve(__dirname, "page.tsx"), "utf8");
+    expect(
+      source,
+      "the portal imports next/link again — a client-side transition keeps the portal's JS context, where PostHog then goes live",
+    ).not.toMatch(/^\s*import\s+.*from\s+["']next\/link["']/m);
+    expect(
+      source,
+      "the notice's policy link is no longer a plain anchor",
+    ).toMatch(/<a\s+href="\/privacy"/);
+
+    // The rendered half: it is a real anchor to the real route, and it carries
+    // `rel="noreferrer"` — defence in depth beside the full load, since without
+    // it the tokenized portal URL travels to `/privacy` as `document.referrer`
+    // and as the `Referer` header. Sentry's redaction of a portal `$referrer` on
+    // every OTHER route (ADR 0037 Amendment 1) is untouched; this just means the
+    // credential never has to rely on it here.
+    const link = policyLink();
+    expect(link.tagName).toBe("A");
+    expect(link).toHaveAttribute("href", "/privacy");
+    expect(link).toHaveAttribute("rel", "noreferrer");
   });
 
   it("is already on the loading shell, so it is never absent while the page settles", async () => {

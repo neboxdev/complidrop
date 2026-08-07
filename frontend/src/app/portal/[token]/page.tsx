@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState, useCallback, useEffect } from "react";
 import { useDropzone, type FileRejection } from "react-dropzone";
@@ -85,14 +84,19 @@ type UploadError = {
 //     by `Extraction:Provider` (`ExtractionClientFactory`, gemini by default);
 //   - and the visit is NOT measured. It was, when this notice shipped: the root
 //     layout wraps every route in `Providers`, which called `initAnalytics()`
-//     unconditionally. `Providers` now gates that on the pathname (#404 round 2
-//     / ADR 0037 Amendment 2), because on this one route the URL IS the bearer
+//     unconditionally. `Providers` now gates that on the pathname AND on whether
+//     this browsing context has ever held the credential (#404 rounds 2-3 / ADR
+//     0037 Amendments 2-3), because on this one route the URL IS the bearer
 //     credential and per-channel redaction is a promise renewed every time
 //     posthog-js grows a channel. So the cookie clause the first version of this
 //     notice carried became FALSE IN THE OTHER DIRECTION and moved with the code
-//     — see ADR 0054 Amendment 1. Nothing else here sets a cookie: the auth
-//     cookies are issued by `AuthEndpoints` on sign-in and `/api/portal/*` sets
-//     none, which `page.test.tsx` pins by reading `document.cookie`.
+//     — see ADR 0054 Amendment 1. Round 3 then found the pathname half lapsing
+//     across THIS notice's own policy link (a soft navigation away and back left
+//     a live SDK on the portal URL), and closed it in code so the sentence stays
+//     true rather than being narrowed — ADR 0054 Amendment 2, and the plain `<a>`
+//     below. Nothing else here sets a cookie: the auth cookies are issued by
+//     `AuthEndpoints` on sign-in and `/api/portal/*` sets none, which
+//     `page.test.tsx` pins by reading `document.cookie`.
 //
 // Notice-at-collection means the disclosure is at or BEFORE the point of
 // collection, so it renders beside the dropzone in every state that offers one
@@ -107,11 +111,52 @@ type UploadError = {
 //
 // Module scope, not inline: `react-hooks/static-components` blocks a component
 // declared inside another component's render body.
+//
+// A PLAIN `<a>`, deliberately — this is the one internal link in the app that
+// must NOT be a client-side navigation (#404 round 3 / ADR 0054 Amendment 2).
+// `next/link` keeps the JS context: `Providers` survives the transition, its
+// effect re-runs with pathname `/privacy`, and `initAnalytics()` starts a
+// module-global posthog-js that nothing de-initialises. When the vendor presses
+// Back — the round trip ADR 0054 already anticipates — the pathname gate returns
+// early but the live SDK keeps running on `/portal/{token}`: `$pageleave` from
+// that URL at tab close, autocapture on its clicks (which `advanced_disable_flags`
+// makes MORE certain, not less — it skips `Autocapture.isEnabled`'s
+// wait-for-the-server guard), and a `localStorage+cookie` writer, which is exactly
+// what the sentence below denies. A full document load lands the policy in a NEW
+// JS context, so the portal context never holds an initialised SDK at all.
+// `Providers`' sticky flag (ADR 0037 Amendment 3) is the other half; either
+// alone holds the invariant, the same belt-and-braces shape #404 used for the
+// heatmaps channel.
+//
+// `rel="noreferrer"` is defence in depth: without it the tokenized portal URL
+// travels to `/privacy` as `document.referrer` and the `Referer` header. Sentry
+// still redacts a portal `$referrer` on every OTHER route (ADR 0037 Amendment 1)
+// — that pin stays exactly as it is; this just means the credential never has to
+// rely on it here.
+//
+// THE LINT RULE, reconciled rather than silenced. `@next/next/no-html-link-for-pages`
+// forbids exactly this shape and `eslint-config-next/core-web-vitals` sets it to
+// `error`; the rule is right about the general case, where an `<a>` to an internal
+// route buys nothing and costs the prefetch and the soft transition. Here the full
+// load IS what is being bought. It does not in fact fire, and NOT because App
+// Router is exempt: the rule builds its app-dir matchers with `normalizeAppPath`
+// (`/^\/privacy$/`) and then tests the href through `normalizeURL`, which appends a
+// trailing slash (`/privacy/`) — so no app-dir route can ever match. Verified in
+// `node_modules/@next/eslint-plugin-next/dist/utils/url.js`, and confirmed the other
+// way round: an `eslint-disable-next-line` here is reported as an UNUSED directive,
+// which `eslint src --max-warnings=0` fails on. So there is nothing to disable
+// today. If a plugin release fixes that mismatch this line starts erroring, and the
+// fix is a one-line scoped disable pointing back here — never a rule turned off for
+// the file or the repo, and never a reversion to `<Link>`.
+//
+// `target="_blank"` would also leave the context and is refused separately: there is
+// no `target="_blank"` anywhere in `frontend/`, so a new-tab legal link would be a
+// new pattern rather than a fix (ADR 0054 § Consequences → Neutral).
 function PrivacyPolicyLink() {
   return (
-    <Link href="/privacy" className="underline underline-offset-2 hover:text-sky-700">
+    <a href="/privacy" rel="noreferrer" className="underline underline-offset-2 hover:text-sky-700">
       Privacy Policy
-    </Link>
+    </a>
   );
 }
 
