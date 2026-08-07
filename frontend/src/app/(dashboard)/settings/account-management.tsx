@@ -224,7 +224,8 @@ export function DataExportSection() {
           details, your reminder settings, and one row per document — file name, type, expiration
           date, status and the date you added it. The uploaded files themselves aren&apos;t
           included. Neither are the fields we read from your documents, their compliance-check
-          results, your requirement checklists and which vendor is on each, or your activity log.
+          results, your requirement checklists and which vendor is on each, the record of reminders
+          already sent, or your activity log.
         </p>
         <Button type="button" size="sm" variant="outline" onClick={onExport} disabled={busy}>
           {busy ? "Preparing…" : "Export my data"}

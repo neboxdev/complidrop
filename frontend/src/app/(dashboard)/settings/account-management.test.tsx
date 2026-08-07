@@ -183,7 +183,7 @@ describe("DataExportSection — export (#183 / #320 FP-113)", () => {
     );
     expect(text).toMatch(/the uploaded files themselves aren't included/i);
     expect(text).toMatch(
-      /neither are the fields we read from your documents, their compliance-check results, your requirement checklists and which vendor is on each, or your activity log/i,
+      /neither are the fields we read from your documents, their compliance-check results, your requirement checklists and which vendor is on each, the record of reminders already sent, or your activity log/i,
     );
     // The claim round 2 retired: nothing may promise "the details we hold", which
     // the export does not contain.
