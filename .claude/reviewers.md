@@ -32,9 +32,11 @@ Both are defined in this repo's `.claude/agents/`.
     and post-upload state), and — as a DIFFERENT sentence — in the dead-link and transient
     branches. "Consolidate it into one render site" is not available: those two branches
     return their own `<main>`, and "By uploading, you agree…" is FALSE where there is no
-    dropzone, so they carry the visit line plus the same policy link instead. On the
-    transient branch it sits OUTSIDE `role="alert"` deliberately — standing disclosure is
-    not part of the failure a screen reader is interrupted for.
+    dropzone, so they carry the standing visit line plus the same policy link instead. That
+    line is NOT there because a pageview fires — since ADR 0037 Amendment 2 none does — it is
+    there because a reader on a dead link is still owed the answer to "what does this page do
+    with me". On the transient branch it sits OUTSIDE `role="alert"` deliberately — standing
+    disclosure is not part of the failure a screen reader is interrupted for.
   - The full notice is on the LOADING SHELL as real copy, not a skeleton bar, and is NOT
     gated on `atQuota`. Both are decisions: the notice belongs to the collection surface,
     not to a particular attempt, and it is the one element that must never be pending.
@@ -43,9 +45,14 @@ Both are defined in this repo's `.claude/agents/`.
     link away. "#404's summary said Google, so the copy should say Google" is the bug — and
     the Anthropic-path disclosure gap is CLM-6 / [#405](https://github.com/neboxdev/complidrop/issues/405),
     deliberately NOT pre-empted here (ADR 0054 §3 / Option B).
-  - The cookie sentence is STATIC while PostHog is gated on `NEXT_PUBLIC_POSTHOG_KEY`
-    (`lib/analytics.ts`), so a key-less environment over-discloses. Accepted; making the
-    notice depend on a build-time env var is the recorded rejection (Option F).
+  - The analytics clause now DISCLAIMS ("sets no cookies and doesn't measure how it's used",
+    ADR 0054 Amendment 1) because ADR 0037 Amendment 2 took the route out of analytics. It is
+    STATIC, and the env-var question no longer cuts either way — with or without
+    `NEXT_PUBLIC_POSTHOG_KEY` the page is unmeasured, so the sentence is true in every
+    environment. Making a notice depend on a build-time env var stays the recorded rejection
+    (Option F) and is not reopened. Both halves of the disclaimer are PINNED (`document.cookie`
+    in `page.test.tsx`, no-PostHog-request in `providers.test.tsx`) and `/privacy` + both CLM-5
+    counsel rows carry the same words — rewording one without the others is the finding.
   - The `/privacy` section added for this reader re-names NO subprocessor, and that is
     load-bearing twice over: `marketing-content.test.tsx` pins each vendor with a SINGULAR
     `getByText` (a second "Document AI" / "Microsoft Azure" / "Railway" / "Vercel" /
