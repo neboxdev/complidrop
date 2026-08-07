@@ -20,14 +20,19 @@
  * `sample` — the actual retired copy where there is one — so the matcher can't
  * quietly stop matching.
  *
- * SCOPE NOTE: this scans SOURCE, so it is a backstop, not a proof. Copy
- * assembled at runtime from fragments can evade it; the per-surface rendered
- * assertions in `marketing-content.test.tsx` and `page.test.tsx` remain the
- * primary pins for the REPLACEMENT wording. This one only answers "did a banned
- * claim come back anywhere".
+ * SCOPE NOTE — what this catches, stated so no record can claim more. It scans
+ * SOURCE, so it is a backstop, not a proof: copy assembled at runtime from
+ * fragments evades it, and a regex census over natural language can never be
+ * complete. It catches a KNOWN LIST — the patterns below, each pinned by the
+ * copy it must match — over a KNOWN TREE: `frontend/src/**` (test files
+ * excluded) plus the repo README. It is blind to the API tree, to a rendered
+ * page, and to a display LABEL, which is a map value rather than prose. The
+ * per-surface rendered assertions in `marketing-content.test.tsx` and
+ * `page.test.tsx` remain the primary pins for the REPLACEMENT wording. This one
+ * only answers "did one of these known claims come back anywhere in this tree".
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { describe, it, expect } from "vitest";
 import { counselRegisterRow } from "./counsel-brief";
 
@@ -47,14 +52,16 @@ interface ClaimRule {
    * Further copy the rule must catch — the near-synonyms it was broadened to
    * cover, none of which was ever shipped, so none can be a `sample`.
    *
-   * Added by round 2 of the #398 review (S7). The four deletion rules matched
-   * only the exact sentences #398 retired, while the records claimed the census
+   * Added by round 2 of the #398 review (S7). The deletion rules matched only
+   * the exact sentences #398 retired, while the records claimed the census
    * enforced the whole invariant ("not 'permanently', not 'can't be undone',
    * not 'we delete your data'") — so "This permanently REMOVES the vendor and
    * everything they sent." passed. Broadening a pattern without pinning what
    * the broadening buys is how a rule quietly narrows again on the next edit;
    * this is the `sample` discipline applied to the family rather than to the
-   * one historical string.
+   * one historical string. Round 2 then found the broadenings themselves short
+   * ("we WILL delete your data", "your account HAS BEEN deleted"), which is why
+   * every widened alternation now carries the sentence that used to escape it.
    */
   readonly alsoCatches?: readonly string[];
 }
@@ -64,10 +71,13 @@ const TERMS_REMINDERS =
 const TERMS_ACCURACY =
   "the Terms disclaim accuracy (\"we do not guarantee that every extracted value or compliance result is accurate or complete\")";
 const NEVER_SAY = "G1-LEGAL-RESEARCH §V.4 never-say list";
-const TERMS_DELETION =
-  "nothing in CompliDrop hard-deletes (#398 / ADR 0013 Amendment 1): closing an account scrubs the holder's email + name and soft-deletes the user + org, while the vendors' contact details, the documents, the uploaded blobs, the reminder logs, the Subscription row and the audit trail are all RETAINED";
 
-const BANNED_CLAIMS: readonly ClaimRule[] = [
+/**
+ * The MARKETING half of the census (#403). Written here because it is enforced here and nowhere
+ * else — the API tree carries no landing-page copy. The DELETION half is NOT written here; see
+ * `DELETION_CLAIMS` below.
+ */
+const MARKETING_CLAIMS: readonly ClaimRule[] = [
   // ── §V.4 "Never" ──────────────────────────────────────────────────────────
   {
     pattern: /(ensures|guarantees) compliance/i,
@@ -152,80 +162,76 @@ const BANNED_CLAIMS: readonly ClaimRule[] = [
     sample:
       "Reminders go out automatically before a certificate expires, so by the day of the event you're looking at a clean list, not a phone in your hand.",
   },
-  // ── The deletion-claim family #398 retired (CLM-7) ─────────────────────────
-  // Nothing in CompliDrop hard-deletes. Account closure scrubs the holder's
-  // email + name and stamps `DeletedAt`; `DeleteDocument` / `DeleteVendor`
-  // soft-delete and the document's blob is RETAINED on purpose. These belong in
-  // the census rather than in per-page assertions for the reason the census
-  // exists: the same sentence sat on four surfaces (settings card, settings
-  // form, document list row, document detail header) and the fifth — a new
-  // dialog on a page nobody has written yet — is the one an assertion cannot
-  // reach. "Deceptive deletion" is also the finding class with the most
-  // regulatory teeth, so it is the last claim that should depend on someone
-  // remembering.
-  {
-    // Broadened past the literal verb (#398 round 2 / S7): the claim is
-    // "permanently" + ANY erasure word, and "permanently removes" is the phrase
-    // a new dialog reaches for. Noun forms ride along via `permanent(ly)?`.
-    pattern: /permanent(ly)?\s+(delet|remov|eras|destroy|wip|purg)/i,
-    why: `${TERMS_DELETION}; ADR 0013 also names support-reversibility as a benefit, so "permanently" is false twice over`,
-    sample: "Permanently deletes your account and organization data. This can't be undone.",
-    alsoCatches: [
-      "This permanently removes the vendor and everything they sent.",
-      "Closing your account triggers permanent deletion of your files.",
-      "Confirm to permanently erase this certificate.",
-    ],
-  },
-  {
-    // The irreversibility claim is a FAMILY, not the one literal #398 happened
-    // to retire (S7). Bare "forever" is deliberately NOT here — "Free forever",
-    // "tracked forever" and "Locked forever" are shipped, true, and about
-    // something else entirely.
-    pattern:
-      /\b(irreversibl[ey]|can(no|')t be reversed|cannot be reversed|deleted forever|gone forever|unrecoverable|permanent(ly)? and final)\b/i,
-    why: `${TERMS_DELETION} — nothing is irreversible: the row keeps its DeletedAt tombstone, a document keeps its blob, and support restores an account by clearing DeletedAt`,
-    sample: "Removing a vendor is irreversible.",
-    alsoCatches: [
-      "Once you confirm, this action cannot be reversed.",
-      "Your uploads are gone forever.",
-    ],
-  },
-  {
-    pattern: /can(no|')t be undone/i,
-    why: `${TERMS_DELETION} — every delete path soft-deletes, and DeleteDocument keeps the blob so the document "remains recoverable" (its own comment). Say what the CUSTOMER can't do instead`,
-    sample: "This removes the document from your records and can't be undone.",
-  },
-  {
-    // The third phrase frontend/CLAUDE.md bans and no rule matched (S7): the
-    // plain first-person erasure promise. Scoped to "we <verb> your/all/every…"
-    // so the Privacy Policy's honest "…until you ask us to delete them" and
-    // "delete what we can" (a REQUEST channel, not a standing promise) stay legal.
-    pattern:
-      /\bwe\s+(then\s+|also\s+|automatically\s+|permanently\s+)?(delete|erase|destroy|wipe|purge)\s+(your|all|every|everything)\b/i,
-    why: `${TERMS_DELETION}. We delete nothing on closure — say what closure DOES (scrub the holder's name + email, cancel the plan, stop reminders) and what is kept`,
-    sample: "When you close your account we delete your data.",
-    alsoCatches: ["We permanently erase all documents you uploaded."],
-  },
-  {
-    // Same claim in the passive, which is how a policy page phrases it.
-    pattern:
-      /\byour\s+(data|documents|files|account|information|uploads)\s+(is|are|will be|gets?)\s+(permanently\s+|automatically\s+)?(deleted|erased|destroyed|wiped|purged)\b/i,
-    why: `${TERMS_DELETION} — the passive voice does not make it true; no purge job exists anywhere in the codebase`,
-    sample: "Your data is permanently deleted when you close your account.",
-    alsoCatches: ["Your documents will be erased once the account closes."],
-  },
-  {
-    pattern: /(delete|de-identify)[^.]{0,40}within a reasonable/i,
-    why: "the retired Privacy Policy retention promise — no purge job exists anywhere in the codebase, so nothing implements it (#398)",
-    sample:
-      "If you close your account, we delete or de-identify your data within a reasonable period.",
-  },
-  {
-    pattern: /\b(delete|deleted|dispose of|disposed of|purge)\b[^.]{0,60}\b(after|within)\s+\d{1,3}\s*(day|month|year)/i,
-    why: "a retention SCHEDULE nobody enforces recreates #398's defect in a new sentence — the disposal question is counsel-gate CLM-7, not a copy decision",
-    sample: "If you close your account we delete everything you uploaded within 90 days.",
-  },
 ];
+
+/**
+ * ── The deletion-claim family #398 retired (CLM-7) ──────────────────────────
+ *
+ * NOT written here. The table lives in
+ * `api/CompliDrop.Api.Tests/SharedFixtures/deletion-claim-rules.json` and drives BOTH this census
+ * and `api/CompliDrop.Api.Tests/DeletionClaimCensusTests.cs` — the ContactEmail arrangement
+ * (ADR 0038), adopted for the same reason. Round 2 of the #398 review found the two tables already
+ * unequal (7 rules here, 5 there, each catching sentences the other missed) while three records
+ * called them "the same census". Add or broaden a rule in the FIXTURE, never in one suite.
+ *
+ * What still differs — deliberately, and it is why both censuses exist — is the WALK: this one
+ * covers `frontend/src/**` + the repo README, the backend one covers `api/CompliDrop.Api/**\/*.cs`
+ * where a SERVER message lives. Neither reads the other's tree. The MARKETING rules above are this
+ * side's alone and are not mirrored.
+ *
+ * The rules belong in a census rather than in per-page assertions for the reason the census
+ * exists: the same sentence sat on four surfaces (settings card, settings form, document list row,
+ * document detail header) and the fifth — a new dialog on a page nobody has written yet — is the
+ * one an assertion cannot reach. "Deceptive deletion" is also the finding class with the most
+ * regulatory teeth, so it is the last claim that should depend on someone remembering.
+ */
+interface FixtureRule {
+  readonly id: string;
+  readonly pattern: string;
+  readonly why: string;
+  readonly sample: string;
+  readonly alsoCatches?: readonly string[];
+}
+
+// Located by walking UP from the working directory rather than resolving a fixed `../` hop, and
+// asserted to exist — the reasoning is `src/lib/contact-email.test.ts`'s, which reads the sibling
+// corpus the same way: cwd is only `frontend/` because the CI job sets working-directory, and a
+// silently-missing fixture would make the whole census vacuous.
+const DELETION_FIXTURE_REL = "api/CompliDrop.Api.Tests/SharedFixtures/deletion-claim-rules.json";
+
+function locateDeletionFixture(): string {
+  let dir = process.cwd();
+  for (let up = 0; up < 5; up++) {
+    const candidate = resolve(dir, DELETION_FIXTURE_REL);
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break; // filesystem root
+    dir = parent;
+  }
+  throw new Error(
+    `Shared deletion-claim rule table not found: no ${DELETION_FIXTURE_REL} above ${process.cwd()}. ` +
+      `It is the single table both this census and DeletionClaimCensusTests read (#398) — do not ` +
+      `inline the rules here instead.`,
+  );
+}
+
+const deletionFixture: { retention: string; rules: FixtureRule[] } = JSON.parse(
+  readFileSync(locateDeletionFixture(), "utf8"),
+);
+
+/**
+ * The shared table compiled with THIS side's engine. The `i` flag is the counterpart of the
+ * backend's `IgnoreCase | CultureInvariant`; the not-dark test below is what proves the two
+ * engines agree on every sample, since the fixture itself cannot assert that.
+ */
+const DELETION_CLAIMS: readonly ClaimRule[] = deletionFixture.rules.map((rule) => ({
+  pattern: new RegExp(rule.pattern, "i"),
+  why: `${deletionFixture.retention}${rule.why}`,
+  sample: rule.sample,
+  alsoCatches: rule.alsoCatches,
+}));
+
+const BANNED_CLAIMS: readonly ClaimRule[] = [...MARKETING_CLAIMS, ...DELETION_CLAIMS];
 
 /**
  * Fold the shapes the same sentence takes across .tsx / .ts / .md into one
@@ -287,10 +293,14 @@ describe("Marketing-claim census (#403)", () => {
         .map((copy) => `${String(rule.pattern)} misses: ${copy}`),
     );
     expect(dark).toEqual([]);
-    // Floor raised from 15 by #398's four deletion rules, then to 22 by round 2's
-    // three (the irreversibility family, "we delete your…", and its passive) — a
-    // rule deleted rather than deliberately retired reddens here.
-    expect(BANNED_CLAIMS.length).toBeGreaterThanOrEqual(22);
+    // Two floors, because the two halves are maintained in different places and a rule DELETED
+    // rather than deliberately retired must redden wherever it was deleted from. Both are the
+    // EXACT current counts (the old single floor of 22 sat one below a 23-rule table, so the
+    // guard whose whole job is "notice a deleted rule" would not have fired on the first
+    // deletion — #398 round 2 / C5). The deletion floor is also asserted, at the same number,
+    // by the backend census: one edit to the shared fixture, two red suites.
+    expect(MARKETING_CLAIMS.length).toBeGreaterThanOrEqual(16);
+    expect(DELETION_CLAIMS.length).toBeGreaterThanOrEqual(7);
   });
 
   it("scans the whole shipped surface, not a hand-picked subset", () => {

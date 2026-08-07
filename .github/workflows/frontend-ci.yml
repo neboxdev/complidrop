@@ -20,6 +20,11 @@ on:
       # tells contributors to make — must run BOTH suites or the cross-language agreement it
       # claims to pin is unenforced. (api-ci already covers it via "api/**".)
       - "api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json"
+      # The shared DELETION-CLAIM rule table (#398 round 2) lives in the api test tree for the same
+      # reason and drives src/test/marketing-claims.test.ts too. Round 2 found the two censuses'
+      # rule tables already unequal while three records called them "the same census"; one table
+      # fixes that only if a table-only edit runs BOTH suites. (api-ci covers it via "api/**".)
+      - "api/CompliDrop.Api.Tests/SharedFixtures/deletion-claim-rules.json"
       # The marketing-claim census (#403, src/test/marketing-claims.test.ts) scans the repo
       # README as a shipped product surface — it is public, and its one-liner carried the
       # exact claim the ticket removed from every other surface, through two sweeps. A
@@ -44,6 +49,11 @@ on:
       - "api/CompliDrop.Api/Services/Extraction/ExtractionPrompts.cs"
       - "api/CompliDrop.Api/Data/Seed/ComplianceTemplateSeed.cs"
       - "api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json"
+      # The shared DELETION-CLAIM rule table (#398 round 2) lives in the api test tree for the same
+      # reason and drives src/test/marketing-claims.test.ts too. Round 2 found the two censuses'
+      # rule tables already unequal while three records called them "the same census"; one table
+      # fixes that only if a table-only edit runs BOTH suites. (api-ci covers it via "api/**".)
+      - "api/CompliDrop.Api.Tests/SharedFixtures/deletion-claim-rules.json"
       - "README.md"
       # THREE frontend suites read the counsel gate's §0 register and check that every
       # sentence a row quotes for the attorney to bless still ships verbatim — a quote that
