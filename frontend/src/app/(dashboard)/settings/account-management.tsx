@@ -212,13 +212,19 @@ export function DataExportSection() {
             reads, to a portability/CCPA-access reader, as the thing the product itself calls
             "Extracted fields" — and the `DocumentField` rows, `Document.ExtractionFields`,
             the `ComplianceCheck` results and the `AuditLog` appear nowhere in the dump. An
-            omission this export makes has to be stated, not covered by a vaguer word. */}
+            omission this export makes has to be stated, not covered by a vaguer word.
+            Round 2 then found the omission LIST itself over-claiming by being finite: three
+            named absences read as complete, so a reader infers everything unnamed is present.
+            The requirement checklists (`ComplianceTemplate` + `ComplianceRule`) are a
+            first-class user-authored feature with their own nav item, and the vendor
+            projection above drops `Vendor.ComplianceTemplateId`, so which checklist a vendor
+            is on is absent too — both are now named. */}
         <p className="text-sm text-slate-500">
           Download a JSON copy of your profile, your organization, your vendors and their contact
           details, your reminder settings, and one row per document — file name, type, expiration
           date, status and the date you added it. The uploaded files themselves aren&apos;t
           included. Neither are the fields we read from your documents, their compliance-check
-          results, or your activity log.
+          results, your requirement checklists and which vendor is on each, or your activity log.
         </p>
         <Button type="button" size="sm" variant="outline" onClick={onExport} disabled={busy}>
           {busy ? "Preparing…" : "Export my data"}

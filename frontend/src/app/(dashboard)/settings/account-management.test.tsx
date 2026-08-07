@@ -170,6 +170,12 @@ describe("DataExportSection — export (#183 / #320 FP-113)", () => {
     // calls "Extracted fields", which is equally absent — as are the
     // `ComplianceCheck` rows and the `AuditLog`. So the card enumerates what IS
     // in the dump and states what is not, and this pins both halves.
+    //
+    // Round 2 (S1): a finite omission list reads as COMPLETE, so every absence a
+    // portability reader would look for has to be in it. The checklists
+    // (`ComplianceTemplate` / `ComplianceRule`) are user-authored and have their own
+    // nav item, and the vendor projection drops `Vendor.ComplianceTemplateId`, so the
+    // assignment is absent as well — both named now.
     const { container } = renderWithProviders(<DataExportSection />);
     const text = (container.textContent ?? "").replace(/\s+/g, " ");
     expect(text).toMatch(
@@ -177,7 +183,7 @@ describe("DataExportSection — export (#183 / #320 FP-113)", () => {
     );
     expect(text).toMatch(/the uploaded files themselves aren't included/i);
     expect(text).toMatch(
-      /neither are the fields we read from your documents, their compliance-check results, or your activity log/i,
+      /neither are the fields we read from your documents, their compliance-check results, your requirement checklists and which vendor is on each, or your activity log/i,
     );
     // The claim round 2 retired: nothing may promise "the details we hold", which
     // the export does not contain.
