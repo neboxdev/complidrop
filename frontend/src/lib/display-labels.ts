@@ -129,7 +129,16 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   "user.email_verified": "Email verified",
   "user.email_changed": "Email changed",
   "user.email_change_requested": "Email change requested",
-  "user.account_deleted": "Account deleted",
+  // #398 / ADR 0013 Amendment 1. The ACTION key is a stored value and stays
+  // `user.account_deleted` — renaming it would orphan historical rows — but the
+  // LABEL prints in the dashboard activity feed and in the exported audit PDF,
+  // and it was the only entry in this map still saying the product deletes
+  // (every sibling soft-delete already reads "removed"). It becomes readable
+  // again exactly on ADR 0013's designed-in support path: clear `DeletedAt` to
+  // restore an accidentally-closed account, sign in, and the feed would have
+  // reported a deletion for an account nothing deleted. Mirrored in
+  // `api/CompliDrop.Api/Services/DisplayLabels.cs`.
+  "user.account_deleted": "Account closed",
 };
 
 /**

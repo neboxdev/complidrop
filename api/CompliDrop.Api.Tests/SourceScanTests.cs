@@ -34,6 +34,25 @@ public class SourceScanTests
     }
 
     [Fact]
+    public void The_copy_stripper_removes_prose_around_code_without_dropping_the_line()
+    {
+        // The census variant (#398 round 2 / S4). A copy census asks "does this file carry this
+        // sentence", so it must clear a comment's TAIL while keeping whatever shares its line — the
+        // opposite trade-off from StripLineComments, which drops the whole line.
+        SourceScan.StripComments("var m = \"closed\"; // it used to say permanently deleted\n")
+            .Should().NotContain("permanently deleted").And.Contain("var m = \"closed\";");
+        SourceScan.StripComments("/* was: This can't be undone. */ var m = \"You won't be able to undo it.\";")
+            .Should().NotContain("can't be undone").And.Contain("You won't be able to undo it.");
+        SourceScan.StripComments("/// <summary>Retired: we delete your data.</summary>\nvar a = 1;")
+            .Should().NotContain("we delete your data").And.Contain("var a = 1;");
+
+        // A URL is not a comment. Stripping from its slashes would delete the rest of the line —
+        // which is how a banned sentence sitting AFTER a link would vanish from the scan.
+        SourceScan.StripComments("var u = \"https://complidrop.com/privacy\"; var m = \"we delete your data\";")
+            .Should().Contain("https://complidrop.com/privacy").And.Contain("we delete your data");
+    }
+
+    [Fact]
     public void The_locator_finds_the_real_production_tree_and_fails_closed_otherwise()
     {
         var root = SourceScan.ProductionRoot();

@@ -17,6 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { http } from "msw";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import DocumentDetailPage from "./page";
+import { DOCUMENT_REMOVAL_NOTICE } from "@/lib/removal-copy";
 import {
   renderWithProviders,
   server,
@@ -566,6 +567,11 @@ describe("DocumentDetailPage — Batch C (#317)", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /remove coi\.pdf/i }));
     const dialog = await screen.findByRole("alertdialog");
+    // #398 round 2 (S9): the §0 CLM-7 register quotes this sentence, and until now
+    // "actually ships" only meant "appears in `removal-copy.ts`". This is the second
+    // of the two surfaces that constant exists to keep in step (the list row is the
+    // other) — assert the render, verbatim, on both.
+    expect(within(dialog).getByText(DOCUMENT_REMOVAL_NOTICE)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: /^remove$/i }));
     await waitFor(() => expect(deleted).toBe(true));
     await waitFor(() => expect(pushSpy).toHaveBeenCalledWith("/documents"));

@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace CompliDrop.Api.Tests.TestHelpers;
 
 /// <summary>
@@ -61,6 +63,28 @@ internal static class SourceScan
     internal static string StripLineComments(string source) =>
         string.Join('\n', source.Split('\n')
             .Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+    /// <summary>
+    /// Drops block comments and the tail of trailing <c>//</c> comments while KEEPING the code before
+    /// them — the COPY-census rule, as distinct from <see cref="StripLineComments"/>, which drops whole
+    /// comment LINES for the call-shape gates. The two differ because they answer different questions: a
+    /// call-shape gate asks "is this statement present" (a trailing comment cannot hide a statement, so
+    /// dropping whole lines is enough), while a copy census asks "does this file carry this sentence" —
+    /// and a sentence can start mid-line, right after code, on a line that also carries a comment.
+    /// <para/>
+    /// Both exist so PROSE ABOUT a banned claim cannot read as the claim shipping: the census's own
+    /// neighbours deliberately quote the sentences they retired, right beside the copy that replaced
+    /// them. The <c>//</c> strip requires the slashes not to be preceded by <c>:</c> so a <c>https://…</c>
+    /// URL survives intact and cannot hide text after it (the frontend census's rule, same reason).
+    /// <para/>
+    /// Not a parser: a <c>//</c> or <c>/*</c> inside a string literal is stripped too. That direction is
+    /// safe for a census — it can only DROP text, never invent it, so the failure mode is a claim getting
+    /// through, which the planted-string proofs measure, never a false accusation.
+    /// </summary>
+    internal static string StripComments(string source) =>
+        Regex.Replace(
+            Regex.Replace(source, @"/\*[\s\S]*?\*/", " "),
+            @"(^|[^:])//[^\n]*", "$1", RegexOptions.Multiline);
 
     /// <summary>
     /// Returns the source text between the braces of the method whose declaration contains

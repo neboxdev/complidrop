@@ -20,14 +20,19 @@
  * `sample` — the actual retired copy where there is one — so the matcher can't
  * quietly stop matching.
  *
- * SCOPE NOTE: this scans SOURCE, so it is a backstop, not a proof. Copy
- * assembled at runtime from fragments can evade it; the per-surface rendered
- * assertions in `marketing-content.test.tsx` and `page.test.tsx` remain the
- * primary pins for the REPLACEMENT wording. This one only answers "did a banned
- * claim come back anywhere".
+ * SCOPE NOTE — what this catches, stated so no record can claim more. It scans
+ * SOURCE, so it is a backstop, not a proof: copy assembled at runtime from
+ * fragments evades it, and a regex census over natural language can never be
+ * complete. It catches a KNOWN LIST — the patterns below, each pinned by the
+ * copy it must match — over a KNOWN TREE: `frontend/src/**` (test files
+ * excluded) plus the repo README. It is blind to the API tree, to a rendered
+ * page, and to a display LABEL, which is a map value rather than prose. The
+ * per-surface rendered assertions in `marketing-content.test.tsx` and
+ * `page.test.tsx` remain the primary pins for the REPLACEMENT wording. This one
+ * only answers "did one of these known claims come back anywhere in this tree".
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { describe, it, expect } from "vitest";
 import { counselRegisterRow } from "./counsel-brief";
 
@@ -43,6 +48,22 @@ interface ClaimRule {
   readonly why: string;
   /** Copy this rule must catch — the real retired sentence where one exists. Pinned by the matcher self-test below. */
   readonly sample: string;
+  /**
+   * Further copy the rule must catch — the near-synonyms it was broadened to
+   * cover, none of which was ever shipped, so none can be a `sample`.
+   *
+   * Added by round 2 of the #398 review (S7). The deletion rules matched only
+   * the exact sentences #398 retired, while the records claimed the census
+   * enforced the whole invariant ("not 'permanently', not 'can't be undone',
+   * not 'we delete your data'") — so "This permanently REMOVES the vendor and
+   * everything they sent." passed. Broadening a pattern without pinning what
+   * the broadening buys is how a rule quietly narrows again on the next edit;
+   * this is the `sample` discipline applied to the family rather than to the
+   * one historical string. Round 2 then found the broadenings themselves short
+   * ("we WILL delete your data", "your account HAS BEEN deleted"), which is why
+   * every widened alternation now carries the sentence that used to escape it.
+   */
+  readonly alsoCatches?: readonly string[];
 }
 
 const TERMS_REMINDERS =
@@ -51,7 +72,12 @@ const TERMS_ACCURACY =
   "the Terms disclaim accuracy (\"we do not guarantee that every extracted value or compliance result is accurate or complete\")";
 const NEVER_SAY = "G1-LEGAL-RESEARCH §V.4 never-say list";
 
-const BANNED_CLAIMS: readonly ClaimRule[] = [
+/**
+ * The MARKETING half of the census (#403). Written here because it is enforced here and nowhere
+ * else — the API tree carries no landing-page copy. The DELETION half is NOT written here; see
+ * `DELETION_CLAIMS` below.
+ */
+const MARKETING_CLAIMS: readonly ClaimRule[] = [
   // ── §V.4 "Never" ──────────────────────────────────────────────────────────
   {
     pattern: /(ensures|guarantees) compliance/i,
@@ -139,6 +165,77 @@ const BANNED_CLAIMS: readonly ClaimRule[] = [
 ];
 
 /**
+ * ── The deletion-claim family #398 retired (CLM-7) ──────────────────────────
+ *
+ * NOT written here. The table lives in
+ * `api/CompliDrop.Api.Tests/SharedFixtures/deletion-claim-rules.json` and drives BOTH this census
+ * and `api/CompliDrop.Api.Tests/DeletionClaimCensusTests.cs` — the ContactEmail arrangement
+ * (ADR 0038), adopted for the same reason. Round 2 of the #398 review found the two tables already
+ * unequal (7 rules here, 5 there, each catching sentences the other missed) while three records
+ * called them "the same census". Add or broaden a rule in the FIXTURE, never in one suite.
+ *
+ * What still differs — deliberately, and it is why both censuses exist — is the WALK: this one
+ * covers `frontend/src/**` + the repo README, the backend one covers `api/CompliDrop.Api/**\/*.cs`
+ * where a SERVER message lives. Neither reads the other's tree. The MARKETING rules above are this
+ * side's alone and are not mirrored.
+ *
+ * The rules belong in a census rather than in per-page assertions for the reason the census
+ * exists: the same sentence sat on four surfaces (settings card, settings form, document list row,
+ * document detail header) and the fifth — a new dialog on a page nobody has written yet — is the
+ * one an assertion cannot reach. "Deceptive deletion" is also the finding class with the most
+ * regulatory teeth, so it is the last claim that should depend on someone remembering.
+ */
+interface FixtureRule {
+  readonly id: string;
+  readonly pattern: string;
+  readonly why: string;
+  readonly sample: string;
+  readonly alsoCatches?: readonly string[];
+}
+
+// Located by walking UP from the working directory rather than resolving a fixed `../` hop, and
+// asserted to exist — the reasoning is `src/lib/contact-email.test.ts`'s, which reads the sibling
+// corpus the same way: cwd is only `frontend/` because the CI job sets working-directory, and a
+// silently-missing fixture would make the whole census vacuous.
+const DELETION_FIXTURE_REL = "api/CompliDrop.Api.Tests/SharedFixtures/deletion-claim-rules.json";
+
+function locateDeletionFixture(): string {
+  let dir = process.cwd();
+  for (let up = 0; up < 5; up++) {
+    const candidate = resolve(dir, DELETION_FIXTURE_REL);
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break; // filesystem root
+    dir = parent;
+  }
+  throw new Error(
+    `Shared deletion-claim rule table not found: no ${DELETION_FIXTURE_REL} above ${process.cwd()}. ` +
+      `It is the single table both this census and DeletionClaimCensusTests read (#398) — do not ` +
+      `inline the rules here instead.`,
+  );
+}
+
+const deletionFixture: { retention: string; rules: FixtureRule[] } = JSON.parse(
+  readFileSync(locateDeletionFixture(), "utf8"),
+);
+
+/**
+ * The shared table compiled with THIS side's engine. The `i` flag is the counterpart of the
+ * backend's `IgnoreCase | CultureInvariant`; the not-dark test below is what proves the two
+ * engines agree on every sample, since the fixture itself cannot assert that.
+ */
+const DELETION_CLAIMS: readonly ClaimRule[] = deletionFixture.rules.map((rule) => ({
+  pattern: new RegExp(rule.pattern, "i"),
+  // The fixture's `id` leads the reason so a failure here names the same rule the backend census
+  // would name for the same sentence — that is how the two are compared by hand.
+  why: `[${rule.id}] ${deletionFixture.retention}${rule.why}`,
+  sample: rule.sample,
+  alsoCatches: rule.alsoCatches,
+}));
+
+const BANNED_CLAIMS: readonly ClaimRule[] = [...MARKETING_CLAIMS, ...DELETION_CLAIMS];
+
+/**
  * Fold the shapes the same sentence takes across .tsx / .ts / .md into one
  * comparable string: JSX entities and curly punctuation back to ASCII, and all
  * whitespace to single spaces so a claim wrapped across source lines still
@@ -188,10 +285,24 @@ describe("Marketing-claim census (#403)", () => {
   it("every rule matches the copy it exists to ban (the matcher is not dark)", () => {
     // Without this the whole census could silently stop matching — a broken
     // `normalize`, an over-escaped pattern, an entity form nobody anticipated —
-    // and every file below would pass for the wrong reason.
-    const dark = BANNED_CLAIMS.filter((rule) => !rule.pattern.test(normalize(rule.sample)));
-    expect(dark.map((rule) => String(rule.pattern))).toEqual([]);
-    expect(BANNED_CLAIMS.length).toBeGreaterThanOrEqual(15);
+    // and every file below would pass for the wrong reason. `alsoCatches` extends
+    // the same discipline to the near-synonyms a broadened rule was widened FOR
+    // (#398 round 2 / S7): a pattern narrowed back to its historical string goes
+    // red here rather than going quietly dark on copy nobody has written yet.
+    const dark = BANNED_CLAIMS.flatMap((rule) =>
+      [rule.sample, ...(rule.alsoCatches ?? [])]
+        .filter((copy) => !rule.pattern.test(normalize(copy)))
+        .map((copy) => `${String(rule.pattern)} misses: ${copy}`),
+    );
+    expect(dark).toEqual([]);
+    // Two floors, because the two halves are maintained in different places and a rule DELETED
+    // rather than deliberately retired must redden wherever it was deleted from. Both are the
+    // EXACT current counts (the old single floor of 22 sat one below a 23-rule table, so the
+    // guard whose whole job is "notice a deleted rule" would not have fired on the first
+    // deletion — #398 round 2 / C5). The deletion floor is also asserted, at the same number,
+    // by the backend census: one edit to the shared fixture, two red suites.
+    expect(MARKETING_CLAIMS.length).toBeGreaterThanOrEqual(16);
+    expect(DELETION_CLAIMS.length).toBeGreaterThanOrEqual(7);
   });
 
   it("scans the whole shipped surface, not a hand-picked subset", () => {
@@ -225,29 +336,91 @@ describe("Marketing-claim census (#403)", () => {
  * that keeps the register honest when the §C detail row is edited alone — the
  * defect that put the footer tagline in one row and not the other.
  */
-describe("Counsel brief §0 CLM-4 register (#403)", () => {
-  // Path walk + row filter + quote extraction live in `./counsel-brief` — the
-  // CLM-5 pin in `app/portal/[token]/page.test.tsx` needs the same three steps
-  // and used to carry its own copy of them (#404 review S6).
-  const { rows: row, quoted } = counselRegisterRow("CLM-4");
-  const shipped = SURFACES.map(([, path]) => normalize(readFileSync(path, "utf8")));
+/**
+ * Every shipped surface with its comments stripped — so a register quote that
+ * survives only inside a code comment explaining why it was retired does NOT
+ * read as shipping. (The CLM-4 pin scanned raw source; nothing depended on the
+ * looseness, and #398's corrections are quoted in comments beside the copy they
+ * replaced, which is exactly the vacuous pass this closes.)
+ */
+const SHIPPED_COPY = SURFACES.map(([, path]) => normalize(stripComments(readFileSync(path, "utf8"))));
 
-  it("is a single row that quotes every item it asks counsel to bless", () => {
-    expect(row, "expected exactly one §0 CLM-4 register row").toHaveLength(1);
-    // (a) the FAQ answer, (b) the CCPA parenthetical, (c) the footer tagline,
-    // (d) the "won't slip through unnoticed" clause. Dropping one must be a
-    // deliberate edit, not an accident of rewriting the cell.
-    expect(quoted.length).toBeGreaterThanOrEqual(4);
+/**
+ * Assert a §0 register row is single, quotes at least `minQuotes` sentences,
+ * and that each of them is copy some surface actually carries.
+ *
+ * Shared because CLM-4 and CLM-7 want the identical three assertions, and the
+ * next CLM item will too — the same reason `./counsel-brief` owns the path walk
+ * and the quote regex (#404 review S6).
+ */
+function pinRegisterQuotes(
+  item: string,
+  minQuotes: number,
+  whatIsQuoted: string,
+  /**
+   * Quotes this SOURCE scan structurally cannot see, because the copy embeds a
+   * `<Link>` mid-sentence and is therefore not contiguous in the file — only a
+   * render puts the link's own text back inline. Each entry names the test that
+   * pins it instead, and the prefix is asserted to still match one of the row's
+   * quotes, so a register reword cannot silently orphan the exemption. This is
+   * the same split CLM-5 has lived on since #404 (`app/portal/[token]/page.test.tsx`
+   * renders two portal states for exactly this reason); #398 round 2 brought
+   * CLM-7 (a) into it by linking the Privacy Policy the sentence defers to.
+   */
+  pinnedByARender: ReadonlyArray<readonly [prefix: string, pinnedBy: string]> = [],
+): void {
+  const { rows: row, quoted } = counselRegisterRow(item);
+
+  it(`§0 ${item} is a single row that quotes every item it asks counsel to bless`, () => {
+    expect(row, `expected exactly one §0 ${item} register row`).toHaveLength(1);
+    expect(quoted.length, whatIsQuoted).toBeGreaterThanOrEqual(minQuotes);
+    for (const [prefix, pinnedBy] of pinnedByARender) {
+      expect(
+        quoted.filter((q) => q.includes(prefix)),
+        `the §0 ${item} row no longer quotes the sentence ${pinnedBy} pins — either the register was reworded (update the exemption) or the quote was dropped`,
+      ).toHaveLength(1);
+    }
   });
 
-  it.each(quoted.map((q) => [q.slice(0, 56), q] as const))(
-    'the copy it quotes as "%s…" actually ships',
+  const scannable = quoted.filter(
+    (q) => !pinnedByARender.some(([prefix]) => q.includes(prefix)),
+  );
+
+  it.each(scannable.map((q) => [q.slice(0, 56), q] as const))(
+    `${item}: the copy it quotes as "%s…" actually ships`,
     (_label, sentence) => {
-      const where = shipped.filter((text) => text.includes(normalize(sentence)));
+      const where = SHIPPED_COPY.filter((text) => text.includes(normalize(sentence)));
       expect(
         where.length,
-        `the §0 CLM-4 row quotes copy that no shipped surface carries — either the page was reworded without updating the brief, or the brief quotes something that was never shipped:\n  ${sentence}`,
+        `the §0 ${item} row quotes copy that no shipped surface carries — either the page was reworded without updating the brief, or the brief quotes something that was never shipped:\n  ${sentence}`,
       ).toBeGreaterThan(0);
     },
   );
+}
+
+describe("Counsel brief §0 CLM-4 register (#403)", () => {
+  // (a) the FAQ answer, (b) the CCPA parenthetical, (c) the footer tagline,
+  // (d) the "won't slip through unnoticed" clause, (e) the Rules page's "warn
+  // you 30 days before" helper — added by #398 as a QUESTION, not a rewrite:
+  // it is true of the code (60/30/14/7 seeded reminders; ExpiringSoonWindowDays
+  // = 30) but it is (d)'s delivery-flavoured family and both #403 clearance
+  // reviewers named it. Dropping one must be a deliberate edit, not an accident
+  // of rewriting the cell.
+  pinRegisterQuotes("CLM-4", 5, "expected (a)–(e) to be quoted in the CLM-4 row");
+});
+
+/**
+ * The deletion claim is the highest-risk sentence in the product, so the §0 row
+ * that scopes counsel's engagement has to quote what actually renders. Same
+ * guard as CLM-4's, aimed at the copy #398 shipped: (a) the Settings closure
+ * notice, (b) the Privacy Policy's replacement retention sentences, (c) the
+ * per-item removal notice, (d) the export description.
+ */
+describe("Counsel brief §0 CLM-7 register (#398)", () => {
+  pinRegisterQuotes("CLM-7", 6, "expected (a)–(d) — six sentences — to be quoted in the CLM-7 row", [
+    [
+      "we handle them as described in our Privacy Policy.",
+      "`app/(dashboard)/settings/account-management.test.tsx`",
+    ],
+  ]);
 });

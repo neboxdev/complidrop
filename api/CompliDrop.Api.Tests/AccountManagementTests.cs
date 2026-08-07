@@ -253,13 +253,40 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
 
     // ───────── delete account ─────────
 
+    /// <summary>
+    /// Every user-visible sentence <c>POST /api/auth/account/delete</c> can emit must be
+    /// true of what it does (#398 / ADR 0013 Amendment 1). It CLOSES an account: the org
+    /// is tombstoned and the vendors, documents, blobs, reminder logs, Subscription row
+    /// and audit trail all survive, so no message may claim an erasure or an
+    /// irreversibility. These strings are user-visible on every arm — `friendly` returns
+    /// the server's `message` and the frontend toasts it verbatim — which is how the two
+    /// FAILURE messages kept saying "your account was not deleted" under a button now
+    /// labelled "Close my account" after the success message had been corrected.
+    /// </summary>
+    private static void AssertNoErasureClaim(string? message, string mustSay)
+    {
+        message.Should().NotBeNullOrWhiteSpace();
+        message.Should().Contain(mustSay, "the closure vocabulary is what the button and the card say");
+        message.Should().NotContainEquivalentOf("delet", "nothing in the request path erases anything (ADR 0013 § Consequences)");
+        message.Should().NotContainEquivalentOf("permanent", "ADR 0013 names support-reversibility as a benefit");
+        message.Should().NotContainEquivalentOf("eras", "same claim, different verb");
+        message.Should().NotContainEquivalentOf("undone", "clearing DeletedAt undoes it");
+    }
+
     [Fact]
     public async Task Delete_account_revokes_access_and_frees_the_email_for_reregistration()
     {
         var auth = await RegisterAndLoginAsync();
 
-        (await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" }))
-            .StatusCode.Should().Be(HttpStatusCode.OK);
+        var ok = await auth.Client.PostAsJsonAsync("/api/auth/account/delete", new { password = "Password1234" });
+        ok.StatusCode.Should().Be(HttpStatusCode.OK);
+        // #398 round 2 (S6): the corrected success sentence was the one shipped string in
+        // the whole change with no test behind it — `marketing-claims.test.ts` walks
+        // `frontend/src/**` only, so a revert to "Your account has been deleted." shipped green.
+        var okMessage = (await ok.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("data").GetProperty("message").GetString();
+        okMessage.Should().Be("Your account is closed.");
+        AssertNoErasureClaim(okMessage, "closed");
 
         // The deleted account can no longer sign in.
         (await CreateClient().PostAsJsonAsync("/api/auth/login", new { email = auth.Email, password = "Password1234" }))
@@ -401,6 +428,8 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
         body.GetProperty("error").GetProperty("code").GetString().Should().Be("billing.cancel_failed");
         body.GetProperty("error").GetProperty("message").GetString().Should().NotContainEquivalentOf("stripe",
             "error copy stays jargon-free for SMB users");
+        AssertNoErasureClaim(
+            body.GetProperty("error").GetProperty("message").GetString(), "your account was not closed");
 
         // Nothing was deleted, no false audit trail, still signed in.
         (await auth.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.OK);
@@ -450,6 +479,8 @@ public sealed class AccountManagementTests(IntegrationTestFixture fixture) : Int
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
         body.GetProperty("error").GetProperty("code").GetString().Should().Be("billing.unavailable");
         body.GetProperty("error").GetProperty("message").GetString().Should().NotContainEquivalentOf("stripe");
+        AssertNoErasureClaim(
+            body.GetProperty("error").GetProperty("message").GetString(), "your account was not closed");
 
         FakeStripe.CanceledSubscriptions.Should().BeEmpty();
         (await auth.Client.GetAsync("/api/auth/me")).StatusCode.Should().Be(HttpStatusCode.OK);

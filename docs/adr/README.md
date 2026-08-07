@@ -20,7 +20,7 @@ Use `/adr <title>` to scaffold a new one.
 - [0010](0010-frontend-e2e-with-playwright.md) — Frontend E2E with Playwright (network-mocked, scrubbed artifacts, conservative flake policy)
 - [0011](0011-plan-vocab-unified-with-founding-as-authenticated-only-promo.md) — Plan vocab unified as `free | pro | annual | founding`; `founding` is an authenticated-only promo tier
 - [0012](0012-seo-geo-marketing-surface.md) — Public marketing/SEO surface: server-rendered content pages, structured data, and an AI-crawler-allow robots policy
-- [0013](0013-account-deletion-is-soft-delete-plus-pii-scrub.md) — Account deletion is soft-delete + PII scrub, not hard delete
+- [0013](0013-account-deletion-is-soft-delete-plus-pii-scrub.md) — Account deletion is soft-delete + PII scrub, not hard delete (Amendment 1: the user-facing copy now matches the decision; the retention posture is counsel-gate CLM-7, not a code answer)
 - [0014](0014-per-request-principal-revalidation-and-security-stamp.md) — Per-request principal re-validation + a rotating security stamp
 - [0015](0015-reminder-dedupe-time-zone-edit-guard.md) — Reminder dedupe carries a trailing-window guard for editable-time-zone re-fires (extends 0002 / 0007)
 - [0016](0016-apply-ef-migrations-on-startup.md) — Apply EF migrations on API startup (auto-migrate by default) with a boot-time drift guard

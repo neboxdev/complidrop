@@ -1,0 +1,105 @@
+{
+  "$readme": [
+    "The deletion-claim rule table (#398 / ADR 0013 Amendment 1 / counsel gate CLM-7). ONE table, read by",
+    "BOTH censuses: frontend/src/test/marketing-claims.test.ts and",
+    "api/CompliDrop.Api.Tests/DeletionClaimCensusTests.cs. Add or broaden a rule HERE, never in one suite —",
+    "the ContactEmail precedent (ADR 0038, SharedFixtures/contact-email-cases.json): two hand-maintained",
+    "copies of the same table were already unequal at introduction, and round 2 of the #398 review found",
+    "the same thing here (5 rules one side, 7 the other, each catching sentences the other missed) while",
+    "three records called them 'the same census'.",
+    "",
+    "What is shared is the RULE TABLE. The two censuses still differ in what they WALK, and that is the",
+    "point of having two: the frontend walks frontend/src/** plus the repo README; the backend walks",
+    "api/CompliDrop.Api/**/*.cs, where a server message lives — invisible to the frontend walk, and where",
+    "both of round 2's CONFIRMED majors were found.",
+    "",
+    "Each side compiles these patterns with its OWN engine (JS RegExp / .NET Regex) and folds punctuation",
+    "and whitespace with its own normalizer, so 'the two agree' is not asserted from this file — it is",
+    "proved on each side by its not-dark test running every `sample` + `alsoCatches` below through its own",
+    "engine. A pattern that means different things in the two dialects reddens there.",
+    "",
+    "`sample` is the real retired sentence where one exists; `alsoCatches` pins what a broadening BOUGHT,",
+    "so a pattern narrowed back to its historical string reddens instead of going quietly dark. Every rule",
+    "needs at least two words, so an identifier (DeleteAccount, DeletedAt, user.account_deleted) cannot",
+    "trip one. Patterns are matched case-insensitively.",
+    "",
+    "A display LABEL is a map value, not prose — no rule here can judge one. `user.account_deleted` ->",
+    "'Account closed' is asserted directly in both mirrors instead."
+  ],
+  "retention": "nothing in CompliDrop hard-deletes (#398 / ADR 0013 Amendment 1): closing an account scrubs the holder's email + name and soft-deletes the user + org, while the vendors' contact details, the documents, the uploaded blobs, the reminder logs, the Subscription row and the audit trail are all RETAINED — and clearing DeletedAt restores the account, which ADR 0013 names as a BENEFIT",
+  "rules": [
+    {
+      "id": "permanently-plus-erasure-verb",
+      "pattern": "permanent(ly)?\\s+(delet|remov|eras|destroy|wip|purg)",
+      "why": "; so \"permanently\" is false twice over. Broadened past the literal verb the ticket retired: the claim is \"permanently\" + ANY erasure word, and \"permanently removes\" is the phrase a new dialog reaches for. Noun forms ride along via `permanent(ly)?`",
+      "sample": "Permanently deletes your account and organization data. This can't be undone.",
+      "alsoCatches": [
+        "This permanently removes the vendor and everything they sent.",
+        "Closing your account triggers permanent deletion of your files.",
+        "Confirm to permanently erase this certificate."
+      ]
+    },
+    {
+      "id": "irreversibility-family",
+      "pattern": "\\b(irreversibl[ey]|can(no|')t be reversed|(is|are)\\s+not\\s+reversible|deleted forever|gone forever|unrecoverable|permanent(ly)? and final)\\b",
+      "why": " — nothing is irreversible: the row keeps its DeletedAt tombstone, a document keeps its blob, and support restores an account by clearing DeletedAt. Bare \"forever\" is deliberately NOT banned — \"Free forever\", \"tracked forever\" and \"Locked forever\" ship, are true, and are about something else entirely",
+      "sample": "Removing a vendor is irreversible.",
+      "alsoCatches": [
+        "Once you confirm, this action cannot be reversed.",
+        "Once you confirm, this action is not reversible.",
+        "Your uploads are gone forever."
+      ]
+    },
+    {
+      "id": "cannot-be-undone",
+      "pattern": "can(no|')t be undone",
+      "why": " — every delete path soft-deletes, and DeleteDocument keeps the blob so the document \"remains recoverable\" (its own comment). Say what the CUSTOMER can't do instead",
+      "sample": "This removes the document from your records and can't be undone.",
+      "alsoCatches": [
+        "Closing your account cannot be undone.",
+        "This can’t be undone."
+      ]
+    },
+    {
+      "id": "we-delete-your-active",
+      "pattern": "\\bwe(?:'ll|\\s+(?:will|would|shall|can|may|might|then|also|automatically|permanently|eventually)){0,2}\\s+(delete|erase|destroy|wipe|purge)\\s+(your|all|every|everything)\\b",
+      "why": ". We delete nothing on closure — say what closure DOES (scrub the holder's name + email, cancel the plan, stop reminders) and what is kept. A modal between \"we\" and the verb is the MOST natural way to write the promise, and every one of them used to pass. Still scoped to \"we <verb> your/all/every…\" so the Privacy Policy's honest \"…until you ask us to delete them\" and \"delete what we can\" (a REQUEST channel, not a standing promise) stay legal",
+      "sample": "When you close your account we delete your data.",
+      "alsoCatches": [
+        "We permanently erase all documents you uploaded.",
+        "When you close your account we will delete your data.",
+        "We'll delete your data.",
+        "We may delete all documents you uploaded.",
+        "We will then purge everything you sent us."
+      ]
+    },
+    {
+      "id": "your-data-was-deleted-passive",
+      "pattern": "\\byour\\s+(data|documents|files|account|information|uploads)\\s+(is|are|was|were|has been|have been|will be|gets?)\\s+(not\\s+)?(permanently\\s+|automatically\\s+)?(deleted|erased|destroyed|wiped|purged)\\b",
+      "why": " — the passive voice does not make it true; no purge job exists anywhere in the codebase. The tense list is spelled out because the two shapes that actually shipped sit at opposite ends of it: a success toast reporting \"has been deleted\", and an abort arm reporting the NEGATION, \"so your account was not deleted\" — which is why the optional `not` is here rather than in a rule of its own",
+      "sample": "Your data is permanently deleted when you close your account.",
+      "alsoCatches": [
+        "Your documents will be erased once the account closes.",
+        "Your account has been deleted.",
+        "We can't reach billing right now, so your account was not deleted. Please try again later.",
+        "Your uploads get wiped when the plan ends."
+      ]
+    },
+    {
+      "id": "within-a-reasonable-period",
+      "pattern": "(delete|de-identify)[^.]{0,40}within a reasonable",
+      "why": ". This is the retired Privacy Policy retention promise verbatim — no purge job exists anywhere in the codebase, so nothing implements it",
+      "sample": "If you close your account, we delete or de-identify your data within a reasonable period."
+    },
+    {
+      "id": "disposal-schedule",
+      "pattern": "\\b(delete|deleted|dispose of|disposed of|purge|purged)\\b[^.]{0,60}\\b(after|within)\\s+\\d{1,3}\\s*(day|month|year)",
+      "why": ". A retention SCHEDULE nobody enforces recreates #398's defect in a new sentence — the disposal question is counsel-gate CLM-7, not a copy decision",
+      "sample": "If you close your account we delete everything you uploaded within 90 days.",
+      "alsoCatches": [
+        "Your uploaded files will be deleted within 90 days.",
+        "Closed accounts are purged after 12 months."
+      ]
+    }
+  ]
+}

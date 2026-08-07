@@ -11,6 +11,7 @@ import { describe, it, expect, vi } from "vitest";
 import { http } from "msw";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import VendorDetailPage from "./page";
+import { VENDOR_REMOVAL_NOTICE } from "@/lib/removal-copy";
 import type { VendorDetail } from "@/hooks/useVendors";
 import {
   renderWithProviders,
@@ -545,6 +546,12 @@ describe("VendorDetailPage — remove vendor (#319 FP-073)", () => {
     // Open the confirm from the header, then confirm inside the dialog.
     fireEvent.click(await screen.findByRole("button", { name: /remove vendor/i }));
     const dialog = await screen.findByRole("alertdialog");
+    // #398 round 2 (S9): the §0 CLM-7 register asks counsel to bless this
+    // sentence, and "actually ships" was satisfied by its presence in
+    // `removal-copy.ts` — a constants module. Nothing asserted it reached a
+    // `description` prop, so counsel could have blessed a string no dialog
+    // renders. Assert the render, in the dialog, verbatim.
+    expect(within(dialog).getByText(VENDOR_REMOVAL_NOTICE)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: /remove vendor/i }));
 
     await waitFor(() => expect(deleteCalls).toBe(1));

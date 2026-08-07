@@ -19,13 +19,15 @@
  *
  * The example this docstring used to lead with — "a vendor who follows the
  * notice's Privacy Policy link reaches `/privacy`, a route that DOES measure,
- * carrying the tokenized portal URL in `document.referrer`" — is no longer one
- * of them, in TWO ways (Amendment 3, #404 round 3). That link is now a plain
- * `<a … rel="noreferrer">`, so the referrer is not sent at all; and the gate is
- * sticky per browsing context, so that `/privacy` visit is not measured either.
- * The redaction it motivated stays exactly as it is — it protects every OTHER
- * route, and narrowing a redactor because one of its callers went away is how
- * the next channel gets missed.
+ * carrying the tokenized portal URL in `document.referrer`" — lost its second
+ * half in Amendment 3 (#404 round 3): that link is now a plain
+ * `<a … rel="noreferrer">`, so the REFERRER is not sent at all. The first half
+ * still holds, and this docstring's earlier correction over-reached (fixed
+ * #398): `/privacy` is reached by a FULL DOCUMENT LOAD, i.e. a new JS context
+ * in which the sticky gate starts false, so that visit IS measured — just
+ * credential-free. The redaction stays exactly as it is either way: it protects
+ * every OTHER route, and narrowing a redactor because one of its callers went
+ * away is how the next channel gets missed.
  *
  * WHY IT DRIVES THE REAL SDK. The defect was never in our code — it is in what
  * posthog-js adds on its own — so the fix is only as good as the set of

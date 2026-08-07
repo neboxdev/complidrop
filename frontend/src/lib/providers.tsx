@@ -55,10 +55,19 @@ function isCredentialInUrlRoute(pathname: string | null): boolean {
  * sanitisation AND `capture_heatmaps: false`).
  *
  * **The cost is real and recorded.** A customer who opens a portal link in the
- * same tab loses PostHog for the rest of that tab's session, and the vendor's
- * `/privacy` visit is not measured either. Accepted: the alternative is a
- * bearer credential in a third party's store, and every route is measured again
- * on the next hard load.
+ * same tab loses PostHog for the rest of that tab's session. Accepted: the
+ * alternative is a bearer credential in a third party's store, and every route
+ * is measured again on the next hard load.
+ *
+ * **What that cost is NOT** (corrected #398, ADR 0037 Amendment 3's cost bullet
+ * retracted): the vendor's `/privacy` visit. This flag is the BELT to the plain
+ * anchor's brace, and the anchor wins first — a full document load renders the
+ * policy in a new JS context where this flag starts `false`, so `initAnalytics`
+ * runs there and the visit IS measured. Credential-free, which is the property
+ * that matters: `rel="noreferrer"` keeps the tokenized URL out of the referrer
+ * and `before_send` would redact it regardless. The unmeasured-`/privacy` claim
+ * describes the SOFT-NAV round trip this flag exists to survive — which is what
+ * `providers.test.tsx` drives, since jsdom never navigates — not what ships.
  */
 let contextHeldCredentialInUrl = false;
 

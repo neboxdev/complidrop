@@ -411,6 +411,73 @@ describe("Legal + contact pages (#194)", () => {
     expect(text).toMatch(/if your information appears inside a document/i);
   });
 
+  it("Privacy Policy's retention section describes closure as it is actually implemented (#398)", () => {
+    // The retired sentence promised that after closure "we delete or de-identify
+    // your data within a reasonable period". No purge job exists anywhere in the
+    // codebase: `AuthEndpoints.DeleteAccount` scrubs `User.Email` + `FullName`,
+    // stamps `DeletedAt` on the user and the org, and stops there — vendors and
+    // their contact details, documents, the Azure blobs, reminder logs, the
+    // Subscription row and the audit trail all survive (ADR 0013 § Consequences).
+    // "We delete your data" against actual retention is the FTC Act §5 pattern
+    // this replaces, and it poisons any CCPA §1798.105 delete response.
+    const { container } = render(<PrivacyPolicyPage />);
+    const page = (container.textContent ?? "").replace(/\s+/g, " ");
+    // Scoped to the retention section: the page elsewhere legitimately promises
+    // to "respond within 30 days" to a rights request, which is a RESPONSE time,
+    // not a disposal schedule. Slicing keeps the no-schedule assertion below
+    // aimed at the sentences that would actually be the promise.
+    const start = page.indexOf("How long we keep it");
+    const end = page.indexOf("If you were sent an upload link");
+    expect(start, "the retention section heading moved or was renamed").toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const text = page.slice(start, end);
+
+    expect(text).not.toMatch(/within a reasonable period/i);
+    // The three facts of closure, each traceable: the scrub, the Stripe cancel
+    // (which aborts the whole request if it fails), and the reminder sweep's
+    // `o.DeletedAt == null` filter.
+    expect(text).toMatch(
+      /clear your name and email from your account record straight away, cancel any paid plan, and stop sending reminders/i,
+    );
+    // …and the retained set, named rather than implied.
+    expect(text).toMatch(/on its own it is not a deletion of everything the account held/i);
+    expect(text).toMatch(/the vendors you added and their contact details/i);
+    expect(text).toMatch(/the files uploaded for them/i);
+    // NO retention period is stated — a number no job enforces would be the same
+    // defect in a new sentence. The disposal question is counsel-gate CLM-7.
+    expect(text).toMatch(/we have not set a fixed disposal period/i);
+    expect(text).not.toMatch(/\bwithin \d+ (day|month|year)/i);
+    // The deletion channel the policy already offers is the one it points at —
+    // and it must not become a SECOND support mailto, which would break the
+    // singular `getByRole("link")` pin above.
+    expect(text).toMatch(/until you ask us to delete them/i);
+    expect(text).toMatch(/use the contact details at the end of this page/i);
+    expect(
+      screen.getAllByRole("link", { name: new RegExp(SUPPORT_EMAIL, "i") }),
+    ).toHaveLength(1);
+  });
+
+  it("tells the account-less uploader that CompliDrop keeps a copy too (#398 / #404 coherence)", () => {
+    // The upload-link section (#404) answered "how long is my document kept?"
+    // with "that business … decides how long it keeps its copy" — true, but it
+    // ended the reader's question at the customer while OUR copy outlives the
+    // customer's account entirely. Read beside the rewritten retention section,
+    // that left a false impression for exactly the reader who has no account and
+    // no other way to find out.
+    const { container } = render(<PrivacyPolicyPage />);
+    const text = (container.textContent ?? "").replace(/\s+/g, " ");
+
+    expect(text).toMatch(/that business decides what to do with the document/i);
+    expect(text).toMatch(/we keep our own copy while they use/i);
+    // The whole clause, not just the section name (#398 round 2 / S1): the page
+    // ALWAYS renders a "How long we keep it" heading, so `/how long we keep it/i`
+    // was satisfied by the heading and stayed green with the cross-reference
+    // deleted — while reviewers.md calls that pointer load-bearing ("Rewording
+    // either half alone re-opens the false impression for the one reader with no
+    // account"). textContent renders `&quot;` as `"`.
+    expect(text).toMatch(/afterwards as described in "How long we keep it" above/i);
+  });
+
   it("Terms of Service renders the not-advice disclaimer + cancellation terms (Stripe requirement)", () => {
     render(<TermsOfServicePage />);
     expect(

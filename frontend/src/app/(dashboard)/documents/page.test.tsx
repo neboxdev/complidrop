@@ -15,6 +15,7 @@ import { afterEach, describe, it, expect, vi } from "vitest";
 import { http } from "msw";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import DocumentsPage, { SEARCH_DEBOUNCE_MS } from "./page";
+import { DOCUMENT_REMOVAL_NOTICE } from "@/lib/removal-copy";
 import {
   renderWithProviders,
   server,
@@ -1658,6 +1659,33 @@ describe("DocumentsPage — state matrix (#36)", () => {
     expect(
       screen.getByRole("button", { name: /remove coi-completed\.pdf/i }),
     ).toBeInTheDocument();
+  });
+
+  it("the remove confirm renders the shared removal notice verbatim (#398)", async () => {
+    // #398 round 2 (S9). The §0 CLM-7 register asks counsel to bless this exact
+    // sentence, and the pin for "actually ships" scans source — so it was
+    // satisfied by `removal-copy.ts`, a constants module, with nothing asserting
+    // the constant reached a `description` prop. Counsel could have blessed a
+    // string no dialog renders. This is the list-row half of the two surfaces
+    // that constant single-sources; the detail header is pinned the same way.
+    server.use(
+      http.get(url("/api/documents"), () =>
+        jsonOk(
+          makeDocumentsResponse({ items: [{ ...documentsAllStatuses[2] }], total: 1 }),
+        ),
+      ),
+    );
+
+    renderWithProviders(<DocumentsPage />, { auth: authedMe });
+    await waitFor(() =>
+      expect(screen.getByText("coi-completed.pdf")).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /remove coi-completed\.pdf/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(DOCUMENT_REMOVAL_NOTICE)).toBeInTheDocument();
+    // …and the claim it replaced must not have come back on the way in.
+    expect(dialog.textContent ?? "").not.toMatch(/permanent|can(no|')t be undone/i);
   });
 });
 

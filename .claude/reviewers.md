@@ -57,7 +57,15 @@ Both are defined in this repo's `.claude/agents/`.
     load-bearing twice over: `marketing-content.test.tsx` pins each vendor with a SINGULAR
     `getByText` (a second "Document AI" / "Microsoft Azure" / "Railway" / "Vercel" /
     "Resend" reddens CI), and the section's job is to point at the one list rather than fork
-    it. Same for the `SUPPORT_EMAIL` mailto, pinned by a singular `getByRole("link")`.
+    it. Same for the `SUPPORT_EMAIL` mailto, pinned by a singular `getByRole("link")` — which is
+    why #398's retention rewrite routes its deletion request to "the contact details at the end
+    of this page" rather than adding a second mailto.
+  - Since #398 that section also answers the RETENTION question for its reader, and the two
+    sections are read TOGETHER by design: it used to end at "that business … decides how long it
+    keeps its copy" — true, but it stopped the reader's question at the customer, while OUR copy
+    outlives the customer's account entirely (closing purges nothing). It now names our copy and
+    points at § "How long we keep it". Rewording either half alone re-opens the false impression
+    for the one reader with no account and no other way to find out.
   - Same-tab link, matching every other legal link in `frontend/` — there is no
     `target="_blank"` anywhere in the tree. Adding one here is a new pattern, not a fix. Same tab,
     but since ADR 0054 Amendment 2 NOT a client-side transition: it is a plain `<a>` so the policy
@@ -133,11 +141,31 @@ Both are defined in this repo's `.claude/agents/`.
       on file at the call site; do not add the directive, and do not switch the rule off.
     - `Providers` keeps a module-scope `contextHeldCredentialInUrl`, so once a tab has held the
       credential nothing initialises in it again until a hard load. **The cost is recorded, not
-      overlooked:** that tab is unmeasured for the rest of its session and the vendor's `/privacy`
-      visit is not measured either. Flagging either as a regression is reviewer noise.
-    The residue that REMAINS is also recorded: a tab that arrives at the portal from an ordinary
-    route keeps its already-live SDK (nothing in `frontend/` links to `/portal/{token}`, so it
-    needs a pasted URL). ADR 0037 Amendment 3 § What stays open.
+      overlooked:** that tab is unmeasured for the rest of its session, so a customer who opens a
+      portal link in an in-app tab loses PostHog there. Flagging that as a regression is reviewer
+      noise.
+    - CORRECTED (#398) — this block, ADR 0037 Amendment 3's cost bullet, both CLAUDE.md files,
+      `providers.tsx`'s flag doc, `analytics.test.ts` and `providers.test.tsx` all said the
+      vendor's `/privacy` visit is no longer measured. **That is FALSE as shipped**, and it was
+      the conservative half of a two-mechanism fix being read as if only the sticky flag existed.
+      Layer (1) is a plain `<a>`, i.e. a FULL DOCUMENT LOAD, so the policy renders in a NEW JS
+      context where the module-scope flag starts `false` and `initAnalytics()` runs. The visit IS
+      measured, and credential-free: `rel="noreferrer"` means the tokenized URL is not in
+      `document.referrer`, and `before_send` would redact it anyway. The unmeasured-`/privacy`
+      claim is true only of the counterfactual SOFT-NAV round trip the sticky flag exists to
+      survive — which is exactly what `providers.test.tsx`'s "a soft-nav /privacy round trip
+      included" case drives (jsdom never navigates), so that test is still a correct pin of
+      layer (2) and must not be "fixed" to match the shipped flow. Its NAME moved in round 2
+      (and only its name): the title still asserted the retracted claim, on the one line CI
+      prints, while the body and docstring already said soft-nav.
+    The residue that REMAINS is also recorded, and RESTATED accurately (#398): a tab that arrives
+    at the portal from an ordinary route keeps its already-live SDK. It used to say "today this
+    needs a pasted URL" — but a pasted URL is an ADDRESS-BAR navigation, i.e. a full document load
+    that destroys the old context along with the live SDK, so it does not reach the residue at
+    all. Reaching it needs an in-app CLIENT-SIDE navigation to `/portal/{token}`, and nothing in
+    `frontend/` links there, so the residue is **unreachable today**. The named future fix is
+    unchanged: an explicit `posthog.opt_out_capturing()` on entry, not a wider gate. ADR 0037
+    Amendment 3 § What stays open.
   - The portal notice + `/privacy` saying the page "sets no cookies and doesn't measure how it's
     used" are claims of ABSENCE that moved with that gate (ADR 0054 Amendment 1) and are pinned
     — `page.test.tsx` reads `document.cookie`, `providers.test.tsx` asserts no PostHog request
@@ -188,6 +216,103 @@ Both are defined in this repo's `.claude/agents/`.
   false-uncovered regression the review caught.
 - A normal document delete RETAINS its blob (ADR 0013); the sample-demo clear DELETES
   its blob (ADR 0028). Both directions are deliberate.
+- Deletion COPY is ADR 0013 Amendment 1 (#398 / counsel gate CLM-7); the facts that follow
+  are pointers into it, not a second copy of the rationale.
+  - NOTHING hard-deletes, so the copy is scoped to what the CUSTOMER sees and no surface may
+    say "permanently", "can't be undone", or "we delete your data". The Settings action is
+    **Close account** (not Delete), and the removal dialogs say "You won't be able to undo it"
+    — scoped, because the user has no restore affordance while the SYSTEM keeps the row and,
+    for a document, the blob. Re-introducing an erasure or irreversibility word IS a finding;
+    "the button used to say Delete, restore it" is the recorded rejection (ADR 0013 Amendment 1
+    § Alternatives — a Delete button beside "your records are kept" is the deception's shape,
+    not its cure).
+  - Enforcement is a CENSUS, not a per-page assertion (the same sentence sat on FOUR surfaces and
+    the next one is a dialog on a page nobody has written). State its reach EXACTLY — round 2
+    found the claim still live because three records described it as more than it was. It is
+    **ONE rule table, TWO walks, plus direct assertions where no walk can read**:
+    - The table is `api/CompliDrop.Api.Tests/SharedFixtures/deletion-claim-rules.json` — 7 rules,
+      each carrying the copy it must catch. **Add or broaden a rule THERE, not in one suite.**
+      That is ADR 0038's arrangement for the ContactEmail mirrors, adopted for its exact reason:
+      round 2 found the two hand-maintained tables already unequal (7 rules frontend, 5 backend,
+      each catching sentences the other missed) while the records called them "the same census".
+      Each side compiles the patterns with its OWN engine (JS `i` / .NET `IgnoreCase |
+      CultureInvariant`) and normalizes with its own function, so "the two agree" is PROVED by
+      each side's not-dark test running every sample, never asserted by the fixture. Both count
+      floors equal the table size — a floor one BELOW it (the shipped state round 2 found) cannot
+      fire on the first deletion, which is the one thing a floor is for.
+    - `frontend/src/test/marketing-claims.test.ts` runs that table over `frontend/src/**` (test
+      files excluded by `TEST_FILE_RE`) + the repo README, and additionally carries the #403
+      MARKETING rules, which are NOT mirrored and are not claimed to be.
+    - `api/CompliDrop.Api.Tests/DeletionClaimCensusTests.cs` runs the SAME table over
+      `api/CompliDrop.Api/**/*.cs`. The WALK is why it exists: the frontend one structurally
+      cannot see a server message — exactly where round 2's two CONFIRMED majors lived (both
+      abort arms of the renamed endpoint still said *"so your account was not deleted"*, rendered
+      verbatim in a toast under "Close my account").
+    - The rules match the claim FAMILY, not the retired sentences: an erasure verb after
+      "permanently" (`permanently removes` used to pass), the irreversibility family including
+      "is/are not reversible", "we delete your…" in both voices AND with a modal between ("we
+      WILL delete your data", "we'll…" — every one of those used to pass), and the passive with
+      the full tense list plus an optional `not`, so both the success shape ("your account HAS
+      BEEN deleted") and the abort shape ("was NOT deleted") land on one rule. A broadened
+      pattern carries `alsoCatches` samples so narrowing it back reddens the not-dark test
+      instead of going quiet. Bare "forever" is deliberately NOT banned — "Free forever" /
+      "Locked forever" ship and are about something else. The schedule rule bans a stated
+      disposal PERIOD: publishing one no job enforces is #398's own defect re-shipped, so "the
+      policy should say how long" is not a finding, it is CLM-7's question.
+    - BOTH are SOURCE scans over a KNOWN list, so both are BACKSTOPS. A regex census over natural
+      language can never be complete; neither reads copy assembled at runtime from fragments, a
+      rendered page, or a map value. Do not describe either as covering "the family" — describe
+      it as catching the table, over its tree.
+    - What no walk reads is asserted DIRECTLY: the closure endpoint's three messages by
+      `AccountManagementTests.AssertNoErasureClaim` (success, 502, 503); the closure success
+      toast by `account-management.test.tsx` (added round 2 — nothing asserted it, so "Your
+      account has been deleted." could be restored on the one surface a closing customer reads
+      and ship green); and the display LABEL, which is a MAP VALUE, not prose — see the
+      "Account closed" bullet below.
+    - `ConfirmDialog.test.tsx` imports `DOCUMENT_REMOVAL_NOTICE` rather than typing a
+      description. Test files are excluded from the frontend walk by construction, and that
+      fixture is what a developer copies when wiring the next dialog — it held the retired
+      "This can't be undone." until round 2. Do not re-inline a literal there.
+  - `frontend/src/lib/removal-copy.ts` single-sources the document + vendor notices for ADR
+    0047 §1's reason (the document sentence shipped as two hand-copied literals). Inlining
+    either back is the drift, not a simplification.
+  - The audit LABEL for the closure event reads **"Account closed"** in both mirrors
+    (`frontend/src/lib/display-labels.ts` + `Services/DisplayLabels.cs`) while the stored ACTION
+    key stays `user.account_deleted` — renaming the key orphans historical rows. The label is
+    user-facing on two surfaces (`DashboardEndpoints.FeedVisibleActions` whitelists the action;
+    `ExportService` prints `DisplayLabels.Action` into the audit PDF) and readable again exactly
+    on ADR 0013's support path, so "the key still says deleted, align the label back" is the bug.
+    The census cannot reach this one — it is a MAP VALUE, not prose — which is why both mirrors
+    carry a direct assertion instead.
+  - What is DELIBERATELY not done: no purge job, no retention period, no change to what is
+    retained, and no per-dialog retention paragraph (that disclosure belongs to `/privacy`
+    § "How long we keep it" and the closure card). Proposing option (b) — build the purge —
+    is not a review finding: it reverses ADR 0013's § Decision and needs its own ADR plus the
+    sign-off CLM-7 is asking for.
+  - `AuthEndpoints.ExportAccount` serializes document ROWS (`OriginalFileName`, `DocumentType`,
+    `ExpirationDate`, `ComplianceStatus`, `CreatedAt`) and NO files; the Settings card ENUMERATES
+    those five and names the omissions. Round 2 of the #398 review found the first replacement
+    over-claiming in a NEW way — *"the details we hold for each document"* is, in the product's own
+    vocabulary, the "Extracted fields" — so the rule is: a vaguer word is not a fix, an export
+    description names what the projection contains and states what it leaves out. The OMISSION
+    list is finite and therefore reads as COMPLETE, so it has to name every absence a portability
+    reader would look for: `DocumentField` / `Document.ExtractionFields`, the `ComplianceCheck`
+    rows, the `AuditLog`, AND the requirement checklists (`ComplianceTemplate` + `ComplianceRule`,
+    a user-authored feature with its own nav item) plus `Vendor.ComplianceTemplateId`, which the
+    vendor projection drops — so which checklist a vendor is on is absent too. Adding a table to
+    the projection means editing this sentence in the same PR.
+    It is still out of ADR 0047's disclaimer scope (a portability dump) — the two facts are
+    about different things, so do not merge them.
+  - The closure card LINKS `/privacy` (#398 round 2). Not decoration: the sentence defers the
+    retention disclosure to the policy and `app/(dashboard)/layout.tsx` renders no footer and no
+    legal links, so the pointer went somewhere a signed-in customer could not reach — ADR 0013
+    Amendment 1 § Alternatives rejects "leave it to `/privacy`" on exactly that ground. Same-tab
+    `<Link>` like every other legal link in the tree; `target="_blank"` is a new pattern, not a fix.
+    Its consequence for the pins is the CLM-5 shape arriving at CLM-7: the sentence is no longer
+    CONTIGUOUS in source, so `marketing-claims.test.ts` cannot scan it and
+    `pinRegisterQuotes`'s `pinnedByARender` hands that ONE quote to a render in
+    `account-management.test.tsx` (which asserts the register still quotes it, so the exemption
+    cannot be orphaned). Do not "simplify" the exemption away by re-flattening the sentence.
 - Vendor contact-email validation is ADR 0038; the review-time facts that follow are
   pointers into it, not a second copy of the rationale.
   - Two email validators coexist ON PURPOSE: `Services/ContactEmail.IsWellFormed` (vendor

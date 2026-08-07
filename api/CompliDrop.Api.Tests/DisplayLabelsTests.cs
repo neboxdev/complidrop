@@ -105,4 +105,20 @@ public class DisplayLabelsTests
         label.Should().NotContain(" · ");
         label.Should().NotContain("_");
     }
+
+    // #398 / ADR 0013 Amendment 1. This label prints into the exported audit PDF
+    // (ExportService renders DisplayLabels.Action per row) and is mirrored on the
+    // dashboard feed by frontend/src/lib/display-labels.ts. Account closure deletes
+    // nothing — the org is tombstoned and every child row survives — and the account
+    // is restorable by clearing DeletedAt, which is precisely when this row becomes
+    // readable again. The stored ACTION key keeps its name so historical rows resolve.
+    [Fact]
+    public void Action_prints_account_closure_as_a_closure_not_a_deletion()
+    {
+        DisplayLabels.Action("user.account_deleted").Should().Be("Account closed");
+        DisplayLabels.Action("user.account_deleted").Should().NotContainEquivalentOf("delet");
+        // The siblings it was out of step with — every other soft-delete reads "removed".
+        DisplayLabels.Action("document.deleted").Should().Be("Document removed");
+        DisplayLabels.Action("vendor.deleted").Should().Be("Vendor removed");
+    }
 }

@@ -46,7 +46,27 @@ class, and the generic reviewer roster structurally missed them).
 3. **Deletion and retention copy vs code.** "Permanently delete", "can't be undone",
    retention statements — against the soft-delete interceptor, blob retention (ADR
    0013), and reminder logs. Copy that promises hard deletion over soft-delete code is
-   a bug in the copy or the code — flag it and say which fix the ADRs favor.
+   a bug in the copy or the code — flag it and say which fix the ADRs favor. **The
+   answer this project already gave is ADR 0013 Amendment 1 (#398 / CLM-7):** the copy
+   moved, the behaviour did not, and no retention period is stated anywhere.
+   So an erasure/irreversibility word coming BACK is a finding; "build the purge" and
+   "publish a retention schedule" are the counsel gate's open question, not review
+   findings. **Enforcement is THREE mechanisms, and knowing which reaches where is the
+   difference between a covered surface and one that only looks covered** — round 2 of
+   #398 found the claim alive on a surface the records implied was guarded. (1) The
+   deletion rules live in one shared table,
+   `api/CompliDrop.Api.Tests/SharedFixtures/deletion-claim-rules.json`;
+   `frontend/src/test/marketing-claims.test.ts` runs it over `frontend/src/**` (test
+   files excluded) + the repo README. (2)
+   `api/CompliDrop.Api.Tests/DeletionClaimCensusTests.cs` runs the SAME table over
+   `api/CompliDrop.Api/**/*.cs`, because a server message is invisible to the frontend
+   walk and is exactly where both of round 2's majors lived. (3) Direct assertions cover
+   what neither can read: the `user.account_deleted` → "Account closed" label in both
+   mirrors, the closure endpoint's three messages, and the closure toast. Both censuses
+   read SOURCE, catch a KNOWN LIST of patterns, and are blind to copy assembled at
+   runtime, to a rendered page, and to a map value. A claim their table should have
+   caught but did not is a finding against the table; a claim outside it is a finding
+   against the copy. Add or broaden a rule in the FIXTURE, never in one suite.
 4. **Privacy and disclosure copy vs data flows.** Subprocessor claims vs providers
    actually wired (`Extraction:Provider` paths — Vertex vs AI Studio vs Anthropic have
    different data-use realities); "not used to train AI models" claims vs the

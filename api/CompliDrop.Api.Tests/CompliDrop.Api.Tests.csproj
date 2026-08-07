@@ -49,6 +49,13 @@
          or the "mechanically pinned" guarantee is unenforced precisely where it matters. frontend-ci
          names it explicitly, the same way it already reaches for ExtractionPrompts.cs (#272). -->
     <None Update="SharedFixtures\contact-email-cases.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The SHARED deletion-claim rule table (#398 round 2). Same arrangement, same reason: this file
+         is the ONE table read by DeletionClaimCensusTests here and by
+         frontend/src/test/marketing-claims.test.ts there. Round 2 of the review found the two tables
+         already unequal — 5 rules on this side, 7 on that, each catching sentences the other missed —
+         while three records described them as "the same census". Sitting inside the api test tree puts
+         it under api-ci's "api/**" filter automatically; frontend-ci names it explicitly. -->
+    <None Update="SharedFixtures\deletion-claim-rules.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

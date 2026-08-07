@@ -42,11 +42,19 @@
  *       credential, `initAnalytics()` never runs in it again until a hard load.
  *       Pinned here, by the two middle cases.
  *
- * (b) has a cost, recorded rather than discovered: the vendor's `/privacy` visit
- * is no longer measured, and a customer who opens a portal link in the same tab
- * loses analytics for the rest of that tab's session. The "vendor's /privacy
- * visit included" case asserts exactly that, so deleting the flag reddens this
- * file instead of silently re-opening the window.
+ * (b) has a cost, recorded rather than discovered: a customer who opens a portal
+ * link in the same tab loses analytics for the rest of that tab's session. The
+ * "vendor's /privacy visit included" case asserts the flag's reach directly, so
+ * deleting the flag reddens this file instead of silently re-opening the window.
+ *
+ * READ THAT CASE FOR WHAT IT IS (corrected #398). It drives a SOFT navigation,
+ * because jsdom never navigates — so it pins (b) against the counterfactual (b)
+ * exists to survive, not against the shipped flow. In production (a) wins first:
+ * `/privacy` arrives via a full document load, the module-scope flag starts
+ * false there, and that visit IS measured — credential-free, since the referrer
+ * is suppressed and `before_send` redacts anyway. Do NOT "fix" this case to
+ * match the shipped flow; it would stop pinning the flag, which is the whole
+ * reason it is here.
  */
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest";
 import { act, render, waitFor } from "@testing-library/react";
@@ -149,7 +157,14 @@ describe("Providers analytics gate (#404 / ADR 0037 Amendments 2–3)", () => {
     ).toEqual([]);
   });
 
-  it("never initialises again in a tab that has held the credential — the vendor's /privacy visit included", async () => {
+  // The name says SOFT-NAV, not "the vendor's /privacy visit" (#398 round 2 / S8):
+  // the shipped link is a plain `<a>`, so the real visit is a full document load
+  // in a fresh context and IS measured. This case drives the counterfactual the
+  // sticky flag exists to survive, which is what the docstring above already
+  // says — the title was the last place the retracted claim was still asserted,
+  // and it is the line CI prints. The BODY is unchanged on purpose: reviewers.md
+  // is explicit that it must not be rewritten to match the shipped flow.
+  it("never initialises again in a tab that has held the credential — a soft-nav /privacy round trip included", async () => {
     const Providers = await freshTab();
     setNavigationState({ pathname: PORTAL_PATH, params: { token: PORTAL_TOKEN } });
     render(<Providers>portal</Providers>);
