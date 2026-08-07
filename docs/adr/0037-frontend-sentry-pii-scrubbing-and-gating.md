@@ -177,9 +177,76 @@ warranted for a compliance product.
 Rejected: a leaked DSN in a non-prod build would start sending. Requiring `NODE_ENV === production`
 *and* a DSN matches the #271 "isolated by default" posture.
 
+## Amendment 1 (2026-08-07) — the other telemetry vendor gets the same URL rule, from the same function
+
+**PostHog was never scrubbed.** `lib/analytics.ts` initialised it with `capture_pageview: true` /
+`capture_pageleave: true` and no property hook at all, so every URL PostHog assembles from
+`window.location` went out verbatim. The vendor-portal token IS a URL path segment
+(`/portal/{token}`) and it is a **bearer credential** — whoever holds the string can upload to that
+link. So the one page in the product a non-customer touches was shipping that credential to a
+third-party analytics store on every event, while the decision above had been redacting the *exact
+same string* for Sentry since #356 and `robots.ts` was disallowing `/portal/` to keep it out of
+third-party indexes. Found while implementing [ADR 0054](0054-portal-gives-notice-at-collection.md)
+/ [#404](https://github.com/neboxdev/complidrop/issues/404), which added the first out-link from
+that page — so `document.referrer` on a middle-click made it a `$referrer` too.
+
+### The rule is IMPORTED, not mirrored
+
+`initAnalytics` passes a `before_send` hook that rewrites URL-valued properties through
+**`sanitizeUrl` from `lib/sentry/scrub.ts`** — the same function, imported. A second copy of a
+redaction regex is the drift this repo refuses elsewhere (the `ContactEmail` ↔ `contact-email.ts`
+mirror exists with a shared corpus for exactly this reason, [ADR 0038](0038-vendor-contact-email-mirrored-validation.md)),
+and it would be worse here: the two vendors would disagree about what a secret is. `scrub.ts`
+imports `@sentry/nextjs` for **types only**, so nothing of the Sentry runtime is pulled into the
+analytics bundle.
+
+`before_send`, not `sanitize_properties`. The installed SDK marks `sanitize_properties`
+`@deprecated`, logs an error on **every** event that uses it, and hands the hook `properties`
+alone — while `$set_once`, a sibling of `properties` on the wire, is where the `$initial_*` family
+rides. `before_send` receives the whole assembled `CaptureResult`.
+
+### Which properties, and how they were established
+
+By **observation, not documentation**: `analytics.test.ts` drives the real SDK in jsdom, intercepts
+the ingest requests with MSW, gunzips them and asserts on the bytes that would have left the
+browser. That found `$session_entry_url` / `$session_entry_pathname` / `$session_entry_referrer`,
+which were in nothing we started from, alongside the expected `$current_url` / `$pathname` /
+`$referrer` and the `$set_once` trio `$initial_current_url` / `$initial_pathname` /
+`$initial_referrer`.
+
+The match is therefore a **substring rule on the key** (`url` | `path` | `referrer` | `href`, applied
+recursively so autocapture's nested `attr__href` is covered), not an enumeration: the SDK grows
+these by family and a future `$…_url` is covered the day it ships. Over-matching is harmless —
+`sanitizeUrl` leaves a non-portal URL alone, and dashed GUIDs (document / vendor / org ids) survive
+its opaque-token net by design — while under-matching is the bug. `$host` / `$referring_domain`
+carry no path and so cannot carry the token.
+
+### What stays open (recorded, not overlooked)
+
+The **`/flags` request** builds its `person_properties` bag straight from persistence and does not
+pass through `before_send`, so it can still carry a raw `$initial_current_url`. Verified live, not
+inferred. It is bounded and it is a different population: it fires only after `identify()`, which
+the portal never calls (there is no session there), so the exposed value is an **identified
+customer's own** initial URL — reachable when a customer follows their own portal link and then
+signs in from the same browser — never a stranger's credential.
+
+Closing it means `advanced_disable_flags: true`, which the SDK documents as also disabling remote
+configuration (web vitals, surveys, and anything else configured in PostHog's own settings rather
+than in code). Nothing in `frontend/` reads a feature flag today, but that is a product/analytics
+decision with a visible blast radius and it is **not** what #404 reported, so it is recorded here
+rather than taken silently. The test file states the same boundary where it scopes its assertions
+to the ingest endpoint, so the scope is visible at the pin as well as in the record.
+
+Unchanged: PostHog still gates on `NEXT_PUBLIC_POSTHOG_KEY` presence alone (this ADR's "Gate only
+on DSN presence (PostHog-style)" alternative is about *Sentry's* stricter gate and is not
+reopened), and this amendment discloses nothing new to a user — [ADR 0054](0054-portal-gives-notice-at-collection.md)'s
+notice already says the page uses analytics cookies.
+
 ## References
 
-- **Tickets:** [#356](https://github.com/neboxdev/complidrop/issues/356) (this feature).
+- **Tickets:** [#356](https://github.com/neboxdev/complidrop/issues/356) (this feature),
+  [#404](https://github.com/neboxdev/complidrop/issues/404) (Amendment 1 — the PostHog half,
+  found while shipping the portal notice-at-collection).
 - **Related ADRs:** [0035](0035-standing-cleanup-tooling-gates.md) (supersedes its
   `@sentry/nextjs` kept-but-ignored knip sub-decision),
   [0034](0034-dev-environment-isolation-and-boot-banner.md) /
@@ -188,7 +255,11 @@ Rejected: a leaked DSN in a non-prod build would start sending. Requiring `NODE_
   [#254](https://github.com/neboxdev/complidrop/issues/254).
 - **Code:** `frontend/src/lib/sentry/{scrub,options,build}.ts`,
   `frontend/src/instrumentation.ts`, `frontend/src/instrumentation-client.ts`,
-  `frontend/src/app/global-error.tsx`, `frontend/next.config.ts`.
+  `frontend/src/app/global-error.tsx`, `frontend/next.config.ts`; Amendment 1 —
+  `frontend/src/lib/analytics.ts` (imports `sanitizeUrl`).
+- **Tests:** `frontend/src/lib/sentry/scrub.test.ts`; Amendment 1 —
+  `frontend/src/lib/analytics.test.ts` (drives the real SDK and asserts on the decompressed
+  ingest bodies).
 - **Env:** `NEXT_PUBLIC_SENTRY_DSN` (public DSN; absence ⇒ no-op), optional
   `NEXT_PUBLIC_SENTRY_ENVIRONMENT` (tag; defaults to `NODE_ENV`) and
   `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` (default `0`), plus the build-time

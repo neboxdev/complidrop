@@ -53,10 +53,38 @@ Both are defined in this repo's `.claude/agents/`.
     it. Same for the `SUPPORT_EMAIL` mailto, pinned by a singular `getByRole("link")`.
   - Same-tab link, matching every other legal link in `frontend/` — there is no
     `target="_blank"` anywhere in the tree. Adding one here is a new pattern, not a fix.
-  - Frontend-only by design: `/api/portal/*` is untouched, no token reaches any link or
-    analytics property (pinned by `assertNotInDom`), and no session is needed to read the
-    policy. A version that adds a consent checkbox or a cookie banner is ADR 0054 Options
-    C/D, both refuted.
+  - Frontend-only by design: `/api/portal/*` is untouched, this change ADDS the token to no
+    link and no analytics property, and no session is needed to read the policy. The DOM half
+    is what `assertNotInDom` pins, and only that half — its own docstring scopes it out of
+    non-DOM channels ("`localStorage` / `sessionStorage` / `window.*` … non-DOM channels are
+    explicitly out of scope"), so it never spoke for what leaves over the wire. Whether the
+    token reaches a telemetry VENDOR is a separate mechanism with its own record and its own
+    pin: ADR 0037 Amendment 1 / `frontend/src/lib/analytics.test.ts` (Sentry has redacted it
+    since #356; PostHog since #404). A version that adds a consent checkbox or a cookie
+    banner is ADR 0054 Options C/D, both refuted.
+- Frontend telemetry URL redaction is ADR 0037 (#356) + its Amendment 1 (#404); the facts that
+  follow are pointers into it, not a second copy of the rationale.
+  - `lib/analytics.ts` IMPORTING `sanitizeUrl` from `lib/sentry/scrub.ts` is the decision, not a
+    layering slip. One redaction rule, two vendors — a mirrored regex is the drift ADR 0038
+    already refuses, and worse here (the two vendors would disagree about what a secret is).
+    `scrub.ts`'s only `@sentry/nextjs` import is `import type`, so no Sentry runtime enters the
+    analytics bundle. "Move the shared helper somewhere neutral" is a rename, not a finding.
+  - `before_send`, NOT `sanitize_properties`: the installed SDK marks the latter `@deprecated`,
+    logs an error on every event that uses it, and hands it `properties` alone — while the
+    `$initial_*` family rides in `$set_once`, a SIBLING of `properties` on the wire.
+  - The key match is a SUBSTRING rule (`url`|`path`|`referrer`|`href`, applied recursively) on
+    purpose. The property set was established by DRIVING THE REAL SDK
+    (`analytics.test.ts` intercepts + gunzips the ingest requests), which is how
+    `$session_entry_url` / `_pathname` / `_referrer` were found at all; the SDK grows these by
+    family, so "replace it with the exact list" re-opens the hole on the next SDK release.
+    Over-matching is harmless — `sanitizeUrl` leaves a non-portal URL alone and preserves dashed
+    GUIDs — so `$host` / `$referring_domain` going unmatched (they carry no path) is not a gap.
+  - KNOWN residue, ADR 0037 Amendment 1 § What stays open — do NOT re-report: the `/flags`
+    request builds `person_properties` from persistence and never reaches `before_send`, so it
+    can still carry a raw `$initial_current_url`. It fires only after `identify()`, which the
+    portal never calls, so the value is an identified CUSTOMER's own URL. Closing it means
+    `advanced_disable_flags: true`, which also disables remote config — a product decision
+    recorded rather than taken silently.
 - `IgnoreQueryFilters()` / `SystemDbContext` inside background workers and system
   contexts — by design. In request-path code it IS a blocker (tenant leakage).
 - Idempotency records replay the winner's exact response for as long as the row exists;
