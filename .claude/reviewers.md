@@ -1511,6 +1511,36 @@ Both are defined in this repo's `.claude/agents/`.
     portability dump of the account's own data back to its owner: raw JSON, no masthead, bare
     numeric enum codes, no rendered verdict label). The Decision line is scoped "every export a
     customer hands to a third party" for exactly that reason — do not read it as "every export".
+- Marketing/privacy claim copy (#403 / CLM-4) is guarded by a source CENSUS,
+  `frontend/src/test/marketing-claims.test.ts`, in the `ExportDisclaimerTests` shape: it scans
+  every non-test module under `frontend/src` PLUS the repo `README.md` (a public product surface
+  whose one-liner carried the retired claim through two sweeps), keyed to G1-LEGAL-RESEARCH §V.4's
+  never-say list and the sentences #403 retired. Comments are stripped, entities/curly punctuation
+  folded and whitespace collapsed, and each rule carries the copy it exists to ban plus a self-test,
+  so the census cannot go dark. `README.md` and `G1-COUNSEL-BRIEF.md` are in `frontend-ci`'s path
+  filters for it (the shared-corpus precedent). Facts that look like findings and are not:
+  - **"won't slip through unnoticed" (`faq/page.tsx`) is deliberately NOT banned**, and softening it
+    is a REFUSED suggestion, not an oversight (round-2 S4). #403 prescribed that exact replacement
+    string and CLAUDE.md § Workflow forbids silently diverging from a ticket's acceptance criteria;
+    the residual question — the clause names the REMINDERS the Terms disclaim, and an un-extracted
+    expiration date produces no reminder at all — is ROUTED to counsel as G1-COUNSEL-BRIEF §0 CLM-4
+    item (d), with the alternative wording written into the row. Same posture for item (c), the
+    footer tagline *"Drop your docs. Stay compliant."*: it resembles §V.4's "keeps you compliant"
+    but is an imperative to the reader, so it needs a yes/no rather than a unilateral brand rewrite.
+  - The §0 CLM-4 register and the §C detail row carry the SAME lettered items (a)–(d) and each says
+    so; a new item goes in BOTH or neither. Enumerated, never counted — "Two sentences to bless" in
+    one row while the other had three is the defect this closes. Pinned: the census asserts the §0
+    row is unique, quotes ≥ 4 items, and that every sentence it quotes still ships verbatim.
+  - The two blessed sentences are pinned VERBATIM as whole-string literals in
+    `marketing-content.test.tsx` ("ships both CLM-4 sentences byte-for-byte…"), not by key phrase.
+    That distinction is load-bearing: the per-surface regexes catch the old claim coming BACK, and
+    only the literals catch a REWORD of copy counsel signed off on. Weakening either to a fragment
+    makes the brief's own claim false again.
+  - The `GetStartedChecklist` reminders step carries NO `hint` on purpose — it is hardcoded
+    `done: true` and the done branch renders only the label, so a hint there is copy no user can
+    reach. `hint` is optional for that reason and the invariant is pinned. Re-adding one (it looks
+    like a missing string) is the bug; the first-run reminder copy users actually read is the
+    WelcomeModal's, pinned against the rendered DOM.
 - Health probes (#390 / ADR 0053): `/health` and `/health/live` answer 200 WITHOUT touching the
   database, deliberately. "The liveness probe doesn't verify the DB" is not a finding — Railway's
   healthcheck path is configured OUTSIDE this repo (no `railway.json`, no `HEALTHCHECK` in the
