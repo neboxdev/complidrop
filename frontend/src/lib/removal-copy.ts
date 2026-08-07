@@ -17,6 +17,14 @@
  * of them. Deliberately NOT a per-dialog retention paragraph — the disclosure
  * of what we keep belongs to `/privacy` § "How long we keep it" and to the
  * account-closure card, where the customer is deciding about all of it at once.
+ *
+ * Both sentences are quoted in the counsel gate's §0 CLM-7 register, and that
+ * register's "actually ships" pin scans SOURCE — which this module satisfies on
+ * its own. So each notice also carries a RENDERED assertion inside its dialog
+ * (#398 round 2 / S9): `documents/page.test.tsx`, `documents/[id]/page.test.tsx`
+ * and `vendors/[id]/page.test.tsx`. Without them, unwiring a `description` prop
+ * leaves counsel blessing a string no dialog shows, with every source-level pin
+ * still green.
  */
 
 /** `documents/page.tsx` list row + `documents/[id]/page.tsx` header. */
