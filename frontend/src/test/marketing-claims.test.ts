@@ -31,7 +31,9 @@ import { join, relative, resolve } from "node:path";
 import { describe, it, expect } from "vitest";
 
 const FRONTEND_SRC = resolve(__dirname, "..");
-const REPO_README = resolve(__dirname, "..", "..", "..", "README.md");
+const REPO_ROOT = resolve(__dirname, "..", "..", "..");
+const REPO_README = join(REPO_ROOT, "README.md");
+const COUNSEL_BRIEF = join(REPO_ROOT, "docs", "rule-engine", "G1-COUNSEL-BRIEF.md");
 const TEST_FILE_RE = /\.(test|spec)\.tsx?$/;
 
 interface ClaimRule {
@@ -213,4 +215,39 @@ describe("Marketing-claim census (#403)", () => {
     );
     expect(hits, `${label} ships a banned claim`).toEqual([]);
   });
+});
+
+/**
+ * The counsel gate's §0 register is what the attorney engagement is scoped
+ * from, and its CLM-4 row quotes the copy #403 shipped so counsel can answer
+ * yes/no on the exact wording. A quote that no longer matches the page is worse
+ * than no quote: counsel blesses a string nobody ships. This is also the guard
+ * that keeps the register honest when the §C detail row is edited alone — the
+ * defect that put the footer tagline in one row and not the other.
+ */
+describe("Counsel brief §0 CLM-4 register (#403)", () => {
+  const row = readFileSync(COUNSEL_BRIEF, "utf8")
+    .split("\n")
+    .filter((line) => line.startsWith("| **CLM-4**"));
+  const quoted = row.length === 1 ? [...row[0].matchAll(/\*"(.+?)"\*/g)].map((m) => m[1]) : [];
+  const shipped = SURFACES.map(([, path]) => normalize(readFileSync(path, "utf8")));
+
+  it("is a single row that quotes every item it asks counsel to bless", () => {
+    expect(row, "expected exactly one §0 CLM-4 register row").toHaveLength(1);
+    // (a) the FAQ answer, (b) the CCPA parenthetical, (c) the footer tagline,
+    // (d) the "won't slip through unnoticed" clause. Dropping one must be a
+    // deliberate edit, not an accident of rewriting the cell.
+    expect(quoted.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it.each(quoted.map((q) => [q.slice(0, 56), q] as const))(
+    'the copy it quotes as "%s…" actually ships',
+    (_label, sentence) => {
+      const where = shipped.filter((text) => text.includes(normalize(sentence)));
+      expect(
+        where.length,
+        `the §0 CLM-4 row quotes copy that no shipped surface carries — either the page was reworded without updating the brief, or the brief quotes something that was never shipped:\n  ${sentence}`,
+      ).toBeGreaterThan(0);
+    },
+  );
 });

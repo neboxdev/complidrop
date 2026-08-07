@@ -25,6 +25,9 @@ on:
       # exact claim the ticket removed from every other surface, through two sweeps. A
       # README-only edit must run the census that guards it.
       - "README.md"
+      # Same test checks that every sentence the counsel gate's §0 CLM-4 row quotes for
+      # the attorney to bless still ships verbatim, so a brief-only edit must run it too.
+      - "docs/rule-engine/G1-COUNSEL-BRIEF.md"
   pull_request:
     paths:
       - "frontend/**"
@@ -35,6 +38,9 @@ on:
       - "api/CompliDrop.Api/Data/Seed/ComplianceTemplateSeed.cs"
       - "api/CompliDrop.Api.Tests/SharedFixtures/contact-email-cases.json"
       - "README.md"
+      # Same test checks that every sentence the counsel gate's §0 CLM-4 row quotes for
+      # the attorney to bless still ships verbatim, so a brief-only edit must run it too.
+      - "docs/rule-engine/G1-COUNSEL-BRIEF.md"
 
 jobs:
   build:
