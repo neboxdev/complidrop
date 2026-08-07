@@ -28,7 +28,7 @@ Realistically: **6–10 focused hours**, spread across 2–3 sittings. Don't try
 
 | Sitting | Sections | Why batch them |
 |---|---|---|
-| 1 (~2.5h) | §0 setup, §1 smoke, §2 first-time user, §3 auth & account | Establishes baseline & all the canned accounts the rest needs (§3 now covers password reset, change email/password, delete account, email verification) |
+| 1 (~2.5h) | §0 setup, §1 smoke, §2 first-time user, §3 auth & account | Establishes baseline & all the canned accounts the rest needs (§3 now covers password reset, change email/password, close account, email verification) |
 | 2 (~3h) | §4 documents, §5 vendors, §6 portal, §7 vendor requirements, §8 reminders | The product's core surface |
 | 3 (~2h) | §9 export, §10 billing, §11 settings, §12 dashboard | Money + reporting + read-only views |
 | 4 (~2h) | §13 multi-tenancy, §14 edge cases, §15 a11y, §16 known limits, §17 perf, §18 sign-off | The "polish before launch" pass |

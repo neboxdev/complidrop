@@ -301,14 +301,14 @@ The session cookie expires after 15 minutes; the frontend silently refreshes via
 - [ ] **3.9.3** Return to the dashboard. **Expect:** the amber verification banner is **gone** (no reload needed).
 - [ ] **3.9.4** Open `/verify-email` with no token → **"Invalid verification link"**. An expired/spent token → **"Couldn't confirm your email"** with the server reason and a **"Go to dashboard to resend"** action.
 
-### 3.10 Change password / change email / delete account (Settings → §11)
+### 3.10 Change password / change email / close account (Settings → §11)
 
 These live on `/settings` (Security + Danger zone). Tested here because they're auth flows.
 
 - [ ] **3.10.1 Change password.** `/settings` → **"Security"** card → **"Change password"**. Fields: **Current password / New password / Confirm new password**. Wrong current password → **"Your current password is incorrect."** A valid change → toast **"Your password has been updated."**
 - [ ] **3.10.2 Change email (deferred-confirm).** **"Change email"** sub-form. Helper: **"We'll send a confirmation link to the new address — your email changes only once you click it."** Fields: **New email** + **Confirm with your password**. Submit (**"Send confirmation link"**). **Expect:** toast like **"Check your new email to confirm the change."** The email does NOT change until you click the link sent to the **new** address. **Don't expect:** the displayed email to change before confirmation.
 - [ ] **3.10.3 Close account (two-step).** **"Danger zone"** → **"Close account"**. **Expect** the notice to describe what actually happens (#398 / ADR 0013 Amendment 1) — *"Closing signs you out for good and clears your name and email from your account record."*, the paid-plan cancellation, and *"Your vendors, documents, the files uploaded for them, and our record of account activity are kept…"*. **Don't expect** the words *permanently*, *delete*, or *can't be undone* anywhere in this card: nothing is erased and support can restore the account by clearing `DeletedAt`. Click **"Close my account"** → an inline confirm appears asking you to **"Enter your password to confirm"**. **Expect:** it requires your **password** (not a typed "DELETE" phrase). Wrong password → **"Your password is incorrect."** A correct submit → toast **"Your account is closed."** then redirect to `/login`. **Do this on a throwaway account, not QA Admin A.**
-- [ ] **3.10.4 Export my data.** **"Export your data"** → **"Export my data"**. **Expect:** the description to say it covers *"the details we hold for each document"* and that *"The uploaded files themselves aren't included."* (#398 — the export serializes document rows, no blobs), then toast **"Download started"** and a `complidrop-account-export.json` download. **Don't expect:** raw HTTP errors on failure — `api.getBlob` surfaces the friendly server message.
+- [ ] **3.10.4 Export my data.** **"Export your data"** → **"Export my data"**. **Expect:** the description to enumerate what the dump contains — *"one row per document — file name, type, expiration date, status and the date you added it"* — and to state the omissions: *"The uploaded files themselves aren't included."* plus *"Neither are the fields we read from your documents, their compliance-check results, or your activity log."* (#398 — `ExportAccount` projects exactly five document columns). Then toast **"Download started"** and a `complidrop-account-export.json` download. **Open the file** and confirm no extracted field value appears in it. **Don't expect:** raw HTTP errors on failure — `api.getBlob` surfaces the friendly server message.
 
 ---
 
@@ -375,7 +375,8 @@ Pick a fully-read document.
 - [ ] **4.9.2** Click it. **Expect:** a **styled confirm dialog** (NOT a native browser `confirm()`): title **"Remove {filename}?"**, body **"This removes the document from your records. You won't be able to undo it."** (#398 — scoped to the customer: the row is soft-deleted and the blob is retained on purpose), a rose **"Remove"** button + **"Cancel"**.
 - [ ] **4.9.3** Click Cancel. **Expect:** no change.
 - [ ] **4.9.4** Click the trash again, then **"Remove"**. **Expect:** toast **"Document removed"**, row disappears.
-- [ ] **4.9.5** **Don't expect:** a permanent deletion (soft-delete via `DeletedAt`). Re-uploading the same filename yields a new row, not a "duplicate" warning. **Note:** the detail page has NO delete button — deletion is list-only.
+- [ ] **4.9.5** **Don't expect:** a permanent deletion (soft-delete via `DeletedAt`, and the blob is retained on purpose). Re-uploading the same filename yields a new row, not a "duplicate" warning.
+- [ ] **4.9.6 The detail page carries the same dialog (since #326 / FP-060).** Open any document's detail page. **Expect:** a trash icon in the header (`aria-label="Remove {filename}"`) opening the SAME confirm as the list row — title **"Remove {filename}?"**, body **"This removes the document from your records. You won't be able to undo it."** — because both render the single-sourced `DOCUMENT_REMOVAL_NOTICE`. Confirm → toast **"Document removed"** and a redirect to `/documents`. Spot-check the body text on BOTH surfaces: they are one constant, so a #398 reword lands on both or neither.
 
 ### 4.10 Pagination, filters & search (#187)
 
@@ -472,9 +473,12 @@ There's no longer a standalone "Generate upload link" button — link creation i
 - [ ] **5.5.2** Back on `/vendors`, the **Docs** column should reflect each vendor's document count. After §6 portal uploads this should increase.
 - [ ] **5.5.3** The **Active links** column shows a green **"{n} active"** badge (or "None").
 
-### 5.6 Vendor delete (known gap)
+### 5.6 Remove vendor (shipped since FP-073 — was §16.8's "known gap")
 
-- [ ] **5.6.1** **Note:** there is still **no delete-vendor button** in the UI. The API endpoint (`DELETE /api/vendors/{id}`) and a `useDeleteVendor` hook exist but aren't wired to any control. Confirm it's absent; log/keep as a known gap (§16), not a bug.
+- [ ] **5.6.1 The control exists.** Open a vendor's detail page (`/vendors/{id}`). **Expect:** a rose **"Remove vendor"** button in the header. (The plan told testers to confirm it was ABSENT until #398 caught the note; it has shipped since FP-073.)
+- [ ] **5.6.2 The confirm says what removal actually does.** Click it. **Expect** a styled confirm dialog: title **"Remove {vendor name}?"**, body **"This removes the vendor and deactivates any upload links you shared with them. Documents they already sent stay in your account. You won't be able to undo this."** (#398 — `DeleteVendor` soft-deletes and deactivates the portal links; the vendor's documents are untouched, which is why the middle sentence is there). **Don't expect** the words *permanently* or *can't be undone*.
+- [ ] **5.6.3** Cancel → no change. Re-open and confirm with **"Remove vendor"** → toast **"Vendor removed"** and a redirect to `/vendors`, with the vendor gone from the list.
+- [ ] **5.6.4** Check any portal link you had shared with that vendor: it should no longer accept an upload (§6 covers the dead-link page).
 
 ---
 
@@ -792,7 +796,7 @@ Use a real phone, not just DevTools emulation.
 
 ### 11.3 Security & Danger zone
 
-- [ ] **11.3.1** Confirm the **"Security"** card (change password / change email) and **"Danger zone"** (export data / delete account) render at the bottom. These flows are tested in §3.10.
+- [ ] **11.3.1** Confirm three cards render at the bottom: **"Security"** (change password / change email), **"Export your data"** (its own neutral card since FP-113 — exporting is a safe action and does not belong in the red zone), and **"Danger zone"**, whose only control is **"Close my account"**. These flows are tested in §3.10. **Don't expect** a **Delete account** control anywhere — the operation was renamed in #398 because it deletes nothing.
 
 ### 11.4 Plan badge in sidebar
 
@@ -1039,9 +1043,9 @@ The ✕ on a portal link revokes immediately, no confirm, no toast. Intentional.
 
 Flipping a reminder toggle saves silently — no toast/spinner (only a failure toasts). Intentional per spec; can feel ambiguous.
 
-### 16.8 No delete-vendor button
+### 16.8 ~~No delete-vendor button~~ — CLOSED (FP-073)
 
-The API can delete a vendor but no UI control is wired. A vendor can only be edited or left unused. Decide pre-launch whether to surface delete.
+No longer a gap: the vendor detail page ships a **"Remove vendor"** button behind a confirm dialog. Tested in §5.6. (Recorded here rather than deleted so the pre-launch decision this row was asking for reads as *made*, not lost.)
 
 ### 16.9 Dashboard has no stale-data banner
 
