@@ -57,7 +57,15 @@ Both are defined in this repo's `.claude/agents/`.
     load-bearing twice over: `marketing-content.test.tsx` pins each vendor with a SINGULAR
     `getByText` (a second "Document AI" / "Microsoft Azure" / "Railway" / "Vercel" /
     "Resend" reddens CI), and the section's job is to point at the one list rather than fork
-    it. Same for the `SUPPORT_EMAIL` mailto, pinned by a singular `getByRole("link")`.
+    it. Same for the `SUPPORT_EMAIL` mailto, pinned by a singular `getByRole("link")` — which is
+    why #398's retention rewrite routes its deletion request to "the contact details at the end
+    of this page" rather than adding a second mailto.
+  - Since #398 that section also answers the RETENTION question for its reader, and the two
+    sections are read TOGETHER by design: it used to end at "that business … decides how long it
+    keeps its copy" — true, but it stopped the reader's question at the customer, while OUR copy
+    outlives the customer's account entirely (closing purges nothing). It now names our copy and
+    points at § "How long we keep it". Rewording either half alone re-opens the false impression
+    for the one reader with no account and no other way to find out.
   - Same-tab link, matching every other legal link in `frontend/` — there is no
     `target="_blank"` anywhere in the tree. Adding one here is a new pattern, not a fix. Same tab,
     but since ADR 0054 Amendment 2 NOT a client-side transition: it is a plain `<a>` so the policy
@@ -133,11 +141,29 @@ Both are defined in this repo's `.claude/agents/`.
       on file at the call site; do not add the directive, and do not switch the rule off.
     - `Providers` keeps a module-scope `contextHeldCredentialInUrl`, so once a tab has held the
       credential nothing initialises in it again until a hard load. **The cost is recorded, not
-      overlooked:** that tab is unmeasured for the rest of its session and the vendor's `/privacy`
-      visit is not measured either. Flagging either as a regression is reviewer noise.
-    The residue that REMAINS is also recorded: a tab that arrives at the portal from an ordinary
-    route keeps its already-live SDK (nothing in `frontend/` links to `/portal/{token}`, so it
-    needs a pasted URL). ADR 0037 Amendment 3 § What stays open.
+      overlooked:** that tab is unmeasured for the rest of its session, so a customer who opens a
+      portal link in an in-app tab loses PostHog there. Flagging that as a regression is reviewer
+      noise.
+    - CORRECTED (#398) — this block, ADR 0037 Amendment 3's cost bullet, both CLAUDE.md files,
+      `providers.tsx`'s flag doc, `analytics.test.ts` and `providers.test.tsx` all said the
+      vendor's `/privacy` visit is no longer measured. **That is FALSE as shipped**, and it was
+      the conservative half of a two-mechanism fix being read as if only the sticky flag existed.
+      Layer (1) is a plain `<a>`, i.e. a FULL DOCUMENT LOAD, so the policy renders in a NEW JS
+      context where the module-scope flag starts `false` and `initAnalytics()` runs. The visit IS
+      measured, and credential-free: `rel="noreferrer"` means the tokenized URL is not in
+      `document.referrer`, and `before_send` would redact it anyway. The unmeasured-`/privacy`
+      claim is true only of the counterfactual SOFT-NAV round trip the sticky flag exists to
+      survive — which is exactly what `providers.test.tsx`'s "the vendor's /privacy visit
+      included" case drives (jsdom never navigates), so that test is still a correct pin of
+      layer (2) and must not be "fixed" to match the shipped flow.
+    The residue that REMAINS is also recorded, and RESTATED accurately (#398): a tab that arrives
+    at the portal from an ordinary route keeps its already-live SDK. It used to say "today this
+    needs a pasted URL" — but a pasted URL is an ADDRESS-BAR navigation, i.e. a full document load
+    that destroys the old context along with the live SDK, so it does not reach the residue at
+    all. Reaching it needs an in-app CLIENT-SIDE navigation to `/portal/{token}`, and nothing in
+    `frontend/` links there, so the residue is **unreachable today**. The named future fix is
+    unchanged: an explicit `posthog.opt_out_capturing()` on entry, not a wider gate. ADR 0037
+    Amendment 3 § What stays open.
   - The portal notice + `/privacy` saying the page "sets no cookies and doesn't measure how it's
     used" are claims of ABSENCE that moved with that gate (ADR 0054 Amendment 1) and are pinned
     — `page.test.tsx` reads `document.cookie`, `providers.test.tsx` asserts no PostHog request
@@ -188,6 +214,33 @@ Both are defined in this repo's `.claude/agents/`.
   false-uncovered regression the review caught.
 - A normal document delete RETAINS its blob (ADR 0013); the sample-demo clear DELETES
   its blob (ADR 0028). Both directions are deliberate.
+- Deletion COPY is ADR 0013 Amendment 1 (#398 / counsel gate CLM-7); the facts that follow
+  are pointers into it, not a second copy of the rationale.
+  - NOTHING hard-deletes, so the copy is scoped to what the CUSTOMER sees and no surface may
+    say "permanently", "can't be undone", or "we delete your data". The Settings action is
+    **Close account** (not Delete), and the removal dialogs say "You won't be able to undo it"
+    — scoped, because the user has no restore affordance while the SYSTEM keeps the row and,
+    for a document, the blob. Re-introducing an erasure or irreversibility word IS a finding;
+    "the button used to say Delete, restore it" is the recorded rejection (ADR 0013 Amendment 1
+    § Alternatives — a Delete button beside "your records are kept" is the deception's shape,
+    not its cure).
+  - The four rules in `frontend/src/test/marketing-claims.test.ts` are the enforcement, and the
+    census (not a per-page assertion) is deliberate: the same sentence sat on FOUR surfaces and
+    the next one is a dialog on a page nobody has written. The fourth rule bans a stated
+    disposal SCHEDULE — publishing a period no job enforces is #398's own defect re-shipped, so
+    "the policy should say how long" is not a finding, it is CLM-7's question.
+  - `frontend/src/lib/removal-copy.ts` single-sources the document + vendor notices for ADR
+    0047 §1's reason (the document sentence shipped as two hand-copied literals). Inlining
+    either back is the drift, not a simplification.
+  - What is DELIBERATELY not done: no purge job, no retention period, no change to what is
+    retained, and no per-dialog retention paragraph (that disclosure belongs to `/privacy`
+    § "How long we keep it" and the closure card). Proposing option (b) — build the purge —
+    is not a review finding: it reverses ADR 0013's § Decision and needs its own ADR plus the
+    sign-off CLM-7 is asking for.
+  - `AuthEndpoints.ExportAccount` serializes document ROWS (`OriginalFileName`, `DocumentType`,
+    `ExpirationDate`, `ComplianceStatus`, `CreatedAt`) and NO files; the Settings card now says
+    so. It is still out of ADR 0047's disclaimer scope (a portability dump) — the two facts are
+    about different things, so do not merge them.
 - Vendor contact-email validation is ADR 0038; the review-time facts that follow are
   pointers into it, not a second copy of the rationale.
   - Two email validators coexist ON PURPOSE: `Services/ContactEmail.IsWellFormed` (vendor

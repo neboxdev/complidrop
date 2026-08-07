@@ -46,7 +46,13 @@ class, and the generic reviewer roster structurally missed them).
 3. **Deletion and retention copy vs code.** "Permanently delete", "can't be undone",
    retention statements — against the soft-delete interceptor, blob retention (ADR
    0013), and reminder logs. Copy that promises hard deletion over soft-delete code is
-   a bug in the copy or the code — flag it and say which fix the ADRs favor.
+   a bug in the copy or the code — flag it and say which fix the ADRs favor. **The
+   answer this project already gave is ADR 0013 Amendment 1 (#398 / CLM-7):** the copy
+   moved, the behaviour did not, no retention period is stated anywhere, and the four
+   census rules in `frontend/src/test/marketing-claims.test.ts` are the enforcement.
+   So an erasure/irreversibility word coming BACK is a finding; "build the purge" and
+   "publish a retention schedule" are the counsel gate's open question, not review
+   findings.
 4. **Privacy and disclosure copy vs data flows.** Subprocessor claims vs providers
    actually wired (`Extraction:Provider` paths — Vertex vs AI Studio vs Anthropic have
    different data-use realities); "not used to train AI models" claims vs the
