@@ -210,6 +210,19 @@ describe("Shared content CTA (#403)", () => {
     expect(
       main.getByText(/see who is still missing while there is time to chase them/i),
     ).toBeInTheDocument();
+
+    // The fourth guarantee on this page, in the "How CompliDrop works for
+    // venues" section. Both halves are falsifiable: a reminder reaches the
+    // vendor only when the reminder has NotifyVendor on AND the vendor has a
+    // non-blank ContactEmail (ReminderBackgroundService, the recipients block)
+    // AND the address isn't suppressed (ADR 0031) — and whether the list is
+    // clean on the day depends on the vendor uploading, which CompliDrop does
+    // not control. Terms: "a helpful nudge, not a guaranteed notice".
+    expect(main.queryByText(/looking at a clean list/i)).toBeNull();
+    expect(main.queryByText(/reminders go out automatically/i)).toBeNull();
+    expect(
+      main.getByText(/marks who is covered and who still owes you a document/i),
+    ).toBeInTheDocument();
   });
 
   it("keeps the venue page's <meta name=description> off the same guarantee", () => {
