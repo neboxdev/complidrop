@@ -449,11 +449,23 @@ survives one of them being rewritten by someone who has not read this.
   session.** Nothing in `frontend/` links to `/portal/{token}` today (verified by search), so this is
   reachable by pasting a link into an in-app tab, not by any in-product affordance — but a future
   "preview this vendor's link" button would make it routine.
-- **The vendor's `/privacy` visit is no longer measured.** Amendment 2's "a vendor who follows the
-  notice's policy link is measured from that click on" is now false in both mechanisms: with (1) the
-  visit happens in a context that never runs `initAnalytics` on the portal, and with (2) the flag
-  refuses it. The claim is corrected wherever it was copied — `.claude/reviewers.md` carried it in
-  the do-NOT-flag list, which is the one place a stale fact does active harm.
+- ~~**The vendor's `/privacy` visit is no longer measured.**~~ **RETRACTED 2026-08-07 (#398).** This
+  bullet claimed the visit is refused by both mechanisms. It is refused by **(2) only**, and (2) is
+  the belt to (1)'s brace — so it never fires on the flow that actually ships. With (1) in place the
+  policy link is a full document load, so `/privacy` renders in a **new JS context** where the
+  module-scope flag starts `false` and `initAnalytics()` runs normally: **the vendor's `/privacy`
+  visit IS measured.** It is measured *credential-free*, which is the property that matters and the
+  one Amendment 3 actually bought — `rel="noreferrer"` keeps the tokenized URL out of
+  `document.referrer` / `Referer`, and `before_send` redacts it in any case. The unmeasured-`/privacy`
+  claim is true only of the counterfactual **soft-navigation** round trip that (2) exists to survive,
+  which is what `providers.test.tsx`'s "the vendor's /privacy visit included" case drives (jsdom
+  never navigates). That test remains a correct pin **of layer (2)** and must not be rewritten to
+  match the shipped flow — deleting the flag must still redden it. The false claim was corrected
+  everywhere it had been copied: this bullet, `.claude/reviewers.md`, both `CLAUDE.md` files,
+  `providers.tsx`'s flag doc, `analytics.test.ts` and `providers.test.tsx`. It erred conservative
+  (it under-claims what we measure, never over-claims what we protect), so nothing shipped on top of
+  it was wrong — but a do-NOT-flag entry stating a false mechanism is where a stale fact does active
+  harm, which is why it is retracted rather than quietly edited.
 
 Accepted for the same reason Amendment 2's cost was: the alternative is a bearer credential in a
 third party's store. Every route is measured again on the next hard document load.
@@ -484,9 +496,14 @@ and found non-discriminating.
 ### What stays open (Amendment 3)
 
 - **A tab that reaches the portal from an ordinary route keeps its already-live SDK.** The flag stops
-  a NEW init; it cannot un-initialise one. Nothing in the app links to `/portal/{token}`, so today
-  this needs a pasted URL — but it is the residue, and the fix if it ever becomes routine is an
-  explicit `posthog.opt_out_capturing()` on entry, not a wider gate.
+  a NEW init; it cannot un-initialise one. **Restated 2026-08-07 (#398):** this used to add "today
+  this needs a pasted URL", which is wrong in the residue's favour — pasting a URL is an address-bar
+  navigation, i.e. a full document load that destroys the context and the live SDK with it, so that
+  route does not reach the residue at all. Reaching it requires an in-app **client-side** navigation
+  to `/portal/{token}`, and nothing in `frontend/` renders such a link, so the residue is
+  **unreachable today**. It becomes reachable the moment something does — a "preview this vendor's
+  link" button is the obvious candidate — and the fix then is unchanged: an explicit
+  `posthog.opt_out_capturing()` on entry, not a wider gate.
 - Amendment 2's three open items are unchanged.
 
 ## References
