@@ -217,9 +217,7 @@ describe("Landing page claims vs. the Terms (#403)", () => {
     // Organization/SoftwareApplication schema description — the machine-quoted
     // copy of the same sentence, so it has to be softened in lockstep.
     expect(String(software!.description)).not.toMatch(/before anything expires/i);
-    expect(String(software!.description)).toMatch(
-      /sends reminders ahead of the expiration date/i,
-    );
+    expect(String(software!.description)).toMatch(/sends expiration reminders/i);
   });
 });
 

@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { absoluteUrl, SITE_URL, SITE_NAME, PRO_PRICE_USD } from "./site";
+import {
+  absoluteUrl,
+  SITE_URL,
+  SITE_NAME,
+  PRO_PRICE_USD,
+  SITE_DESCRIPTION,
+  SITE_DESCRIPTION_MAX_CHARS,
+} from "./site";
 
 describe("site facts", () => {
   afterEach(() => {
@@ -21,6 +28,18 @@ describe("site facts", () => {
 
   it("exposes the canonical brand name", () => {
     expect(SITE_NAME).toBe("CompliDrop");
+  });
+
+  it("keeps SITE_DESCRIPTION inside the bound its own doc comment states (#403)", () => {
+    // The comment promised "≤ ~160 chars so it works verbatim as a
+    // <meta name=description>" while the value was 218 — and this string is
+    // ALSO the manifest description and both JSON-LD entities' description, so
+    // nothing else would ever have noticed. A file must not ship a constraint
+    // it violates: the bound is now enforced, not merely documented.
+    expect(SITE_DESCRIPTION.length).toBeLessThanOrEqual(SITE_DESCRIPTION_MAX_CHARS);
+    // Anti-vacuous: an empty or stub description would satisfy the bound.
+    expect(SITE_DESCRIPTION.length).toBeGreaterThan(80);
+    expect(SITE_DESCRIPTION).toMatch(/COI tracking software/i);
   });
 
   it("falls back to the production origin when NEXT_PUBLIC_SITE_URL is empty", async () => {

@@ -51,11 +51,16 @@ export const LEGAL_ADDRESS = "407 Lincoln Road, Suite 708, Miami Beach, FL 33139
 
 /**
  * One-line value proposition. Buyer language + the terms people actually search
- * ("certificate of insurance", "COI tracking"). Kept ≤ ~160 chars so it works
- * verbatim as a `<meta name="description">`.
+ * ("certificate of insurance", "COI tracking"). Kept ≤ {@link SITE_DESCRIPTION_MAX_CHARS}
+ * so it works verbatim as a `<meta name="description">` — search engines
+ * truncate past roughly that, and this string is also both JSON-LD entities'
+ * `description` and the manifest's. The bound is enforced by `site.test.ts`
+ * rather than left to the comment: it shipped violated by 58 characters (#403).
  */
+export const SITE_DESCRIPTION_MAX_CHARS = 160;
+
 export const SITE_DESCRIPTION =
-  "COI tracking software for small businesses. Upload a certificate of insurance, license, or permit — CompliDrop reads the dates and coverage, flags what's non-compliant, and sends reminders ahead of the expiration date.";
+  "COI tracking software for small businesses. CompliDrop reads certificates, licenses, and permits, flags what's non-compliant, and sends expiration reminders.";
 
 /** schema.org `applicationCategory` for the SoftwareApplication entity. */
 export const SITE_CATEGORY = "BusinessApplication";
