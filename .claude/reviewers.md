@@ -1717,6 +1717,7 @@ api/**/AppDbContext.cs
 api/**/AuditSaveChangesInterceptor.cs
 api/**/ComplianceCheckDeleteConcurrencyInterceptor.cs
 api/**/*Portal*
+frontend/src/app/portal/**
 frontend/src/app/(auth)/**
 frontend/src/lib/api.ts
 .github/workflows/**
