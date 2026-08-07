@@ -2,7 +2,7 @@
 
 import posthog from "posthog-js";
 import type { CaptureResult, Properties } from "posthog-js";
-import { sanitizeUrl } from "./sentry/scrub";
+import { REDACTED, sanitizeUrl } from "./sentry/scrub";
 
 let initialized = false;
 
@@ -37,11 +37,50 @@ let initialized = false;
  */
 const URL_BEARING_KEY = /url|path|referrer|href/i;
 
-/** Bounds a pathological/cyclic property bag, mirroring `sentry/scrub.ts`'s own cap. */
-const MAX_DEPTH = 8;
+/**
+ * Bounds a pathological/cyclic property bag. Same limit as `sentry/scrub.ts`'s
+ * cap, and it fails in the same DIRECTION: past the cap a value the walker was
+ * on its way to redact is replaced by `REDACTED` rather than passed through.
+ * Returning it intact — what this did before #404 round 2 — made the cap an
+ * escape hatch: a URL-bearing key with something nested deeply enough under it
+ * left unredacted, which is the one outcome the cap must not produce.
+ *
+ * It is NOT the neighbour's blanket `return REDACTED`: outside a URL-bearing
+ * key this walker redacts nothing anyway, so blanking those values would delete
+ * ordinary deep analytics (session-replay `$snapshot_data`, nested autocapture
+ * payloads) to no privacy end. Past the cap the guarantee is therefore exactly
+ * the guarantee below it — everything under a URL-bearing key is unreadable —
+ * and nothing more.
+ */
+const MAX_DEPTH = 12;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * KEYS are data too, and a value-only walker copies them verbatim.
+ *
+ * posthog-js's heatmaps extension buffers clicks in a map KEYED BY
+ * `window.location.href` and flushes it through `capture()` as `$heatmap_data`
+ * (`heatmaps.js`: `_capture` builds `this._buffer[url]`, `_flush` sends
+ * `capture('$$heatmap', { $heatmap_data: … })`). `$heatmap_data` matches nothing
+ * in {@link URL_BEARING_KEY} and neither does the URL used as the inner key, so
+ * before #404 round 2 the whole tokenized URL left as an object key, intact.
+ * The extension is also pinned OFF in `initAnalytics` — this is the general
+ * rule, that is the belt that survives someone rewriting this function.
+ *
+ * Only URL-SHAPED keys are rewritten (`://`, or a leading `/`). Running every
+ * key through `sanitizeUrl` would let its opaque-token net rename an ordinary
+ * long property key and silently change the analytics schema — a redactor must
+ * not invent property names.
+ *
+ * Two keys that differ only in the redacted segment collapse onto one, and the
+ * later bucket wins. That is inherent to redaction, not a bug to route around:
+ * the only way to keep them apart is to keep the distinction being erased.
+ */
+function sanitizeUrlKey(key: string): string {
+  return key.includes("://") || key.startsWith("/") ? sanitizeUrl(key) : key;
 }
 
 /**
@@ -52,10 +91,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * exactly this reason).
  *
  * Recursive because autocapture nests `attr__href` inside `$elements`; once a
- * key is URL-bearing everything under it is treated as such.
+ * key is URL-bearing everything under it is treated as such. Object keys go
+ * through {@link sanitizeUrlKey} for the case where the URL IS the key.
  */
 function sanitizeUrlsDeep(value: unknown, inUrlKey: boolean, depth: number): unknown {
-  if (depth > MAX_DEPTH) return value;
+  if (depth > MAX_DEPTH) return inUrlKey ? REDACTED : value;
   if (typeof value === "string") return inUrlKey ? sanitizeUrl(value) : value;
   if (Array.isArray(value)) {
     return value.map((item) => sanitizeUrlsDeep(item, inUrlKey, depth + 1));
@@ -63,7 +103,13 @@ function sanitizeUrlsDeep(value: unknown, inUrlKey: boolean, depth: number): unk
   if (isRecord(value)) {
     const out: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      out[key] = sanitizeUrlsDeep(val, inUrlKey || URL_BEARING_KEY.test(key), depth + 1);
+      // `inUrlKey` is decided from the ORIGINAL key: redaction rewrites the name
+      // we are matching on, and a subtree's treatment must not depend on that.
+      out[sanitizeUrlKey(key)] = sanitizeUrlsDeep(
+        val,
+        inUrlKey || URL_BEARING_KEY.test(key),
+        depth + 1,
+      );
     }
     return out;
   }
@@ -74,8 +120,12 @@ function sanitizeUrlsDeep(value: unknown, inUrlKey: boolean, depth: number): unk
  * `before_send` runs on the fully-assembled event immediately before transmit,
  * and it sees `$set` / `$set_once` as well as `properties` — which is where the
  * `$initial_current_url` family lives. (`sanitize_properties` is the older hook
- * for this; the installed SDK marks it `@deprecated` and logs an error on every
- * event that uses it, and it is handed `properties` alone.)
+ * for this; the installed SDK marks it `@deprecated` and logs an error on EVERY
+ * event that uses it — twice, in fact, since `_calculate_set_once_properties`
+ * calls it a second time with the `$set_once` bag.)
+ *
+ * It only wraps `capture()`, so it reaches no channel the SDK opens on its own
+ * — see `initAnalytics` for the two that are closed at init instead.
  */
 function redactUrlProperties(result: CaptureResult | null): CaptureResult | null {
   if (!result) return result;
@@ -87,6 +137,13 @@ function redactUrlProperties(result: CaptureResult | null): CaptureResult | null
   return result;
 }
 
+/**
+ * Never called on `/portal/*` — `Providers` gates it on the pathname (ADR 0037
+ * Amendment 2). That route's URL IS a bearer credential, and per-channel
+ * redaction against a dependency that keeps adding channels is a promise this
+ * file cannot keep; everything below is the layer for every OTHER route, which
+ * can still carry a portal URL in `document.referrer`.
+ */
 export function initAnalytics() {
   if (initialized || typeof window === "undefined") return;
   const key = process.env.NEXT_PUBLIC_POSTHOG_KEY;
@@ -97,6 +154,25 @@ export function initAnalytics() {
     capture_pageleave: true,
     persistence: "localStorage+cookie",
     before_send: redactUrlProperties,
+    // `POST /flags/?v=2` builds `person_properties` straight from persistence
+    // (`get_initial_props()` → the raw `$initial_current_url` / `$initial_pathname`
+    // / `$initial_referrer` that the first `capture()` stored) and never passes
+    // through `before_send`, so redaction cannot reach it. It is issued at INIT
+    // by the remote-config loader and again every 5 minutes by its refresh —
+    // no `identify()` in either chain, which is what round 1 got wrong. Closing
+    // it costs PostHog remote configuration (web vitals, surveys, and anything
+    // else configured in PostHog's settings rather than in code): a deliberate,
+    // recorded trade (ADR 0037 Amendment 2). Nothing in `frontend/` reads a
+    // feature flag.
+    advanced_disable_flags: true,
+    // The heatmaps extension ships in the default bundle and, with neither
+    // `capture_heatmaps` nor `enable_heatmaps` set, enables itself from the
+    // PostHog project's own dashboard toggle (`heatmaps.js`: `isEnabled` falls
+    // through to `_enabledServerSide`). It buffers by `location.href` and sends
+    // the map as `$heatmap_data` — a URL as an object KEY. `sanitizeUrlKey`
+    // covers that shape generally; this makes the surface unreachable, so a
+    // toggle flipped in a dashboard cannot re-open it.
+    capture_heatmaps: false,
   });
   initialized = true;
 }
