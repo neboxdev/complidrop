@@ -12,11 +12,11 @@ namespace CompliDrop.Api.Tests.TestHelpers;
 /// <para/>
 /// It exists for #460 review round 2, C2. <c>ExtractionWorker.PersistSuccess</c> reads its grading basis
 /// INSIDE the best-effort <c>try</c> that degrades the verdict to <c>Pending</c>, deliberately: a throw out
-/// of that method is the most expensive failure in this codebase — since #375 item 1 the catch clears the
-/// tracker and records a counted failure against a guarded fresh read, so the throw costs up to
-/// <c>MaxAttempts</c> re-paid Document AI + LLM runs spaced by the retry backoff before a terminal
-/// <c>Failed</c> (<c>ExtractionWorker.Clamp</c>'s remarks; pre-#375 it was worse — the bookkeeping save
-/// re-threw on the same dirty context and the document was zombie-reclaimed every five minutes). Nothing
+/// of that method is the most expensive failure in this codebase — since #375 item 1 the catch abandons the
+/// dirty context unsaved and records a counted failure in a fresh scope against a guarded reload, so the
+/// throw costs up to <c>MaxAttempts</c> re-paid Document AI + LLM runs spaced by the retry backoff before a
+/// terminal <c>Failed</c> (<c>ExtractionWorker.Clamp</c>'s remarks; pre-#375 it was worse — the bookkeeping
+/// save re-threw on the same dirty context and the document was zombie-reclaimed every five minutes). Nothing
 /// pinned that placement: the mid-run-delete test's soft delete yields a NON-null basis and never makes the
 /// read fail, so hoisting the read above the <c>try</c> left the whole suite green. Making the read itself
 /// fail is the only way to say "a transient failure HERE must land on Pending, not back in the queue" — and

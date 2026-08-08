@@ -1003,14 +1003,17 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     public async Task A_terminal_failure_forces_its_distrust_over_a_confirmation_that_landed_mid_attempt(
         bool nonRetryable)
     {
-        // Only MarkFailed (the `true` arm) still shares ProcessDocumentAsync's stale snapshot — and so
-        // shares the no-op SetTrust's force exists to close. Since #375 item 1 the generic catch records
-        // the failure against a FRESH reload, on which a mid-attempt confirmation is already visible, so
-        // on the `false` arm EF emits the SET with or without the force (kept there for uniformity —
-        // belt and braces) and what that arm pins is the OUTCOME: a terminal failure ends Distrusted
-        // whatever landed mid-attempt. Either way, a Failed row reading Trusted is precisely what
-        // MarkFailed's comment says can only come from a human confirmation AFTER the failure — these
-        // are the paths that could make it a lie.
+        // Since #375 round 2 NEITHER arm still holds ProcessDocumentAsync's stale snapshot — every
+        // failure writer books through FailOrRequeueAsync's guarded fresh reload, on which a
+        // mid-attempt confirmation is already visible (PUT /verify moves no status on an unsettled
+        // row, so the reload still finds it Processing). EF therefore emits the SET with or without
+        // SetTrust's force on BOTH arms — the force is belt-and-braces on the failure writers, kept
+        // for uniformity; only PersistSuccess still holds the stale snapshot and needs it (see
+        // PersistSuccess_forces_its_trust_decision_over_a_write_that_landed_mid_extraction). What this
+        // Theory pins is the OUTCOME: a terminal failure ends Distrusted whatever landed mid-attempt.
+        // Either way, a Failed row reading Trusted is precisely what MarkFailed's comment says can
+        // only come from a human confirmation AFTER the failure — these are the paths that could make
+        // it a lie.
         var (_, docId) = await SeedDocAsync(
             subscriptionSpendUsd: 0m,
             failedAttempts: nonRetryable ? 0 : ExtractionWorker.MaxAttempts - 1,
@@ -1964,6 +1967,53 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         doc.NextAttemptAt.Should().BeNull("no backoff may be stamped on a settled row");
         (await worker.ClaimNextAsync(CancellationToken.None)).Should().BeNull(
             "a Completed document must stay unclaimable — the resurrection would have re-paid OCR + LLM");
+    }
+
+    [Fact]
+    public async Task A_non_retryable_failure_does_not_overwrite_a_read_that_settled_mid_attempt()
+    {
+        // #375 review round 2 (confirmed). The non-retryable arm used to stamp Failed + forced
+        // Distrusted through the tracked snapshot ProcessDocumentAsync loaded before OCR + the LLM —
+        // unconditionally. If this attempt's claim goes stale past ZombieClaimTimeout without its own
+        // CTS firing (a stalled container, a provider client that does not observe ct), a second
+        // container zombie-reclaims and completes the read; when this container's provider call then
+        // comes back non-retryable (token cap, content block), the terminal stamp landed on top of the
+        // fresh Completed/Trusted row — dropping the vendor out of in-force coverage (ADR 0042 /
+        // ComputeCoverage) with no self-heal. The arm therefore books through the same guarded fresh
+        // reload as every other failure writer: a settled row means this attempt's outcome was
+        // superseded, and nothing is written.
+        var (_, docId) = await SeedDocAsync(
+            subscriptionSpendUsd: 0m, extractionTrust: ExtractionTrust.Distrusted);
+        Extraction.ThrowNonRetryable = true;
+        Extraction.DuringExtract = async () =>
+        {
+            // The second container's completed read, committed on another connection while this
+            // attempt is still out at the LLM. It restores trust (a clean re-read earns Trusted back —
+            // PersistSuccess's one boolean, two columns), which is what makes BOTH terminal columns
+            // discriminate below.
+            await using var other = CreateSystemDb();
+            var mid = await other.Documents.SingleAsync(d => d.Id == docId);
+            mid.ExtractionStatus = ExtractionStatus.Completed;
+            mid.ExtractionTrust = ExtractionTrust.Trusted;
+            mid.ExtractionCompletedAt = DateTime.UtcNow;
+            await other.SaveChangesAsync();
+        };
+
+        var worker = BuildWorker();
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "the read that settled mid-attempt stands — an unconditional terminal stamp here re-opens "
+            + "exactly the window the generic catch and the timeout path already guard (#375)");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+            "stamping Distrusted over the settled read would drop the vendor out of in-force coverage "
+            + "(ADR 0042 / ComputeCoverage) with no self-heal");
+        doc.ProcessingError.Should().BeNull(
+            "an attempt whose outcome was superseded records nothing at all");
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+            "a Completed document must stay unclaimable");
     }
 
     [Fact]
