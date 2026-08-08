@@ -1540,6 +1540,32 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
                 "Normalize is length-safe by construction only while every vocabulary literal fits the column");
     }
 
+    // ----- #375 item 4: the DocumentFields clear materializes its query asynchronously ---------
+
+    [Fact]
+    public void The_field_clear_materializes_its_query_before_RemoveRange()
+    {
+        // #375 item 4. `RemoveRange(db.DocumentFields.Where(...))` enumerates the IQueryable on the
+        // blocking sync path with no cancellation token — the exact pattern the codebase already fixed
+        // and documented in ComplianceCheckService.ApplyEvaluationCoreAsync's check-row clear. No
+        // behavioural test can see the difference (the rows come out deleted either way), so the shape
+        // is pinned at the source, the way this repo pins its other reviewer-memory rules.
+        var source = File.ReadAllText(
+            SourceScan.ProductionFile("BackgroundServices", "ExtractionWorker.cs"));
+        var body = SourceScan.ExtractMethodBody(source, "private static async Task PersistSuccess(");
+
+        body.Should().Contain("RemoveRange(",
+            "anti-no-op: the field clear itself must still be there — deleting it would leave every "
+            + "re-extraction appending a second full field set (and would trivially satisfy the "
+            + "NotContain below)");
+        body.Should().Contain(".ToListAsync(ct)",
+            "the delete-driving query must be materialized asynchronously, under the attempt's own "
+            + "cancellation token, before RemoveRange stages the deletes");
+        body.Should().NotContain("RemoveRange(db.DocumentFields.Where",
+            "handing RemoveRange an IQueryable executes the delete-driving query on the blocking sync "
+            + "path with no cancellation token (#375 item 4)");
+    }
+
     // ----- #337: the worker grades inside PersistSuccess (combined unit of work) --------------
 
     // Seeds an org + zero-spend subscription + a vendor on a checklist carrying a SINGLE COI rule + a

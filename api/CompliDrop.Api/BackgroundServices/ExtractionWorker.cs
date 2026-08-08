@@ -709,7 +709,15 @@ public class ExtractionWorker(
         foreach (var f in extraction.Fields.GroupBy(x => x.Name).Select(g => g.Last()))
             CanonicalDocumentFields.ApplyToTypedColumn(doc, f.Name, f.Value);
 
-        db.DocumentFields.RemoveRange(db.DocumentFields.Where(df => df.DocumentId == doc.Id));
+        // Materialized (ToListAsync) before RemoveRange — handing RemoveRange an IQueryable would
+        // execute the delete-driving query on the blocking sync path with no cancellation token (#375).
+        // Same pattern, same reason as ComplianceCheckService.ApplyEvaluationCoreAsync's check-row clear;
+        // like there, the staged deletes deliberately ride in this method's own SaveChanges (ADR 0030 —
+        // a set-based ExecuteDeleteAsync would commit the clear outside the combined unit of work).
+        var existingFields = await db.DocumentFields
+            .Where(df => df.DocumentId == doc.Id)
+            .ToListAsync(ct);
+        db.DocumentFields.RemoveRange(existingFields);
         // Held in hand as well as staged: ReconcileCanonicalCopiesWithTheRow may still have to correct one
         // of these rows, once the basis below says which value the commit will actually leave in the
         // matching typed column (#467 review, C1).
