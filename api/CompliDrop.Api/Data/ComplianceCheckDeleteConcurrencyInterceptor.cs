@@ -18,13 +18,17 @@ namespace CompliDrop.Api.Data;
 /// so one committing between that read and this writer's <c>SaveChanges</c> leaves the DELETE matching
 /// nothing and EF answers <see cref="DbUpdateConcurrencyException"/>.
 /// <para/>
-/// On ONE writer that exception is catastrophic rather than merely noisy, which is why this exists.
-/// <c>ExtractionWorker.PersistSuccess</c> throws it out of the persist, and
-/// <c>ProcessDocumentAsync</c>'s catch then runs its bookkeeping <c>SaveChanges</c> on the SAME context —
-/// which still tracks the same staged deletes, so it throws again, <see cref="Document.FailedAttempts"/>
-/// never increments, and the document is zombie-reclaimed every five minutes RE-PAYING Document AI + the
-/// LLM on every doomed run (<c>ExtractionWorker.Clamp</c>'s remarks). That is the money-burning loop ADR
-/// 0030 Option A and Amendment 1 are refuted over, reached here without any concurrency token at all.
+/// On ONE writer that exception is expensive rather than merely noisy, which is why this exists.
+/// <c>ExtractionWorker.PersistSuccess</c> throws it out of the persist, and <c>ProcessDocumentAsync</c>'s
+/// catch — which since #375 item 1 clears the tracker and records the failure against a guarded fresh
+/// read — counts it and requeues: one counted failure and a re-paid Document AI + LLM run per landing,
+/// bounded by <c>ExtractionWorker.MaxAttempts</c> and spaced by the #375 retry backoff, before a terminal
+/// <c>Failed</c> (<c>ExtractionWorker.Clamp</c>'s remarks). Pre-#375 it was worse — the bookkeeping save
+/// re-threw on the same context, <see cref="Document.FailedAttempts"/> never incremented, and the document
+/// was zombie-reclaimed every five minutes — but bounded-or-not, paying real money per interleave for a
+/// row-count technicality is the cost ADR 0030 Option A and Amendment 1 are refuted over, reached here
+/// without any concurrency token at all (ADR 0030's 2026-08-08 note records the shrunk landing; the
+/// decision below is unchanged by it).
 /// <para/>
 /// <b>Why suppression rather than a different delete.</b> A <see cref="ComplianceCheck"/> is a DERIVED
 /// display row: it carries no concurrency token, it is never updated in place, and every writer that
