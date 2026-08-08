@@ -213,9 +213,81 @@ against a positive control in the same test rather than a timer.
 
 The 409 envelope, the copy and every backend decision above are unchanged.
 
+## Amendment 2 (2026-08-08) — #375 gives the claim a not-before gate (`NextAttemptAt`) and the failure bookkeeping a clean, guarded state
+
+[#375](https://github.com/neboxdev/complidrop/issues/375) changed the queue this ADR owns the record of
+— the claim predicate `ClaimSql` — and the failure-bookkeeping path that feeds it. This amendment is the
+record; Decision §2 above still describes the zombie arm correctly, and nothing above is superseded.
+
+**1. `Document.NextAttemptAt` is a not-before gate on the claim, stamped by the RETRY arm only.**
+
+A transiently-failing document used to burn its whole `MaxAttempts` budget in ~25–30 seconds of
+5-second polls — terminally failing over an outage (Gemini 500s, blob 503) that would have cleared in
+minutes. `RecordFailedAttempt`'s retry arm now stamps `NextAttemptAt = now + RetryBackoffFor(n)`
+(exponential: 1m, 2m, 4m, 8m with `MaxAttempts` = 5, exponent capped), and `ClaimSql` grew a third
+predicate: `AND ("NextAttemptAt" IS NULL OR "NextAttemptAt" < now())`. The clause sits INSIDE the
+`SELECT … ORDER BY "CreatedAt" … LIMIT 1` subquery — hoisted to the outer `UPDATE … WHERE` it would
+select-then-reject the oldest backing-off row and stall the ENTIRE queue behind one document's window
+(pinned by `Claim_skips_an_older_backing_off_doc_and_grabs_the_newer_eligible_one`) — and OUTSIDE the
+status disjunction: for a Pending row it is the backoff; for a stale Processing row it is vacuously
+satisfied (any stamp predates a claim stale past the zombie window), so the reclaim arm keeps its exact
+pre-#375 behaviour.
+
+The stamp is on the RETRY arm only. A terminal failure stamps nothing — a `Failed` row is not
+claimable, so a not-before beside it is dead data. Non-retryable failures are unaffected: a
+deterministic failure is `NonRetryableExtractionException`'s fail-fast, not a retry.
+
+**2. `Reextract` CLEARS the stamp** (`SetProperty(d => d.NextAttemptAt, null)`, joining the §-Decision
+re-arm's existing list). The not-before belongs to the failure cycle whose two counters the re-arm
+already zeroes; left in place, a user's deliberate "Read again" on a recently retry-armed document
+would sit unclaimed until a stale backoff expired. The re-arm still writes nothing about trust (ADR
+0052) and still refuses a live claim exactly as decided above.
+
+**3. The schedule stays WORKER-ONLY — deliberately NOT promoted into `Services/ExtractionClaims`.**
+Decision §2 promoted the zombie threshold because TWO layers must agree on one value; the backoff has
+no second consumer. The claim gate needs no copy of the schedule — the SQL compares the STORED stamp
+against `now()` — and the endpoint's clear needs no copy either (it writes NULL, not a schedule value).
+So `RetryBackoffBase`/`RetryBackoffFor` sit beside `MaxAttempts`/`MaxClaims` on the worker, the
+worker-only exception `Services/InputLengths` already scopes.
+
+**4. ADR 0009 shape: an app-clock stamp compared against the DB's `now()`.** The stamp is written as an
+absolute timestamptz parameter (`DateTime.UtcNow + backoff`) — the write shape ADR 0009 clause 2
+endorses — and the predicate compares it against a bare `now()`, like both of its neighbours; no
+`AT TIME ZONE` anywhere. Seconds of host↔DB clock skew shift the backoff, never the claim's
+correctness. (The test suite gives itself a full-minute margin — negative `RetryBackoffBase`, minute-past
+rewinds — because a Testcontainers Postgres clock even seconds ahead of the host would otherwise flake
+the immediate-re-claim tests.)
+
+**5. Recorded cost — the backoff multiplies the Pending-gated CLIENT polling window ~30x for a
+transiently-failing document.** Three pollers are gated on exactly the status a backed-off document
+holds: the dashboard stats poll (15s while `pendingExtraction > 0`, a heavy multi-count query), the
+documents list (5s), and the detail page (3s). A document that used to settle (or terminally fail) in
+~30 seconds now spends up to ~15 minutes Pending, and every one of those pollers keeps firing for the
+duration. This is DELIBERATE, not an oversight: poll-while-unsettled is the pollers' contract, and a
+backed-off document is genuinely unsettled — a long upload backlog already produces the same shape. If
+provider-outage polling load ever measures as real, the recorded next step is to surface the not-before
+on `DocumentDetail` and widen the detail page's status-dependent `refetchInterval` while
+`nextAttemptAt` is in the future — a widening of an existing predicate, not a new mechanism.
+
+**6. The sibling #375 changes this queue depends on, recorded here because the claim's correctness
+leans on them.** The failure bookkeeping that stamps the backoff now runs on CLEAN state against a
+GUARDED fresh read: `ProcessDocumentAsync`'s generic catch clears the change tracker (a throw out of
+`PersistSuccess` leaves it holding the failed attempt's staged payload, which the bookkeeping save used
+to re-flush — or re-throw on) and reloads the row with the same `ExtractionStatus == Processing`
+predicate `FailOrRequeueAsync`'s timeout path carries, so an attempt whose outcome already SETTLED —
+its own successful persist followed by a transient `RecordSpendAsync` failure, or a concurrent
+container's zombie reclaim running the document to a terminal state — records nothing at all: no
+resurrection to Pending (a re-paid read), no backoff stamp on a settled row, and no terminal
+`Failed` + `Distrusted` stamped over a good read whose budget was nearly spent. A document soft-deleted
+mid-attempt likewise gets no bookkeeping (the reload takes the soft-delete filter; the row is
+unclaimable regardless — `ClaimSql` filters `"DeletedAt" IS NULL`). ADR 0030's 2026-08-08 note records
+what this does to the doomed-persist landing its Amendment 4 is measured against.
+
 ## References
 
-- Tickets: [#365](https://github.com/neboxdev/complidrop/issues/365); adjacent, deliberately separate:
+- Tickets: [#365](https://github.com/neboxdev/complidrop/issues/365),
+  [#375](https://github.com/neboxdev/complidrop/issues/375) (Amendment 2 — the `NextAttemptAt` backoff
+  gate and the guarded failure bookkeeping); adjacent, deliberately separate:
   [#366](https://github.com/neboxdev/complidrop/issues/366) (Document concurrency token),
   [#385](https://github.com/neboxdev/complidrop/issues/385)
 - ADRs: [0016](0016-apply-ef-migrations-on-startup.md) (auto-migrate on startup — why Option D is deferred),
@@ -227,5 +299,7 @@ The 409 envelope, the copy and every backend decision above are unchanged.
   survive the re-arm)
 - Code: `api/CompliDrop.Api/Endpoints/DocumentEndpoints.cs` (`Reextract`),
   `api/CompliDrop.Api/Services/ExtractionClaims.cs` (`ZombieTimeout` — the source both layers read),
-  `api/CompliDrop.Api/BackgroundServices/ExtractionWorker.cs` (`ZombieClaimTimeout` alias, `ClaimSql`),
+  `api/CompliDrop.Api/BackgroundServices/ExtractionWorker.cs` (`ZombieClaimTimeout` alias, `ClaimSql`;
+  for Amendment 2 `RetryBackoffBase`/`RetryBackoffFor`, `RecordFailedAttempt`'s retry arm and
+  `ProcessDocumentAsync`'s guarded catch), `api/CompliDrop.Api/Entities/Document.cs` (`NextAttemptAt`),
   `frontend/src/app/(dashboard)/documents/[id]/page.tsx` (`reextract.onError` — Amendment 1)
