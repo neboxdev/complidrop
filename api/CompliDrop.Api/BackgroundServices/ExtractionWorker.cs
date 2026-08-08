@@ -412,12 +412,26 @@ public class ExtractionWorker(
             // ComplianceStatus, the torn pair the success path exists to forbid (ADR 0030). Clear the
             // tracker and record the failure against a FRESH read of the row instead — the same
             // "bookkeeping on clean state" the timeout path gets from FailOrRequeueAsync's fresh scope.
-            // The reload takes the soft-delete filter like FailOrRequeueAsync's does, so a document
-            // deleted mid-attempt gets no bookkeeping — it is unclaimable anyway (ClaimSql filters
-            // "DeletedAt" IS NULL).
+            // The reload carries FailOrRequeueAsync's guards too, and for the same reasons (#375 items
+            // 1+2): the soft-delete filter, so a document deleted mid-attempt gets no bookkeeping (it
+            // is unclaimable anyway — ClaimSql filters "DeletedAt" IS NULL); and the
+            // ExtractionStatus == Processing predicate, because a row that SETTLED between the throw
+            // and this reload — this attempt's own successful persist followed by a transient
+            // RecordSpendAsync failure is the plainest input, a concurrent container's zombie reclaim
+            // the other — must not be resurrected to Pending (re-extracting, and re-paying for, a
+            // document that already Completed; or, with the budget nearly spent, overwriting a good
+            // read with a terminal Failed + Distrusted). A settled row means this attempt's outcome
+            // was superseded, so there is nothing left to record.
             db.ChangeTracker.Clear();
-            var fresh = await db.Documents.FirstOrDefaultAsync(d => d.Id == documentId, ct);
-            if (fresh is null) return;
+            var fresh = await db.Documents.FirstOrDefaultAsync(
+                d => d.Id == documentId && d.ExtractionStatus == ExtractionStatus.Processing, ct);
+            if (fresh is null)
+            {
+                logger.LogInformation(
+                    "Failed attempt for {DocumentId} found the document no longer Processing; leaving it as is.",
+                    documentId);
+                return;
+            }
             RecordFailedAttempt(db, fresh, "extraction.failed", ex.Message);
             await db.SaveChangesAsync(ct);
         }

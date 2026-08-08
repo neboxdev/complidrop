@@ -439,11 +439,13 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
     public async Task A_document_deleted_mid_extraction_persists_without_a_second_extraction()
     {
         // The basis read is one more thing that can fail, and a throw out of PersistSuccess is the most
-        // expensive failure in this codebase: the catch's bookkeeping save runs on the SAME context and
-        // throws again, FailedAttempts never increments, and the document is zombie-reclaimed every five
-        // minutes RE-PAYING Document AI + the LLM (ExtractionWorker.Clamp's remarks). The row being deleted
-        // mid-run is the sharpest shape of "the world moved under this persist", so pin that it lands as an
-        // ordinary completed persist rather than as an exception.
+        // expensive failure in this codebase: since #375 item 1 the catch clears the tracker and counts
+        // the failure against a guarded fresh read, so the throw costs a counted failure plus a re-paid
+        // Document AI + LLM run per retry — bounded by MaxAttempts and spaced by the retry backoff
+        // (ExtractionWorker.Clamp's remarks; pre-#375 the bookkeeping save re-threw on the same context
+        // and the document was zombie-reclaimed every five minutes). The row being deleted mid-run is the
+        // sharpest shape of "the world moved under this persist", so pin that it lands as an ordinary
+        // completed persist rather than as an exception.
         //
         // What this does NOT pin is the null-basis fallback, and the ADR/reviewers.md used to say it did.
         // DELETE /api/documents/{id} is a SOFT delete, and GetDatabaseValues issues an

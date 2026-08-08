@@ -7,22 +7,28 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 namespace CompliDrop.Api.Tests.TestHelpers;
 
 /// <summary>
-/// Test-only <see cref="IDbCommandInterceptor"/> on <see cref="SystemDbContext"/> that fails ONE reader
-/// command matching a test-supplied predicate, before it reaches Postgres.
+/// Test-only <see cref="IDbCommandInterceptor"/> on <see cref="SystemDbContext"/> that fails ONE command
+/// matching a test-supplied predicate, before it reaches Postgres.
 /// <para/>
 /// It exists for #460 review round 2, C2. <c>ExtractionWorker.PersistSuccess</c> reads its grading basis
 /// INSIDE the best-effort <c>try</c> that degrades the verdict to <c>Pending</c>, deliberately: a throw out
-/// of that method is the most expensive failure in this codebase (the catch's bookkeeping save runs on the
-/// same context, <c>FailedAttempts</c> never increments, and the document is zombie-reclaimed every five
-/// minutes RE-PAYING Document AI + the LLM — <c>ExtractionWorker.Clamp</c>'s remarks). Nothing pinned that
-/// placement: the mid-run-delete test's soft delete yields a NON-null basis and never makes the read fail,
-/// so hoisting the read above the <c>try</c> left the whole suite green. Making the read itself fail is the
-/// only way to say "a transient failure HERE must land on Pending, not back in the queue" — and a hard
-/// delete is not a substitute, because the persist's own UPDATE would then throw for an unrelated reason.
+/// of that method is the most expensive failure in this codebase — since #375 item 1 the catch clears the
+/// tracker and records a counted failure against a guarded fresh read, so the throw costs up to
+/// <c>MaxAttempts</c> re-paid Document AI + LLM runs spaced by the retry backoff before a terminal
+/// <c>Failed</c> (<c>ExtractionWorker.Clamp</c>'s remarks; pre-#375 it was worse — the bookkeeping save
+/// re-threw on the same dirty context and the document was zombie-reclaimed every five minutes). Nothing
+/// pinned that placement: the mid-run-delete test's soft delete yields a NON-null basis and never makes the
+/// read fail, so hoisting the read above the <c>try</c> left the whole suite green. Making the read itself
+/// fail is the only way to say "a transient failure HERE must land on Pending, not back in the queue" — and
+/// a hard delete is not a substitute, because the persist's own UPDATE would then throw for an unrelated
+/// reason.
 /// <para/>
-/// The fault is raised from <see cref="DbCommandInterceptor.ReaderExecutingAsync"/>, i.e. before the command
-/// is sent, so nothing is left half-executed and the connection stays usable for the persist's own
-/// <c>SaveChanges</c> — which is precisely the "transient read failure" shape being simulated.
+/// The fault is raised from <see cref="DbCommandInterceptor.ReaderExecutingAsync"/> — or, for the set-based
+/// writers that go through <c>ExecuteNonQuery</c>, <see cref="DbCommandInterceptor.NonQueryExecutingAsync"/>
+/// (<c>CostTrackingService.RecordSpendAsync</c>'s <c>ExecuteUpdateAsync</c>, which the #375 review's
+/// settled-row tests fault to land a throw AFTER a successful persist) — i.e. before the command is sent,
+/// so nothing is left half-executed and the connection stays usable for the caller's next
+/// <c>SaveChanges</c> — which is precisely the "transient failure" shape being simulated.
 /// <para/>
 /// Armed by CALLBACK rather than by a request header, the same way as
 /// <see cref="ConcurrentSystemWriteInterceptor"/> and for the same reason: the writer under test is a
@@ -51,14 +57,32 @@ public sealed class SystemCommandFaultInterceptor : DbCommandInterceptor
         InterceptionResult<DbDataReader> result,
         CancellationToken cancellationToken = default)
     {
+        MaybeFault(command);
+        return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
+    }
+
+    // SaveChanges batches and EF queries execute as readers, but ExecuteUpdateAsync/ExecuteDeleteAsync
+    // run through ExecuteNonQuery — without this override a predicate aimed at one of those (e.g.
+    // RecordSpendAsync's UPDATE "Subscriptions") would silently never fire and the test would assert
+    // the ordinary success path. Async only, like the reader half: every production caller is async.
+    public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+        DbCommand command,
+        CommandEventData eventData,
+        InterceptionResult<int> result,
+        CancellationToken cancellationToken = default)
+    {
+        MaybeFault(command);
+        return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+    }
+
+    private void MaybeFault(DbCommand command)
+    {
         if (ShouldFault is { } predicate && predicate(command.CommandText))
         {
             ShouldFault = null; // fire exactly once — the retry/repeat shapes are not what this pins
             FaultCount++;
             throw new InvalidOperationException(FaultMessage);
         }
-
-        return base.ReaderExecutingAsync(command, eventData, result, cancellationToken);
     }
 
     public void Reset()
