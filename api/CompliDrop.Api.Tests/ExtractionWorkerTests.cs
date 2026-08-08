@@ -1682,6 +1682,81 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         done.GeneralLiabilityLimit.Should().Be(3_000_000m, "the extracted inputs still persisted");
     }
 
+    // ----- #375 item 1: the failure bookkeeping never flushes the failed attempt's payload -----
+
+    [Fact]
+    public async Task A_transient_persist_failure_commits_only_the_bookkeeping_never_the_partial_payload()
+    {
+        // Fault the persist's OWN SaveChanges batch, exactly once, before it reaches Postgres. The
+        // generic catch then records the counted failure — and before #375 item 1 it did so on the SAME
+        // dirty context, so its bookkeeping save re-flushed the failed attempt's entire staged payload:
+        // the DocumentField inserts, the rebuilt ExtractionFields mirror, the typed columns, the
+        // "document.processed" feed row (for a read that failed!), and whatever verdict had been staged.
+        // The catch must clear the tracker first and commit ONLY the failure fields.
+        var (_, docId, blobPath) = await SeedGradableDocAsync(expectedValue: "2000000");
+        await Fixture.Factory.Services.GetRequiredService<IBlobStorageService>()
+            .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
+        Extraction.Result = GlResult("3000000"); // would grade Compliant if it committed
+        var worker = BuildWorker();
+
+        var fault = Fixture.Factory.Services.GetRequiredService<SystemCommandFaultInterceptor>();
+        // The only command carrying this INSERT is PersistSuccess's final batch — the loads before it
+        // (doc, subscription, existing fields, grading basis, checklist) are SELECTs.
+        fault.ShouldFault = sql => sql.Contains("INSERT INTO \"DocumentFields\"", StringComparison.Ordinal);
+
+        int faults;
+        try
+        {
+            (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+            await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+        }
+        finally
+        {
+            // Read BEFORE the reset — Reset() zeroes the counter.
+            faults = fault.FaultCount;
+            fault.Reset();
+        }
+
+        faults.Should().Be(1,
+            "the persist's SaveChanges really did fail — a predicate that matched nothing would make "
+            + "every assertion below a statement about the ordinary success path");
+
+        await using (var db = CreateSystemDb())
+        {
+            var doc = await db.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+            // The failure IS recorded…
+            doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "a transient persist failure is a counted, retryable failure");
+            doc.FailedAttempts.Should().Be(1);
+            doc.ProcessingError.Should().StartWith("extraction.failed");
+            // …and NOTHING of the failed attempt's payload rode along with it.
+            (await db.DocumentFields.CountAsync(f => f.DocumentId == docId)).Should().Be(0,
+                "the failed run's staged DocumentField inserts must not survive into the bookkeeping commit");
+            doc.ExtractionFields.Should().BeNull("the rebuilt JSON mirror was the failed run's, not the row's");
+            doc.ExtractionRawJson.Should().BeNull();
+            doc.ExtractionCompletedAt.Should().BeNull("the read did not complete");
+            doc.GeneralLiabilityLimit.Should().BeNull("a typed column staged by the failed run is new INPUT beside the old verdict — the torn pair ADR 0030 forbids");
+            doc.ComplianceStatus.Should().Be(ComplianceStatus.Pending, "no verdict may commit for a read that failed");
+            (await db.ComplianceChecks.CountAsync(c => c.DocumentId == docId)).Should().Be(0);
+            (await db.AuditLogs.CountAsync(a => a.EntityId == docId && a.Action == "document.processed"))
+                .Should().Be(0, "a stray feed event for a failed read is the #375 item 1 symptom");
+        }
+
+        // The failure was transient, so the retry (fault disarmed) must heal everything: one payload,
+        // one feed row, the real verdict.
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        await using var verify = CreateSystemDb();
+        var healed = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+        healed.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        healed.ComplianceStatus.Should().Be(ComplianceStatus.Compliant, "3M clears the 2M floor");
+        healed.GeneralLiabilityLimit.Should().Be(3_000_000m);
+        (await verify.DocumentFields.CountAsync(f => f.DocumentId == docId))
+            .Should().Be(Extraction.Result.Fields.Count, "exactly one field set — never the failed run's plus the retry's");
+        (await verify.AuditLogs.CountAsync(a => a.EntityId == docId && a.Action == "document.processed"))
+            .Should().Be(1, "exactly one feed row — the successful read's");
+    }
+
     // ----- AC4: FOR UPDATE SKIP LOCKED --------------------------------------------------------
 
     [Fact]

@@ -369,7 +369,23 @@ public class ExtractionWorker(
             // here — a per-attempt timeout or graceful shutdown must propagate to ProcessClaimedAsync,
             // which records it correctly (a shutdown is an interruption, not a counted failure).
             logger.LogError(ex, "Extraction failed for {DocumentId}", doc.Id);
-            RecordFailedAttempt(db, doc, "extraction.failed", ex.Message);
+
+            // The context may be DIRTY with the failed attempt's own staged writes (#375 item 1): a
+            // throw out of PersistSuccess's final SaveChanges leaves the tracker holding the doc's
+            // extracted scalars (some FORCED via IsModified), the rebuilt ExtractionFields mirror, the
+            // DocumentField deletes/adds and a "document.processed" audit row. The bookkeeping save
+            // below would then COMMIT that partial payload alongside the failure — a feed row for a
+            // read that failed, and (when the throw came early) new inputs beside the old
+            // ComplianceStatus, the torn pair the success path exists to forbid (ADR 0030). Clear the
+            // tracker and record the failure against a FRESH read of the row instead — the same
+            // "bookkeeping on clean state" the timeout path gets from FailOrRequeueAsync's fresh scope.
+            // The reload takes the soft-delete filter like FailOrRequeueAsync's does, so a document
+            // deleted mid-attempt gets no bookkeeping — it is unclaimable anyway (ClaimSql filters
+            // "DeletedAt" IS NULL).
+            db.ChangeTracker.Clear();
+            var fresh = await db.Documents.FirstOrDefaultAsync(d => d.Id == documentId, ct);
+            if (fresh is null) return;
+            RecordFailedAttempt(db, fresh, "extraction.failed", ex.Message);
             await db.SaveChangesAsync(ct);
         }
     }
@@ -585,11 +601,17 @@ public class ExtractionWorker(
     /// Truncates an untrusted string to a column's width, so a value the provider (or an exception
     /// message) made too long can't throw Postgres 22001 out of a <c>SaveChanges</c> (#373; partially
     /// addresses <see href="https://github.com/neboxdev/complidrop/issues/385">#385</see>). That throw is
-    /// not a graceful degrade: <see cref="ProcessDocumentAsync"/>'s catch calls <c>SaveChangesAsync</c> on
-    /// the SAME context, which still tracks the poisoned inserts, so the bookkeeping write throws again —
-    /// <see cref="Document.FailedAttempts"/> never increments, and the document is zombie-reclaimed every
-    /// 5 minutes until <see cref="Document.ProcessingAttempts"/> exceeds <see cref="MaxClaims"/>, re-paying
-    /// Document AI + LLM cost on every doomed run. Reachable from the unauthenticated portal upload route.
+    /// not a graceful degrade. Historically it was the WORST failure in the codebase:
+    /// <see cref="ProcessDocumentAsync"/>'s catch called <c>SaveChangesAsync</c> on the SAME dirty
+    /// context, which still tracked the poisoned inserts, so the bookkeeping write threw again —
+    /// <see cref="Document.FailedAttempts"/> never incremented, and the document was zombie-reclaimed
+    /// every 5 minutes until <see cref="Document.ProcessingAttempts"/> exceeded <see cref="MaxClaims"/>,
+    /// re-paying Document AI + LLM cost on every doomed run. Since #375 (item 1) that catch clears the
+    /// tracker before the bookkeeping save, so an unguarded overflow now "only" costs a counted failure
+    /// per attempt — up to <see cref="MaxAttempts"/> re-paid, byte-identically doomed OCR + LLM runs
+    /// before a terminal <c>Failed</c>. Still real money for a deterministic outcome, which is why every
+    /// untrusted string is clamped up front rather than left to the failure path. Reachable from the
+    /// unauthenticated portal upload route.
     /// <para/>
     /// TRUNCATES rather than drops: unlike <c>DocumentSubType</c> (matchable-or-nothing metadata), an
     /// extracted field is user-facing content shown on the document detail page — a clipped
@@ -912,8 +934,9 @@ public class ExtractionWorker(
         // DELETE of the checks it read, and a competing re-grade committing in the window between that read
         // and this line leaves them matching nothing. ComplianceCheckDeleteConcurrencyInterceptor makes
         // that a success rather than a DbUpdateConcurrencyException (#468); this line is deliberately left
-        // bare of a try/catch, because a catch here would have nothing safe to do — the bookkeeping save in
-        // ProcessDocumentAsync's catch runs on this same context and re-throws.
+        // bare of a try/catch, because a catch here would have nothing safe to do — the failure belongs to
+        // ProcessDocumentAsync's catch, which clears this same context's tracker (dropping everything this
+        // method staged) before recording the counted failure against a fresh read (#375 item 1).
         await db.SaveChangesAsync(ct);
     }
 
