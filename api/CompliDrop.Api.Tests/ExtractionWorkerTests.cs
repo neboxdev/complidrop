@@ -1692,28 +1692,87 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
 
     // ----- #375 item 4: the DocumentFields clear materializes its query asynchronously ---------
 
-    [Fact]
-    public void The_field_clear_materializes_its_query_before_RemoveRange()
+    /// <summary>
+    /// The whole gate, so the hermetic fixture below can drive the SAME assertions the production check
+    /// runs (the <see cref="Adr0050EnforcementTests"/> discipline). #375 item 4:
+    /// <c>RemoveRange(db.DocumentFields.Where(...))</c> enumerates the IQueryable on the blocking sync
+    /// path with no cancellation token — the exact pattern the codebase already fixed and documented in
+    /// <c>ComplianceCheckService.ApplyEvaluationCoreAsync</c>'s check-row clear. No behavioural test can
+    /// see the difference (the rows come out deleted either way), so the shape is pinned at the source.
+    /// <para/>
+    /// Anchoring on a bare <c>Contain(".ToListAsync(ct)")</c> was discriminating only while
+    /// <c>PersistSuccess</c> carried exactly one such call (#375 review round 2, S5): give the method a
+    /// second, unrelated <c>.ToListAsync(ct)</c> and re-spell the clear through a variable-held
+    /// IQueryable — <c>var q = db.DocumentFields.Where(...); db.DocumentFields.RemoveRange(q);</c> —
+    /// and both the Contain and the literal NotContain stay green while the delete-driving query
+    /// executes on the blocking sync path again. So the pin is on the SHAPE: one contiguous statement
+    /// materializing <c>db.DocumentFields</c> through <c>.ToListAsync(ct)</c> (no semicolon inside the
+    /// match — a semicolon means the chain ended without materializing), sitting BEFORE the
+    /// <c>RemoveRange</c> that consumes it.
+    /// </summary>
+    internal static void AssertMaterializedFieldClearShape(string body)
     {
-        // #375 item 4. `RemoveRange(db.DocumentFields.Where(...))` enumerates the IQueryable on the
-        // blocking sync path with no cancellation token — the exact pattern the codebase already fixed
-        // and documented in ComplianceCheckService.ApplyEvaluationCoreAsync's check-row clear. No
-        // behavioural test can see the difference (the rows come out deleted either way), so the shape
-        // is pinned at the source, the way this repo pins its other reviewer-memory rules.
-        var source = File.ReadAllText(
-            SourceScan.ProductionFile("BackgroundServices", "ExtractionWorker.cs"));
-        var body = SourceScan.ExtractMethodBody(source, "private static async Task PersistSuccess(");
-
         body.Should().Contain("RemoveRange(",
             "anti-no-op: the field clear itself must still be there — deleting it would leave every "
             + "re-extraction appending a second full field set (and would trivially satisfy the "
             + "NotContain below)");
-        body.Should().Contain(".ToListAsync(ct)",
+
+        var removeAt = body.IndexOf("RemoveRange(", StringComparison.Ordinal);
+        var materialized = System.Text.RegularExpressions.Regex.Match(
+            body, @"db\.DocumentFields\s*\.Where\([^;]*?\.ToListAsync\(ct\)");
+        materialized.Success.Should().BeTrue(
             "the delete-driving query must be materialized asynchronously, under the attempt's own "
-            + "cancellation token, before RemoveRange stages the deletes");
+            + "cancellation token, in ONE contiguous statement off db.DocumentFields — a re-spelling "
+            + "that parks the un-materialized IQueryable in a variable executes it on the blocking "
+            + "sync path with no cancellation token (#375 item 4)");
+        materialized.Index.Should().BeLessThan(removeAt,
+            "the materialization must happen BEFORE RemoveRange stages the deletes — after it, "
+            + "RemoveRange was handed something else");
+
         body.Should().NotContain("RemoveRange(db.DocumentFields.Where",
             "handing RemoveRange an IQueryable executes the delete-driving query on the blocking sync "
             + "path with no cancellation token (#375 item 4)");
+    }
+
+    [Fact]
+    public void The_field_clear_materializes_its_query_before_RemoveRange()
+    {
+        var source = File.ReadAllText(
+            SourceScan.ProductionFile("BackgroundServices", "ExtractionWorker.cs"));
+        AssertMaterializedFieldClearShape(
+            SourceScan.ExtractMethodBody(source, "private static async Task PersistSuccess("));
+    }
+
+    [Fact]
+    public void The_field_clear_pin_rejects_a_variable_held_IQueryable_clear()
+    {
+        // The evasion the round-2 review named (S5): a second, unrelated .ToListAsync(ct) keeps the old
+        // bare Contain green, and the variable-held IQueryable dodges the literal NotContain — yet the
+        // delete-driving query is back on the blocking sync path. Hermetic, per the
+        // Adr0050EnforcementTests discipline: proving the gate REJECTS the shape is the only way to
+        // know an enforcement test still enforces.
+        const string evasion = """
+            class C
+            {
+                private static async Task PersistSuccess(SystemDbContext db, Document doc, CancellationToken ct)
+                {
+                    var audits = await db.AuditLogs.Where(a => a.EntityId == doc.Id).ToListAsync(ct);
+                    var q = db.DocumentFields.Where(df => df.DocumentId == doc.Id);
+                    db.DocumentFields.RemoveRange(q);
+                    await db.SaveChangesAsync(ct);
+                }
+            }
+            """;
+        var body = SourceScan.ExtractMethodBody(evasion, "private static async Task PersistSuccess(");
+
+        // Proven, not assumed: the fixture clears BOTH of the old gate's anchors, so the rejection
+        // below can only come from the contiguous-shape pin.
+        body.Should().Contain(".ToListAsync(ct)");
+        body.Should().NotContain("RemoveRange(db.DocumentFields.Where");
+
+        var act = () => AssertMaterializedFieldClearShape(body);
+        act.Should().Throw<Exception>("the delete-driving query is un-materialized again")
+            .WithMessage("*ONE contiguous statement*");
     }
 
     // ----- #337: the worker grades inside PersistSuccess (combined unit of work) --------------
