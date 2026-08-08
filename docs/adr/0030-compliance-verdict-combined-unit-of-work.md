@@ -288,6 +288,26 @@ That gives `FailedPages` a SECOND and THIRD meaning, and the records that carry 
 - **Option T — compare the fresh outcome against the row's STORED status and check rows.** Marginally more precise (it would skip the idempotent rewrite when another combined-unit-of-work writer has already made the row consistent). **Rejected on cost for no safety gain:** it needs the page's check rows loaded on EVERY verification pass, and the rewrite it avoids happens only when a writer committed after the page did — which, as § Decision notes, re-grades to the values the row already holds.
 - **Option U — skip verification on the boot/seed path, since it "provably cannot overlap".** **Rejected, and the premise is false as well.** `Program.cs`'s ordering rules out only THIS container's requests; a Railway rolling deploy leaves the previous container serving requests and polling extractions against the same database while the new one seeds (§ Which callers can overlap a field edit). So the exemption would encode one process's startup ordering inside `ComplianceCheckService` as if it were a fact about the system — and it would remove the verification from the one caller whose `RegradeResult` is read and whose failed pages are DURABLY re-fired (#416's watermark). One mechanism for every caller was already worth more than the page-read it saves; that this is also the worst caller to exempt settles it.
 
+## Note (2026-08-08) — #375 shrank the doomed-persist landing this ADR's cost arguments are measured against
+
+Several refutations above — Option A, Amendment 1's `xmin` analysis, Amendment 4's "on ONE writer that
+exception is catastrophic" — price a throw out of `ExtractionWorker.PersistSuccess` at its pre-#375
+landing: the catch's bookkeeping save re-threw on the same dirty context, `FailedAttempts` never
+incremented, and the document was zombie-reclaimed every five minutes, re-paying Document AI + the LLM on
+every doomed run until `MaxClaims`. [#375](https://github.com/neboxdev/complidrop/issues/375) item 1
+changed that landing: the catch now abandons the dirty context unsaved and records a counted failure in a
+fresh scope (`FailOrRequeueAsync`) against a fresh read
+guarded on `ExtractionStatus == Processing`, so the same throw now costs one counted failure plus a
+re-paid extraction per retry — bounded by `MaxAttempts` and spaced by the #375 exponential backoff
+([ADR 0050](0050-reextract-refuses-a-live-extraction-claim.md) Amendment 2) — before a terminal `Failed`,
+and a throw AFTER the persist committed (e.g. out of `RecordSpendAsync`) records nothing at all.
+
+No decision above moves. Bounded-or-not, a re-paid extraction per landing is still the most expensive
+failure in the codebase, so every refutation that rests on "a throw out of the persist costs real money"
+still stands — Amendment 4's tolerance of the zero-row check DELETE included; what changed is only the
+multiplier. This note exists so the next reader prices the landing at its current size instead of the
+2026-08-03 one.
+
 ## References
 
 - Tickets: [#337](https://github.com/neboxdev/complidrop/issues/337), [#243](https://github.com/neboxdev/complidrop/issues/243) (audit), [#235](https://github.com/neboxdev/complidrop/issues/235), [#246](https://github.com/neboxdev/complidrop/issues/246), [#366](https://github.com/neboxdev/complidrop/issues/366) (Amendment 1), [#460](https://github.com/neboxdev/complidrop/issues/460) (the worker's stale-basis grading, Amendment 1 residual 2 → Amendment 2), [#461](https://github.com/neboxdev/complidrop/issues/461) (the pure re-grade window, Amendment 1 residual 1 → Amendment 3), [#467](https://github.com/neboxdev/complidrop/issues/467) + [#468](https://github.com/neboxdev/complidrop/issues/468) (Amendment 2 § What stays open; #468 → Amendment 4, #467 → [ADR 0052](0052-extraction-trust-is-its-own-column.md) Amendment 1, which borrows Amendment 2's grading basis for the trust decision), [#470](https://github.com/neboxdev/complidrop/issues/470) (the BATCHED fan-out's window, Amendment 3 § What stays open → Amendment 5; Amendment 2's worker re-read→commit window pointed here until this closed and is now carried by Amendment 2 § What stays open itself), [#48](https://github.com/neboxdev/complidrop/issues/48)

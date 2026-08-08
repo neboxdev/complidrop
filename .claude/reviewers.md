@@ -448,19 +448,27 @@ Both are defined in this repo's `.claude/agents/`.
     says nothing about the values already on the row, and distrusting on a transient hiccup sinks a
     covered vendor for the whole retry cycle.
   - The three WORKER writers go through `ExtractionWorker.SetTrust`, which sets `IsModified` on the
-    column — a plain assignment is NOT enough and removing the force is a real finding.
-    `ProcessDocumentAsync` loads the doc BEFORE OCR+LLM and holds that snapshot for minutes; EF emits
-    only changed properties, so assigning the snapshot's own value emits no `SET` at all while the row
-    may have moved (a mid-read `PUT /verify` commits the opposite value). Do NOT file this as the ADR
-    0030 / #460 stale-snapshot residual, and do NOT read #460's read-only grading basis (ADR 0030
-    Amendment 2, which ships on the same method) as a reason to unforce this: #460 is about verdict INPUTS
-    a REQUEST owns, which is why it grades from a fresh value and writes no input back — it FORCES
-    `ComplianceStatus` (`ForceVerdictWrite`) for the same reason this forces trust, because a verdict, like
-    trust, is the writer's OWN conclusion, which ADR 0052 §2 says it owns. The axis is ownership, not
-    mechanism. Pinned by
-    `PersistSuccess_forces_its_trust_decision_over_a_write_that_landed_mid_extraction` and
-    `A_terminal_failure_forces_its_distrust_over_a_confirmation_that_landed_mid_attempt`
-    (`FakeExtractionClient.DuringExtract` constructs the interleaving; do not "simplify" it away).
+    column — removing the force is a real finding. The stale-snapshot rationale holds for
+    `PersistSuccess`: `ProcessDocumentAsync` loads the doc BEFORE OCR+LLM and holds that snapshot for
+    minutes; EF emits only changed properties, so assigning the snapshot's own value emits no `SET` at
+    all while the row may have moved (a mid-read `PUT /verify` commits the opposite value).
+    `MarkFailed` and `RecordFailedAttempt` write against a FRESH read on every call site since #375
+    (round 2 routed the terminal arms — non-retryable, claims backstop, cost ceiling — through
+    `FailOrRequeueAsync`'s guarded reload too, the ONE failure-bookkeeping routine), so THERE the
+    force is belt-and-braces, kept for uniformity — do not flag it as dead code, and do not cite it as
+    license to unforce `PersistSuccess`. Do NOT file the force as the ADR 0030 / #460 stale-snapshot
+    residual, and do NOT read #460's read-only grading basis (ADR 0030 Amendment 2, which ships on the
+    same method) as a reason to unforce this: #460 is about verdict INPUTS a REQUEST owns, which is
+    why it grades from a fresh value and writes no input back — it FORCES `ComplianceStatus`
+    (`ForceVerdictWrite`) for the same reason this forces trust, because a verdict, like trust, is the
+    writer's OWN conclusion, which ADR 0052 §2 says it owns. The axis is ownership, not mechanism.
+    Pinned by `PersistSuccess_forces_its_trust_decision_over_a_write_that_landed_mid_extraction` and
+    `A_terminal_failure_forces_its_distrust_over_a_confirmation_that_landed_mid_attempt` — which,
+    post-#375 round 2, pins the terminal OUTCOME on BOTH arms rather than the force (the guarded
+    fresh reload makes EF emit the `SET` either way; only `PersistSuccess`'s pin reddens if the force
+    is removed) — plus `A_non_retryable_failure_does_not_overwrite_a_read_that_settled_mid_attempt`
+    for the guard itself (`FakeExtractionClient.DuringExtract` constructs the interleavings; do not
+    "simplify" it away).
   - OWNERSHIP and SUBJECT are different questions, and #467 / ADR 0052 Amendment 1 answers the second
     WITHOUT touching the first. `PersistSuccess`'s readability trigger reads the #460 grading basis
     (`DocumentFieldReadability.UnreadableCanonicalFields(basis ?? doc)`) — the row this commit will
@@ -1122,9 +1130,12 @@ Both are defined in this repo's `.claude/agents/`.
     `UpdateFields`/`UpdateDocument` and leave other paths undisturbed; `UseXminAsConcurrencyToken` is
     ENTITY-level, so it makes every tracked `Document` write optimistic whether or not that path
     handles the exception. The worst landing is `ExtractionWorker.PersistSuccess`, whose window is the
-    whole OCR + LLM run and whose own remarks record the cost of a throw there (the catch's bookkeeping
-    save re-throws on the same context, `FailedAttempts` never increments, zombie reclaim every 5 min,
-    **re-paying Document AI + the LLM each time**). "Just add the xmin token" is a refuted suggestion,
+    whole OCR + LLM run and whose own remarks record the cost of a throw there (since #375 item 1 the
+    catch abandons the dirty context unsaved and books the failure through `FailOrRequeueAsync`'s
+    guarded fresh read, so the throw costs at
+    most `MaxAttempts` **re-paid Document AI + LLM runs**, spaced by the retry backoff, before a
+    terminal `Failed` — bounded now, still real money per landing for a row-count technicality). "Just
+    add the xmin token" is a refuted suggestion,
     not a finding — and so is `FOR UPDATE` (ADR 0030 § Option B): it takes the `Documents` row lock
     BEFORE the transaction touches `ComplianceChecks` while every other writer's EF batch takes them
     the other way round, a lock-order inversion the current code does not have.
@@ -1913,7 +1924,12 @@ No project labels beyond `task`, `bug`, `epic`, `careful-review`, `in-progress`.
 
 - Orgs: single digits live today; design threshold 100+ orgs
 - Documents per org: up to ~1,000; vendors per org: up to ~200
-- `ExtractionWorker` polls every 5s (`FOR UPDATE SKIP LOCKED`, 5-min zombie reclaim);
+- `ExtractionWorker` polls every 5s (`FOR UPDATE SKIP LOCKED`, 5-min zombie reclaim, exponential
+  retry backoff via `Document.NextAttemptAt` — #375). Recorded, not a bug: the backoff multiplies the
+  Pending-gated CLIENT polling window ~30x for a transiently-failing document (~30s → ~15 min across
+  the dashboard-stats 15s / documents-list 5s / detail-page 3s pollers) — deliberate,
+  poll-while-unsettled is those pollers' contract and a backed-off doc is genuinely unsettled (ADR
+  0050 Amendment 2 records the trade and the widening option if it ever measures as real load);
   `ReminderBackgroundService` ticks hourly
 - Paid per-call: Document AI OCR + Gemini extraction per document; Resend per email —
   re-processing an identical blob is real money

@@ -161,7 +161,8 @@ internal static class ModelConfiguration
             // (terminal rows excluded) and satisfies the `ORDER BY "CreatedAt" … LIMIT 1` as a forward
             // index range scan. Covers both claim arms: the Pending claim and the stale-Processing
             // zombie reclaim (the `ProcessingStartedAt < now() - interval '5 minutes'` predicate is a
-            // cheap residual filter once the index has narrowed to the handful of in-flight rows).
+            // cheap residual filter once the index has narrowed to the handful of in-flight rows, and
+            // so is the `NextAttemptAt` retry-backoff gate, #375).
             // (#243 concurrency-audit performance finding.)
             e.HasIndex(d => d.CreatedAt)
                 .HasFilter("\"DeletedAt\" IS NULL AND \"ExtractionStatus\" IN ('Pending', 'Processing')")

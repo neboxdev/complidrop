@@ -78,7 +78,8 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         decimal? subscriptionSpendUsd = null,
         string plan = "free",
         string? documentType = null,
-        ExtractionTrust extractionTrust = ExtractionTrust.Trusted)
+        ExtractionTrust extractionTrust = ExtractionTrust.Trusted,
+        DateTime? nextAttemptAt = null)
     {
         var orgId = Guid.NewGuid();
         var docId = Guid.NewGuid();
@@ -129,6 +130,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             ProcessingAttempts = attempts,
             FailedAttempts = failedAttempts,
             ProcessingStartedAt = processingStartedAt,
+            NextAttemptAt = nextAttemptAt,
             CreatedAt = createdAt ?? now,
             UpdatedAt = now,
         });
@@ -239,6 +241,12 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
         Extraction.ThrowOnExtract = true;
         var worker = BuildWorker();
+        // NEGATIVE backoff base so the loop can drive the whole budget at claim speed — the schedule
+        // itself is pinned by the #375 item 3 tests below. Negative rather than Zero for clock-skew
+        // margin: a zero base stamps NextAttemptAt = app-now, which ClaimSql compares against the
+        // Testcontainers Postgres now() — a container running even slightly behind the host would
+        // leave the stamp in its future and flake the re-claim.
+        worker.RetryBackoffBase = TimeSpan.FromMinutes(-1);
 
         // Safety cap well above MaxAttempts: a regression to infinite retry exits here and fails the
         // assertion below instead of hanging the suite forever.
@@ -262,6 +270,127 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         doc.FailedAttempts.Should().Be(ExtractionWorker.MaxAttempts);
         doc.ProcessingAttempts.Should().Be(ExtractionWorker.MaxAttempts);
         doc.ProcessingError.Should().StartWith("extraction.failed");
+    }
+
+    // ----- #375 item 3: exponential backoff between retries ------------------------------------
+
+    [Fact]
+    public async Task A_transient_failure_stamps_a_not_before_the_claim_waits_out()
+    {
+        // Without a not-before, a requeued failure was reclaimable on the next 5-second poll, so a
+        // fast-failing transient outage (provider 500s, blob 503) burned all MaxAttempts in ~25-30s
+        // and failed the document terminally — for an outage that would have cleared in minutes.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.ThrowOnExtract = true;
+        var worker = BuildWorker(); // REAL backoff base — the stamp is the contract under test
+
+        var before = DateTime.UtcNow;
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+        var after = DateTime.UtcNow;
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "one failure leaves the budget intact");
+        doc.FailedAttempts.Should().Be(1);
+        doc.NextAttemptAt.Should().NotBeNull("the retry arm stamps the backoff");
+        doc.NextAttemptAt!.Value.Should()
+            .BeOnOrAfter(before + worker.RetryBackoffFor(1)).And
+            .BeOnOrBefore(after + worker.RetryBackoffFor(1));
+
+        // The queue honors the stamp: Pending, yet not claimable until it passes.
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+            "a requeued failure inside its backoff window must not be reclaimed on the next poll");
+
+        // …and once the window has elapsed (simulated by rewinding the stamp) the claim proceeds.
+        await using (var db = CreateSystemDb())
+        {
+            var rewind = await db.Documents.SingleAsync(d => d.Id == docId);
+            // A full minute in the past, not one second: the stamp is app-clock while ClaimSql compares
+            // it against the Testcontainers Postgres now() — margin over host→container skew.
+            rewind.NextAttemptAt = DateTime.UtcNow.AddMinutes(-1);
+            await db.SaveChangesAsync();
+        }
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId,
+            "an expired stamp gates nothing — the backoff delays the retry, it never strands the document");
+    }
+
+    [Fact]
+    public void The_backoff_schedule_doubles_per_failed_attempt()
+    {
+        // Deliberate literals, the #62 convention: this test is the regression discriminator for the
+        // schedule, so deriving the expectations from RetryBackoffBase would make it a tautology.
+        var worker = BuildWorker();
+        worker.RetryBackoffFor(1).Should().Be(TimeSpan.FromMinutes(1));
+        worker.RetryBackoffFor(2).Should().Be(TimeSpan.FromMinutes(2));
+        worker.RetryBackoffFor(3).Should().Be(TimeSpan.FromMinutes(4));
+        worker.RetryBackoffFor(4).Should().Be(TimeSpan.FromMinutes(8),
+            "the deepest retry-armed failure with MaxAttempts = 5 — the whole cycle spans ~15 minutes");
+        worker.RetryBackoffFor(100).Should().Be(TimeSpan.FromMinutes(32),
+            "the exponent is capped so a corrupt counter cannot produce a year-long stamp");
+    }
+
+    [Fact]
+    public async Task The_stamp_grows_with_the_failure_count()
+    {
+        // Third genuine failure: the stamp must be RetryBackoffFor(3) = 4× base, i.e. computed from
+        // the INCREMENTED count — a stamp computed from the pre-increment count would cut every
+        // window in half and the last one to a quarter.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m, failedAttempts: 2);
+        Extraction.ThrowOnExtract = true;
+        var worker = BuildWorker();
+
+        var before = DateTime.UtcNow;
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+        var after = DateTime.UtcNow;
+
+        var doc = await GetDocAsync(docId);
+        doc.FailedAttempts.Should().Be(3);
+        doc.NextAttemptAt!.Value.Should()
+            .BeOnOrAfter(before + worker.RetryBackoffFor(3)).And
+            .BeOnOrBefore(after + worker.RetryBackoffFor(3));
+    }
+
+    [Fact]
+    public async Task A_terminal_failure_stamps_no_not_before()
+    {
+        // The terminal arm leaves NextAttemptAt alone: a Failed row is not claimable, so a not-before
+        // beside it is dead data — and the manual fresh start (Reextract) clears the stamp anyway.
+        var (_, docId) = await SeedDocAsync(
+            subscriptionSpendUsd: 0m, failedAttempts: ExtractionWorker.MaxAttempts - 1);
+        Extraction.ThrowOnExtract = true;
+        var worker = BuildWorker();
+
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed, "the budget is spent");
+        doc.NextAttemptAt.Should().BeNull("only the RETRY arm stamps a backoff");
+    }
+
+    [Fact]
+    public async Task Claim_skips_an_older_backing_off_doc_and_grabs_the_newer_eligible_one()
+    {
+        // Pins that the NextAttemptAt gate sits INSIDE the claim's ORDER BY "CreatedAt" … LIMIT 1
+        // subquery. Hoisted to the outer UPDATE … WHERE, the subquery would still SELECT the oldest
+        // (backing-off) row, the outer predicate would then reject it, and the claim would return
+        // NOTHING — one transiently-failing document stalling every newer upload behind its backoff
+        // window. Same two-document shape as Claim_skips_a_locked_row_and_grabs_the_next_available_one,
+        // which pins the sibling FOR UPDATE SKIP LOCKED fall-through.
+        var (_, olderId) = await SeedDocAsync(
+            createdAt: DateTime.UtcNow.AddMinutes(-10),
+            nextAttemptAt: DateTime.UtcNow.AddMinutes(30));
+        var (_, newerId) = await SeedDocAsync();
+
+        var worker = BuildWorker();
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(newerId,
+            "the oldest row is inside its backoff window, so the claim must fall through to the next "
+            + "eligible one instead of stalling the whole queue behind it");
+
+        var older = await GetDocAsync(olderId);
+        older.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "the backing-off doc is untouched");
+        older.ProcessingAttempts.Should().Be(0);
     }
 
     // ----- AC2: up-front zombie guard --------------------------------------------------------
@@ -758,6 +887,9 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m, extractionTrust: seeded);
         Extraction.ThrowOnExtract = true;
         var worker = BuildWorker();
+        // Negative backoff base (clock-skew margin — see Always_failing_extraction_retries…) — this
+        // test drives repeated claims; the backoff itself has its own pins (#375).
+        worker.RetryBackoffBase = TimeSpan.FromMinutes(-1);
 
         // One genuine failure, budget intact: back to Pending, trust untouched.
         var firstClaim = await worker.ClaimNextAsync(CancellationToken.None);
@@ -871,9 +1003,17 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     public async Task A_terminal_failure_forces_its_distrust_over_a_confirmation_that_landed_mid_attempt(
         bool nonRetryable)
     {
-        // The failure writers share ProcessDocumentAsync's stale snapshot, so they share the no-op. A
-        // Failed row reading Trusted is precisely what MarkFailed's comment says can only come from a
-        // human confirmation AFTER the failure — this is the path that made it a lie.
+        // Since #375 round 2 NEITHER arm still holds ProcessDocumentAsync's stale snapshot — every
+        // failure writer books through FailOrRequeueAsync's guarded fresh reload, on which a
+        // mid-attempt confirmation is already visible (PUT /verify moves no status on an unsettled
+        // row, so the reload still finds it Processing). EF therefore emits the SET with or without
+        // SetTrust's force on BOTH arms — the force is belt-and-braces on the failure writers, kept
+        // for uniformity; only PersistSuccess still holds the stale snapshot and needs it (see
+        // PersistSuccess_forces_its_trust_decision_over_a_write_that_landed_mid_extraction). What this
+        // Theory pins is the OUTCOME: a terminal failure ends Distrusted whatever landed mid-attempt.
+        // Either way, a Failed row reading Trusted is precisely what MarkFailed's comment says can
+        // only come from a human confirmation AFTER the failure — these are the paths that could make
+        // it a lie.
         var (_, docId) = await SeedDocAsync(
             subscriptionSpendUsd: 0m,
             failedAttempts: nonRetryable ? 0 : ExtractionWorker.MaxAttempts - 1,
@@ -882,7 +1022,11 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         Extraction.ThrowOnExtract = !nonRetryable;
         Extraction.DuringExtract = CommitTrustMidExtract(docId, ExtractionTrust.Trusted);
 
-        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+        // Claim first, as production always does: the generic catch's fresh reload only records a
+        // failure for a row still Processing (#375 — a settled row means the outcome was superseded).
+        var worker = BuildWorker();
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
 
         var doc = await GetDocAsync(docId);
         doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed, "precondition: the budget is spent");
@@ -1294,11 +1438,12 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         // explicitly asks for — is routinely long on an ACORD 25 with an ACORD 101 continuation, so this
         // is an ordinary certificate, not an adversarial one.
         //
-        // The failure did NOT degrade gracefully: PersistSuccess's SaveChanges throws, and
-        // ProcessDocumentAsync's catch calls SaveChangesAsync on the SAME context, which still tracks the
-        // poisoned inserts — so the bookkeeping write throws too, FailedAttempts never increments, and the
-        // document is zombie-reclaimed every 5 minutes until ProcessingAttempts exceeds MaxClaims: ~15
-        // re-paid Document AI + LLM runs. Reachable from the unauthenticated portal upload route.
+        // The failure does NOT degrade gracefully: PersistSuccess's SaveChanges throws, and although the
+        // catch now books the failure on clean state against a fresh read (#375 item 1 — before
+        // that, the bookkeeping save re-threw on the same poisoned context and the document was
+        // zombie-reclaimed until ProcessingAttempts exceeded MaxClaims, ~15 re-paid runs), a
+        // deterministic 22001 still costs up to MaxAttempts re-paid, byte-identically doomed Document AI
+        // + LLM runs before a terminal Failed. Reachable from the unauthenticated portal upload route.
         var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
         Extraction.Result = FieldResult(
             new ExtractedField("description_of_operations", new string('d', 2_500), "text", 0.95));
@@ -1501,13 +1646,18 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
     {
         // ProcessingError is varchar(2000) and carries an arbitrary exception message (a provider body
         // echoed back, an EF error listing every parameter). A 22001 HERE is the worst kind: this IS the
-        // failure-bookkeeping write, so an overflow means the retry budget never advances and the document
-        // is reclaimed forever.
+        // failure-bookkeeping write — #375 item 1's tracker clear cannot help, the overflow is in the
+        // failure fields themselves — so an unclamped overflow means the retry budget never advances and
+        // the document is zombie-reclaimed until the MaxClaims backstop fails it up-front.
         var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
         Extraction.ThrowOnExtract = true;
         Extraction.ThrowMessage = new string('e', 5_000);
 
-        await BuildWorker().ProcessDocumentAsync(docId, CancellationToken.None);
+        // Claim first, as production always does — the generic catch only records a failure for a row
+        // still Processing (#375).
+        var worker = BuildWorker();
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
 
         var doc = await GetDocAsync(docId);
         doc.FailedAttempts.Should().Be(1, "the failure must be counted, not lost to a second throw");
@@ -1538,6 +1688,91 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         CanonicalDocumentTypes.All.Max(t => t.Length)
             .Should().BeLessThanOrEqualTo(document.FindProperty(nameof(Document.DocumentType))!.GetMaxLength()!.Value,
                 "Normalize is length-safe by construction only while every vocabulary literal fits the column");
+    }
+
+    // ----- #375 item 4: the DocumentFields clear materializes its query asynchronously ---------
+
+    /// <summary>
+    /// The whole gate, so the hermetic fixture below can drive the SAME assertions the production check
+    /// runs (the <see cref="Adr0050EnforcementTests"/> discipline). #375 item 4:
+    /// <c>RemoveRange(db.DocumentFields.Where(...))</c> enumerates the IQueryable on the blocking sync
+    /// path with no cancellation token — the exact pattern the codebase already fixed and documented in
+    /// <c>ComplianceCheckService.ApplyEvaluationCoreAsync</c>'s check-row clear. No behavioural test can
+    /// see the difference (the rows come out deleted either way), so the shape is pinned at the source.
+    /// <para/>
+    /// Anchoring on a bare <c>Contain(".ToListAsync(ct)")</c> was discriminating only while
+    /// <c>PersistSuccess</c> carried exactly one such call (#375 review round 2, S5): give the method a
+    /// second, unrelated <c>.ToListAsync(ct)</c> and re-spell the clear through a variable-held
+    /// IQueryable — <c>var q = db.DocumentFields.Where(...); db.DocumentFields.RemoveRange(q);</c> —
+    /// and both the Contain and the literal NotContain stay green while the delete-driving query
+    /// executes on the blocking sync path again. So the pin is on the SHAPE: one contiguous statement
+    /// materializing <c>db.DocumentFields</c> through <c>.ToListAsync(ct)</c> (no semicolon inside the
+    /// match — a semicolon means the chain ended without materializing), sitting BEFORE the
+    /// <c>RemoveRange</c> that consumes it.
+    /// </summary>
+    internal static void AssertMaterializedFieldClearShape(string body)
+    {
+        body.Should().Contain("RemoveRange(",
+            "anti-no-op: the field clear itself must still be there — deleting it would leave every "
+            + "re-extraction appending a second full field set (and would trivially satisfy the "
+            + "NotContain below)");
+
+        var removeAt = body.IndexOf("RemoveRange(", StringComparison.Ordinal);
+        var materialized = System.Text.RegularExpressions.Regex.Match(
+            body, @"db\.DocumentFields\s*\.Where\([^;]*?\.ToListAsync\(ct\)");
+        materialized.Success.Should().BeTrue(
+            "the delete-driving query must be materialized asynchronously, under the attempt's own "
+            + "cancellation token, in ONE contiguous statement off db.DocumentFields — a re-spelling "
+            + "that parks the un-materialized IQueryable in a variable executes it on the blocking "
+            + "sync path with no cancellation token (#375 item 4)");
+        materialized.Index.Should().BeLessThan(removeAt,
+            "the materialization must happen BEFORE RemoveRange stages the deletes — after it, "
+            + "RemoveRange was handed something else");
+
+        body.Should().NotContain("RemoveRange(db.DocumentFields.Where",
+            "handing RemoveRange an IQueryable executes the delete-driving query on the blocking sync "
+            + "path with no cancellation token (#375 item 4)");
+    }
+
+    [Fact]
+    public void The_field_clear_materializes_its_query_before_RemoveRange()
+    {
+        var source = File.ReadAllText(
+            SourceScan.ProductionFile("BackgroundServices", "ExtractionWorker.cs"));
+        AssertMaterializedFieldClearShape(
+            SourceScan.ExtractMethodBody(source, "private static async Task PersistSuccess("));
+    }
+
+    [Fact]
+    public void The_field_clear_pin_rejects_a_variable_held_IQueryable_clear()
+    {
+        // The evasion the round-2 review named (S5): a second, unrelated .ToListAsync(ct) keeps the old
+        // bare Contain green, and the variable-held IQueryable dodges the literal NotContain — yet the
+        // delete-driving query is back on the blocking sync path. Hermetic, per the
+        // Adr0050EnforcementTests discipline: proving the gate REJECTS the shape is the only way to
+        // know an enforcement test still enforces.
+        const string evasion = """
+            class C
+            {
+                private static async Task PersistSuccess(SystemDbContext db, Document doc, CancellationToken ct)
+                {
+                    var audits = await db.AuditLogs.Where(a => a.EntityId == doc.Id).ToListAsync(ct);
+                    var q = db.DocumentFields.Where(df => df.DocumentId == doc.Id);
+                    db.DocumentFields.RemoveRange(q);
+                    await db.SaveChangesAsync(ct);
+                }
+            }
+            """;
+        var body = SourceScan.ExtractMethodBody(evasion, "private static async Task PersistSuccess(");
+
+        // Proven, not assumed: the fixture clears BOTH of the old gate's anchors, so the rejection
+        // below can only come from the contiguous-shape pin.
+        body.Should().Contain(".ToListAsync(ct)");
+        body.Should().NotContain("RemoveRange(db.DocumentFields.Where");
+
+        var act = () => AssertMaterializedFieldClearShape(body);
+        act.Should().Throw<Exception>("the delete-driving query is un-materialized again")
+            .WithMessage("*ONE contiguous statement*");
     }
 
     // ----- #337: the worker grades inside PersistSuccess (combined unit of work) --------------
@@ -1654,6 +1889,225 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         done.ExtractionStatus.Should().Be(ExtractionStatus.Completed, "a grading failure must not fail the extraction");
         done.ComplianceStatus.Should().Be(ComplianceStatus.Pending, "the verdict degrades to safe Pending, never a stale confident value");
         done.GeneralLiabilityLimit.Should().Be(3_000_000m, "the extracted inputs still persisted");
+    }
+
+    // ----- #375 item 1: the failure bookkeeping never flushes the failed attempt's payload -----
+
+    [Fact]
+    public async Task A_transient_persist_failure_commits_only_the_bookkeeping_never_the_partial_payload()
+    {
+        // Fault the persist's OWN SaveChanges batch, exactly once, before it reaches Postgres. The
+        // generic catch then records the counted failure — and before #375 item 1 it did so on the SAME
+        // dirty context, so its bookkeeping save re-flushed the failed attempt's entire staged payload:
+        // the DocumentField inserts, the rebuilt ExtractionFields mirror, the typed columns, the
+        // "document.processed" feed row (for a read that failed!), and whatever verdict had been staged.
+        // The catch must clear the tracker first and commit ONLY the failure fields.
+        var (_, docId, blobPath) = await SeedGradableDocAsync(expectedValue: "2000000");
+        await Fixture.Factory.Services.GetRequiredService<IBlobStorageService>()
+            .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
+        Extraction.Result = GlResult("3000000"); // would grade Compliant if it committed
+        var worker = BuildWorker();
+        // Negative backoff base so the healing retry below can claim immediately regardless of
+        // host→container clock skew (#375 item 3 has its own pins).
+        worker.RetryBackoffBase = TimeSpan.FromMinutes(-1);
+
+        var fault = Fixture.Factory.Services.GetRequiredService<SystemCommandFaultInterceptor>();
+        // The only command carrying this INSERT is PersistSuccess's final batch — the loads before it
+        // (doc, subscription, existing fields, grading basis, checklist) are SELECTs.
+        fault.ShouldFault = sql => sql.Contains("INSERT INTO \"DocumentFields\"", StringComparison.Ordinal);
+
+        int faults;
+        try
+        {
+            (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+            await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+        }
+        finally
+        {
+            // Read BEFORE the reset — Reset() zeroes the counter.
+            faults = fault.FaultCount;
+            fault.Reset();
+        }
+
+        faults.Should().Be(1,
+            "the persist's SaveChanges really did fail — a predicate that matched nothing would make "
+            + "every assertion below a statement about the ordinary success path");
+
+        await using (var db = CreateSystemDb())
+        {
+            var doc = await db.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+            // The failure IS recorded…
+            doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "a transient persist failure is a counted, retryable failure");
+            doc.FailedAttempts.Should().Be(1);
+            doc.ProcessingError.Should().StartWith("extraction.failed");
+            // …and NOTHING of the failed attempt's payload rode along with it.
+            (await db.DocumentFields.CountAsync(f => f.DocumentId == docId)).Should().Be(0,
+                "the failed run's staged DocumentField inserts must not survive into the bookkeeping commit");
+            doc.ExtractionFields.Should().BeNull("the rebuilt JSON mirror was the failed run's, not the row's");
+            doc.ExtractionRawJson.Should().BeNull();
+            doc.ExtractionCompletedAt.Should().BeNull("the read did not complete");
+            doc.GeneralLiabilityLimit.Should().BeNull("a typed column staged by the failed run is new INPUT beside the old verdict — the torn pair ADR 0030 forbids");
+            doc.ComplianceStatus.Should().Be(ComplianceStatus.Pending, "no verdict may commit for a read that failed");
+            (await db.ComplianceChecks.CountAsync(c => c.DocumentId == docId)).Should().Be(0);
+            (await db.AuditLogs.CountAsync(a => a.EntityId == docId && a.Action == "document.processed"))
+                .Should().Be(0, "a stray feed event for a failed read is the #375 item 1 symptom");
+        }
+
+        // The failure was transient, so the retry (fault disarmed) must heal everything: one payload,
+        // one feed row, the real verdict.
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        await using var verify = CreateSystemDb();
+        var healed = await verify.Documents.AsNoTracking().SingleAsync(d => d.Id == docId);
+        healed.ExtractionStatus.Should().Be(ExtractionStatus.Completed);
+        healed.ComplianceStatus.Should().Be(ComplianceStatus.Compliant, "3M clears the 2M floor");
+        healed.GeneralLiabilityLimit.Should().Be(3_000_000m);
+        (await verify.DocumentFields.CountAsync(f => f.DocumentId == docId))
+            .Should().Be(Extraction.Result.Fields.Count, "exactly one field set — never the failed run's plus the retry's");
+        (await verify.AuditLogs.CountAsync(a => a.EntityId == docId && a.Action == "document.processed"))
+            .Should().Be(1, "exactly one feed row — the successful read's");
+    }
+
+    // ----- #375 review: a throw AFTER the persist committed records nothing ---------------------
+
+    [Theory]
+    [InlineData(0)]                                 // plain arm: resurrection = a re-paid read
+    [InlineData(ExtractionWorker.MaxAttempts - 1)]  // worse arm: Failed + Distrusted over a GOOD read
+    public async Task A_throw_after_the_persist_committed_does_not_resurrect_the_completed_read(
+        int seededFailedAttempts)
+    {
+        // The only awaited call AFTER PersistSuccess's commit is costTracker.RecordSpendAsync — an
+        // ExecuteUpdate on the same Neon connection, inside the same try. A transient throw there lands
+        // in the generic catch with the row already Completed, and an unguarded RecordFailedAttempt
+        // would demote it back to Pending — re-claiming and re-paying OCR + LLM for a read that
+        // SUCCEEDED — or, at MaxAttempts - 1 prior failures (the counter survives a successful
+        // persist), push the counter over the budget and stamp Failed + Distrusted over a good read,
+        // dropping the vendor out of in-force coverage. The catch's fresh reload therefore carries the
+        // same ExtractionStatus == Processing guard as FailOrRequeueAsync's (#375): a settled row means
+        // this attempt's outcome was superseded, so nothing is recorded. The timed-out sibling window
+        // is pinned by A_timed_out_attempt_does_not_resurrect_a_doc_that_reached_a_terminal_state.
+        var (_, docId) = await SeedDocAsync(
+            subscriptionSpendUsd: 0m, failedAttempts: seededFailedAttempts);
+        var worker = BuildWorker(); // the default Extraction.Result carries a non-zero cost, so RecordSpendAsync runs
+
+        var fault = Fixture.Factory.Services.GetRequiredService<SystemCommandFaultInterceptor>();
+        // RecordSpendAsync is the only Subscriptions WRITER on this path (the cost check is a SELECT),
+        // and it runs strictly after PersistSuccess's SaveChanges committed the Completed row.
+        fault.ShouldFault = sql => sql.Contains("UPDATE \"Subscriptions\"", StringComparison.Ordinal);
+
+        int faults;
+        try
+        {
+            (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+            await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+        }
+        finally
+        {
+            // Read BEFORE the reset — Reset() zeroes the counter.
+            faults = fault.FaultCount;
+            fault.Reset();
+        }
+
+        faults.Should().Be(1,
+            "the spend record really did fail — a predicate that matched nothing would make every "
+            + "assertion below a statement about the ordinary success path");
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionCompletedAt.Should().NotBeNull("precondition: the persist committed before the throw");
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "a failure to RECORD THE SPEND is not a failed read — the persisted outcome stands");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+            "an unguarded catch at MaxAttempts - 1 prior failures would have stamped Failed + Distrusted "
+            + "over a good read, dropping the vendor out of in-force coverage");
+        doc.FailedAttempts.Should().Be(seededFailedAttempts,
+            "no failure is charged against the budget for an attempt whose outcome was superseded");
+        doc.ProcessingError.Should().BeNull();
+        doc.NextAttemptAt.Should().BeNull("no backoff may be stamped on a settled row");
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+            "a Completed document must stay unclaimable — the resurrection would have re-paid OCR + LLM");
+    }
+
+    [Fact]
+    public async Task A_non_retryable_failure_does_not_overwrite_a_read_that_settled_mid_attempt()
+    {
+        // #375 review round 2 (confirmed). The non-retryable arm used to stamp Failed + forced
+        // Distrusted through the tracked snapshot ProcessDocumentAsync loaded before OCR + the LLM —
+        // unconditionally. If this attempt's claim goes stale past ZombieClaimTimeout without its own
+        // CTS firing (a stalled container, a provider client that does not observe ct), a second
+        // container zombie-reclaims and completes the read; when this container's provider call then
+        // comes back non-retryable (token cap, content block), the terminal stamp landed on top of the
+        // fresh Completed/Trusted row — dropping the vendor out of in-force coverage (ADR 0042 /
+        // ComputeCoverage) with no self-heal. The arm therefore books through the same guarded fresh
+        // reload as every other failure writer: a settled row means this attempt's outcome was
+        // superseded, and nothing is written.
+        var (_, docId) = await SeedDocAsync(
+            subscriptionSpendUsd: 0m, extractionTrust: ExtractionTrust.Distrusted);
+        Extraction.ThrowNonRetryable = true;
+        Extraction.DuringExtract = async () =>
+        {
+            // The second container's completed read, committed on another connection while this
+            // attempt is still out at the LLM. It restores trust (a clean re-read earns Trusted back —
+            // PersistSuccess's one boolean, two columns), which is what makes BOTH terminal columns
+            // discriminate below.
+            await using var other = CreateSystemDb();
+            var mid = await other.Documents.SingleAsync(d => d.Id == docId);
+            mid.ExtractionStatus = ExtractionStatus.Completed;
+            mid.ExtractionTrust = ExtractionTrust.Trusted;
+            mid.ExtractionCompletedAt = DateTime.UtcNow;
+            await other.SaveChangesAsync();
+        };
+
+        var worker = BuildWorker();
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
+            "the read that settled mid-attempt stands — an unconditional terminal stamp here re-opens "
+            + "exactly the window the generic catch and the timeout path already guard (#375)");
+        doc.ExtractionTrust.Should().Be(ExtractionTrust.Trusted,
+            "stamping Distrusted over the settled read would drop the vendor out of in-force coverage "
+            + "(ADR 0042 / ComputeCoverage) with no self-heal");
+        doc.ProcessingError.Should().BeNull(
+            "an attempt whose outcome was superseded records nothing at all");
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+            "a Completed document must stay unclaimable");
+    }
+
+    [Fact]
+    public async Task A_failing_attempt_whose_document_vanished_records_no_bookkeeping()
+    {
+        // The other arm of the generic catch's guarded reload (#375 item 1): the fresh read takes the
+        // soft-delete filter, so a document deleted while the attempt was out at the LLM yields null
+        // and the catch returns without writing anything. There is nothing to bookkeep FOR — the row
+        // is unclaimable whatever its counters say (ClaimSql filters "DeletedAt" IS NULL), and a
+        // FailedAttempts/ProcessingError write onto a row the customer just deleted would be noise.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.ThrowOnExtract = true;
+        Extraction.DuringExtract = async () =>
+        {
+            // Soft-delete on another connection while the worker is out at the LLM — the hook runs
+            // before the throw, so the catch's reload sees the deleted row.
+            await using var other = CreateSystemDb();
+            var mid = await other.Documents.SingleAsync(d => d.Id == docId);
+            mid.DeletedAt = DateTime.UtcNow;
+            await other.SaveChangesAsync();
+        };
+
+        var worker = BuildWorker();
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        await using var db = CreateSystemDb();
+        var after = await db.Documents.AsNoTracking().IgnoreQueryFilters().SingleAsync(d => d.Id == docId);
+        after.DeletedAt.Should().NotBeNull("precondition: the mid-attempt delete really committed");
+        after.FailedAttempts.Should().Be(0,
+            "no failure may be charged to a document that no longer exists — the filtered reload must "
+            + "come back null, not bookkeep through IgnoreQueryFilters");
+        after.ProcessingError.Should().BeNull();
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+            "a soft-deleted row is unclaimable whatever its status");
     }
 
     // ----- AC4: FOR UPDATE SKIP LOCKED --------------------------------------------------------
@@ -2060,6 +2514,38 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
 
     [Theory]
     [MemberData(nameof(NonUtcSessionZones))]
+    public async Task Claim_under_non_UTC_session_honors_an_unexpired_backoff(string ianaZone)
+    {
+        // The #375 backoff gate is the THIRD timestamptz comparison in ClaimSql and inherits ADR
+        // 0009's rule: bare now(), never AT TIME ZONE. NextAttemptAt 30 min in the future; a
+        // session-TZ-bridged comparison under New_York (UTC-4/-5) would shift the RHS hours into the
+        // future, so the unexpired stamp would wrongly read as passed and the doc be claimed at poll
+        // speed — the exact budget burn the backoff exists to stop. (Under Tokyo the broken SQL also
+        // holds the doc; the New_York branch is the discriminating one.)
+        var (_, docId) = await SeedDocAsync(nextAttemptAt: DateTime.UtcNow.AddMinutes(30));
+
+        var claimed = await RunClaimUnderSessionTimeZoneAsync(ianaZone);
+
+        claimed.Should().BeNull("an unexpired backoff must hold under any session TZ");
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.Pending, "untouched");
+    }
+
+    [Theory]
+    [MemberData(nameof(NonUtcSessionZones))]
+    public async Task Claim_under_non_UTC_session_claims_an_expired_backoff(string ianaZone)
+    {
+        // The other direction: NextAttemptAt 30 min in the past. Under Tokyo (UTC+9) a bridged
+        // comparison shifts the RHS ~9h into the past, so the long-expired stamp would wrongly hold
+        // the document — a requeued failure stuck for hours instead of minutes.
+        var (_, docId) = await SeedDocAsync(nextAttemptAt: DateTime.UtcNow.AddMinutes(-30));
+
+        var claimed = await RunClaimUnderSessionTimeZoneAsync(ianaZone);
+
+        claimed.Should().Be(docId, "an expired backoff gates nothing under any session TZ");
+    }
+
+    [Theory]
+    [MemberData(nameof(NonUtcSessionZones))]
     public async Task Claim_under_non_UTC_session_writes_ProcessingStartedAt_at_real_now_not_offset(string ianaZone)
     {
         // The symmetric write-side bug: under the pre-fix SQL, assigning `now() at time zone 'utc'`
@@ -2367,6 +2853,48 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed, "the last attempt's timeout spends the budget");
         doc.FailedAttempts.Should().Be(ExtractionWorker.MaxAttempts);
         doc.ProcessingError.Should().StartWith("extraction.timeout");
+    }
+
+    [Theory]
+    [InlineData(ExtractionStatus.Completed)]
+    [InlineData(ExtractionStatus.Failed)]
+    public async Task A_timed_out_attempt_does_not_resurrect_a_doc_that_reached_a_terminal_state(
+        ExtractionStatus terminal)
+    {
+        // #375 item 2. FailOrRequeueAsync used to load by id alone and apply RecordFailedAttempt
+        // unconditionally — unlike its sibling RequeueInterruptedAsync, which filters on
+        // ExtractionStatus == Processing. A document that reached a terminal state between the
+        // cancellation and the fresh load (a concurrent container's zombie reclaim running it to
+        // completion — or to a NON-RETRYABLE failure) was then resurrected to Pending and re-extracted,
+        // re-paying OCR + LLM for a document that had already settled. The guard lives in the WHERE of
+        // the reload, mirroring the shutdown path.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        const string settledError = "extraction.token_limit: settled by a concurrent container";
+        Extraction.DuringExtract = async () =>
+        {
+            // A concurrent writer settles the document while this attempt is out at the (wedged) LLM —
+            // the state FailOrRequeueAsync will find once the timeout fires.
+            await using var db = CreateSystemDb();
+            var doc = await db.Documents.SingleAsync(d => d.Id == docId);
+            doc.ExtractionStatus = terminal;
+            doc.ProcessingError = terminal == ExtractionStatus.Failed ? settledError : null;
+            await db.SaveChangesAsync();
+        };
+        Extraction.ExtractDelay = TimeSpan.FromSeconds(3);
+        var worker = BuildWorker(attemptTimeout: TimeSpan.FromMilliseconds(250));
+
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessClaimedAsync(docId, CancellationToken.None);
+
+        var after = await GetDocAsync(docId);
+        after.ExtractionStatus.Should().Be(terminal,
+            "a document that settled while the attempt was wedged must NOT be resurrected to Pending");
+        after.FailedAttempts.Should().Be(0,
+            "the timed-out attempt's outcome was superseded, so no failure is charged against the budget");
+        after.ProcessingError.Should().Be(terminal == ExtractionStatus.Failed ? settledError : null,
+            "the settling writer's record survives — never overwritten with extraction.timeout");
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+            "a terminal document must stay unclaimable — the resurrection would have re-paid OCR + LLM");
     }
 
     // ----- #259 problem 2: a graceful shutdown mid-attempt doesn't burn the budget -------------
