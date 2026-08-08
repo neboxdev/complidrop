@@ -2470,6 +2470,48 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         doc.ProcessingError.Should().StartWith("extraction.timeout");
     }
 
+    [Theory]
+    [InlineData(ExtractionStatus.Completed)]
+    [InlineData(ExtractionStatus.Failed)]
+    public async Task A_timed_out_attempt_does_not_resurrect_a_doc_that_reached_a_terminal_state(
+        ExtractionStatus terminal)
+    {
+        // #375 item 2. FailOrRequeueAsync used to load by id alone and apply RecordFailedAttempt
+        // unconditionally — unlike its sibling RequeueInterruptedAsync, which filters on
+        // ExtractionStatus == Processing. A document that reached a terminal state between the
+        // cancellation and the fresh load (a concurrent container's zombie reclaim running it to
+        // completion — or to a NON-RETRYABLE failure) was then resurrected to Pending and re-extracted,
+        // re-paying OCR + LLM for a document that had already settled. The guard lives in the WHERE of
+        // the reload, mirroring the shutdown path.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        const string settledError = "extraction.token_limit: settled by a concurrent container";
+        Extraction.DuringExtract = async () =>
+        {
+            // A concurrent writer settles the document while this attempt is out at the (wedged) LLM —
+            // the state FailOrRequeueAsync will find once the timeout fires.
+            await using var db = CreateSystemDb();
+            var doc = await db.Documents.SingleAsync(d => d.Id == docId);
+            doc.ExtractionStatus = terminal;
+            doc.ProcessingError = terminal == ExtractionStatus.Failed ? settledError : null;
+            await db.SaveChangesAsync();
+        };
+        Extraction.ExtractDelay = TimeSpan.FromSeconds(3);
+        var worker = BuildWorker(attemptTimeout: TimeSpan.FromMilliseconds(250));
+
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessClaimedAsync(docId, CancellationToken.None);
+
+        var after = await GetDocAsync(docId);
+        after.ExtractionStatus.Should().Be(terminal,
+            "a document that settled while the attempt was wedged must NOT be resurrected to Pending");
+        after.FailedAttempts.Should().Be(0,
+            "the timed-out attempt's outcome was superseded, so no failure is charged against the budget");
+        after.ProcessingError.Should().Be(terminal == ExtractionStatus.Failed ? settledError : null,
+            "the settling writer's record survives — never overwritten with extraction.timeout");
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+            "a terminal document must stay unclaimable — the resurrection would have re-paid OCR + LLM");
+    }
+
     // ----- #259 problem 2: a graceful shutdown mid-attempt doesn't burn the budget -------------
 
     [Fact]

@@ -535,14 +535,30 @@ public class ExtractionWorker(
     /// fresh, bounded token — NOT the worker's stopping token — so a shutdown that races the timeout
     /// can't tear down the bookkeeping write and strand the document in <c>Processing</c> (it would
     /// then only self-heal via the 5-minute zombie reclaim).
+    /// <para/>
+    /// Only a document still in <c>Processing</c> gets the failure recorded — the same guard
+    /// <see cref="RequeueInterruptedAsync"/> carries, in the WHERE of the reload so there is no
+    /// read-then-write gap on the check itself (#375 item 2). Between the cancellation and this fresh
+    /// load the row can have moved: a concurrent container's zombie reclaim can have run the document
+    /// to a terminal state, and <c>RecordFailedAttempt</c> applied unconditionally would then resurrect
+    /// it to <c>Pending</c> — re-extracting (and re-paying) a document that already <c>Completed</c>,
+    /// or re-arming one that failed NON-retryably. A settled row means this attempt's outcome was
+    /// superseded, so there is nothing left to record.
     /// </summary>
     private async Task FailOrRequeueAsync(Guid documentId, string code, string message)
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<SystemDbContext>();
-        var doc = await db.Documents.FirstOrDefaultAsync(d => d.Id == documentId, cts.Token);
-        if (doc is null) return;
+        var doc = await db.Documents.FirstOrDefaultAsync(
+            d => d.Id == documentId && d.ExtractionStatus == ExtractionStatus.Processing, cts.Token);
+        if (doc is null)
+        {
+            logger.LogInformation(
+                "Timed-out attempt for {DocumentId} found the document no longer Processing; leaving it as is.",
+                documentId);
+            return;
+        }
         RecordFailedAttempt(db, doc, code, message);
         await db.SaveChangesAsync(cts.Token);
     }
