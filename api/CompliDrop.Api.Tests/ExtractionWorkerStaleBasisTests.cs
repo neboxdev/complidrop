@@ -439,7 +439,8 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
     public async Task A_document_deleted_mid_extraction_persists_without_a_second_extraction()
     {
         // The basis read is one more thing that can fail, and a throw out of PersistSuccess is the most
-        // expensive failure in this codebase: since #375 item 1 the catch clears the tracker and counts
+        // expensive failure in this codebase: since #375 item 1 the catch abandons the dirty context
+        // unsaved and counts
         // the failure against a guarded fresh read, so the throw costs a counted failure plus a re-paid
         // Document AI + LLM run per retry — bounded by MaxAttempts and spaced by the retry backoff
         // (ExtractionWorker.Clamp's remarks; pre-#375 the bookkeeping save re-threw on the same context

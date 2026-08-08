@@ -1439,7 +1439,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         // is an ordinary certificate, not an adversarial one.
         //
         // The failure does NOT degrade gracefully: PersistSuccess's SaveChanges throws, and although the
-        // catch now clears the tracker and counts the failure against a fresh read (#375 item 1 — before
+        // catch now books the failure on clean state against a fresh read (#375 item 1 — before
         // that, the bookkeeping save re-threw on the same poisoned context and the document was
         // zombie-reclaimed until ProcessingAttempts exceeded MaxClaims, ~15 re-paid runs), a
         // deterministic 22001 still costs up to MaxAttempts re-paid, byte-identically doomed Document AI

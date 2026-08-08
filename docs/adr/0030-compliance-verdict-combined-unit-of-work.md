@@ -295,7 +295,8 @@ exception is catastrophic" — price a throw out of `ExtractionWorker.PersistSuc
 landing: the catch's bookkeeping save re-threw on the same dirty context, `FailedAttempts` never
 incremented, and the document was zombie-reclaimed every five minutes, re-paying Document AI + the LLM on
 every doomed run until `MaxClaims`. [#375](https://github.com/neboxdev/complidrop/issues/375) item 1
-changed that landing: the catch now clears the tracker and records a counted failure against a fresh read
+changed that landing: the catch now abandons the dirty context unsaved and records a counted failure in a
+fresh scope (`FailOrRequeueAsync`) against a fresh read
 guarded on `ExtractionStatus == Processing`, so the same throw now costs one counted failure plus a
 re-paid extraction per retry — bounded by `MaxAttempts` and spaced by the #375 exponential backoff
 ([ADR 0050](0050-reextract-refuses-a-live-extraction-claim.md) Amendment 2) — before a terminal `Failed`,

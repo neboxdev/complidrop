@@ -270,18 +270,24 @@ on `DocumentDetail` and widen the detail page's status-dependent `refetchInterva
 `nextAttemptAt` is in the future — a widening of an existing predicate, not a new mechanism.
 
 **6. The sibling #375 changes this queue depends on, recorded here because the claim's correctness
-leans on them.** The failure bookkeeping that stamps the backoff now runs on CLEAN state against a
-GUARDED fresh read: `ProcessDocumentAsync`'s generic catch clears the change tracker (a throw out of
-`PersistSuccess` leaves it holding the failed attempt's staged payload, which the bookkeeping save used
-to re-flush — or re-throw on) and reloads the row with the same `ExtractionStatus == Processing`
-predicate `FailOrRequeueAsync`'s timeout path carries, so an attempt whose outcome already SETTLED —
-its own successful persist followed by a transient `RecordSpendAsync` failure, or a concurrent
-container's zombie reclaim running the document to a terminal state — records nothing at all: no
+leans on them.** ALL failure bookkeeping now runs on CLEAN state against a GUARDED fresh read, through
+ONE routine — `FailOrRequeueAsync`, unified in review round 2 (S6) after the first cut left the generic
+catch with a hand-copied reload and `MarkFailed`'s non-retryable arm with none. The routine opens a
+fresh scope on its own bounded token and reloads the row with an `ExtractionStatus == Processing`
+predicate in the reload's WHERE, then records either a counted retry (`RecordFailedAttempt` — the
+generic catch and the per-attempt timeout) or the terminal `Failed` + `Distrusted` stamp (`MarkFailed`
+— the non-retryable, claims-backstop and cost-ceiling arms). A throw out of `PersistSuccess` leaves the
+attempt's own context holding its staged payload; that context is now disposed UNSAVED (the old catch
+re-flushed — or re-threw on — it). An attempt whose outcome already SETTLED — its own successful
+persist followed by a transient `RecordSpendAsync` failure, or a concurrent container's zombie reclaim
+running the document to a terminal state or a fresh completed read — records nothing at all: no
 resurrection to Pending (a re-paid read), no backoff stamp on a settled row, and no terminal
-`Failed` + `Distrusted` stamped over a good read whose budget was nearly spent. A document soft-deleted
-mid-attempt likewise gets no bookkeeping (the reload takes the soft-delete filter; the row is
-unclaimable regardless — `ClaimSql` filters `"DeletedAt" IS NULL`). ADR 0030's 2026-08-08 note records
-what this does to the doomed-persist landing its Amendment 4 is measured against.
+`Failed` + `Distrusted` stamped over a good read — whether by the counted arm with the budget nearly
+spent, or by the non-retryable arm directly (round 2's confirmed finding: the first cut still wrote
+that stamp through the minutes-old tracked snapshot). A document soft-deleted mid-attempt likewise
+gets no bookkeeping (the reload takes the soft-delete filter; the row is unclaimable regardless —
+`ClaimSql` filters `"DeletedAt" IS NULL`). ADR 0030's 2026-08-08 note records what this does to the
+doomed-persist landing its Amendment 4 is measured against.
 
 ## References
 
@@ -301,5 +307,6 @@ what this does to the doomed-persist landing its Amendment 4 is measured against
   `api/CompliDrop.Api/Services/ExtractionClaims.cs` (`ZombieTimeout` — the source both layers read),
   `api/CompliDrop.Api/BackgroundServices/ExtractionWorker.cs` (`ZombieClaimTimeout` alias, `ClaimSql`;
   for Amendment 2 `RetryBackoffBase`/`RetryBackoffFor`, `RecordFailedAttempt`'s retry arm and
-  `ProcessDocumentAsync`'s guarded catch), `api/CompliDrop.Api/Entities/Document.cs` (`NextAttemptAt`),
+  `FailOrRequeueAsync`, the one guarded failure-bookkeeping routine every failure writer books
+  through), `api/CompliDrop.Api/Entities/Document.cs` (`NextAttemptAt`),
   `frontend/src/app/(dashboard)/documents/[id]/page.tsx` (`reextract.onError` — Amendment 1)

@@ -449,25 +449,26 @@ Both are defined in this repo's `.claude/agents/`.
     covered vendor for the whole retry cycle.
   - The three WORKER writers go through `ExtractionWorker.SetTrust`, which sets `IsModified` on the
     column — removing the force is a real finding. The stale-snapshot rationale holds for
-    `PersistSuccess` and `MarkFailed`: `ProcessDocumentAsync` loads the doc BEFORE OCR+LLM and holds
-    that snapshot for minutes; EF emits only changed properties, so assigning the snapshot's own value
-    emits no `SET` at all while the row may have moved (a mid-read `PUT /verify` commits the opposite
-    value). `RecordFailedAttempt` writes against a FRESH read on both of its call sites since #375
-    item 1 (the generic catch clears the tracker and reloads through the same guarded predicate the
-    timeout path always had), so THERE the force is belt-and-braces, kept for uniformity — do not flag
-    it as dead code, and do not cite it as license to unforce the other two. Do NOT file the force as
-    the ADR 0030 / #460 stale-snapshot residual, and do NOT read #460's read-only grading basis (ADR
-    0030 Amendment 2, which ships on the same method) as a reason to unforce this: #460 is about
-    verdict INPUTS a REQUEST owns, which is why it grades from a fresh value and writes no input back
-    — it FORCES `ComplianceStatus` (`ForceVerdictWrite`) for the same reason this forces trust, because
-    a verdict, like trust, is the writer's OWN conclusion, which ADR 0052 §2 says it owns. The axis is
-    ownership, not mechanism. Pinned by
-    `PersistSuccess_forces_its_trust_decision_over_a_write_that_landed_mid_extraction` and
-    `A_terminal_failure_forces_its_distrust_over_a_confirmation_that_landed_mid_attempt` — whose
-    `nonRetryable: false` arm, post-#375, pins the terminal OUTCOME rather than the force (the fresh
-    reload makes EF emit the `SET` either way; only the `true`/`MarkFailed` arm reddens if the force is
-    removed) — (`FakeExtractionClient.DuringExtract` constructs the interleaving; do not "simplify" it
-    away).
+    `PersistSuccess`: `ProcessDocumentAsync` loads the doc BEFORE OCR+LLM and holds that snapshot for
+    minutes; EF emits only changed properties, so assigning the snapshot's own value emits no `SET` at
+    all while the row may have moved (a mid-read `PUT /verify` commits the opposite value).
+    `MarkFailed` and `RecordFailedAttempt` write against a FRESH read on every call site since #375
+    (round 2 routed the terminal arms — non-retryable, claims backstop, cost ceiling — through
+    `FailOrRequeueAsync`'s guarded reload too, the ONE failure-bookkeeping routine), so THERE the
+    force is belt-and-braces, kept for uniformity — do not flag it as dead code, and do not cite it as
+    license to unforce `PersistSuccess`. Do NOT file the force as the ADR 0030 / #460 stale-snapshot
+    residual, and do NOT read #460's read-only grading basis (ADR 0030 Amendment 2, which ships on the
+    same method) as a reason to unforce this: #460 is about verdict INPUTS a REQUEST owns, which is
+    why it grades from a fresh value and writes no input back — it FORCES `ComplianceStatus`
+    (`ForceVerdictWrite`) for the same reason this forces trust, because a verdict, like trust, is the
+    writer's OWN conclusion, which ADR 0052 §2 says it owns. The axis is ownership, not mechanism.
+    Pinned by `PersistSuccess_forces_its_trust_decision_over_a_write_that_landed_mid_extraction` and
+    `A_terminal_failure_forces_its_distrust_over_a_confirmation_that_landed_mid_attempt` — which,
+    post-#375 round 2, pins the terminal OUTCOME on BOTH arms rather than the force (the guarded
+    fresh reload makes EF emit the `SET` either way; only `PersistSuccess`'s pin reddens if the force
+    is removed) — plus `A_non_retryable_failure_does_not_overwrite_a_read_that_settled_mid_attempt`
+    for the guard itself (`FakeExtractionClient.DuringExtract` constructs the interleavings; do not
+    "simplify" it away).
   - OWNERSHIP and SUBJECT are different questions, and #467 / ADR 0052 Amendment 1 answers the second
     WITHOUT touching the first. `PersistSuccess`'s readability trigger reads the #460 grading basis
     (`DocumentFieldReadability.UnreadableCanonicalFields(basis ?? doc)`) — the row this commit will
@@ -1130,7 +1131,8 @@ Both are defined in this repo's `.claude/agents/`.
     ENTITY-level, so it makes every tracked `Document` write optimistic whether or not that path
     handles the exception. The worst landing is `ExtractionWorker.PersistSuccess`, whose window is the
     whole OCR + LLM run and whose own remarks record the cost of a throw there (since #375 item 1 the
-    catch clears the tracker and counts the failure against a guarded fresh read, so the throw costs at
+    catch abandons the dirty context unsaved and books the failure through `FailOrRequeueAsync`'s
+    guarded fresh read, so the throw costs at
     most `MaxAttempts` **re-paid Document AI + LLM runs**, spaced by the retry backoff, before a
     terminal `Failed` — bounded now, still real money per landing for a row-count technicality). "Just
     add the xmin token" is a refuted suggestion,

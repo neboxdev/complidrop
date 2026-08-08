@@ -20,7 +20,8 @@ namespace CompliDrop.Api.Data;
 /// <para/>
 /// On ONE writer that exception is expensive rather than merely noisy, which is why this exists.
 /// <c>ExtractionWorker.PersistSuccess</c> throws it out of the persist, and <c>ProcessDocumentAsync</c>'s
-/// catch — which since #375 item 1 clears the tracker and records the failure against a guarded fresh
+/// catch — which since #375 item 1 abandons the dirty context unsaved and records the failure in a fresh
+/// scope against a guarded fresh
 /// read — counts it and requeues: one counted failure and a re-paid Document AI + LLM run per landing,
 /// bounded by <c>ExtractionWorker.MaxAttempts</c> and spaced by the #375 retry backoff, before a terminal
 /// <c>Failed</c> (<c>ExtractionWorker.Clamp</c>'s remarks). Pre-#375 it was worse — the bookkeeping save
