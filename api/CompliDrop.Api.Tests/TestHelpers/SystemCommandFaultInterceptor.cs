@@ -39,12 +39,20 @@ namespace CompliDrop.Api.Tests.TestHelpers;
 /// </summary>
 public sealed class SystemCommandFaultInterceptor : DbCommandInterceptor
 {
-    /// <summary>The message of the injected failure, so a test can prove the degrade came from HERE.</summary>
-    public const string FaultMessage = "Simulated transient failure reading the grading basis.";
+    /// <summary>
+    /// The message of the injected failure, so a test can prove the outcome came from HERE. Generic on
+    /// purpose (#375 review round 2, S3): the faulted command is whatever the predicate matched — the
+    /// grading-basis SELECT this class was built for, but also a <c>DocumentFields</c> INSERT batch or
+    /// <c>RecordSpendAsync</c>'s <c>UPDATE "Subscriptions"</c> — and this text lands in real columns
+    /// (<c>Document.ProcessingError</c>), so a shape-specific sentence would misname the failure there.
+    /// </summary>
+    public const string FaultMessage = "Simulated transient command failure.";
 
     /// <summary>
-    /// Receives each reader command's SQL while armed; return <c>true</c> to fail that one instead of
-    /// executing it. Null means inert, and the hook nulls it itself the moment it fires.
+    /// Receives each intercepted command's SQL while armed — reader batches (EF queries and
+    /// <c>SaveChanges</c>) AND the set-based non-query writers (<c>ExecuteUpdateAsync</c> /
+    /// <c>ExecuteDeleteAsync</c>) — return <c>true</c> to fail that one instead of executing it. Null
+    /// means inert, and the hook nulls it itself the moment it fires.
     /// </summary>
     public Func<string, bool>? ShouldFault { get; set; }
 
