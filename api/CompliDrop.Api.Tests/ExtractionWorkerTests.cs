@@ -78,7 +78,8 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         decimal? subscriptionSpendUsd = null,
         string plan = "free",
         string? documentType = null,
-        ExtractionTrust extractionTrust = ExtractionTrust.Trusted)
+        ExtractionTrust extractionTrust = ExtractionTrust.Trusted,
+        DateTime? nextAttemptAt = null)
     {
         var orgId = Guid.NewGuid();
         var docId = Guid.NewGuid();
@@ -129,6 +130,7 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             ProcessingAttempts = attempts,
             FailedAttempts = failedAttempts,
             ProcessingStartedAt = processingStartedAt,
+            NextAttemptAt = nextAttemptAt,
             CreatedAt = createdAt ?? now,
             UpdatedAt = now,
         });
@@ -239,6 +241,9 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
         Extraction.ThrowOnExtract = true;
         var worker = BuildWorker();
+        // Zero backoff so the loop can drive the whole budget at claim speed — the backoff schedule
+        // itself is pinned by the #375 item 3 tests below.
+        worker.RetryBackoffBase = TimeSpan.Zero;
 
         // Safety cap well above MaxAttempts: a regression to infinite retry exits here and fails the
         // assertion below instead of hanging the suite forever.
@@ -262,6 +267,101 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         doc.FailedAttempts.Should().Be(ExtractionWorker.MaxAttempts);
         doc.ProcessingAttempts.Should().Be(ExtractionWorker.MaxAttempts);
         doc.ProcessingError.Should().StartWith("extraction.failed");
+    }
+
+    // ----- #375 item 3: exponential backoff between retries ------------------------------------
+
+    [Fact]
+    public async Task A_transient_failure_stamps_a_not_before_the_claim_waits_out()
+    {
+        // Without a not-before, a requeued failure was reclaimable on the next 5-second poll, so a
+        // fast-failing transient outage (provider 500s, blob 503) burned all MaxAttempts in ~25-30s
+        // and failed the document terminally — for an outage that would have cleared in minutes.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m);
+        Extraction.ThrowOnExtract = true;
+        var worker = BuildWorker(); // REAL backoff base — the stamp is the contract under test
+
+        var before = DateTime.UtcNow;
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+        var after = DateTime.UtcNow;
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Pending, "one failure leaves the budget intact");
+        doc.FailedAttempts.Should().Be(1);
+        doc.NextAttemptAt.Should().NotBeNull("the retry arm stamps the backoff");
+        doc.NextAttemptAt!.Value.Should()
+            .BeOnOrAfter(before + worker.RetryBackoffFor(1)).And
+            .BeOnOrBefore(after + worker.RetryBackoffFor(1));
+
+        // The queue honors the stamp: Pending, yet not claimable until it passes.
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().BeNull(
+            "a requeued failure inside its backoff window must not be reclaimed on the next poll");
+
+        // …and once the window has elapsed (simulated by rewinding the stamp) the claim proceeds.
+        await using (var db = CreateSystemDb())
+        {
+            var rewind = await db.Documents.SingleAsync(d => d.Id == docId);
+            rewind.NextAttemptAt = DateTime.UtcNow.AddSeconds(-1);
+            await db.SaveChangesAsync();
+        }
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId,
+            "an expired stamp gates nothing — the backoff delays the retry, it never strands the document");
+    }
+
+    [Fact]
+    public async Task The_backoff_schedule_doubles_per_failed_attempt()
+    {
+        // Deliberate literals, the #62 convention: this test is the regression discriminator for the
+        // schedule, so deriving the expectations from RetryBackoffBase would make it a tautology.
+        var worker = BuildWorker();
+        worker.RetryBackoffFor(1).Should().Be(TimeSpan.FromMinutes(1));
+        worker.RetryBackoffFor(2).Should().Be(TimeSpan.FromMinutes(2));
+        worker.RetryBackoffFor(3).Should().Be(TimeSpan.FromMinutes(4));
+        worker.RetryBackoffFor(4).Should().Be(TimeSpan.FromMinutes(8),
+            "the deepest retry-armed failure with MaxAttempts = 5 — the whole cycle spans ~15 minutes");
+        worker.RetryBackoffFor(100).Should().Be(TimeSpan.FromMinutes(32),
+            "the exponent is capped so a corrupt counter cannot produce a year-long stamp");
+    }
+
+    [Fact]
+    public async Task The_stamp_grows_with_the_failure_count()
+    {
+        // Third genuine failure: the stamp must be RetryBackoffFor(3) = 4× base, i.e. computed from
+        // the INCREMENTED count — a stamp computed from the pre-increment count would cut every
+        // window in half and the last one to a quarter.
+        var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m, failedAttempts: 2);
+        Extraction.ThrowOnExtract = true;
+        var worker = BuildWorker();
+
+        var before = DateTime.UtcNow;
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+        var after = DateTime.UtcNow;
+
+        var doc = await GetDocAsync(docId);
+        doc.FailedAttempts.Should().Be(3);
+        doc.NextAttemptAt!.Value.Should()
+            .BeOnOrAfter(before + worker.RetryBackoffFor(3)).And
+            .BeOnOrBefore(after + worker.RetryBackoffFor(3));
+    }
+
+    [Fact]
+    public async Task A_terminal_failure_stamps_no_not_before()
+    {
+        // The terminal arm leaves NextAttemptAt alone: a Failed row is not claimable, so a not-before
+        // beside it is dead data — and the manual fresh start (Reextract) clears the stamp anyway.
+        var (_, docId) = await SeedDocAsync(
+            subscriptionSpendUsd: 0m, failedAttempts: ExtractionWorker.MaxAttempts - 1);
+        Extraction.ThrowOnExtract = true;
+        var worker = BuildWorker();
+
+        (await worker.ClaimNextAsync(CancellationToken.None)).Should().Be(docId);
+        await worker.ProcessDocumentAsync(docId, CancellationToken.None);
+
+        var doc = await GetDocAsync(docId);
+        doc.ExtractionStatus.Should().Be(ExtractionStatus.Failed, "the budget is spent");
+        doc.NextAttemptAt.Should().BeNull("only the RETRY arm stamps a backoff");
     }
 
     // ----- AC2: up-front zombie guard --------------------------------------------------------
@@ -758,6 +858,8 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
         var (_, docId) = await SeedDocAsync(subscriptionSpendUsd: 0m, extractionTrust: seeded);
         Extraction.ThrowOnExtract = true;
         var worker = BuildWorker();
+        // Zero backoff — this test drives repeated claims; the backoff itself has its own pins (#375).
+        worker.RetryBackoffBase = TimeSpan.Zero;
 
         // One genuine failure, budget intact: back to Pending, trust untouched.
         var firstClaim = await worker.ClaimNextAsync(CancellationToken.None);
@@ -1698,6 +1800,8 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
             .UploadAsync(blobPath, new MemoryStream(UploadFixtures.PdfBytes()), "application/pdf", default);
         Extraction.Result = GlResult("3000000"); // would grade Compliant if it committed
         var worker = BuildWorker();
+        // Zero backoff so the healing retry below can claim immediately (#375 item 3 has its own pins).
+        worker.RetryBackoffBase = TimeSpan.Zero;
 
         var fault = Fixture.Factory.Services.GetRequiredService<SystemCommandFaultInterceptor>();
         // The only command carrying this INSERT is PersistSuccess's final batch — the loads before it
@@ -2157,6 +2261,38 @@ public sealed class ExtractionWorkerTests(IntegrationTestFixture fixture) : Inte
 
         claimed.Should().BeNull("a fresh doc must not be reclaimed under a non-UTC session TZ");
         (await GetDocAsync(docId)).ProcessingAttempts.Should().Be(1, "fresh doc is untouched");
+    }
+
+    [Theory]
+    [MemberData(nameof(NonUtcSessionZones))]
+    public async Task Claim_under_non_UTC_session_honors_an_unexpired_backoff(string ianaZone)
+    {
+        // The #375 backoff gate is the THIRD timestamptz comparison in ClaimSql and inherits ADR
+        // 0009's rule: bare now(), never AT TIME ZONE. NextAttemptAt 30 min in the future; a
+        // session-TZ-bridged comparison under New_York (UTC-4/-5) would shift the RHS hours into the
+        // future, so the unexpired stamp would wrongly read as passed and the doc be claimed at poll
+        // speed — the exact budget burn the backoff exists to stop. (Under Tokyo the broken SQL also
+        // holds the doc; the New_York branch is the discriminating one.)
+        var (_, docId) = await SeedDocAsync(nextAttemptAt: DateTime.UtcNow.AddMinutes(30));
+
+        var claimed = await RunClaimUnderSessionTimeZoneAsync(ianaZone);
+
+        claimed.Should().BeNull("an unexpired backoff must hold under any session TZ");
+        (await GetDocAsync(docId)).ExtractionStatus.Should().Be(ExtractionStatus.Pending, "untouched");
+    }
+
+    [Theory]
+    [MemberData(nameof(NonUtcSessionZones))]
+    public async Task Claim_under_non_UTC_session_claims_an_expired_backoff(string ianaZone)
+    {
+        // The other direction: NextAttemptAt 30 min in the past. Under Tokyo (UTC+9) a bridged
+        // comparison shifts the RHS ~9h into the past, so the long-expired stamp would wrongly hold
+        // the document — a requeued failure stuck for hours instead of minutes.
+        var (_, docId) = await SeedDocAsync(nextAttemptAt: DateTime.UtcNow.AddMinutes(-30));
+
+        var claimed = await RunClaimUnderSessionTimeZoneAsync(ianaZone);
+
+        claimed.Should().Be(docId, "an expired backoff gates nothing under any session TZ");
     }
 
     [Theory]

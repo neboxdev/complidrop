@@ -2397,6 +2397,10 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
                 ProcessingAttempts = ExtractionWorker.MaxClaims,
                 FailedAttempts = ExtractionWorker.MaxAttempts,
                 ProcessingError = "extraction.failed: boom",
+                // A stale backoff stamp from the failure cycle (#375 item 3) — deliberately in the
+                // FUTURE, so the assertion below discriminates a real clear from a stamp that merely
+                // expired.
+                NextAttemptAt = DateTime.UtcNow.AddMinutes(8),
                 CreatedAt = DateTime.UtcNow,
                 UpdatedAt = DateTime.UtcNow,
             });
@@ -2412,6 +2416,9 @@ public sealed class DocumentEndpointsTests(IntegrationTestFixture fixture) : Int
         doc.ProcessingAttempts.Should().Be(0);
         doc.FailedAttempts.Should().Be(0, "a manual re-extract must restore the full retry budget");
         doc.ProcessingError.Should().BeNull();
+        doc.NextAttemptAt.Should().BeNull(
+            "the re-arm clears the retry backoff with the counters it belongs to (#375 item 3) — a "
+            + "deliberate 'Read again' must not sit unclaimed waiting out a stale not-before");
     }
 
     // ----- #365: the re-extract in-flight guard ------------------------------------------------

@@ -1086,6 +1086,11 @@ public static class DocumentEndpoints
                 // a document that previously exhausted its budget would re-fail on the first hiccup with
                 // no real retries (#259 introduced FailedAttempts as the budget gate).
                 .SetProperty(d => d.FailedAttempts, 0)
+                // …and the retry backoff with them (#375 item 3): the not-before stamp belongs to the
+                // failure cycle the two counters above just erased, and the worker only re-stamps it on
+                // a genuine failure. Left in place, a user's deliberate "Read again" on a recently
+                // retry-armed document would sit unclaimed until a stale backoff expired.
+                .SetProperty(d => d.NextAttemptAt, (DateTime?)null)
                 // Set explicitly: ExecuteUpdateAsync bypasses AuditSaveChangesInterceptor, which is what
                 // stamps UpdatedAt on the tracked-entity path.
                 .SetProperty(d => d.UpdatedAt, DateTime.UtcNow),

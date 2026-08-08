@@ -131,6 +131,30 @@ public class ExtractionWorker(
         TimeSpan.FromSeconds(Math.Clamp(
             extractionOptions.Value.AttemptTimeoutSeconds, AttemptTimeoutFloorSeconds, AttemptTimeoutCeilingSeconds));
 
+    /// <summary>
+    /// First-retry delay for the exponential backoff <see cref="RecordFailedAttempt"/> stamps into
+    /// <see cref="Document.NextAttemptAt"/> on its RETRY arm (#375 item 3). Doubles per genuine failure
+    /// (<see cref="RetryBackoffFor"/>: 1m, 2m, 4m, 8m with <see cref="MaxAttempts"/> = 5), so the whole
+    /// retry cycle spans ~15 minutes instead of the ~25 seconds five 5-second polls used to burn it in —
+    /// a short provider outage (Gemini 500s, blob 503) now clears within the budget instead of failing
+    /// the document terminally. Poison inputs are unaffected: a deterministic failure is
+    /// <see cref="NonRetryableExtractionException"/>'s fail-fast, not a retry.
+    /// <para/>
+    /// WORKER-ONLY timing, like <see cref="MaxAttempts"/> — the claim gate needs no copy of it (the SQL
+    /// compares the stored stamp against <c>now()</c>), so it does NOT belong in
+    /// <c>Services/ExtractionClaims</c>. Internal-settable like <see cref="AttemptTimeout"/> so the
+    /// retry-loop tests can run without waiting out real backoff.
+    /// </summary>
+    internal TimeSpan RetryBackoffBase { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// Exponential backoff for the NEXT attempt after <paramref name="failedAttempts"/> genuine
+    /// failures: base × 2^(n−1), exponent capped so a corrupt counter cannot produce a year-long stamp.
+    /// Internal so the regression suite pins the schedule against the source of truth.
+    /// </summary>
+    internal TimeSpan RetryBackoffFor(int failedAttempts) =>
+        RetryBackoffBase * (1 << Math.Clamp(failedAttempts - 1, 0, 5));
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("ExtractionWorker starting.");
@@ -220,6 +244,14 @@ public class ExtractionWorker(
     /// this claim can never disagree about which claims are still live. Formatted with
     /// <see cref="CultureInfo.InvariantCulture"/> because this is SQL, not display text — a culture that
     /// shapes digits differently must not be able to produce an interval Postgres cannot parse.
+    /// <para/>
+    /// The <c>NextAttemptAt</c> gate (#375 item 3) is the retry BACKOFF: <see cref="RecordFailedAttempt"/>
+    /// stamps it on the retry arm, and this predicate skips the row until the stamp passes — bare
+    /// <c>now()</c> against a timestamptz column, ADR 0009-clean like both of its neighbours. A NULL
+    /// stamp (never failed, or re-armed by <c>Reextract</c>, which clears it) gates nothing. It sits
+    /// OUTSIDE the status disjunction on purpose: for a Pending row it is the backoff; for a stale
+    /// Processing row it is vacuously satisfied (any stamp predates the claim that went stale by more
+    /// than the zombie window), so the reclaim arm keeps its exact pre-#375 behaviour.
     /// </summary>
     internal static readonly string ClaimSql = $"""
         UPDATE "Documents"
@@ -230,6 +262,7 @@ public class ExtractionWorker(
         WHERE "Id" = (
           SELECT "Id" FROM "Documents"
           WHERE "DeletedAt" IS NULL
+            AND ("NextAttemptAt" IS NULL OR "NextAttemptAt" < now())
             AND (
                 "ExtractionStatus" = 'Pending'
                 OR ("ExtractionStatus" = 'Processing'
@@ -499,10 +532,13 @@ public class ExtractionWorker(
     /// <summary>
     /// Records one genuine failure against the retry budget: increments <see cref="Document.FailedAttempts"/>
     /// and either marks the document <c>Failed</c> (budget spent) or returns it to <c>Pending</c> for
-    /// another attempt. Does not save — the caller owns the unit of work. Takes the context only so the
-    /// terminal arm can go through <see cref="SetTrust"/>.
+    /// another attempt — stamped with <see cref="RetryBackoffFor"/>'s exponential not-before (#375
+    /// item 3), so a fast-failing transient outage can't burn the whole budget in a handful of 5-second
+    /// polls. Does not save — the caller owns the unit of work. Takes the context only so the terminal
+    /// arm can go through <see cref="SetTrust"/>. An instance method (unlike its static neighbours)
+    /// only because the backoff base is the test-settable <see cref="RetryBackoffBase"/>.
     /// </summary>
-    private static void RecordFailedAttempt(SystemDbContext db, Document doc, string code, string message)
+    private void RecordFailedAttempt(SystemDbContext db, Document doc, string code, string message)
     {
         doc.FailedAttempts += 1;
         // Clamped for the same reason the extracted fields are: `message` is an arbitrary exception
@@ -526,6 +562,14 @@ public class ExtractionWorker(
         {
             doc.ExtractionStatus = ExtractionStatus.Pending;
             doc.ProcessingStartedAt = null;
+            // Not-before for the next claim (#375 item 3): exponential in the failures so far, so a
+            // provider outage of a few minutes clears inside the budget instead of exhausting it at
+            // poll speed. App-clock stamp compared against the DB's now() in ClaimSql — an absolute
+            // timestamptz parameter, the write shape ADR 0009 clause 2 endorses; seconds of clock skew
+            // only shifts the backoff, never the claim's correctness. RETRY arm only: a terminal
+            // failure is not claimable, so a not-before would be dead data beside it — and Reextract's
+            // re-arm clears the stamp precisely so a manual fresh start never waits out a stale one.
+            doc.NextAttemptAt = DateTime.UtcNow + RetryBackoffFor(doc.FailedAttempts);
         }
     }
 

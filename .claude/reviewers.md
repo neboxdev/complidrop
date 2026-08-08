@@ -1913,7 +1913,8 @@ No project labels beyond `task`, `bug`, `epic`, `careful-review`, `in-progress`.
 
 - Orgs: single digits live today; design threshold 100+ orgs
 - Documents per org: up to ~1,000; vendors per org: up to ~200
-- `ExtractionWorker` polls every 5s (`FOR UPDATE SKIP LOCKED`, 5-min zombie reclaim);
+- `ExtractionWorker` polls every 5s (`FOR UPDATE SKIP LOCKED`, 5-min zombie reclaim, exponential
+  retry backoff via `Document.NextAttemptAt` — #375);
   `ReminderBackgroundService` ticks hourly
 - Paid per-call: Document AI OCR + Gemini extraction per document; Resend per email —
   re-processing an identical blob is real money

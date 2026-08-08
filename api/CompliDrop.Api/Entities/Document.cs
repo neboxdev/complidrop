@@ -99,6 +99,18 @@ public class Document
     public int FailedAttempts { get; set; } = 0;
     public string? ProcessingError { get; set; }
 
+    /// <summary>
+    /// Not-before gate on the extraction queue (#375): the claim skips this document until the stamp
+    /// passes (<c>ClaimSql</c>: <c>"NextAttemptAt" IS NULL OR "NextAttemptAt" &lt; now()</c>). Stamped
+    /// with exponential backoff by <c>ExtractionWorker.RecordFailedAttempt</c>'s RETRY arm only — so a
+    /// fast-failing transient outage (provider 500s, blob 503) no longer burns the whole
+    /// <c>MaxAttempts</c> budget in ~30 seconds of 5-second polls. Null means claim whenever eligible
+    /// (a fresh upload, or a document that has never failed). A terminal failure stamps nothing (a
+    /// <c>Failed</c> row is not claimable), and <c>Reextract</c>'s re-arm CLEARS it — a manual
+    /// re-extract is a deliberate fresh start that must not wait out a stale backoff.
+    /// </summary>
+    public DateTime? NextAttemptAt { get; set; }
+
     public DateTime? EffectiveDate { get; set; }
     public DateTime? ExpirationDate { get; set; }
 
