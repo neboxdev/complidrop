@@ -26,8 +26,9 @@ namespace CompliDrop.Api.Tests;
 /// and staging a <c>RemoveRange</c>, so EF emits a per-row DELETE keyed on the primary key and demands one
 /// row each. <c>ExtractionWorkerStaleBasisTests.A_regrade_that_deletes_the_check_rows_this_persist_staged_
 /// costs_no_extraction</c> pins what that used to cost on the writer that matters (a throw out of
-/// <c>PersistSuccess</c>, which the catch's re-save on the same context turns into a five-minutely
-/// re-paid Document AI + LLM run). This suite pins the MECHANISM instead — its two ends:
+/// <c>PersistSuccess</c> — since #375 a counted failure plus a re-paid Document AI + LLM run per
+/// retry, bounded by <c>MaxAttempts</c>; pre-#375 the catch's re-save on the same dirty context
+/// turned it into a five-minutely re-paid run). This suite pins the MECHANISM instead — its two ends:
 /// <list type="bullet">
 /// <item>the tolerance itself, on BOTH contexts, since the rule is a property of the row and not of the
 /// caller — and the request-path context cannot be reached behaviourally through its own writers, whose

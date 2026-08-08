@@ -474,8 +474,9 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         await using var db = CreateSystemDb();
         var doc = await db.Documents.AsNoTracking().IgnoreQueryFilters().FirstAsync(d => d.Id == docId);
         doc.ExtractionStatus.Should().Be(ExtractionStatus.Completed,
-            "the persist completed normally — a throw here would have been swallowed into a counted failure "
-            + "and the document requeued for another paid run");
+            "the persist completed normally — a throw would have left this soft-deleted row at the claim's "
+            + "Processing, since the catch's guarded reload takes the soft-delete filter and writes "
+            + "nothing (#375 item 1)");
         doc.DeletedAt.Should().NotBeNull("precondition: the interleaved request really did delete the row");
         doc.VendorId.Should().Be(lenient, "precondition: the reassignment committed before the delete");
         doc.ComplianceStatus.Should().Be(ComplianceStatus.Compliant,
@@ -491,13 +492,16 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         // drives one cycle, so the assertion below cannot fail. A second ClaimNextAsync cannot say it here
         // either — ClaimSql filters "DeletedAt" IS NULL, so a soft-deleted row is unclaimable whatever its
         // status (A_failing_basis_read_degrades_the_verdict_without_requeuing_the_extraction pins the
-        // second cycle on a row that is still alive). What DOES discriminate is the failure bookkeeping:
-        // a throw out of PersistSuccess reaches RecordFailedAttempt, which charges the retry budget and
-        // stamps the error before requeuing.
+        // second cycle on a row that is still alive). Nor, since #375 item 1, can the failure bookkeeping
+        // (#375 review round 2, S1): its guarded reload takes the soft-delete filter, so on THIS row it
+        // returns null and writes nothing — the two assertions below hold whether or not the failure path
+        // ran, and are kept as shape guards on the interleave rather than as the discriminator. What DOES
+        // discriminate is the ExtractionStatus == Completed assertion above (a throw leaves the claim's
+        // Processing) plus the Compliant verdict and single check row only a completed persist produces.
         doc.FailedAttempts.Should().Be(0,
-            "nothing was charged against the retry budget, so no failure path ran");
+            "a soft-deleted row gets no bookkeeping at all — and a completed persist charges nothing either");
         doc.ProcessingError.Should().BeNull(
-            "a counted failure would have stamped the error that caused it");
+            "no failure path can stamp an error on this row (#375 item 1's filtered reload)");
         Extraction.ExtractCallCount.Should().Be(1,
             "precondition: the run under test really did reach the extraction boundary");
     }
@@ -1005,10 +1009,11 @@ public sealed class ExtractionWorkerStaleBasisTests(IntegrationTestFixture fixtu
         // them and staging a RemoveRange, so EF emits a DELETE per row keyed on its primary key. A
         // competing regrade that commits inside the window between that read and the persist's SaveChanges
         // has already deleted exactly those rows, so the persist's DELETE affects 0 rows and EF answers
-        // DbUpdateConcurrencyException — out of PersistSuccess, which is the most expensive failure in this
-        // codebase: ProcessDocumentAsync's catch re-saves on the SAME context, so FailedAttempts never
-        // increments and the document is zombie-reclaimed every five minutes RE-PAYING Document AI + the
-        // LLM (ExtractionWorker.Clamp's remarks).
+        // DbUpdateConcurrencyException — out of PersistSuccess, still the most expensive failure in this
+        // codebase: since #375 item 1 the throw costs a counted failure plus a re-paid Document AI + LLM
+        // run per retry, bounded by MaxAttempts and spaced by the retry backoff, before a terminal Failed
+        // (pre-#375 the catch re-saved on the SAME dirty context, so FailedAttempts never incremented and
+        // the document was zombie-reclaimed every five minutes — ExtractionWorker.Clamp's remarks).
         //
         // The checklist GOVERNS the document's type on purpose — that is what makes both writers produce
         // check rows, and it is the difference between this test and
